@@ -12,13 +12,19 @@ export class Jobs {
     fs.mkdirSync(this.runsDir, { recursive: true });
   }
 
-  createJob({ title }) {
+  createJob({ title, ownerUserId = null, ownerChatId = null }) {
     const jobId = crypto.randomUUID();
     const dir = path.join(this.runsDir, jobId);
     fs.mkdirSync(dir, { recursive: true });
     fs.mkdirSync(path.join(dir, "shared"), { recursive: true });
 
-    const meta = { jobId, title, createdAt: new Date().toISOString() };
+    const meta = {
+      jobId,
+      title,
+      ownerUserId: ownerUserId == null ? null : String(ownerUserId),
+      ownerChatId: ownerChatId == null ? null : String(ownerChatId),
+      createdAt: new Date().toISOString(),
+    };
     fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2), "utf8");
     fs.writeFileSync(path.join(dir, "job.log"), `[${meta.createdAt}] Job created: ${title}\n`, "utf8");
     return { ...meta, dir };

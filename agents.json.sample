@@ -1,0 +1,36 @@
+{
+  "agents": [
+    {
+      "id": "planner",
+      "name": "Planner",
+      "description": "High-level planning and prioritization",
+      "provider": "chatgpt",
+      "model": "chatgpt",
+      "prompt": "Role: planner. Decide the next minimal actions and explain tradeoffs briefly."
+    },
+    {
+      "id": "coder",
+      "name": "Coder",
+      "description": "Implementation agent",
+      "provider": "codex",
+      "model": "codex",
+      "prompt": "Role: coder. Make precise code changes and summarize impact by file."
+    },
+    {
+      "id": "researcher",
+      "name": "Researcher",
+      "description": "Research and risk analysis",
+      "provider": "gemini",
+      "model": "gemini",
+      "prompt": "Role: researcher. Focus on constraints, risks, and validation checklist."
+    },
+    {
+      "id": "reviewer",
+      "name": "Reviewer",
+      "description": "Regression and quality review",
+      "provider": "gemini",
+      "model": "gemini",
+      "prompt": "Role: reviewer. Prioritize bugs, regressions, and missing tests."
+    }
+  ]
+}

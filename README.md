@@ -52,10 +52,24 @@ cp .env.example .env
 - `CODEX_WORKSPACE_ROOT=/path/to/your/repo`  (Codex가 코드 수정할 워크스페이스)
 - `RUNS_DIR=/path/to/your/repo/.orchestrator`
 - `TELEGRAM_BOT_TOKEN=...`
+- `MEMORY_MODE=local|goc`
 
 참고:
 - `WORKSPACE_ROOT`도 하위호환으로 동작하지만, 혼동 방지를 위해 `CODEX_WORKSPACE_ROOT` 사용 권장
 - `plan.md / research.md / progress.md / decisions.md`는 `RUNS_DIR/runs/<jobId>/shared/`에서만 관리
+- 에이전트 레지스트리 파일을 쓰려면 `agents.json.sample`을 복사해서 `agents.json`을 만들고 `AGENTS_REGISTRY_PATH`로 지정
+
+GoC 모드(`MEMORY_MODE=goc`) 추가 설정:
+- `GOC_API_BASE`, `GOC_UI_BASE`
+- `GOC_SERVICE_KEY`
+- `GOC_UI_TOKEN_TTL_SEC` (기본 21600 = 6시간)
+- `GOC_AUTO_ACTIVATE_PROGRESS` (기본 false)
+- `GOC_JOB_THREAD_TITLE_PREFIX` (기본: `job:`)
+
+운영 모델:
+- 서비스 인스턴스 1개 = 사용자 1명
+- ddalggak은 ServiceKey로 GoC backend를 호출하고, `/context`에서 UI Bearer 토큰을 민팅해 링크를 전달
+- ServiceKey는 서버 환경변수로만 보관하고 사용자/브라우저로 노출하지 않음
 
 ### 2) Codex CLI (ChatGPT 계정/Plus 로그인 기반)
 ```bash
@@ -136,12 +150,23 @@ sudo systemctl status telegram-orchestrator
 - `/whoami` → chat_id/user_id 확인
 - `/help` → 명령 목록
 
-### 5) Multi-Agent 메모리 커스터마이즈
+### 5) GoC 명령
+- `/agents` : 현재 agent registry 목록 출력
+- `/context <jobId|global>` : GoC UI 링크 반환 (`jobId` 생략 시 현재 job 사용)
+- `/context`로 발급되는 UI 토큰은 쓰기 권한 포함이므로 TTL을 짧게 두고 필요 시 재발급 권장
+
+### 6) Multi-Agent 메모리 커스터마이즈
 - `/memory show` : 전체 요약(반성 프롬프트 + 라우터 프롬프트 + 에이전트 역할)
 - `/memory agents` : Gemini/Codex/ChatGPT 역할 메모리 확인
 - `/memory routing <자연어>` : 라우팅 기준 프롬프트 수정
 - `/memory role <gemini|codex|chatgpt> <자연어>` : 에이전트별 역할 수정
 - `/memory md` : 원문 markdown 확인
+
+### 7) MEMORY_MODE 동작
+- `local`: 기존 local 메모리 동작 유지
+- `goc`: 로컬 md는 계속 기록하되, 프롬프트 컨텍스트는 GoC `compiled_text`를 우선 사용
+- `goc` 모드에서 에이전트 호출 직전마다 `compiled_text`를 매번 새로 가져오므로, UI 편집/활성 토글/삭제가 다음 스텝부터 반영됨
+- GoC API/UI 실패 시 local 컨텍스트로 자동 폴백
 
 ---
 
@@ -153,5 +178,6 @@ sudo systemctl status telegram-orchestrator
 - `shared/progress.md`
 - `shared/decisions.md`
 - `conversation.jsonl` (Telegram/Codex/Gemini/ChatGPT 텍스트 로그)
+- `goc.json` (`MEMORY_MODE=goc`에서 thread/ctx 매핑)
 
 Slack/Telegram 히스토리 제한에 의존하지 않습니다.

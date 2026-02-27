@@ -14,6 +14,13 @@ import { runGeminiPrompt } from "./src/gemini.js";
 import { OrchestratorMemory } from "./src/settings.js";
 import { orchestratorNotes, buildChatGPTNextStepPrompt } from "./src/prompts.js";
 import { clip, chunk, extractCodexInstruction, extractJsonPlan } from "./src/textutil.js";
+import { loadAgents, getAgent } from "./src/agents.js";
+import { GocClient } from "./src/goc_client.js";
+import {
+  ensureJobThread,
+  ensureGlobalThread,
+  appendTrackingChunkToGoc,
+} from "./src/goc_mapping.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) { console.error("Missing TELEGRAM_BOT_TOKEN"); process.exit(1); }
@@ -34,8 +41,32 @@ const TELEGRAM_POLLING_INTERVAL_MS = Number(process.env.TELEGRAM_POLLING_INTERVA
 const TELEGRAM_POLLING_TIMEOUT_SEC = Number(process.env.TELEGRAM_POLLING_TIMEOUT_SEC ?? 15);
 const TELEGRAM_SINGLE_INSTANCE_LOCK = String(process.env.TELEGRAM_SINGLE_INSTANCE_LOCK ?? "true").toLowerCase() !== "false";
 const LOCK_FILE = process.env.TELEGRAM_LOCK_FILE || path.join(workspace.root, ".orchestrator", "telegram_runner.lock");
+const MEMORY_MODE = String(process.env.MEMORY_MODE || "local").trim().toLowerCase() === "goc" ? "goc" : "local";
+const GOC_UI_TOKEN_TTL_SEC = Number(process.env.GOC_UI_TOKEN_TTL_SEC ?? 21600);
+const LEGACY_AGENT_MAP = {
+  gemini: "researcher",
+  codex: "coder",
+  chatgpt: "planner",
+};
 
 const memory = new OrchestratorMemory({ baseDir: jobs.baseDir });
+let agentRegistry = loadAgents();
+let gocClient = null;
+let gocReady = false;
+let gocInitError = "";
+if (MEMORY_MODE === "goc") {
+  try {
+    gocClient = new GocClient({
+      apiBase: process.env.GOC_API_BASE,
+      serviceKey: process.env.GOC_SERVICE_KEY,
+    });
+    gocReady = true;
+  } catch (e) {
+    gocReady = false;
+    gocInitError = String(e?.message ?? e);
+    console.error(`[memory] GoC init failed, fallback to local: ${gocInitError}`);
+  }
+}
 
 let hasLock = false;
 
@@ -97,6 +128,7 @@ process.on("exit", () => { releaseSingleInstanceLock(); });
 function isAllowedChat(chatId) { return ALLOWED_CHATS.length === 0 || ALLOWED_CHATS.includes(String(chatId)); }
 function isAllowedUser(userId) { return ALLOWED_USERS.length === 0 || ALLOWED_USERS.includes(String(userId)); }
 const TRACK_DOC_NAMES = ["plan.md", "research.md", "progress.md", "decisions.md"];
+const gocFallbackByJob = new Map();
 
 function runDir(jobId) {
   return jobs.jobDir(jobId);
@@ -106,7 +138,7 @@ function runSharedDir(jobId) {
   return path.join(runDir(jobId), "shared");
 }
 
-function loadContextDocs(jobId, docNames, maxCharsPerDoc = 3500) {
+function loadLocalContextDocs(jobId, docNames, maxCharsPerDoc = 3500) {
   let out = "";
   for (const name of docNames) {
     try {
@@ -118,6 +150,44 @@ function loadContextDocs(jobId, docNames, maxCharsPerDoc = 3500) {
     }
   }
   return out.trim() || "(none)";
+}
+
+function buildGocUiLink({ threadId, ctxId, token }) {
+  const base = String(process.env.GOC_UI_BASE || "").trim().replace(/\/+$/, "");
+  if (!base) throw new Error("Missing GOC_UI_BASE");
+  return `${base}?thread=${encodeURIComponent(String(threadId || ""))}&ctx=${encodeURIComponent(String(ctxId || ""))}#token=${encodeURIComponent(String(token || ""))}`;
+}
+
+async function loadContextDocs(jobId, docNames, maxCharsPerDoc = 3500) {
+  const local = loadLocalContextDocs(jobId, docNames, maxCharsPerDoc);
+  if (memoryModeWithFallback() !== "goc") return local;
+
+  try {
+    const map = await ensureJobThread(requireGocClient(), {
+      jobId,
+      jobDir: runDir(jobId),
+      title: `job:${jobId}`,
+    });
+    const compiled = await requireGocClient().getCompiledContext(map.ctxSharedId);
+    const latest = String(compiled || "").trim();
+    if (!latest) {
+      gocFallbackByJob.set(String(jobId), "empty compiled_text");
+      return local;
+    }
+    gocFallbackByJob.delete(String(jobId));
+    return [
+      "### GOC ACTIVE CONTEXT",
+      clip(latest, 12000),
+      "",
+      "### LOCAL TRACKING SNAPSHOT",
+      local,
+    ].join("\n\n");
+  } catch (e) {
+    const reason = String(e?.message ?? e);
+    gocFallbackByJob.set(String(jobId), reason);
+    jobs.log(jobId, `GoC compiled context failed; fallback to local: ${reason}`);
+    return local;
+  }
 }
 
 function convoToText(convo) {
@@ -136,11 +206,62 @@ function ensureCommandOk(name, result) {
   throw new Error(`${name} failed (exit=${exitCode})\n${details}`);
 }
 
+function refreshAgentRegistry() {
+  agentRegistry = loadAgents();
+  return agentRegistry;
+}
+
+function resolveAgentId(raw) {
+  const key = String(raw || "").trim().toLowerCase();
+  if (!key) return "";
+  return LEGACY_AGENT_MAP[key] || key;
+}
+
+function findAgentConfig(agentId) {
+  const id = resolveAgentId(agentId);
+  return getAgent(id, agentRegistry) || null;
+}
+
+function memoryModeWithFallback() {
+  if (MEMORY_MODE !== "goc") return "local";
+  return gocReady && gocClient ? "goc" : "local";
+}
+
+function requireGocClient() {
+  if (!gocReady || !gocClient) {
+    const reason = gocInitError || "GoC is not ready";
+    throw new Error(reason);
+  }
+  return gocClient;
+}
+
+function installTrackingGocHook() {
+  tracking.setAppendHook(async ({ jobId, docName, chunk }) => {
+    if (memoryModeWithFallback() !== "goc") return;
+    if (!TRACK_DOC_NAMES.includes(docName)) return;
+    try {
+      await appendTrackingChunkToGoc(requireGocClient(), {
+        jobId,
+        jobDir: runDir(jobId),
+        docName,
+        chunkText: String(chunk || ""),
+      });
+    } catch (e) {
+      jobs.log(jobId, `GoC append hook failed (${docName}): ${String(e?.message ?? e)}`);
+    }
+  });
+}
+
+installTrackingGocHook();
+
 function formatMemorySummary() {
   const s = memory.getSummary();
   const role = memory.getAgentRoleSummary();
   return [
     "🧠 현재 메모리 기반 설정",
+    `memory.mode=${MEMORY_MODE}`,
+    `memory.effective=${memoryModeWithFallback()}`,
+    ...(gocInitError ? [`memory.goc_error=${gocInitError}`] : []),
     `memory.file=${s.filePath}`,
     "",
     "Auto-Suggest Reflection Prompt (preview):",
@@ -187,6 +308,14 @@ function getAgentRolesText() {
     "### ChatGPT",
     roles.chatgpt,
   ].join("\n");
+}
+
+function getRegisteredAgentsText() {
+  refreshAgentRegistry();
+  if (!agentRegistry.agents.length) return "(none)";
+  return agentRegistry.agents
+    .map((row) => `- id=${row.id}, provider=${row.provider}, model=${row.model}, prompt=${clip(row.prompt || "", 220)}`)
+    .join("\n");
 }
 
 function formatAgentMemorySummary() {
@@ -291,21 +420,37 @@ function normalizeRouterAction(raw) {
   const type = String(raw?.type || "").trim().toLowerCase();
   if (!type) return null;
 
+  if (type === "agent_run") {
+    const agent = resolveAgentId(raw.agent || raw.agentId || raw.role);
+    const prompt = String(raw.prompt || raw.task || raw.instruction || "").trim();
+    const inputs = raw.inputs && typeof raw.inputs === "object" ? raw.inputs : {};
+    if (!agent || !prompt) return null;
+    return { type: "agent_run", agent, prompt, inputs };
+  }
+
   if (type === "gemini" || type === "gemini_research") {
     const prompt = String(raw.prompt || raw.query || raw.task || "").trim();
-    return { type: "gemini_research", prompt };
+    if (!prompt) return null;
+    return { type: "agent_run", agent: "researcher", prompt, inputs: {} };
   }
 
   if (type === "codex" || type === "codex_implement") {
     const instruction = String(raw.instruction || raw.prompt || raw.task || "").trim();
-    return { type: "codex_implement", instruction };
+    if (!instruction) return null;
+    return { type: "agent_run", agent: "coder", prompt: instruction, inputs: {} };
   }
 
   if (type === "git_summary") return { type: "git_summary" };
 
-  if (type === "chatgpt_prompt" || type === "chatgpt") {
+  if (type === "chatgpt_prompt") {
     const question = String(raw.question || raw.prompt || raw.task || "").trim();
     return { type: "chatgpt_prompt", question };
+  }
+
+  if (type === "chatgpt") {
+    const prompt = String(raw.question || raw.prompt || raw.task || "").trim();
+    if (!prompt) return null;
+    return { type: "agent_run", agent: "planner", prompt, inputs: {} };
   }
 
   return null;
@@ -385,8 +530,13 @@ async function pump() {
   try { item.resolve(await item.fn()); } catch (e) { item.reject(e); } finally { running -= 1; pump(); }
 }
 
-async function createJob(goal) {
-  const job = jobs.createJob({ title: goal.slice(0, 80) });
+async function createJob(goal, { ownerUserId = null, ownerChatId = null } = {}) {
+  refreshAgentRegistry();
+  const job = jobs.createJob({
+    title: goal.slice(0, 80),
+    ownerUserId,
+    ownerChatId,
+  });
   tracking.init(job.jobId);
   tracking.append(job.jobId, "plan.md", orchestratorNotes({ goal }), { timestamp: false });
   tracking.append(job.jobId, "research.md", `## Goal\n\n${goal}\n`, { timestamp: false });
@@ -399,8 +549,10 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const sectionTitle = String(opts.sectionTitle || "Gemini notes");
   const outputGuide = String(opts.outputGuide || "").trim();
   const roleMemo = memory.getAgentRole("gemini");
-  const ctx = loadContextDocs(jobId, ["research.md"]);
+  const ctx = await loadContextDocs(jobId, ["research.md"]);
   const prompt = [
+    ctx,
+    "",
     "역할 메모리:",
     roleMemo,
     "",
@@ -411,8 +563,6 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     "- 코드 작성/수정/패치 제안 금지",
     "- 터미널 명령 제안 최소화",
     "- 설계/리스크/검증 관점으로만 답변",
-    "",
-    ctx,
     "",
     "다음 목표를 달성하기 위한 구현 단계와 리스크를 한국어로 간결하게 작성해줘.",
     "",
@@ -436,7 +586,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
 
 async function codexImplement(jobId, instruction, signal = null) {
   const roleMemo = memory.getAgentRole("codex");
-  const ctx = loadContextDocs(jobId, ["plan.md", "research.md"], 6000);
+  const ctx = await loadContextDocs(jobId, ["plan.md", "research.md"], 6000);
   const trackDocs = TRACK_DOC_NAMES.map(n => `- ${path.join(runSharedDir(jobId), n)}`).join("\n");
   const prompt = [
     ctx,
@@ -491,7 +641,7 @@ function defaultRouteFor(mode, goal, seedInstruction = "") {
   if (mode === "continue") {
     return {
       actions: [
-        { type: "codex_implement", instruction: seedInstruction || "run/shared 문서를 반영해 CODEX_WORKSPACE_ROOT 코드 변경을 진행하라." },
+        { type: "agent_run", agent: "coder", prompt: seedInstruction || "run/shared 문서를 반영해 CODEX_WORKSPACE_ROOT 코드 변경을 진행하라.", inputs: {} },
         { type: "git_summary" },
       ],
       reason: "fallback: continue default",
@@ -499,8 +649,8 @@ function defaultRouteFor(mode, goal, seedInstruction = "") {
   }
   return {
     actions: [
-      { type: "gemini_research", prompt: goal },
-      { type: "codex_implement", instruction: goal },
+      { type: "agent_run", agent: "researcher", prompt: goal, inputs: {} },
+      { type: "agent_run", agent: "coder", prompt: goal, inputs: {} },
       { type: "git_summary" },
     ],
     reason: "fallback: run default",
@@ -508,10 +658,11 @@ function defaultRouteFor(mode, goal, seedInstruction = "") {
 }
 
 async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal = null }) {
-  const docs = loadContextDocs(jobId, ["research.md", "plan.md", "progress.md", "decisions.md"], 2200);
+  const docs = await loadContextDocs(jobId, ["research.md", "plan.md", "progress.md", "decisions.md"], 2200);
   const convo = clip(convoToText(jobs.tailConversation(jobId, 50)), 4200);
   const routerPrompt = memory.getRouterPrompt();
   const roleText = getAgentRolesText();
+  const registryText = getRegisteredAgentsText();
 
   const prompt = [
     "너는 오케스트레이터의 Multi-Agent 라우터다.",
@@ -522,8 +673,8 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
     "{",
     "  \"reason\": \"한 줄 이유\",",
     "  \"actions\": [",
-    "    {\"type\":\"gemini_research\", \"prompt\":\"...\"},",
-    "    {\"type\":\"codex_implement\", \"instruction\":\"...\"},",
+    "    {\"type\":\"agent_run\", \"agent\":\"researcher\", \"prompt\":\"...\", \"inputs\":{}},",
+    "    {\"type\":\"agent_run\", \"agent\":\"coder\", \"prompt\":\"...\", \"inputs\":{}},",
     "    {\"type\":\"chatgpt_prompt\", \"question\":\"...\"},",
     "    {\"type\":\"git_summary\"}",
     "  ]",
@@ -543,6 +694,9 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
     "",
     "에이전트 역할 메모리:",
     roleText,
+    "",
+    "에이전트 레지스트리:",
+    registryText,
     "",
     "shared docs:",
     docs,
@@ -565,12 +719,11 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
     const normalized = [];
     for (const a of planned.actions) {
       if (normalized.length >= 4) break;
-      if (a.type === "gemini_research") {
-        normalized.push({ type: "gemini_research", prompt: a.prompt || goal });
-        continue;
-      }
-      if (a.type === "codex_implement") {
-        normalized.push({ type: "codex_implement", instruction: a.instruction || seedInstruction || goal });
+      if (a.type === "agent_run") {
+        const agent = resolveAgentId(a.agent || "");
+        const promptText = String(a.prompt || "").trim() || (agent === "coder" ? (seedInstruction || goal) : goal);
+        if (!agent || !promptText) continue;
+        normalized.push({ type: "agent_run", agent, prompt: promptText, inputs: a.inputs && typeof a.inputs === "object" ? a.inputs : {} });
         continue;
       }
       if (a.type === "chatgpt_prompt") {
@@ -594,7 +747,7 @@ async function reflectAutoSuggest(jobId, trigger, question, signal = null) {
   }
 
   const goal = getGoalFromResearch(jobId);
-  const docs = loadContextDocs(jobId, ["research.md", "plan.md", "progress.md", "decisions.md"], 2200);
+  const docs = await loadContextDocs(jobId, ["research.md", "plan.md", "progress.md", "decisions.md"], 2200);
   const convo = clip(convoToText(jobs.tailConversation(jobId, 50)), 5000);
   const policyPrompt = memory.getPolicyPrompt();
 
@@ -676,7 +829,7 @@ async function suggestNextPrompt(bot, chatId, jobId, question, trigger = "run", 
 
 async function sendChatGPTPrompt(bot, chatId, jobId, question) {
   const goal = getGoalFromResearch(jobId);
-  const docs = loadContextDocs(jobId, ["research.md", "plan.md", "progress.md"], 3000);
+  const docs = await loadContextDocs(jobId, ["research.md", "plan.md", "progress.md"], 3000);
   const convo = jobs.tailConversation(jobId, 60);
   const prompt = buildChatGPTNextStepPrompt({
     jobId,
@@ -691,41 +844,183 @@ async function sendChatGPTPrompt(bot, chatId, jobId, question) {
   await sendLong(bot, chatId, prompt);
 }
 
-async function executeRoutedPlan(bot, chatId, jobId, route, signal = null) {
+function normalizeActionShape(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const type = String(raw.type || "").trim().toLowerCase();
+  if (!type) return null;
+
+  if (type === "agent_run") {
+    const agent = resolveAgentId(raw.agent || raw.agentId || "");
+    const prompt = String(raw.prompt || raw.task || raw.instruction || "").trim();
+    if (!agent || !prompt) return null;
+    return {
+      type: "agent_run",
+      agent,
+      prompt,
+      inputs: raw.inputs && typeof raw.inputs === "object" ? raw.inputs : {},
+    };
+  }
+  if (type === "gemini" || type === "gemini_research") {
+    const prompt = String(raw.prompt || raw.query || raw.task || "").trim();
+    if (!prompt) return null;
+    return { type: "agent_run", agent: "researcher", prompt, inputs: {} };
+  }
+  if (type === "codex" || type === "codex_implement") {
+    const prompt = String(raw.instruction || raw.prompt || raw.task || "").trim();
+    if (!prompt) return null;
+    return { type: "agent_run", agent: "coder", prompt, inputs: {} };
+  }
+  if (type === "chatgpt_prompt") {
+    const question = String(raw.question || raw.prompt || raw.task || "").trim();
+    if (!question) return null;
+    return { type: "chatgpt_prompt", question };
+  }
+  if (type === "chatgpt") {
+    const prompt = String(raw.question || raw.prompt || raw.task || "").trim();
+    if (!prompt) return null;
+    return { type: "agent_run", agent: "planner", prompt, inputs: {} };
+  }
+  if (type === "track_append") {
+    return { type: "track_append", doc: raw.doc || "plan.md", markdown: String(raw.markdown || "") };
+  }
+  if (type === "git_summary") return { type: "git_summary" };
+  if (type === "commit_request") {
+    const message = String(raw.message || "").trim();
+    if (!message) return null;
+    return { type: "commit_request", message };
+  }
+  return null;
+}
+
+function actionLabel(act) {
+  if (!act || !act.type) return "(unknown)";
+  if (act.type === "agent_run") return `agent_run:${act.agent}`;
+  if (act.type === "chatgpt_prompt") return "chatgpt_prompt";
+  if (act.type === "track_append") return `track_append:${act.doc || "plan.md"}`;
+  return String(act.type);
+}
+
+async function executeAgentRun(bot, chatId, jobId, act, { signal = null } = {}) {
+  refreshAgentRegistry();
+  const agentId = resolveAgentId(act.agent || "");
+  const taskPrompt = String(act.prompt || "").trim();
+  if (!agentId || !taskPrompt) throw new Error("invalid agent_run action");
+
+  const agent = findAgentConfig(agentId);
+  if (!agent) throw new Error(`Unknown agent: ${agentId}. Check agents registry: ${agentRegistry.path}`);
+
+  const provider = String(agent.provider || "gemini").trim().toLowerCase();
+  const model = String(agent.model || provider).trim() || provider;
+
+  const runProvider = async (providerPrompt) => {
+    if (provider === "codex") {
+      const trackDocs = TRACK_DOC_NAMES.map((n) => `- ${path.join(runSharedDir(jobId), n)}`).join("\n");
+      const codexPrompt = [
+        providerPrompt,
+        "",
+        "실행 제약:",
+        `- CODEX_WORKSPACE_ROOT(코드 작업 영역): ${workspace.root}`,
+        `- 현재 run dir: ${runDir(jobId)}`,
+        "- run/shared 트래킹 문서를 CODEX_WORKSPACE_ROOT 루트에 새로 만들지 말 것:",
+        trackDocs,
+        "- 테스트는 실행하지 말고 필요한 테스트를 제안만 할 것.",
+      ].join("\n");
+      const r = await runCodexExec({
+        workspaceRoot: workspace.root,
+        cwd: runDir(jobId),
+        prompt: codexPrompt,
+        signal,
+      });
+      ensureCommandOk("Codex", r);
+      return r.stdout || r.stderr || "";
+    }
+
+    if (provider === "gemini") {
+      const r = await runGeminiPrompt({
+        workspaceRoot: workspace.root,
+        cwd: runDir(jobId),
+        prompt: providerPrompt,
+        signal,
+      });
+      ensureCommandOk("Gemini", r);
+      return r.stdout || r.stderr || "";
+    }
+
+    if (provider === "chatgpt") {
+      await sendChatGPTPrompt(bot, chatId, jobId, taskPrompt);
+      return `ChatGPT prompt generated by agent=${agentId}\nquestion=${taskPrompt}`;
+    }
+
+    throw new Error(`Unsupported provider for agent ${agentId}: ${provider}`);
+  };
+
+  const appendLocalLogs = (output, mode) => {
+    const section = `## Agent ${agentId} output (${mode})`;
+    if (provider === "codex") {
+      tracking.append(jobId, "progress.md", `${section}\n\n${output}\n`);
+    } else {
+      tracking.append(jobId, "research.md", `${section}\n\n${output}\n`);
+    }
+    jobs.appendConversation(jobId, agentId, output, { kind: "agent_run", provider, model, mode });
+  };
+
+  if (provider === "codex") {
+    const output = await codexImplement(jobId, taskPrompt, signal);
+    const fallback = gocFallbackByJob.get(String(jobId));
+    if (fallback) {
+      await bot.sendMessage(chatId, `⚠️ GoC 컨텍스트 조회 실패로 local fallback 사용 중입니다.\nreason=${clip(fallback, 180)}`);
+      gocFallbackByJob.delete(String(jobId));
+    }
+    return { output, mode: memoryModeWithFallback(), agent, provider, model };
+  }
+  if (provider === "gemini") {
+    const output = await geminiResearch(jobId, taskPrompt, signal, {
+      sectionTitle: `${agentId} notes`,
+      outputGuide: [
+        "출력:",
+        "- 핵심 요약",
+        "- 구현 전 확인사항",
+        "- 리스크와 완화책",
+        "- 검증 체크리스트",
+      ].join("\n"),
+    });
+    const fallback = gocFallbackByJob.get(String(jobId));
+    if (fallback) {
+      await bot.sendMessage(chatId, `⚠️ GoC 컨텍스트 조회 실패로 local fallback 사용 중입니다.\nreason=${clip(fallback, 180)}`);
+      gocFallbackByJob.delete(String(jobId));
+    }
+    return { output, mode: memoryModeWithFallback(), agent, provider, model };
+  }
+  if (provider === "chatgpt") {
+    const output = await runProvider(taskPrompt);
+    appendLocalLogs(output, memoryModeWithFallback());
+    return { output, mode: memoryModeWithFallback(), agent, provider, model };
+  }
+
+  const output = await runProvider(taskPrompt);
+  appendLocalLogs(output, memoryModeWithFallback());
+  return { output, mode: memoryModeWithFallback(), agent, provider, model };
+}
+
+async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts = {}) {
+  void opts;
   let askedChatGPT = false;
   const actions = Array.isArray(route?.actions) ? route.actions : [];
 
-  for (const act of actions) {
+  for (const rawAct of actions) {
+    const act = normalizeActionShape(rawAct);
     if (!act?.type) continue;
 
-    if (act.type === "gemini_research") {
-      const promptText = String(act.prompt || getGoalFromResearch(jobId)).trim();
-      await bot.sendMessage(chatId, "🧠 Gemini 조사 중…");
-      const g = await enqueue(
-        () => geminiResearch(jobId, promptText, signal, {
-          sectionTitle: "Gemini notes (routed)",
-          outputGuide: [
-            "출력:",
-            "- 핵심 요약",
-            "- 구현 전 확인사항",
-            "- 리스크와 완화책",
-            "- 검증 체크리스트",
-          ].join("\n"),
-        }),
-        { jobId, signal, label: "gemini_routed" }
+    if (act.type === "agent_run") {
+      const agentInfo = findAgentConfig(act.agent);
+      const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
+      await bot.sendMessage(chatId, `🤖 ${act.agent} 실행 중… (${provider})`);
+      const result = await enqueue(
+        () => executeAgentRun(bot, chatId, jobId, act, { signal }),
+        { jobId, signal, label: `agent_run_${act.agent}` }
       );
-      await sendLong(bot, chatId, `🧠 Gemini 완료\n${clip(g, 3500)}`);
-      continue;
-    }
-
-    if (act.type === "codex_implement") {
-      const instruction = String(act.instruction || getGoalFromResearch(jobId)).trim();
-      await bot.sendMessage(chatId, "🛠️ Codex 구현 중…");
-      const c = await enqueue(
-        () => codexImplement(jobId, instruction, signal),
-        { jobId, signal, label: "codex_routed" }
-      );
-      await sendLong(bot, chatId, `🛠️ Codex 완료\n${clip(c, 3500)}`);
+      await sendLong(bot, chatId, `🤖 ${act.agent} 완료 (${result.mode})\n${clip(result.output, 3500)}`);
+      if (result.provider === "chatgpt") askedChatGPT = true;
       continue;
     }
 
@@ -745,72 +1040,30 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null) {
   return { askedChatGPT };
 }
 
-async function executeActions(bot, chatId, jobId, plan, signal = null) {
+async function executeActions(bot, chatId, jobId, plan, signal = null, opts = {}) {
+  void opts;
   if (!plan || !Array.isArray(plan.actions)) return;
-  const allowed = new Set(["track_append", "gemini", "codex", "git_summary", "chatgpt_prompt", "commit_request"]);
+  const allowed = new Set(["track_append", "agent_run", "gemini", "codex", "git_summary", "chatgpt_prompt", "chatgpt", "commit_request"]);
 
-  for (const act of plan.actions) {
-    if (!act || !allowed.has(act.type)) continue;
+  for (const rawAct of plan.actions) {
+    if (!rawAct || !allowed.has(String(rawAct.type || "").trim().toLowerCase())) continue;
+    const act = normalizeActionShape(rawAct);
+    if (!act) continue;
 
     if (act.type === "track_append") {
       tracking.append(jobId, act.doc || "plan.md", String(act.markdown || ""));
       await bot.sendMessage(chatId, `📝 기록 업데이트: ${act.doc || "plan.md"}`);
     }
 
-    if (act.type === "gemini") {
-      const p = String(act.prompt || "").trim();
-      if (!p) continue;
-      await bot.sendMessage(chatId, "🧠 Gemini 실행 중…");
-      const roleMemo = memory.getAgentRole("gemini");
-      const researchOnlyPrompt = [
-        "역할 메모리:",
-        roleMemo,
-        "",
-        "역할: 기술 리서치/검토 어시스턴트",
-        `run dir: ${runDir(jobId)}`,
-        `tracking docs dir: ${runSharedDir(jobId)}`,
-        "규칙: 코드 작성/수정/패치 지시를 하지 말고, 분석/근거/검증 체크리스트 중심으로 답하라.",
-        "",
-        p,
-      ].join("\n");
+    if (act.type === "agent_run") {
+      const agentInfo = findAgentConfig(act.agent);
+      const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
+      await bot.sendMessage(chatId, `🤖 ${act.agent} 실행 중… (${provider})`);
       const r = await enqueue(
-        () => runGeminiPrompt({ workspaceRoot: workspace.root, cwd: runDir(jobId), prompt: researchOnlyPrompt, signal }),
-        { jobId, signal, label: "gemini_action" }
+        () => executeAgentRun(bot, chatId, jobId, act, { signal }),
+        { jobId, signal, label: `agent_run_${act.agent}` }
       );
-      const out = (r.stdout || r.stderr || "");
-      tracking.append(jobId, "research.md", `## Gemini (from ChatGPT plan)\n\n${out}\n`);
-      jobs.appendConversation(jobId, "gemini", out, { kind: "from_chatgpt_plan" });
-      ensureCommandOk("Gemini", r);
-      await sendLong(bot, chatId, `🧠 Gemini 결과\n${clip(out, 3500)}`);
-    }
-
-    if (act.type === "codex") {
-      const p = String(act.prompt || "").trim();
-      if (!p) continue;
-      await bot.sendMessage(chatId, "🛠️ Codex 실행 중…");
-      const roleMemo = memory.getAgentRole("codex");
-      const trackDocs = TRACK_DOC_NAMES.map(n => `- ${path.join(runSharedDir(jobId), n)}`).join("\n");
-      const codexActionPrompt = [
-        "역할 메모리:",
-        roleMemo,
-        "",
-        "규칙:",
-        `- CODEX_WORKSPACE_ROOT(코드 작업 영역): ${workspace.root}`,
-        `- 현재 run dir: ${runDir(jobId)}`,
-        "- run/shared 트래킹 문서를 CODEX_WORKSPACE_ROOT 루트에 새로 만들지 말 것:",
-        trackDocs,
-        "",
-        p,
-      ].join("\n");
-      const r = await enqueue(
-        () => runCodexExec({ workspaceRoot: workspace.root, cwd: runDir(jobId), prompt: codexActionPrompt, signal }),
-        { jobId, signal, label: "codex_action" }
-      );
-      const out = (r.stdout || r.stderr || "");
-      tracking.append(jobId, "progress.md", `## Codex (from ChatGPT plan)\n\n${out}\n`);
-      jobs.appendConversation(jobId, "codex", out, { kind: "from_chatgpt_plan" });
-      ensureCommandOk("Codex", r);
-      await sendLong(bot, chatId, `🛠️ Codex 결과\n${clip(out, 3500)}`);
+      await sendLong(bot, chatId, `🤖 ${act.agent} 결과 (${r.mode})\n${clip(r.output, 3500)}`);
     }
 
     if (act.type === "git_summary") {
@@ -956,7 +1209,9 @@ bot.on("message", async (msg) => {
       const chatKey = String(chatId);
       activeJobByChat.set(chatKey, String(jobId));
       try {
-        await executeActions(bot, chatId, jobId, plan, controller.signal);
+        await executeActions(bot, chatId, jobId, plan, controller.signal, {
+          telegramUserId: st.userId || userId,
+        });
         await bot.sendMessage(chatId, "🏁 액션 플랜 실행 완료.");
         await suggestNextPrompt(bot, chatId, jobId, "현재 상태에서 다음으로 무엇을 해야 하는지 action plan(JSON)으로 제안해줘.", "action_plan", controller.signal);
       } catch (e) {
@@ -979,7 +1234,7 @@ bot.on("message", async (msg) => {
   const args = rest.join(" ").trim();
 
   if (cmd === "/help") {
-    await bot.sendMessage(chatId, "Commands:\n- /whoami\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply <jobId>\n- /gptdone\n- /commit <jobId> <message>");
+    await bot.sendMessage(chatId, "Commands:\n- /whoami\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply <jobId>\n- /gptdone\n- /commit <jobId> <message>");
     return;
   }
 
@@ -1104,12 +1359,88 @@ bot.on("message", async (msg) => {
     return;
   }
 
+  if (cmd === "/agents") {
+    const reg = refreshAgentRegistry();
+    const lines = [
+      `memory_mode=${MEMORY_MODE}`,
+      `effective_mode=${memoryModeWithFallback()}`,
+      `registry=${reg.path}`,
+      "",
+      ...reg.agents.map((row) => `- ${row.id}: provider=${row.provider}, model=${row.model}${row.description ? `, ${row.description}` : ""}`),
+    ];
+    await sendLong(bot, chatId, lines.join("\n"));
+    return;
+  }
+
+  if (cmd === "/context") {
+    if (memoryModeWithFallback() !== "goc") {
+      await bot.sendMessage(chatId, `GoC 비활성 상태입니다 (mode=${MEMORY_MODE}, effective=${memoryModeWithFallback()}). local 컨텍스트로 계속 진행됩니다.`);
+      return;
+    }
+
+    const arg = String(rest[0] || "").trim();
+    const chatKey = String(chatId);
+    const currentJobId = activeJobByChat.get(chatKey) || getAwait(chatId)?.jobId || "";
+    const target = arg || currentJobId;
+    if (!target) {
+      await bot.sendMessage(chatId, "Usage: /context <jobId|global>\n(jobId 생략 시 현재 실행중 job 사용)");
+      return;
+    }
+
+    try {
+      const client = requireGocClient();
+      const minted = await client.mintUiToken(GOC_UI_TOKEN_TTL_SEC);
+
+      if (target.toLowerCase() === "global") {
+        const g = await ensureGlobalThread(client, {
+          baseDir: jobs.baseDir,
+          title: "global:shared",
+        });
+        const link = buildGocUiLink({ threadId: g.threadId, ctxId: g.ctxId, token: minted.token });
+        await sendLong(bot, chatId, [
+          "global context",
+          `thread=${g.threadId}`,
+          `ctx=${g.ctxId}`,
+          minted.exp ? `token_exp=${minted.exp}` : "",
+          link,
+          "",
+          "UI에서 편집/활성 토글/삭제하면 다음 스텝 호출부터 반영됩니다.",
+        ].filter(Boolean).join("\n"));
+        return;
+      }
+
+      const jobId = String(target).trim();
+      const map = await ensureJobThread(client, {
+        jobId,
+        jobDir: runDir(jobId),
+        title: `job:${jobId}`,
+      });
+      const link = buildGocUiLink({
+        threadId: map.threadId,
+        ctxId: map.ctxSharedId,
+        token: minted.token,
+      });
+      await sendLong(bot, chatId, [
+        `jobId=${jobId}`,
+        `thread=${map.threadId}`,
+        `ctx=${map.ctxSharedId}`,
+        minted.exp ? `token_exp=${minted.exp}` : "",
+        link,
+        "",
+        "UI에서 편집/활성 토글/삭제하면 다음 스텝 호출부터 반영됩니다.",
+      ].filter(Boolean).join("\n"));
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ /context 실패: ${String(e?.message ?? e)}\nlocal fallback으로 계속 진행합니다.`);
+    }
+    return;
+  }
+
   if (cmd === "/run") {
     if (!args) return bot.sendMessage(chatId, "Usage: /run <goal>");
     const goal = args;
     await bot.sendMessage(chatId, "🚀 시작합니다…");
     try {
-      const job = await createJob(goal);
+      const job = await createJob(goal, { ownerUserId: userId, ownerChatId: chatId });
       const jobId = String(job.jobId);
       const controller = resetJobAbortController(jobId);
       const chatKey = String(chatId);
@@ -1127,11 +1458,13 @@ bot.on("message", async (msg) => {
           "## Multi-Agent routing",
           `- mode: run`,
           `- reason: ${route.reason}`,
-          `- actions: ${route.actions.map(a => a.type).join(" -> ")}`,
+          `- actions: ${route.actions.map((a) => actionLabel(a)).join(" -> ")}`,
         ].join("\n"));
-        await bot.sendMessage(chatId, `🧭 Multi-Agent 라우팅\n${route.actions.map(a => `- ${a.type}`).join("\n")}`);
+        await bot.sendMessage(chatId, `🧭 Multi-Agent 라우팅\n${route.actions.map((a) => `- ${actionLabel(a)}`).join("\n")}`);
 
-        const routed = await executeRoutedPlan(bot, chatId, jobId, route, controller.signal);
+        const routed = await executeRoutedPlan(bot, chatId, jobId, route, controller.signal, {
+          telegramUserId: userId,
+        });
         if (!routed.askedChatGPT) {
           await suggestNextPrompt(bot, chatId, jobId, "현재 상태에서 다음 단계를 action plan(JSON)으로 제안해줘.", "run", controller.signal);
         }
@@ -1177,11 +1510,13 @@ bot.on("message", async (msg) => {
         "## Multi-Agent routing",
         `- mode: continue`,
         `- reason: ${route.reason}`,
-        `- actions: ${route.actions.map(a => a.type).join(" -> ")}`,
+        `- actions: ${route.actions.map((a) => actionLabel(a)).join(" -> ")}`,
       ].join("\n"));
-      await bot.sendMessage(chatId, `🧭 Multi-Agent 라우팅\n${route.actions.map(a => `- ${a.type}`).join("\n")}`);
+      await bot.sendMessage(chatId, `🧭 Multi-Agent 라우팅\n${route.actions.map((a) => `- ${actionLabel(a)}`).join("\n")}`);
 
-      const routed = await executeRoutedPlan(bot, chatId, jobKey, route, controller.signal);
+      const routed = await executeRoutedPlan(bot, chatId, jobKey, route, controller.signal, {
+        telegramUserId: userId,
+      });
       if (!routed.askedChatGPT) {
         await suggestNextPrompt(bot, chatId, jobKey, "현재 변경 결과를 바탕으로 다음 action plan(JSON)을 제안해줘.", "continue", controller.signal);
       }
@@ -1241,4 +1576,7 @@ process.on("SIGTERM", () => { void shutdown(0); });
 console.log("Telegram orchestrator v2.1 started (polling).");
 console.log(`Codex workspace root: ${workspace.root}`);
 console.log(`Runs dir: ${jobs.runsDir}`);
+console.log(`Memory mode: ${MEMORY_MODE} (effective=${memoryModeWithFallback()})`);
+if (gocInitError) console.log(`GoC init error: ${gocInitError}`);
+console.log(`Agents registry: ${agentRegistry.path}`);
 await bot.startPolling({ restart: true });
