@@ -49,9 +49,13 @@ cp .env.example .env
 ```
 
 `.env` 최소 설정:
-- `WORKSPACE_ROOT=/path/to/your/repo`
+- `CODEX_WORKSPACE_ROOT=/path/to/your/repo`  (Codex가 코드 수정할 워크스페이스)
 - `RUNS_DIR=/path/to/your/repo/.orchestrator`
 - `TELEGRAM_BOT_TOKEN=...`
+
+참고:
+- `WORKSPACE_ROOT`도 하위호환으로 동작하지만, 혼동 방지를 위해 `CODEX_WORKSPACE_ROOT` 사용 권장
+- `plan.md / research.md / progress.md / decisions.md`는 `RUNS_DIR/runs/<jobId>/shared/`에서만 관리
 
 ### 2) Codex CLI (ChatGPT 계정/Plus 로그인 기반)
 ```bash
@@ -71,6 +75,9 @@ env | grep -E 'OPENAI_API_KEY|CODEX_API_KEY'
 npm i -g @google/gemini-cli
 gemini   # 1회 로그인
 ```
+
+권장 설정:
+- `.env`에 `GEMINI_APPROVAL_MODE=plan` 설정 (Gemini를 리서치/점검 위주로 사용, 코딩 액션 최소화)
 
 ### 4) 실행 (개발용)
 ```bash

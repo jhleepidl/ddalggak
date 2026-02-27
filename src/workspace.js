@@ -4,7 +4,8 @@ import { resolveInside } from "./paths.js";
 
 export class Workspace {
   constructor() {
-    this.root = path.resolve(process.env.WORKSPACE_ROOT ?? process.cwd());
+    // Prefer CODEX_WORKSPACE_ROOT for clarity. Keep WORKSPACE_ROOT for backward compatibility.
+    this.root = path.resolve(process.env.CODEX_WORKSPACE_ROOT ?? process.env.WORKSPACE_ROOT ?? process.cwd());
   }
 
   readFile(relPath) {

@@ -11,6 +11,7 @@ import { Approvals } from "./src/approvals.js";
 import { runCommand } from "./src/proc.js";
 import { runCodexExec } from "./src/codex.js";
 import { runGeminiPrompt } from "./src/gemini.js";
+import { OrchestratorMemory } from "./src/settings.js";
 import { orchestratorNotes, buildChatGPTNextStepPrompt } from "./src/prompts.js";
 import { clip, chunk, extractCodexInstruction, extractJsonPlan } from "./src/textutil.js";
 
@@ -27,12 +28,14 @@ const approvals = new Approvals(jobs);
 const ALLOWED_CHATS = (process.env.TELEGRAM_ALLOWED_CHAT_IDS ?? "").split(",").map(s => s.trim()).filter(Boolean);
 const ALLOWED_USERS = (process.env.TELEGRAM_ALLOWED_USER_IDS ?? "").split(",").map(s => s.trim()).filter(Boolean);
 const MAX_CONCURRENCY = Number(process.env.MAX_CONCURRENCY ?? 1);
-const AUTO_SUGGEST = String(process.env.AUTO_SUGGEST_GPT_PROMPT ?? "true").toLowerCase() !== "false";
+const AUTO_SUGGEST_ENABLED = String(process.env.AUTO_SUGGEST_GPT_PROMPT ?? "true").toLowerCase() !== "false";
 const TELEGRAM_FORCE_IPV4 = String(process.env.TELEGRAM_FORCE_IPV4 ?? "true").toLowerCase() !== "false";
 const TELEGRAM_POLLING_INTERVAL_MS = Number(process.env.TELEGRAM_POLLING_INTERVAL_MS ?? 1000);
 const TELEGRAM_POLLING_TIMEOUT_SEC = Number(process.env.TELEGRAM_POLLING_TIMEOUT_SEC ?? 15);
 const TELEGRAM_SINGLE_INSTANCE_LOCK = String(process.env.TELEGRAM_SINGLE_INSTANCE_LOCK ?? "true").toLowerCase() !== "false";
 const LOCK_FILE = process.env.TELEGRAM_LOCK_FILE || path.join(workspace.root, ".orchestrator", "telegram_runner.lock");
+
+const memory = new OrchestratorMemory({ baseDir: jobs.baseDir });
 
 let hasLock = false;
 
@@ -93,6 +96,15 @@ process.on("exit", () => { releaseSingleInstanceLock(); });
 
 function isAllowedChat(chatId) { return ALLOWED_CHATS.length === 0 || ALLOWED_CHATS.includes(String(chatId)); }
 function isAllowedUser(userId) { return ALLOWED_USERS.length === 0 || ALLOWED_USERS.includes(String(userId)); }
+const TRACK_DOC_NAMES = ["plan.md", "research.md", "progress.md", "decisions.md"];
+
+function runDir(jobId) {
+  return jobs.jobDir(jobId);
+}
+
+function runSharedDir(jobId) {
+  return path.join(runDir(jobId), "shared");
+}
 
 function loadContextDocs(jobId, docNames, maxCharsPerDoc = 3500) {
   let out = "";
@@ -100,9 +112,9 @@ function loadContextDocs(jobId, docNames, maxCharsPerDoc = 3500) {
     try {
       const t = tracking.read(jobId, name);
       const clipped = t.length > maxCharsPerDoc ? t.slice(-maxCharsPerDoc) : t;
-      out += `\n\n---\n\n### ${name}\n\n${clipped}\n`;
+      out += `\n\n---\n\n### ${path.join(runSharedDir(jobId), name)}\n\n${clipped}\n`;
     } catch (e) {
-      out += `\n\n---\n\n### ${name}\n\n[read failed: ${String(e?.message ?? e)}]\n`;
+      out += `\n\n---\n\n### ${path.join(runSharedDir(jobId), name)}\n\n[read failed: ${String(e?.message ?? e)}]\n`;
     }
   }
   return out.trim() || "(none)";
@@ -117,14 +129,153 @@ async function sendLong(bot, chatId, text) {
   for (const part of chunk(text, 3800)) await bot.sendMessage(chatId, part);
 }
 
+function ensureCommandOk(name, result) {
+  if (result?.ok) return;
+  const exitCode = Number.isInteger(result?.exitCode) ? result.exitCode : -1;
+  const details = clip(String(result?.stderr || result?.stdout || "(no output)"), 1500);
+  throw new Error(`${name} failed (exit=${exitCode})\n${details}`);
+}
+
+function formatMemorySummary() {
+  const s = memory.getSummary();
+  return [
+    "🧠 현재 메모리 기반 설정",
+    `memory.file=${s.filePath}`,
+    "",
+    "Auto-Suggest Reflection Prompt (preview):",
+    s.policyPreview || "(empty)",
+    "",
+    `operator_notes=${s.noteCount}`,
+    `recent_lessons=${s.lessonCount}`,
+    "",
+    "명령:",
+    "/memory show",
+    "/memory md",
+    "/memory policy <자연어 프롬프트>",
+    "/memory note <메모>",
+    "/memory lesson <교훈>",
+    "/memory reset",
+    "",
+    "호환 alias:",
+    "/settings ...  (=/memory ...)",
+  ].join("\n");
+}
+
+function findFirstJsonObject(text) {
+  const s = String(text || "");
+  const start = s.indexOf("{");
+  if (start < 0) return null;
+
+  let depth = 0;
+  let inStr = false;
+  let escaped = false;
+  for (let i = start; i < s.length; i += 1) {
+    const ch = s[i];
+    if (inStr) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === "\"") {
+        inStr = false;
+      }
+      continue;
+    }
+    if (ch === "\"") {
+      inStr = true;
+      continue;
+    }
+    if (ch === "{") depth += 1;
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return s.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+function parseAutoSuggestDecision(raw) {
+  const text = String(raw || "");
+  const candidates = [];
+
+  const fenced = text.match(/```json\s*([\s\S]*?)```/i) || text.match(/```\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) candidates.push(fenced[1].trim());
+  candidates.push(text.trim());
+
+  for (const c of candidates) {
+    if (!c) continue;
+    const direct = (() => { try { return JSON.parse(c); } catch { return null; } })();
+    if (direct && typeof direct === "object") return direct;
+
+    const objText = findFirstJsonObject(c);
+    if (!objText) continue;
+    try {
+      const parsed = JSON.parse(objText);
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {}
+  }
+  return null;
+}
+
 // concurrency gate
 let running = 0;
 const queue = [];
-async function enqueue(fn) { return await new Promise((resolve, reject) => { queue.push({ fn, resolve, reject }); pump(); }); }
+const jobAbortControllers = new Map(); // jobId -> AbortController
+const activeJobByChat = new Map(); // chatId -> jobId
+
+function makeCancelledError(jobId) {
+  const e = new Error(`Cancelled job ${jobId}`);
+  e.code = "ECANCELLED";
+  return e;
+}
+
+function isCancelledError(e) {
+  return e?.code === "ECANCELLED" || String(e?.message ?? "").includes("Cancelled job");
+}
+
+function resetJobAbortController(jobId) {
+  const key = String(jobId);
+  const controller = new AbortController();
+  jobAbortControllers.set(key, controller);
+  return controller;
+}
+
+function cancelJobExecution(jobId) {
+  const key = String(jobId);
+  let aborted = false;
+  const controller = jobAbortControllers.get(key);
+  if (controller && !controller.signal.aborted) {
+    controller.abort();
+    aborted = true;
+  }
+
+  let dropped = 0;
+  for (let i = queue.length - 1; i >= 0; i -= 1) {
+    if (String(queue[i]?.jobId ?? "") !== key) continue;
+    queue[i].reject(makeCancelledError(key));
+    queue.splice(i, 1);
+    dropped += 1;
+  }
+
+  jobAbortControllers.delete(key);
+  return { aborted, dropped };
+}
+
+async function enqueue(fn, { jobId = "", signal = null, label = "" } = {}) {
+  return await new Promise((resolve, reject) => {
+    queue.push({ fn, resolve, reject, jobId: String(jobId || ""), signal, label });
+    pump();
+  });
+}
 async function pump() {
   if (running >= MAX_CONCURRENCY) return;
   const item = queue.shift();
   if (!item) return;
+  if (item.signal?.aborted) {
+    item.reject(makeCancelledError(item.jobId || "unknown"));
+    pump();
+    return;
+  }
   running += 1;
   try { item.resolve(await item.fn()); } catch (e) { item.reject(e); } finally { running -= 1; pump(); }
 }
@@ -139,29 +290,71 @@ async function createJob(goal) {
   return job;
 }
 
-async function geminiResearch(jobId, goal) {
+async function geminiResearch(jobId, goal, signal = null) {
   const ctx = loadContextDocs(jobId, ["research.md"]);
-  const prompt = `${ctx}\n\n다음 목표를 달성하기 위한 구현 단계와 리스크를 한국어로 간결하게 작성해줘.\n\n목표: ${goal}\n\n출력:\n- 요약\n- 구현 단계(번호)\n- 리스크/주의\n- 검증(테스트/체크)\n`;
-  const r = await runGeminiPrompt({ workspaceRoot: workspace.root, prompt });
+  const prompt = [
+    "역할: 기술 리서처",
+    `run dir: ${runDir(jobId)}`,
+    `tracking docs dir: ${runSharedDir(jobId)}`,
+    "",
+    "제약:",
+    "- 코드 작성/수정/패치 제안 금지",
+    "- 터미널 명령 제안 최소화",
+    "- 설계/리스크/검증 관점으로만 답변",
+    "",
+    ctx,
+    "",
+    "다음 목표를 달성하기 위한 구현 단계와 리스크를 한국어로 간결하게 작성해줘.",
+    "",
+    `목표: ${goal}`,
+    "",
+    "출력:",
+    "- 요약",
+    "- 구현 단계(번호)",
+    "- 리스크/주의",
+    "- 검증(테스트/체크)",
+  ].join("\n");
+  const r = await runGeminiPrompt({ workspaceRoot: workspace.root, cwd: runDir(jobId), prompt, signal });
   const out = (r.stdout || r.stderr || "");
   tracking.append(jobId, "research.md", `## Gemini notes\n\n${out}\n`);
   jobs.appendConversation(jobId, "gemini", out, { kind: "research" });
+  ensureCommandOk("Gemini", r);
   return out;
 }
 
-async function codexImplement(jobId, instruction) {
+async function codexImplement(jobId, instruction, signal = null) {
   const ctx = loadContextDocs(jobId, ["plan.md", "research.md"], 6000);
-  const prompt = `${ctx}\n\n너는 코드 수정 에이전트다.\n규칙:\n- 네트워크 접근 금지.\n- WORKSPACE_ROOT 내부 파일만 수정.\n- 테스트 실행은 하지 말고, 필요한 테스트를 제안만.\n- 변경 요약(파일별 이유) 포함.\n\n작업:\n${instruction}\n`;
-  const r = await runCodexExec({ workspaceRoot: workspace.root, prompt });
+  const trackDocs = TRACK_DOC_NAMES.map(n => `- ${path.join(runSharedDir(jobId), n)}`).join("\n");
+  const prompt = [
+    ctx,
+    "",
+    "너는 코드 수정 에이전트다.",
+    "규칙:",
+    "- 네트워크 접근 금지.",
+    `- CODEX_WORKSPACE_ROOT(코드 작업 영역) 내부 파일만 수정: ${workspace.root}`,
+    `- 현재 run dir: ${runDir(jobId)}`,
+    "- 아래 트래킹 문서는 run/shared에서만 관리하고, CODEX_WORKSPACE_ROOT 루트에 동명 파일을 만들지 말 것:",
+    trackDocs,
+    "- 테스트 실행은 하지 말고, 필요한 테스트를 제안만.",
+    "- 변경 요약(파일별 이유) 포함.",
+    "",
+    "작업:",
+    instruction,
+    "",
+  ].join("\n");
+  const r = await runCodexExec({ workspaceRoot: workspace.root, cwd: runDir(jobId), prompt, signal });
   const out = (r.stdout || r.stderr || "");
   tracking.append(jobId, "progress.md", `## Codex output\n\n${out}\n`);
   jobs.appendConversation(jobId, "codex", out, { kind: "implementation" });
+  ensureCommandOk("Codex", r);
   return out;
 }
 
-async function gitSummary(jobId) {
-  const status = await runCommand("git", ["status", "--porcelain=v1"], { cwd: workspace.root });
-  const diff = await runCommand("git", ["diff"], { cwd: workspace.root, timeoutMs: 120000 });
+async function gitSummary(jobId, signal = null) {
+  const status = await runCommand("git", ["status", "--porcelain=v1"], { cwd: workspace.root, abortSignal: signal });
+  const diff = await runCommand("git", ["diff"], { cwd: workspace.root, timeoutMs: 120000, abortSignal: signal });
+  ensureCommandOk("git status", status);
+  ensureCommandOk("git diff", diff);
 
   tracking.append(jobId, "progress.md", `## git status\n\n${FENCE}\n${status.stdout}\n${FENCE}\n`);
   tracking.append(jobId, "progress.md", `## git diff\n\n${FENCE}diff\n${diff.stdout}\n${FENCE}\n`);
@@ -178,8 +371,89 @@ function getGoalFromResearch(jobId) {
   return "(unknown)";
 }
 
-async function suggestNextPrompt(bot, chatId, jobId, question) {
-  if (!AUTO_SUGGEST) return;
+async function reflectAutoSuggest(jobId, trigger, question, signal = null) {
+  if (!AUTO_SUGGEST_ENABLED) {
+    return { shouldAsk: false, reason: "AUTO_SUGGEST_GPT_PROMPT=false" };
+  }
+
+  const goal = getGoalFromResearch(jobId);
+  const docs = loadContextDocs(jobId, ["research.md", "plan.md", "progress.md", "decisions.md"], 2200);
+  const convo = clip(convoToText(jobs.tailConversation(jobId, 50)), 5000);
+  const policyPrompt = memory.getPolicyPrompt();
+
+  const prompt = [
+    "너는 Telegram 오케스트레이터의 '자체 반성 판단기'다.",
+    "지금 이 시점에 ChatGPT에게 다음 단계 질문 프롬프트를 자동 생성할지 판단해라.",
+    "반드시 JSON 객체 하나만 출력해라. JSON 외 텍스트 금지.",
+    "",
+    "출력 JSON 스키마:",
+    "{",
+    "  \"shouldAskChatGPT\": true|false,",
+    "  \"reason\": \"짧은 한 줄 이유\",",
+    "  \"signals\": [\"looping\"|\"complexity\"|\"needs_review\"|\"blocked\"|\"none\"],",
+    "  \"confidence\": 0-100",
+    "}",
+    "",
+    "판단 기준(운영자 메모리 프롬프트):",
+    policyPrompt,
+    "",
+    `trigger=${trigger}`,
+    `question=${question}`,
+    `goal=${goal}`,
+    "",
+    "shared docs:",
+    docs,
+    "",
+    "recent conversation:",
+    convo,
+  ].join("\n");
+
+  try {
+    const r = await enqueue(
+      () => runGeminiPrompt({ workspaceRoot: workspace.root, cwd: runDir(jobId), prompt, signal }),
+      { jobId, signal, label: "auto_reflection" }
+    );
+    const out = (r.stdout || r.stderr || "").trim();
+    if (!r.ok) return { shouldAsk: false, reason: clip(`reflection failed: ${out}`, 300) };
+
+    const parsed = parseAutoSuggestDecision(out);
+    const rawShouldAsk = parsed?.shouldAskChatGPT;
+    const shouldAsk = typeof rawShouldAsk === "boolean"
+      ? rawShouldAsk
+      : (["true", "1", "yes"].includes(String(rawShouldAsk).trim().toLowerCase()) ? true
+        : (["false", "0", "no"].includes(String(rawShouldAsk).trim().toLowerCase()) ? false : null));
+    if (!parsed || shouldAsk === null) {
+      return { shouldAsk: false, reason: "reflection output parse failed" };
+    }
+
+    const signals = Array.isArray(parsed.signals) ? parsed.signals.map(v => String(v)) : [];
+    return {
+      shouldAsk,
+      reason: String(parsed.reason || "").trim() || "(no reason)",
+      signals,
+      confidence: Number.isFinite(Number(parsed.confidence)) ? Number(parsed.confidence) : null,
+    };
+  } catch (e) {
+    return { shouldAsk: false, reason: `reflection exception: ${String(e?.message ?? e)}` };
+  }
+}
+
+async function suggestNextPrompt(bot, chatId, jobId, question, trigger = "run", signal = null) {
+  const decision = await reflectAutoSuggest(jobId, trigger, question, signal);
+  try {
+    const signals = Array.isArray(decision.signals) && decision.signals.length > 0 ? decision.signals.join(", ") : "none";
+    const confidence = Number.isFinite(Number(decision.confidence)) ? Number(decision.confidence) : "n/a";
+    tracking.append(jobId, "decisions.md", [
+      "## Auto-suggest reflection",
+      `- trigger: ${trigger}`,
+      `- shouldAskChatGPT: ${decision.shouldAsk}`,
+      `- confidence: ${confidence}`,
+      `- signals: ${signals}`,
+      `- reason: ${decision.reason || "(no reason)"}`,
+    ].join("\n"));
+  } catch {}
+  if (!decision.shouldAsk) return;
+
   const goal = getGoalFromResearch(jobId);
   const docs = loadContextDocs(jobId, ["research.md", "plan.md", "progress.md"], 3000);
   const convo = jobs.tailConversation(jobId, 60);
@@ -188,7 +462,7 @@ async function suggestNextPrompt(bot, chatId, jobId, question) {
   await sendLong(bot, chatId, prompt);
 }
 
-async function executeActions(bot, chatId, jobId, plan) {
+async function executeActions(bot, chatId, jobId, plan, signal = null) {
   if (!plan || !Array.isArray(plan.actions)) return;
   const allowed = new Set(["track_append", "gemini", "codex", "git_summary", "commit_request"]);
 
@@ -204,10 +478,22 @@ async function executeActions(bot, chatId, jobId, plan) {
       const p = String(act.prompt || "").trim();
       if (!p) continue;
       await bot.sendMessage(chatId, "🧠 Gemini 실행 중…");
-      const r = await enqueue(() => runGeminiPrompt({ workspaceRoot: workspace.root, prompt: p }));
+      const researchOnlyPrompt = [
+        "역할: 기술 리서치/검토 어시스턴트",
+        `run dir: ${runDir(jobId)}`,
+        `tracking docs dir: ${runSharedDir(jobId)}`,
+        "규칙: 코드 작성/수정/패치 지시를 하지 말고, 분석/근거/검증 체크리스트 중심으로 답하라.",
+        "",
+        p,
+      ].join("\n");
+      const r = await enqueue(
+        () => runGeminiPrompt({ workspaceRoot: workspace.root, cwd: runDir(jobId), prompt: researchOnlyPrompt, signal }),
+        { jobId, signal, label: "gemini_action" }
+      );
       const out = (r.stdout || r.stderr || "");
       tracking.append(jobId, "research.md", `## Gemini (from ChatGPT plan)\n\n${out}\n`);
       jobs.appendConversation(jobId, "gemini", out, { kind: "from_chatgpt_plan" });
+      ensureCommandOk("Gemini", r);
       await sendLong(bot, chatId, `🧠 Gemini 결과\n${clip(out, 3500)}`);
     }
 
@@ -215,15 +501,29 @@ async function executeActions(bot, chatId, jobId, plan) {
       const p = String(act.prompt || "").trim();
       if (!p) continue;
       await bot.sendMessage(chatId, "🛠️ Codex 실행 중…");
-      const r = await enqueue(() => runCodexExec({ workspaceRoot: workspace.root, prompt: p }));
+      const trackDocs = TRACK_DOC_NAMES.map(n => `- ${path.join(runSharedDir(jobId), n)}`).join("\n");
+      const codexActionPrompt = [
+        "규칙:",
+        `- CODEX_WORKSPACE_ROOT(코드 작업 영역): ${workspace.root}`,
+        `- 현재 run dir: ${runDir(jobId)}`,
+        "- run/shared 트래킹 문서를 CODEX_WORKSPACE_ROOT 루트에 새로 만들지 말 것:",
+        trackDocs,
+        "",
+        p,
+      ].join("\n");
+      const r = await enqueue(
+        () => runCodexExec({ workspaceRoot: workspace.root, cwd: runDir(jobId), prompt: codexActionPrompt, signal }),
+        { jobId, signal, label: "codex_action" }
+      );
       const out = (r.stdout || r.stderr || "");
       tracking.append(jobId, "progress.md", `## Codex (from ChatGPT plan)\n\n${out}\n`);
       jobs.appendConversation(jobId, "codex", out, { kind: "from_chatgpt_plan" });
+      ensureCommandOk("Codex", r);
       await sendLong(bot, chatId, `🛠️ Codex 결과\n${clip(out, 3500)}`);
     }
 
     if (act.type === "git_summary") {
-      const { status, diff } = await gitSummary(jobId);
+      const { status, diff } = await gitSummary(jobId, signal);
       await sendLong(bot, chatId, `📌 git status\n${FENCE}\n${clip(status, 1500)}\n${FENCE}\n\n📌 git diff(일부)\n${FENCE}diff\n${clip(diff, 2500)}\n${FENCE}`);
     }
 
@@ -330,7 +630,7 @@ bot.on("callback_query", async (q) => {
       const commit = await runCommand("git", ["commit", "-m", msg2], { cwd: workspace.root });
       tracking.append(jobId, "progress.md", `## git commit\n\n${FENCE}\n${add.stdout || add.stderr}\n${commit.stdout || commit.stderr}\n${FENCE}\n`);
       await sendLong(bot, chatId, `✅ 커밋 완료\n${clip(commit.stdout || commit.stderr, 3500)}`);
-      await suggestNextPrompt(bot, chatId, jobId, "커밋 이후 다음 단계(테스트/PR/배포 등)를 결정해줘.");
+      await suggestNextPrompt(bot, chatId, jobId, "커밋 이후 다음 단계(테스트/PR/배포 등)를 결정해줘.", "commit");
     }
   } catch {}
 });
@@ -355,12 +655,22 @@ bot.on("message", async (msg) => {
     if (plan && String(plan.jobId || "") === String(jobId)) {
       await bot.sendMessage(chatId, "✅ JSON 액션 플랜 감지. 실행을 시작합니다.");
       clearAwait(chatId);
+      const controller = resetJobAbortController(jobId);
+      const chatKey = String(chatId);
+      activeJobByChat.set(chatKey, String(jobId));
       try {
-        await executeActions(bot, chatId, jobId, plan);
+        await executeActions(bot, chatId, jobId, plan, controller.signal);
         await bot.sendMessage(chatId, "🏁 액션 플랜 실행 완료.");
-        await suggestNextPrompt(bot, chatId, jobId, "현재 상태에서 다음으로 무엇을 해야 하는지 action plan(JSON)으로 제안해줘.");
+        await suggestNextPrompt(bot, chatId, jobId, "현재 상태에서 다음으로 무엇을 해야 하는지 action plan(JSON)으로 제안해줘.", "action_plan", controller.signal);
       } catch (e) {
-        await bot.sendMessage(chatId, `❌ 액션 실행 오류: ${String(e?.message ?? e)}`);
+        if (isCancelledError(e)) {
+          await bot.sendMessage(chatId, `⏹️ 액션 플랜 실행이 중단되었습니다. (jobId=${jobId})`);
+        } else {
+          await bot.sendMessage(chatId, `❌ 액션 실행 오류: ${String(e?.message ?? e)}`);
+        }
+      } finally {
+        if (activeJobByChat.get(chatKey) === String(jobId)) activeJobByChat.delete(chatKey);
+        jobAbortControllers.delete(String(jobId));
       }
     } else {
       await bot.sendMessage(chatId, "🟣 plan.md에 기록 완료. (JSON 플랜이 없어서 자동 실행은 하지 않았어요)");
@@ -372,12 +682,92 @@ bot.on("message", async (msg) => {
   const args = rest.join(" ").trim();
 
   if (cmd === "/help") {
-    await bot.sendMessage(chatId, "Commands:\n- /whoami\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply <jobId>\n- /gptdone\n- /commit <jobId> <message>");
+    await bot.sendMessage(chatId, "Commands:\n- /whoami\n- /stop [jobId]\n- /memory [show|md|policy|note|lesson|reset]\n- /settings ... (alias)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply <jobId>\n- /gptdone\n- /commit <jobId> <message>");
     return;
   }
 
   if (cmd === "/whoami") {
     await bot.sendMessage(chatId, `chat_id=${chatId}\nuser_id=${userId}`);
+    return;
+  }
+
+  if (cmd === "/stop") {
+    const chatKey = String(chatId);
+    const fromAwait = getAwait(chatId)?.jobId;
+    const targetJobId = args || activeJobByChat.get(chatKey) || fromAwait;
+    if (!targetJobId) {
+      await bot.sendMessage(chatId, "중단할 jobId를 찾지 못했어요. Usage: /stop <jobId>");
+      return;
+    }
+
+    const { aborted, dropped } = cancelJobExecution(targetJobId);
+    if (activeJobByChat.get(chatKey) === String(targetJobId)) activeJobByChat.delete(chatKey);
+    if (fromAwait && String(fromAwait) === String(targetJobId)) clearAwait(chatId);
+
+    if (!aborted && dropped === 0) {
+      await bot.sendMessage(chatId, `중단할 실행이 없어요. (jobId=${targetJobId})`);
+      return;
+    }
+    await bot.sendMessage(chatId, `⏹️ 중단 요청 완료\njobId=${targetJobId}\n실행중 중단=${aborted}\n큐 제거=${dropped}`);
+    return;
+  }
+
+  if (cmd === "/memory" || cmd === "/settings") {
+    const sub = String(rest[0] || "show").trim().toLowerCase();
+
+    if (sub === "show") {
+      await sendLong(bot, chatId, formatMemorySummary());
+      return;
+    }
+
+    if (sub === "md") {
+      await sendLong(bot, chatId, memory.readMarkdown());
+      return;
+    }
+
+    if (sub === "reset") {
+      memory.reset();
+      await sendLong(bot, chatId, `✅ 메모리를 기본값으로 되돌렸습니다.\n\n${formatMemorySummary()}`);
+      return;
+    }
+
+    if (sub === "policy") {
+      const value = rest.slice(1).join(" ").trim();
+      if (!value) return bot.sendMessage(chatId, "Usage: /memory policy <자연어 프롬프트>");
+      try {
+        memory.setPolicyPrompt(value);
+        await sendLong(bot, chatId, `✅ reflection prompt 업데이트 완료.\n\n${formatMemorySummary()}`);
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ 업데이트 실패: ${String(e?.message ?? e)}`);
+      }
+      return;
+    }
+
+    if (sub === "note") {
+      const value = rest.slice(1).join(" ").trim();
+      if (!value) return bot.sendMessage(chatId, "Usage: /memory note <메모>");
+      try {
+        memory.addOperatorNote(value);
+        await sendLong(bot, chatId, `✅ operator note 추가 완료.\n\n${formatMemorySummary()}`);
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ 메모 추가 실패: ${String(e?.message ?? e)}`);
+      }
+      return;
+    }
+
+    if (sub === "lesson") {
+      const value = rest.slice(1).join(" ").trim();
+      if (!value) return bot.sendMessage(chatId, "Usage: /memory lesson <교훈>");
+      try {
+        memory.addRecentLesson(value);
+        await sendLong(bot, chatId, `✅ recent lesson 추가 완료.\n\n${formatMemorySummary()}`);
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ 교훈 추가 실패: ${String(e?.message ?? e)}`);
+      }
+      return;
+    }
+
+    await bot.sendMessage(chatId, "Usage:\n/memory show\n/memory md\n/memory policy <자연어 프롬프트>\n/memory note <메모>\n/memory lesson <교훈>\n/memory reset");
     return;
   }
 
@@ -393,26 +783,46 @@ bot.on("message", async (msg) => {
     await bot.sendMessage(chatId, "🚀 시작합니다…");
     try {
       const job = await createJob(goal);
-      await bot.sendMessage(chatId, `✅ Job created: ${job.jobId}\ngoal: ${goal}\n복잡하면: /gptprompt ${job.jobId} <질문>`);
+      const jobId = String(job.jobId);
+      const controller = resetJobAbortController(jobId);
+      const chatKey = String(chatId);
+      activeJobByChat.set(chatKey, jobId);
+      await bot.sendMessage(chatId, `✅ Job created: ${job.jobId}\ngoal: ${goal}\nrun_dir: ${runDir(jobId)}\n복잡하면: /gptprompt ${job.jobId} <질문>`);
 
-      await bot.sendMessage(chatId, "🧠 Gemini 조사 중…");
       try {
-        const g = await enqueue(() => geminiResearch(job.jobId, goal));
-        await sendLong(bot, chatId, `🧠 Gemini 완료\n${clip(g, 3500)}`);
-      } catch (e) {
-        await bot.sendMessage(chatId, `⚠️ Gemini 실패(계속 진행): ${String(e?.message ?? e)}`);
+        await bot.sendMessage(chatId, "🧠 Gemini 조사 중…");
+        try {
+          const g = await enqueue(
+            () => geminiResearch(jobId, goal, controller.signal),
+            { jobId, signal: controller.signal, label: "gemini_research" }
+          );
+          await sendLong(bot, chatId, `🧠 Gemini 완료\n${clip(g, 3500)}`);
+        } catch (e) {
+          if (isCancelledError(e)) throw e;
+          await bot.sendMessage(chatId, `⚠️ Gemini 실패(계속 진행): ${String(e?.message ?? e)}`);
+        }
+
+        await bot.sendMessage(chatId, "🛠️ Codex 구현 중…");
+        const c = await enqueue(
+          () => codexImplement(jobId, goal, controller.signal),
+          { jobId, signal: controller.signal, label: "codex_run" }
+        );
+        await sendLong(bot, chatId, `🛠️ Codex 완료\n${clip(c, 3500)}`);
+
+        const { status, diff } = await gitSummary(jobId, controller.signal);
+        await sendLong(bot, chatId, `📌 git status\n${FENCE}\n${clip(status, 1500)}\n${FENCE}\n\n📌 git diff(일부)\n${FENCE}diff\n${clip(diff, 2500)}\n${FENCE}\n\n커밋: /commit ${jobId} <message>`);
+
+        await suggestNextPrompt(bot, chatId, jobId, "현재 상태에서 다음 단계를 action plan(JSON)으로 제안해줘.", "run", controller.signal);
+      } finally {
+        if (activeJobByChat.get(chatKey) === jobId) activeJobByChat.delete(chatKey);
+        jobAbortControllers.delete(jobId);
       }
-
-      await bot.sendMessage(chatId, "🛠️ Codex 구현 중…");
-      const c = await enqueue(() => codexImplement(job.jobId, goal));
-      await sendLong(bot, chatId, `🛠️ Codex 완료\n${clip(c, 3500)}`);
-
-      const { status, diff } = await gitSummary(job.jobId);
-      await sendLong(bot, chatId, `📌 git status\n${FENCE}\n${clip(status, 1500)}\n${FENCE}\n\n📌 git diff(일부)\n${FENCE}diff\n${clip(diff, 2500)}\n${FENCE}\n\n커밋: /commit ${job.jobId} <message>`);
-
-      await suggestNextPrompt(bot, chatId, job.jobId, "현재 상태에서 다음 단계를 action plan(JSON)으로 제안해줘.");
     } catch (e) {
-      await bot.sendMessage(chatId, `❌ 실패: ${String(e?.message ?? e)}`);
+      if (isCancelledError(e)) {
+        await bot.sendMessage(chatId, "⏹️ 작업이 중단되었습니다.");
+      } else {
+        await bot.sendMessage(chatId, `❌ 실패: ${String(e?.message ?? e)}`);
+      }
     }
     return;
   }
@@ -420,9 +830,13 @@ bot.on("message", async (msg) => {
   if (cmd === "/continue") {
     if (!args) return bot.sendMessage(chatId, "Usage: /continue <jobId>");
     const jobId = args;
-    await bot.sendMessage(chatId, `▶️ Continue job ${jobId}`);
+    const jobKey = String(jobId);
+    const controller = resetJobAbortController(jobKey);
+    const chatKey = String(chatId);
+    activeJobByChat.set(chatKey, jobKey);
+    await bot.sendMessage(chatId, `▶️ Continue job ${jobId}\nrun_dir: ${runDir(jobKey)}`);
 
-    let instruction = "plan.md와 research.md를 반영해 다음 변경을 진행해라.";
+    let instruction = "run/shared의 plan.md와 research.md를 반영해 CODEX_WORKSPACE_ROOT 코드 변경을 진행해라.";
     try {
       const planText = tracking.read(jobId, "plan.md");
       const extracted = extractCodexInstruction(planText);
@@ -430,15 +844,25 @@ bot.on("message", async (msg) => {
     } catch {}
 
     try {
-      const c = await enqueue(() => codexImplement(jobId, instruction));
+      const c = await enqueue(
+        () => codexImplement(jobKey, instruction, controller.signal),
+        { jobId: jobKey, signal: controller.signal, label: "codex_continue" }
+      );
       await sendLong(bot, chatId, `🛠️ Codex 완료\n${clip(c, 3500)}`);
 
-      const { status, diff } = await gitSummary(jobId);
+      const { status, diff } = await gitSummary(jobKey, controller.signal);
       await sendLong(bot, chatId, `📌 git status\n${FENCE}\n${clip(status, 1500)}\n${FENCE}\n\n📌 git diff(일부)\n${FENCE}diff\n${clip(diff, 2500)}\n${FENCE}`);
 
-      await suggestNextPrompt(bot, chatId, jobId, "현재 변경 결과를 바탕으로 다음 action plan(JSON)을 제안해줘.");
+      await suggestNextPrompt(bot, chatId, jobKey, "현재 변경 결과를 바탕으로 다음 action plan(JSON)을 제안해줘.", "continue", controller.signal);
     } catch (e) {
-      await bot.sendMessage(chatId, `❌ 실패: ${String(e?.message ?? e)}`);
+      if (isCancelledError(e)) {
+        await bot.sendMessage(chatId, `⏹️ 작업이 중단되었습니다. (jobId=${jobKey})`);
+      } else {
+        await bot.sendMessage(chatId, `❌ 실패: ${String(e?.message ?? e)}`);
+      }
+    } finally {
+      if (activeJobByChat.get(chatKey) === jobKey) activeJobByChat.delete(chatKey);
+      jobAbortControllers.delete(jobKey);
     }
     return;
   }
@@ -491,5 +915,6 @@ process.on("SIGINT", () => { void shutdown(0); });
 process.on("SIGTERM", () => { void shutdown(0); });
 
 console.log("Telegram orchestrator v2.1 started (polling).");
-console.log(`Workspace root: ${workspace.root}`);
+console.log(`Codex workspace root: ${workspace.root}`);
+console.log(`Runs dir: ${jobs.runsDir}`);
 await bot.startPolling({ restart: true });
