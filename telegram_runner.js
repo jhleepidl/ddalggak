@@ -138,12 +138,23 @@ function ensureCommandOk(name, result) {
 
 function formatMemorySummary() {
   const s = memory.getSummary();
+  const role = memory.getAgentRoleSummary();
   return [
     "🧠 현재 메모리 기반 설정",
     `memory.file=${s.filePath}`,
     "",
     "Auto-Suggest Reflection Prompt (preview):",
     s.policyPreview || "(empty)",
+    "",
+    "Multi-Agent Router Prompt (preview):",
+    s.routerPreview || "(empty)",
+    "",
+    "Agent Roles (preview):",
+    `[Gemini]\n${role.geminiPreview}`,
+    "",
+    `[Codex]\n${role.codexPreview}`,
+    "",
+    `[ChatGPT]\n${role.chatgptPreview}`,
     "",
     `operator_notes=${s.noteCount}`,
     `recent_lessons=${s.lessonCount}`,
@@ -152,12 +163,48 @@ function formatMemorySummary() {
     "/memory show",
     "/memory md",
     "/memory policy <자연어 프롬프트>",
+    "/memory routing <자연어 프롬프트>",
+    "/memory role <gemini|codex|chatgpt> <자연어 역할>",
+    "/memory agents",
     "/memory note <메모>",
     "/memory lesson <교훈>",
     "/memory reset",
     "",
     "호환 alias:",
     "/settings ...  (=/memory ...)",
+  ].join("\n");
+}
+
+function getAgentRolesText() {
+  const roles = memory.getAgentRoles();
+  return [
+    "### Gemini",
+    roles.gemini,
+    "",
+    "### Codex",
+    roles.codex,
+    "",
+    "### ChatGPT",
+    roles.chatgpt,
+  ].join("\n");
+}
+
+function formatAgentMemorySummary() {
+  const roles = memory.getAgentRoles();
+  return [
+    "🤖 Multi-Agent 역할 메모리",
+    "",
+    "Gemini",
+    roles.gemini,
+    "",
+    "Codex",
+    roles.codex,
+    "",
+    "ChatGPT",
+    roles.chatgpt,
+    "",
+    "Router Prompt",
+    memory.getRouterPrompt(),
   ].join("\n");
 }
 
@@ -215,6 +262,64 @@ function parseAutoSuggestDecision(raw) {
     } catch {}
   }
   return null;
+}
+
+function parseJsonObjectFromText(raw) {
+  const text = String(raw || "");
+  const candidates = [];
+  const fenced = text.match(/```json\s*([\s\S]*?)```/i) || text.match(/```\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) candidates.push(fenced[1].trim());
+  candidates.push(text.trim());
+
+  for (const c of candidates) {
+    if (!c) continue;
+    try {
+      const parsed = JSON.parse(c);
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {}
+    const objText = findFirstJsonObject(c);
+    if (!objText) continue;
+    try {
+      const parsed = JSON.parse(objText);
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {}
+  }
+  return null;
+}
+
+function normalizeRouterAction(raw) {
+  const type = String(raw?.type || "").trim().toLowerCase();
+  if (!type) return null;
+
+  if (type === "gemini" || type === "gemini_research") {
+    const prompt = String(raw.prompt || raw.query || raw.task || "").trim();
+    return { type: "gemini_research", prompt };
+  }
+
+  if (type === "codex" || type === "codex_implement") {
+    const instruction = String(raw.instruction || raw.prompt || raw.task || "").trim();
+    return { type: "codex_implement", instruction };
+  }
+
+  if (type === "git_summary") return { type: "git_summary" };
+
+  if (type === "chatgpt_prompt" || type === "chatgpt") {
+    const question = String(raw.question || raw.prompt || raw.task || "").trim();
+    return { type: "chatgpt_prompt", question };
+  }
+
+  return null;
+}
+
+function parseRouterPlan(raw) {
+  const parsed = parseJsonObjectFromText(raw);
+  if (!parsed || !Array.isArray(parsed.actions)) return null;
+  const actions = parsed.actions.map(normalizeRouterAction).filter(Boolean);
+  if (actions.length === 0) return null;
+  return {
+    actions,
+    reason: String(parsed.reason || "").trim() || "(no reason)",
+  };
 }
 
 // concurrency gate
@@ -290,10 +395,15 @@ async function createJob(goal) {
   return job;
 }
 
-async function geminiResearch(jobId, goal, signal = null) {
+async function geminiResearch(jobId, goal, signal = null, opts = {}) {
+  const sectionTitle = String(opts.sectionTitle || "Gemini notes");
+  const outputGuide = String(opts.outputGuide || "").trim();
+  const roleMemo = memory.getAgentRole("gemini");
   const ctx = loadContextDocs(jobId, ["research.md"]);
   const prompt = [
-    "역할: 기술 리서처",
+    "역할 메모리:",
+    roleMemo,
+    "",
     `run dir: ${runDir(jobId)}`,
     `tracking docs dir: ${runSharedDir(jobId)}`,
     "",
@@ -308,25 +418,31 @@ async function geminiResearch(jobId, goal, signal = null) {
     "",
     `목표: ${goal}`,
     "",
-    "출력:",
-    "- 요약",
-    "- 구현 단계(번호)",
-    "- 리스크/주의",
-    "- 검증(테스트/체크)",
+    outputGuide || [
+      "출력:",
+      "- 요약",
+      "- 구현 단계(번호)",
+      "- 리스크/주의",
+      "- 검증(테스트/체크)",
+    ].join("\n"),
   ].join("\n");
   const r = await runGeminiPrompt({ workspaceRoot: workspace.root, cwd: runDir(jobId), prompt, signal });
   const out = (r.stdout || r.stderr || "");
-  tracking.append(jobId, "research.md", `## Gemini notes\n\n${out}\n`);
+  tracking.append(jobId, "research.md", `## ${sectionTitle}\n\n${out}\n`);
   jobs.appendConversation(jobId, "gemini", out, { kind: "research" });
   ensureCommandOk("Gemini", r);
   return out;
 }
 
 async function codexImplement(jobId, instruction, signal = null) {
+  const roleMemo = memory.getAgentRole("codex");
   const ctx = loadContextDocs(jobId, ["plan.md", "research.md"], 6000);
   const trackDocs = TRACK_DOC_NAMES.map(n => `- ${path.join(runSharedDir(jobId), n)}`).join("\n");
   const prompt = [
     ctx,
+    "",
+    "역할 메모리:",
+    roleMemo,
     "",
     "너는 코드 수정 에이전트다.",
     "규칙:",
@@ -369,6 +485,107 @@ function getGoalFromResearch(jobId) {
     if (m && m[1]) return m[1].trim().slice(0, 2000);
   } catch {}
   return "(unknown)";
+}
+
+function defaultRouteFor(mode, goal, seedInstruction = "") {
+  if (mode === "continue") {
+    return {
+      actions: [
+        { type: "codex_implement", instruction: seedInstruction || "run/shared 문서를 반영해 CODEX_WORKSPACE_ROOT 코드 변경을 진행하라." },
+        { type: "git_summary" },
+      ],
+      reason: "fallback: continue default",
+    };
+  }
+  return {
+    actions: [
+      { type: "gemini_research", prompt: goal },
+      { type: "codex_implement", instruction: goal },
+      { type: "git_summary" },
+    ],
+    reason: "fallback: run default",
+  };
+}
+
+async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal = null }) {
+  const docs = loadContextDocs(jobId, ["research.md", "plan.md", "progress.md", "decisions.md"], 2200);
+  const convo = clip(convoToText(jobs.tailConversation(jobId, 50)), 4200);
+  const routerPrompt = memory.getRouterPrompt();
+  const roleText = getAgentRolesText();
+
+  const prompt = [
+    "너는 오케스트레이터의 Multi-Agent 라우터다.",
+    "목표를 가장 빠르고 안전하게 달성하기 위해 필요한 에이전트만 선택하고 순서를 정해라.",
+    "반드시 JSON 객체 하나만 출력해라. JSON 외 텍스트 금지.",
+    "",
+    "출력 JSON 스키마:",
+    "{",
+    "  \"reason\": \"한 줄 이유\",",
+    "  \"actions\": [",
+    "    {\"type\":\"gemini_research\", \"prompt\":\"...\"},",
+    "    {\"type\":\"codex_implement\", \"instruction\":\"...\"},",
+    "    {\"type\":\"chatgpt_prompt\", \"question\":\"...\"},",
+    "    {\"type\":\"git_summary\"}",
+    "  ]",
+    "}",
+    "",
+    "규칙:",
+    "- 중복 작업 금지. 같은 분석/계획/구현을 반복 배정하지 말 것.",
+    "- 필요한 최소 액션만 포함.",
+    "- action은 최대 4개.",
+    "",
+    `mode=${mode}`,
+    `goal=${goal}`,
+    `seedInstruction=${seedInstruction || "(none)"}`,
+    "",
+    "라우팅 기준 메모리:",
+    routerPrompt,
+    "",
+    "에이전트 역할 메모리:",
+    roleText,
+    "",
+    "shared docs:",
+    docs,
+    "",
+    "recent conversation:",
+    convo,
+  ].join("\n");
+
+  try {
+    const r = await enqueue(
+      () => runGeminiPrompt({ workspaceRoot: workspace.root, cwd: runDir(jobId), prompt, signal }),
+      { jobId, signal, label: "agent_router" }
+    );
+    const out = (r.stdout || r.stderr || "").trim();
+    if (!r.ok) return defaultRouteFor(mode, goal, seedInstruction);
+
+    const planned = parseRouterPlan(out);
+    if (!planned) return defaultRouteFor(mode, goal, seedInstruction);
+
+    const normalized = [];
+    for (const a of planned.actions) {
+      if (normalized.length >= 4) break;
+      if (a.type === "gemini_research") {
+        normalized.push({ type: "gemini_research", prompt: a.prompt || goal });
+        continue;
+      }
+      if (a.type === "codex_implement") {
+        normalized.push({ type: "codex_implement", instruction: a.instruction || seedInstruction || goal });
+        continue;
+      }
+      if (a.type === "chatgpt_prompt") {
+        normalized.push({ type: "chatgpt_prompt", question: a.question || "현재 상태에서 다음 단계를 action plan(JSON)으로 제안해줘." });
+        continue;
+      }
+      if (a.type === "git_summary") {
+        normalized.push({ type: "git_summary" });
+      }
+    }
+    if (normalized.length === 0) return defaultRouteFor(mode, goal, seedInstruction);
+    return { actions: normalized, reason: planned.reason };
+  } catch {
+    return defaultRouteFor(mode, goal, seedInstruction);
+  }
 }
 
 async function reflectAutoSuggest(jobId, trigger, question, signal = null) {
@@ -454,17 +671,83 @@ async function suggestNextPrompt(bot, chatId, jobId, question, trigger = "run", 
   } catch {}
   if (!decision.shouldAsk) return;
 
+  await sendChatGPTPrompt(bot, chatId, jobId, question);
+}
+
+async function sendChatGPTPrompt(bot, chatId, jobId, question) {
   const goal = getGoalFromResearch(jobId);
   const docs = loadContextDocs(jobId, ["research.md", "plan.md", "progress.md"], 3000);
   const convo = jobs.tailConversation(jobId, 60);
-  const prompt = buildChatGPTNextStepPrompt({ jobId, goal, question, contextDocsText: docs, convoText: convoToText(convo) });
+  const prompt = buildChatGPTNextStepPrompt({
+    jobId,
+    goal,
+    question,
+    contextDocsText: docs,
+    convoText: convoToText(convo),
+    routerPrompt: memory.getRouterPrompt(),
+    agentRolesText: getAgentRolesText(),
+  });
   await bot.sendMessage(chatId, `🧩 다음 단계 결정을 위해 ChatGPT에 물어볼 프롬프트를 자동 생성했어요.\n답을 받은 뒤 /gptapply ${jobId} 후 답을 붙여넣으면 자동 실행됩니다.`);
   await sendLong(bot, chatId, prompt);
 }
 
+async function executeRoutedPlan(bot, chatId, jobId, route, signal = null) {
+  let askedChatGPT = false;
+  const actions = Array.isArray(route?.actions) ? route.actions : [];
+
+  for (const act of actions) {
+    if (!act?.type) continue;
+
+    if (act.type === "gemini_research") {
+      const promptText = String(act.prompt || getGoalFromResearch(jobId)).trim();
+      await bot.sendMessage(chatId, "🧠 Gemini 조사 중…");
+      const g = await enqueue(
+        () => geminiResearch(jobId, promptText, signal, {
+          sectionTitle: "Gemini notes (routed)",
+          outputGuide: [
+            "출력:",
+            "- 핵심 요약",
+            "- 구현 전 확인사항",
+            "- 리스크와 완화책",
+            "- 검증 체크리스트",
+          ].join("\n"),
+        }),
+        { jobId, signal, label: "gemini_routed" }
+      );
+      await sendLong(bot, chatId, `🧠 Gemini 완료\n${clip(g, 3500)}`);
+      continue;
+    }
+
+    if (act.type === "codex_implement") {
+      const instruction = String(act.instruction || getGoalFromResearch(jobId)).trim();
+      await bot.sendMessage(chatId, "🛠️ Codex 구현 중…");
+      const c = await enqueue(
+        () => codexImplement(jobId, instruction, signal),
+        { jobId, signal, label: "codex_routed" }
+      );
+      await sendLong(bot, chatId, `🛠️ Codex 완료\n${clip(c, 3500)}`);
+      continue;
+    }
+
+    if (act.type === "git_summary") {
+      const { status, diff } = await gitSummary(jobId, signal);
+      await sendLong(bot, chatId, `📌 git status\n${FENCE}\n${clip(status, 1500)}\n${FENCE}\n\n📌 git diff(일부)\n${FENCE}diff\n${clip(diff, 2500)}\n${FENCE}\n\n커밋: /commit ${jobId} <message>`);
+      continue;
+    }
+
+    if (act.type === "chatgpt_prompt") {
+      const q = String(act.question || "현재 상태에서 다음 단계 action plan(JSON)을 제안해줘.").trim();
+      await sendChatGPTPrompt(bot, chatId, jobId, q);
+      askedChatGPT = true;
+    }
+  }
+
+  return { askedChatGPT };
+}
+
 async function executeActions(bot, chatId, jobId, plan, signal = null) {
   if (!plan || !Array.isArray(plan.actions)) return;
-  const allowed = new Set(["track_append", "gemini", "codex", "git_summary", "commit_request"]);
+  const allowed = new Set(["track_append", "gemini", "codex", "git_summary", "chatgpt_prompt", "commit_request"]);
 
   for (const act of plan.actions) {
     if (!act || !allowed.has(act.type)) continue;
@@ -478,7 +761,11 @@ async function executeActions(bot, chatId, jobId, plan, signal = null) {
       const p = String(act.prompt || "").trim();
       if (!p) continue;
       await bot.sendMessage(chatId, "🧠 Gemini 실행 중…");
+      const roleMemo = memory.getAgentRole("gemini");
       const researchOnlyPrompt = [
+        "역할 메모리:",
+        roleMemo,
+        "",
         "역할: 기술 리서치/검토 어시스턴트",
         `run dir: ${runDir(jobId)}`,
         `tracking docs dir: ${runSharedDir(jobId)}`,
@@ -501,8 +788,12 @@ async function executeActions(bot, chatId, jobId, plan, signal = null) {
       const p = String(act.prompt || "").trim();
       if (!p) continue;
       await bot.sendMessage(chatId, "🛠️ Codex 실행 중…");
+      const roleMemo = memory.getAgentRole("codex");
       const trackDocs = TRACK_DOC_NAMES.map(n => `- ${path.join(runSharedDir(jobId), n)}`).join("\n");
       const codexActionPrompt = [
+        "역할 메모리:",
+        roleMemo,
+        "",
         "규칙:",
         `- CODEX_WORKSPACE_ROOT(코드 작업 영역): ${workspace.root}`,
         `- 현재 run dir: ${runDir(jobId)}`,
@@ -525,6 +816,12 @@ async function executeActions(bot, chatId, jobId, plan, signal = null) {
     if (act.type === "git_summary") {
       const { status, diff } = await gitSummary(jobId, signal);
       await sendLong(bot, chatId, `📌 git status\n${FENCE}\n${clip(status, 1500)}\n${FENCE}\n\n📌 git diff(일부)\n${FENCE}diff\n${clip(diff, 2500)}\n${FENCE}`);
+    }
+
+    if (act.type === "chatgpt_prompt") {
+      const q = String(act.question || act.prompt || "").trim();
+      if (!q) continue;
+      await sendChatGPTPrompt(bot, chatId, jobId, q);
     }
 
     if (act.type === "commit_request") {
@@ -682,7 +979,7 @@ bot.on("message", async (msg) => {
   const args = rest.join(" ").trim();
 
   if (cmd === "/help") {
-    await bot.sendMessage(chatId, "Commands:\n- /whoami\n- /stop [jobId]\n- /memory [show|md|policy|note|lesson|reset]\n- /settings ... (alias)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply <jobId>\n- /gptdone\n- /commit <jobId> <message>");
+    await bot.sendMessage(chatId, "Commands:\n- /whoami\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply <jobId>\n- /gptdone\n- /commit <jobId> <message>");
     return;
   }
 
@@ -743,6 +1040,36 @@ bot.on("message", async (msg) => {
       return;
     }
 
+    if (sub === "routing") {
+      const value = rest.slice(1).join(" ").trim();
+      if (!value) return bot.sendMessage(chatId, "Usage: /memory routing <자연어 프롬프트>");
+      try {
+        memory.setRouterPrompt(value);
+        await sendLong(bot, chatId, `✅ router prompt 업데이트 완료.\n\n${formatMemorySummary()}`);
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ 업데이트 실패: ${String(e?.message ?? e)}`);
+      }
+      return;
+    }
+
+    if (sub === "role") {
+      const agent = String(rest[1] || "").trim().toLowerCase();
+      const value = rest.slice(2).join(" ").trim();
+      if (!agent || !value) return bot.sendMessage(chatId, "Usage: /memory role <gemini|codex|chatgpt> <자연어 역할>");
+      try {
+        memory.setAgentRole(agent, value);
+        await sendLong(bot, chatId, `✅ ${agent} role 업데이트 완료.\n\n${formatAgentMemorySummary()}`);
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ role 업데이트 실패: ${String(e?.message ?? e)}`);
+      }
+      return;
+    }
+
+    if (sub === "agents") {
+      await sendLong(bot, chatId, formatAgentMemorySummary());
+      return;
+    }
+
     if (sub === "note") {
       const value = rest.slice(1).join(" ").trim();
       if (!value) return bot.sendMessage(chatId, "Usage: /memory note <메모>");
@@ -767,7 +1094,7 @@ bot.on("message", async (msg) => {
       return;
     }
 
-    await bot.sendMessage(chatId, "Usage:\n/memory show\n/memory md\n/memory policy <자연어 프롬프트>\n/memory note <메모>\n/memory lesson <교훈>\n/memory reset");
+    await bot.sendMessage(chatId, "Usage:\n/memory show\n/memory md\n/memory policy <자연어 프롬프트>\n/memory routing <자연어 프롬프트>\n/memory role <gemini|codex|chatgpt> <자연어 역할>\n/memory agents\n/memory note <메모>\n/memory lesson <교훈>\n/memory reset");
     return;
   }
 
@@ -790,29 +1117,24 @@ bot.on("message", async (msg) => {
       await bot.sendMessage(chatId, `✅ Job created: ${job.jobId}\ngoal: ${goal}\nrun_dir: ${runDir(jobId)}\n복잡하면: /gptprompt ${job.jobId} <질문>`);
 
       try {
-        await bot.sendMessage(chatId, "🧠 Gemini 조사 중…");
-        try {
-          const g = await enqueue(
-            () => geminiResearch(jobId, goal, controller.signal),
-            { jobId, signal: controller.signal, label: "gemini_research" }
-          );
-          await sendLong(bot, chatId, `🧠 Gemini 완료\n${clip(g, 3500)}`);
-        } catch (e) {
-          if (isCancelledError(e)) throw e;
-          await bot.sendMessage(chatId, `⚠️ Gemini 실패(계속 진행): ${String(e?.message ?? e)}`);
+        const route = await decideRunRoute(jobId, {
+          mode: "run",
+          goal,
+          seedInstruction: goal,
+          signal: controller.signal,
+        });
+        tracking.append(jobId, "decisions.md", [
+          "## Multi-Agent routing",
+          `- mode: run`,
+          `- reason: ${route.reason}`,
+          `- actions: ${route.actions.map(a => a.type).join(" -> ")}`,
+        ].join("\n"));
+        await bot.sendMessage(chatId, `🧭 Multi-Agent 라우팅\n${route.actions.map(a => `- ${a.type}`).join("\n")}`);
+
+        const routed = await executeRoutedPlan(bot, chatId, jobId, route, controller.signal);
+        if (!routed.askedChatGPT) {
+          await suggestNextPrompt(bot, chatId, jobId, "현재 상태에서 다음 단계를 action plan(JSON)으로 제안해줘.", "run", controller.signal);
         }
-
-        await bot.sendMessage(chatId, "🛠️ Codex 구현 중…");
-        const c = await enqueue(
-          () => codexImplement(jobId, goal, controller.signal),
-          { jobId, signal: controller.signal, label: "codex_run" }
-        );
-        await sendLong(bot, chatId, `🛠️ Codex 완료\n${clip(c, 3500)}`);
-
-        const { status, diff } = await gitSummary(jobId, controller.signal);
-        await sendLong(bot, chatId, `📌 git status\n${FENCE}\n${clip(status, 1500)}\n${FENCE}\n\n📌 git diff(일부)\n${FENCE}diff\n${clip(diff, 2500)}\n${FENCE}\n\n커밋: /commit ${jobId} <message>`);
-
-        await suggestNextPrompt(bot, chatId, jobId, "현재 상태에서 다음 단계를 action plan(JSON)으로 제안해줘.", "run", controller.signal);
       } finally {
         if (activeJobByChat.get(chatKey) === jobId) activeJobByChat.delete(chatKey);
         jobAbortControllers.delete(jobId);
@@ -844,16 +1166,25 @@ bot.on("message", async (msg) => {
     } catch {}
 
     try {
-      const c = await enqueue(
-        () => codexImplement(jobKey, instruction, controller.signal),
-        { jobId: jobKey, signal: controller.signal, label: "codex_continue" }
-      );
-      await sendLong(bot, chatId, `🛠️ Codex 완료\n${clip(c, 3500)}`);
+      const goal = getGoalFromResearch(jobKey);
+      const route = await decideRunRoute(jobKey, {
+        mode: "continue",
+        goal,
+        seedInstruction: instruction,
+        signal: controller.signal,
+      });
+      tracking.append(jobKey, "decisions.md", [
+        "## Multi-Agent routing",
+        `- mode: continue`,
+        `- reason: ${route.reason}`,
+        `- actions: ${route.actions.map(a => a.type).join(" -> ")}`,
+      ].join("\n"));
+      await bot.sendMessage(chatId, `🧭 Multi-Agent 라우팅\n${route.actions.map(a => `- ${a.type}`).join("\n")}`);
 
-      const { status, diff } = await gitSummary(jobKey, controller.signal);
-      await sendLong(bot, chatId, `📌 git status\n${FENCE}\n${clip(status, 1500)}\n${FENCE}\n\n📌 git diff(일부)\n${FENCE}diff\n${clip(diff, 2500)}\n${FENCE}`);
-
-      await suggestNextPrompt(bot, chatId, jobKey, "현재 변경 결과를 바탕으로 다음 action plan(JSON)을 제안해줘.", "continue", controller.signal);
+      const routed = await executeRoutedPlan(bot, chatId, jobKey, route, controller.signal);
+      if (!routed.askedChatGPT) {
+        await suggestNextPrompt(bot, chatId, jobKey, "현재 변경 결과를 바탕으로 다음 action plan(JSON)을 제안해줘.", "continue", controller.signal);
+      }
     } catch (e) {
       if (isCancelledError(e)) {
         await bot.sendMessage(chatId, `⏹️ 작업이 중단되었습니다. (jobId=${jobKey})`);
@@ -873,15 +1204,8 @@ bot.on("message", async (msg) => {
     const question = parts.slice(1).join(" ").trim();
     if (!jobId || !question) return bot.sendMessage(chatId, "Usage: /gptprompt <jobId> <question>");
 
-    const goal = getGoalFromResearch(jobId);
-    const docs = loadContextDocs(jobId, ["research.md", "plan.md", "progress.md"], 3000);
-    const convo = jobs.tailConversation(jobId, 60);
-    const prompt = buildChatGPTNextStepPrompt({ jobId, goal, question, contextDocsText: docs, convoText: convoToText(convo) });
-
     jobs.appendConversation(jobId, "user", `/gptprompt ${question}`, { kind: "gptprompt" });
-
-    await bot.sendMessage(chatId, `🧩 아래 프롬프트를 통째로 복사해서 ChatGPT에 넣으세요.\n답을 받은 뒤: /gptapply ${jobId} → 답을 그대로 붙여넣으면 자동 실행됩니다.\n종료: /gptdone`);
-    await sendLong(bot, chatId, prompt);
+    await sendChatGPTPrompt(bot, chatId, jobId, question);
     return;
   }
 

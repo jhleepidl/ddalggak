@@ -100,14 +100,13 @@ sudo systemctl status telegram-orchestrator
 ### 1) 기본 자동화
 - `/run <goal>`
   - job 생성
-  - Gemini 조사 → research.md
-  - Codex 구현 → progress.md
-  - git diff/status 요약 전송
+  - **Multi-Agent 라우터가 목표 기반으로 필요한 에이전트만 선택**
+  - 예: Gemini 조사 / Codex 구현 / ChatGPT 프롬프트 생성 / git 요약 중 필요한 단계만 실행
   - 이후 **다음 단계용 ChatGPT 프롬프트 자동 제안** (AUTO_SUGGEST_GPT_PROMPT=true)
 
 - `/continue <jobId>`
-  - plan.md(“Codex 지시문” 섹션이 있으면 그걸 우선) + research.md 기반으로 Codex 재실행
-  - git 요약 전송 + 다음 단계용 ChatGPT 프롬프트 제안
+  - plan.md(“Codex 지시문” 섹션이 있으면 우선) + 누적 문맥 기반으로 라우팅 재결정
+  - 필요한 에이전트만 실행 후 다음 단계용 ChatGPT 프롬프트 제안
 
 ### 2) 중앙 통제 AI(=ChatGPT)에게 “다음 단계” 질문하기
 - `/gptprompt <jobId> <question>`
@@ -136,6 +135,13 @@ sudo systemctl status telegram-orchestrator
 ### 4) 상태 확인/보안
 - `/whoami` → chat_id/user_id 확인
 - `/help` → 명령 목록
+
+### 5) Multi-Agent 메모리 커스터마이즈
+- `/memory show` : 전체 요약(반성 프롬프트 + 라우터 프롬프트 + 에이전트 역할)
+- `/memory agents` : Gemini/Codex/ChatGPT 역할 메모리 확인
+- `/memory routing <자연어>` : 라우팅 기준 프롬프트 수정
+- `/memory role <gemini|codex|chatgpt> <자연어>` : 에이전트별 역할 수정
+- `/memory md` : 원문 markdown 확인
 
 ---
 
