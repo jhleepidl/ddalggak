@@ -15,6 +15,8 @@ import { OrchestratorMemory } from "./src/settings.js";
 import { orchestratorNotes, buildChatGPTNextStepPrompt } from "./src/prompts.js";
 import { clip, chunk, extractCodexInstruction, extractJsonPlan } from "./src/textutil.js";
 import { loadAgents, getAgent } from "./src/agents.js";
+import { loadAgentsFromGoc, createAgentProfile, updateAgentProfile } from "./src/agent_registry.js";
+import { route as routeChatMessage } from "./src/router_agent.js";
 import { GocClient } from "./src/goc_client.js";
 import {
   ensureJobThread,
@@ -158,6 +160,85 @@ function buildGocUiLink({ threadId, ctxId, token }) {
   return `${base}?thread=${encodeURIComponent(String(threadId || ""))}&ctx=${encodeURIComponent(String(ctxId || ""))}#token=${encodeURIComponent(String(token || ""))}`;
 }
 
+function resolveCurrentJobIdForChat(chatId) {
+  const chatKey = String(chatId);
+  return activeJobByChat.get(chatKey) || getAwait(chatId)?.jobId || "";
+}
+
+async function buildContextInfo(target, { chatId = null } = {}) {
+  if (memoryModeWithFallback() !== "goc") {
+    throw new Error(`GoC disabled (mode=${MEMORY_MODE}, effective=${memoryModeWithFallback()})`);
+  }
+
+  const client = requireGocClient();
+  const minted = await client.mintUiToken(GOC_UI_TOKEN_TTL_SEC);
+  const targetRaw = String(target || "").trim();
+  const resolved = targetRaw || (chatId == null ? "" : resolveCurrentJobIdForChat(chatId));
+
+  if (!resolved) {
+    throw new Error("Usage: /context <jobId|global>  (jobId omitted uses current running job)");
+  }
+
+  if (resolved.toLowerCase() === "global") {
+    const g = await ensureGlobalThread(client, {
+      baseDir: jobs.baseDir,
+      title: "global:shared",
+    });
+    const link = buildGocUiLink({ threadId: g.threadId, ctxId: g.ctxId, token: minted.token });
+    return {
+      scope: "global",
+      threadId: g.threadId,
+      ctxId: g.ctxId,
+      link,
+      tokenExp: minted.exp || null,
+      lines: [
+        "global context",
+        `thread=${g.threadId}`,
+        `ctx=${g.ctxId}`,
+        minted.exp ? `token_exp=${minted.exp}` : "",
+        link,
+        "",
+        "UI에서 편집/활성 토글/삭제하면 다음 스텝 호출부터 반영됩니다.",
+      ].filter(Boolean),
+    };
+  }
+
+  const jobId = String(resolved).trim();
+  const map = await ensureJobThread(client, {
+    jobId,
+    jobDir: runDir(jobId),
+    title: `job:${jobId}`,
+  });
+  const link = buildGocUiLink({
+    threadId: map.threadId,
+    ctxId: map.ctxSharedId,
+    token: minted.token,
+  });
+  return {
+    scope: "job",
+    jobId,
+    threadId: map.threadId,
+    ctxId: map.ctxSharedId,
+    link,
+    tokenExp: minted.exp || null,
+    lines: [
+      `jobId=${jobId}`,
+      `thread=${map.threadId}`,
+      `ctx=${map.ctxSharedId}`,
+      minted.exp ? `token_exp=${minted.exp}` : "",
+      link,
+      "",
+      "UI에서 편집/활성 토글/삭제하면 다음 스텝 호출부터 반영됩니다.",
+    ].filter(Boolean),
+  };
+}
+
+async function sendContextInfo(bot, chatId, target) {
+  const info = await buildContextInfo(target, { chatId });
+  await sendLong(bot, chatId, info.lines.join("\n"));
+  return info;
+}
+
 async function loadContextDocs(jobId, docNames, maxCharsPerDoc = 3500) {
   const local = loadLocalContextDocs(jobId, docNames, maxCharsPerDoc);
   if (memoryModeWithFallback() !== "goc") return local;
@@ -206,9 +287,26 @@ function ensureCommandOk(name, result) {
   throw new Error(`${name} failed (exit=${exitCode})\n${details}`);
 }
 
-function refreshAgentRegistry() {
+function refreshAgentRegistryLocal() {
   agentRegistry = loadAgents();
   return agentRegistry;
+}
+
+async function refreshAgentRegistry({ preferGoc = true, includeCompiled = true } = {}) {
+  if (preferGoc && memoryModeWithFallback() === "goc") {
+    try {
+      agentRegistry = await loadAgentsFromGoc({
+        client: requireGocClient(),
+        baseDir: jobs.baseDir,
+        includeCompiled,
+      });
+      return agentRegistry;
+    } catch (e) {
+      const reason = String(e?.message ?? e);
+      gocInitError = gocInitError || reason;
+    }
+  }
+  return refreshAgentRegistryLocal();
 }
 
 function resolveAgentId(raw) {
@@ -310,8 +408,8 @@ function getAgentRolesText() {
   ].join("\n");
 }
 
-function getRegisteredAgentsText() {
-  refreshAgentRegistry();
+async function getRegisteredAgentsText() {
+  await refreshAgentRegistry();
   if (!agentRegistry.agents.length) return "(none)";
   return agentRegistry.agents
     .map((row) => `- id=${row.id}, provider=${row.provider}, model=${row.model}, prompt=${clip(row.prompt || "", 220)}`)
@@ -531,7 +629,7 @@ async function pump() {
 }
 
 async function createJob(goal, { ownerUserId = null, ownerChatId = null } = {}) {
-  refreshAgentRegistry();
+  await refreshAgentRegistry();
   const job = jobs.createJob({
     title: goal.slice(0, 80),
     ownerUserId,
@@ -662,7 +760,7 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
   const convo = clip(convoToText(jobs.tailConversation(jobId, 50)), 4200);
   const routerPrompt = memory.getRouterPrompt();
   const roleText = getAgentRolesText();
-  const registryText = getRegisteredAgentsText();
+  const registryText = await getRegisteredAgentsText();
 
   const prompt = [
     "너는 오케스트레이터의 Multi-Agent 라우터다.",
@@ -900,8 +998,136 @@ function actionLabel(act) {
   return String(act.type);
 }
 
+function formatRegistryLines(reg) {
+  return [
+    `registry=${reg.path}`,
+    `source=${reg.source || "local"}`,
+    ...(reg.threadId ? [`thread=${reg.threadId}`] : []),
+    ...(reg.ctxId ? [`ctx=${reg.ctxId}`] : []),
+    "",
+    ...reg.agents.map((row) => `- ${row.id}: provider=${row.provider}, model=${row.model}${row.description ? `, ${row.description}` : ""}`),
+  ].join("\n");
+}
+
+function chatActionLabel(action) {
+  const type = String(action?.type || "").trim().toLowerCase();
+  if (!type) return "(unknown)";
+  if (type === "run_agent") return `run_agent:${action.agent}`;
+  if (type === "open_context") return `open_context:${action.scope || "current"}`;
+  if (type === "create_agent") return `create_agent:${action.agent?.id || "unknown"}`;
+  if (type === "update_agent") return `update_agent:${action.agentId || "unknown"}`;
+  return type;
+}
+
+function formatChatSummary(routePlan, results) {
+  const lines = [
+    "🧭 /chat summary",
+    `reason=${String(routePlan?.reason || "(none)")}`,
+    `actions=${Array.isArray(routePlan?.actions) ? routePlan.actions.length : 0}`,
+  ];
+  for (const row of results) {
+    lines.push(`- ${row.label}: ${row.status}${row.note ? ` (${row.note})` : ""}`);
+  }
+  return lines.join("\n");
+}
+
+async function executeChatActions(bot, chatId, userId, message, routePlan) {
+  const actions = Array.isArray(routePlan?.actions) ? routePlan.actions : [];
+  const results = [];
+  let currentJobId = resolveCurrentJobIdForChat(chatId);
+
+  for (const action of actions) {
+    const label = chatActionLabel(action);
+    try {
+      if (action.type === "show_agents") {
+        const reg = await refreshAgentRegistry();
+        await sendLong(bot, chatId, formatRegistryLines(reg));
+        results.push({ label, status: "ok", note: `${reg.agents.length} agents` });
+        continue;
+      }
+
+      if (action.type === "open_context") {
+        const target = action.scope === "global"
+          ? "global"
+          : String(action.jobId || currentJobId || "").trim();
+        await sendContextInfo(bot, chatId, target);
+        results.push({ label, status: "ok", note: target || "current" });
+        continue;
+      }
+
+      if (action.type === "create_agent") {
+        if (memoryModeWithFallback() !== "goc") throw new Error("create_agent requires MEMORY_MODE=goc");
+        const created = await createAgentProfile(requireGocClient(), {
+          baseDir: jobs.baseDir,
+          profile: action.agent,
+          format: action.format || "json",
+          actor: `telegram:${userId}`,
+        });
+        await refreshAgentRegistry({ includeCompiled: true });
+        results.push({ label, status: "ok", note: `node=${created.created?.id || "unknown"}` });
+        continue;
+      }
+
+      if (action.type === "update_agent") {
+        if (memoryModeWithFallback() !== "goc") throw new Error("update_agent requires MEMORY_MODE=goc");
+        const updated = await updateAgentProfile(requireGocClient(), {
+          baseDir: jobs.baseDir,
+          agentId: action.agentId,
+          patch: action.patch || {},
+          format: action.format || "json",
+          actor: `telegram:${userId}`,
+        });
+        await refreshAgentRegistry({ includeCompiled: true });
+        results.push({ label, status: "ok", note: `node=${updated.created?.id || "unknown"}` });
+        continue;
+      }
+
+      if (action.type === "run_agent") {
+        const agentId = resolveAgentId(action.agent || "");
+        const prompt = String(action.prompt || "").trim();
+        if (!agentId || !prompt) throw new Error("run_agent requires agent and prompt");
+
+        let targetJobId = String(action.jobId || currentJobId || "").trim();
+        if (!targetJobId) {
+          const job = await createJob(message || prompt, { ownerUserId: userId, ownerChatId: chatId });
+          targetJobId = String(job.jobId);
+          currentJobId = targetJobId;
+          await bot.sendMessage(chatId, `✅ /chat job created: ${targetJobId}\nrun_dir: ${runDir(targetJobId)}`);
+        } else {
+          runDir(targetJobId);
+        }
+
+        const controller = resetJobAbortController(targetJobId);
+        const chatKey = String(chatId);
+        activeJobByChat.set(chatKey, targetJobId);
+        await bot.sendMessage(chatId, `🤖 ${agentId} 실행 중…`);
+
+        try {
+          const result = await enqueue(
+            () => executeAgentRun(bot, chatId, targetJobId, { type: "agent_run", agent: agentId, prompt }, { signal: controller.signal }),
+            { jobId: targetJobId, signal: controller.signal, label: `chat_agent_run_${agentId}` }
+          );
+          await sendLong(bot, chatId, `🤖 ${agentId} 완료 (${result.mode})\n${clip(result.output, 3000)}`);
+          currentJobId = targetJobId;
+          results.push({ label, status: "ok", note: `jobId=${targetJobId}` });
+        } finally {
+          if (activeJobByChat.get(chatKey) === targetJobId) activeJobByChat.delete(chatKey);
+          jobAbortControllers.delete(targetJobId);
+        }
+        continue;
+      }
+
+      results.push({ label, status: "skip", note: "unsupported action" });
+    } catch (e) {
+      results.push({ label, status: "error", note: clip(String(e?.message ?? e), 180) });
+    }
+  }
+
+  return { results, currentJobId };
+}
+
 async function executeAgentRun(bot, chatId, jobId, act, { signal = null } = {}) {
-  refreshAgentRegistry();
+  await refreshAgentRegistry();
   const agentId = resolveAgentId(act.agent || "");
   const taskPrompt = String(act.prompt || "").trim();
   if (!agentId || !taskPrompt) throw new Error("invalid agent_run action");
@@ -1234,7 +1460,7 @@ bot.on("message", async (msg) => {
   const args = rest.join(" ").trim();
 
   if (cmd === "/help") {
-    await bot.sendMessage(chatId, "Commands:\n- /whoami\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply <jobId>\n- /gptdone\n- /commit <jobId> <message>");
+    await bot.sendMessage(chatId, "Commands:\n- /whoami\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents\n- /chat <message>\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply <jobId>\n- /gptdone\n- /commit <jobId> <message>");
     return;
   }
 
@@ -1360,7 +1586,7 @@ bot.on("message", async (msg) => {
   }
 
   if (cmd === "/agents") {
-    const reg = refreshAgentRegistry();
+    const reg = await refreshAgentRegistry();
     const lines = [
       `memory_mode=${MEMORY_MODE}`,
       `effective_mode=${memoryModeWithFallback()}`,
@@ -1373,64 +1599,57 @@ bot.on("message", async (msg) => {
   }
 
   if (cmd === "/context") {
-    if (memoryModeWithFallback() !== "goc") {
-      await bot.sendMessage(chatId, `GoC 비활성 상태입니다 (mode=${MEMORY_MODE}, effective=${memoryModeWithFallback()}). local 컨텍스트로 계속 진행됩니다.`);
-      return;
+    try {
+      const arg = String(rest[0] || "").trim();
+      await sendContextInfo(bot, chatId, arg);
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ /context 실패: ${String(e?.message ?? e)}`);
     }
+    return;
+  }
 
-    const arg = String(rest[0] || "").trim();
-    const chatKey = String(chatId);
-    const currentJobId = activeJobByChat.get(chatKey) || getAwait(chatId)?.jobId || "";
-    const target = arg || currentJobId;
-    if (!target) {
-      await bot.sendMessage(chatId, "Usage: /context <jobId|global>\n(jobId 생략 시 현재 실행중 job 사용)");
-      return;
-    }
+  if (cmd === "/chat") {
+    if (!args) return bot.sendMessage(chatId, "Usage: /chat <message>");
+    const message = args;
+    const currentJobId = resolveCurrentJobIdForChat(chatId);
+    const routeCwd = (() => {
+      if (!currentJobId) return workspace.root;
+      try {
+        return runDir(currentJobId);
+      } catch {
+        return workspace.root;
+      }
+    })();
 
     try {
-      const client = requireGocClient();
-      const minted = await client.mintUiToken(GOC_UI_TOKEN_TTL_SEC);
-
-      if (target.toLowerCase() === "global") {
-        const g = await ensureGlobalThread(client, {
-          baseDir: jobs.baseDir,
-          title: "global:shared",
-        });
-        const link = buildGocUiLink({ threadId: g.threadId, ctxId: g.ctxId, token: minted.token });
-        await sendLong(bot, chatId, [
-          "global context",
-          `thread=${g.threadId}`,
-          `ctx=${g.ctxId}`,
-          minted.exp ? `token_exp=${minted.exp}` : "",
-          link,
-          "",
-          "UI에서 편집/활성 토글/삭제하면 다음 스텝 호출부터 반영됩니다.",
-        ].filter(Boolean).join("\n"));
+      const reg = await refreshAgentRegistry({ includeCompiled: true });
+      const routePlan = await routeChatMessage(message, {
+        agents: reg.agents,
+        currentJobId,
+        workspaceRoot: workspace.root,
+        cwd: routeCwd,
+        locale: "ko-KR",
+        routerPolicy: memory.getRouterPrompt(),
+      });
+      if (!Array.isArray(routePlan.actions) || routePlan.actions.length === 0) {
+        await bot.sendMessage(chatId, "라우팅 결과 action이 비어 있어 실행하지 않았습니다.");
         return;
       }
 
-      const jobId = String(target).trim();
-      const map = await ensureJobThread(client, {
-        jobId,
-        jobDir: runDir(jobId),
-        title: `job:${jobId}`,
-      });
-      const link = buildGocUiLink({
-        threadId: map.threadId,
-        ctxId: map.ctxSharedId,
-        token: minted.token,
-      });
-      await sendLong(bot, chatId, [
-        `jobId=${jobId}`,
-        `thread=${map.threadId}`,
-        `ctx=${map.ctxSharedId}`,
-        minted.exp ? `token_exp=${minted.exp}` : "",
-        link,
-        "",
-        "UI에서 편집/활성 토글/삭제하면 다음 스텝 호출부터 반영됩니다.",
-      ].filter(Boolean).join("\n"));
+      await bot.sendMessage(chatId, `🧭 /chat route\n${routePlan.actions.map((a) => `- ${chatActionLabel(a)}`).join("\n")}`);
+      const executed = await executeChatActions(bot, chatId, userId, message, routePlan);
+      const activeJobId = String(executed.currentJobId || currentJobId || "").trim();
+      if (activeJobId) {
+        tracking.append(activeJobId, "decisions.md", [
+          "## /chat routing",
+          `- message: ${clip(message, 240)}`,
+          `- reason: ${routePlan.reason || "(none)"}`,
+          `- actions: ${routePlan.actions.map((a) => chatActionLabel(a)).join(" -> ")}`,
+        ].join("\n"));
+      }
+      await sendLong(bot, chatId, formatChatSummary(routePlan, executed.results));
     } catch (e) {
-      await bot.sendMessage(chatId, `❌ /context 실패: ${String(e?.message ?? e)}\nlocal fallback으로 계속 진행합니다.`);
+      await bot.sendMessage(chatId, `❌ /chat 실패: ${String(e?.message ?? e)}`);
     }
     return;
   }

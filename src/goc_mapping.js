@@ -3,6 +3,7 @@ import path from "node:path";
 
 const DEFAULT_JOB_THREAD_TITLE_PREFIX = "job:";
 const DEFAULT_GLOBAL_THREAD_TITLE = "global:shared";
+const DEFAULT_AGENTS_THREAD_TITLE = "agents:profiles";
 
 function parseBool(raw, fallback = false) {
   const v = String(raw ?? "").trim().toLowerCase();
@@ -88,6 +89,73 @@ async function ensureSharedContextSet(client, threadId) {
   const existing = list.find((row) => row.name === "shared");
   if (existing?.id) return existing;
   return await client.createContextSet(threadId, "shared");
+}
+
+function gocServiceMapPath(baseDir) {
+  const dir = path.resolve(baseDir || process.cwd());
+  return path.join(dir, "goc.service.json");
+}
+
+function loadGocServiceMap(baseDir) {
+  const p = gocServiceMapPath(baseDir);
+  try {
+    const parsed = JSON.parse(fs.readFileSync(p, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveGocServiceMap(baseDir, map) {
+  const p = gocServiceMapPath(baseDir);
+  const final = map && typeof map === "object" ? map : {};
+  fs.writeFileSync(p, JSON.stringify(final, null, 2), "utf8");
+  return final;
+}
+
+async function ensureServiceThread(client, { baseDir, key, title }) {
+  const serviceKey = String(key || "").trim();
+  if (!serviceKey) throw new Error("ensureServiceThread requires key");
+
+  const current = loadGocServiceMap(baseDir);
+  const slot = current[serviceKey] && typeof current[serviceKey] === "object" ? current[serviceKey] : {};
+
+  let threadId = String(slot.threadId || "").trim();
+  let ctxId = String(slot.ctxId || "").trim();
+
+  if (!threadId) {
+    const created = await client.createThread(String(title || "").trim());
+    threadId = created.id;
+  }
+  if (!ctxId) {
+    const shared = await ensureSharedContextSet(client, threadId);
+    ctxId = shared.id;
+  }
+
+  const next = saveGocServiceMap(baseDir, {
+    ...current,
+    version: 1,
+    [serviceKey]: {
+      threadId,
+      ctxId,
+      updatedAt: new Date().toISOString(),
+    },
+    updatedAt: new Date().toISOString(),
+  });
+
+  return {
+    threadId,
+    ctxId,
+    raw: next[serviceKey],
+  };
+}
+
+export async function ensureAgentsThread(client, { baseDir, title = "" }) {
+  return await ensureServiceThread(client, {
+    baseDir,
+    key: "agents",
+    title: String(title || "").trim() || DEFAULT_AGENTS_THREAD_TITLE,
+  });
 }
 
 export async function ensureJobThread(client, { jobId, jobDir, title = "" }) {

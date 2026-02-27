@@ -138,9 +138,25 @@ export class GocClient {
 
   normalizeResource(entity) {
     const row = asObject(entity);
+    const payload = asObject(pick(row, ["payload_json", "payloadJson", "payload"]));
     return {
       id: pickId(row),
-      text: String(pick(row, ["text", "content", "compiled_text"]) || ""),
+      name: String(pick(row, ["name", "title"]) || ""),
+      text: String(pick(row, ["text", "content", "summary", "compiled_text"]) || ""),
+      summary: String(pick(row, ["summary", "text", "content"]) || ""),
+      uri: String(pick(row, ["uri", "url"]) || ""),
+      resourceKind: String(
+        pick(row, ["resource_kind", "resourceKind", "kind"])
+        || pick(payload, ["resource_kind", "resourceKind", "kind"])
+        || ""
+      ).trim().toLowerCase(),
+      contextSetId: String(
+        pick(row, ["context_set_id", "contextSetId", "ctx_id", "ctxId"])
+        || pick(payload, ["context_set_id", "contextSetId", "ctx_id", "ctxId"])
+        || ""
+      ).trim(),
+      createdAt: String(pick(row, ["created_at", "createdAt", "ts", "timestamp"]) || ""),
+      payload,
       raw: row,
     };
   }
@@ -242,6 +258,34 @@ export class GocClient {
     const resource = this.normalizeResource(entity);
     if (!resource.id) throw new Error("GoC createResource returned no id");
     return resource;
+  }
+
+  async listResources(threadId, options = {}) {
+    const tid = String(threadId || "").trim();
+    if (!tid) throw new Error("listResources requires threadId");
+    const resourceKind = String(options.resourceKind || "").trim().toLowerCase();
+    const contextSetId = String(options.contextSetId || "").trim();
+
+    const data = await this._requestAny({
+      method: "GET",
+      attempts: [
+        { path: "/api/resources", query: { thread_id: tid, resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
+        { path: "/api/resources", query: { threadId: tid, resourceKind: resourceKind || undefined, contextSetId: contextSetId || undefined } },
+        { path: "/resources", query: { thread_id: tid, resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
+        { path: "/v1/resources", query: { thread_id: tid, resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
+        { path: `/api/threads/${encodeURIComponent(tid)}/resources`, query: { resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
+        { path: `/threads/${encodeURIComponent(tid)}/resources`, query: { resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
+      ],
+    });
+
+    let rows = normalizeArrayResponse(data).map((row) => this.normalizeResource(row)).filter((row) => row.id);
+    if (resourceKind) {
+      rows = rows.filter((row) => row.resourceKind === resourceKind);
+    }
+    if (contextSetId) {
+      rows = rows.filter((row) => !row.contextSetId || row.contextSetId === contextSetId);
+    }
+    return rows;
   }
 
   async createEdge(threadId, fromId, toId, type = "NEXT_PART") {
