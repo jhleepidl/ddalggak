@@ -77,7 +77,8 @@ gemini   # 1회 로그인
 ```
 
 권장 설정:
-- `.env`에 `GEMINI_APPROVAL_MODE=plan` 설정 (Gemini를 리서치/점검 위주로 사용, 코딩 액션 최소화)
+- 기본은 `.env`에 `GEMINI_APPROVAL_MODE=default` 사용
+- `plan` 모드를 쓰려면 `~/.gemini/settings.json`에 `{"experimental":{"plan":true}}`를 켜야 함
 
 ### 4) 실행 (개발용)
 ```bash
