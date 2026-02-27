@@ -251,16 +251,30 @@ export class GocClient {
     const edgeType = String(type || "NEXT_PART").trim() || "NEXT_PART";
     if (!tid || !from || !to) throw new Error("createEdge requires threadId/fromId/toId");
 
-    await this._requestAny({
-      method: "POST",
-      attempts: [
-        { path: "/api/edges", body: { thread_id: tid, from_id: from, to_id: to, type: edgeType } },
-        { path: "/edges", body: { thread_id: tid, from_id: from, to_id: to, type: edgeType } },
-        { path: "/v1/edges", body: { thread_id: tid, from_id: from, to_id: to, type: edgeType } },
-        { path: "/api/nodes/edges", body: { thread_id: tid, from_node_id: from, to_node_id: to, edge_type: edgeType } },
-      ],
-    });
-    return true;
+    try {
+      await this._requestAny({
+        method: "POST",
+        attempts: [
+          // Primary backend contract
+          {
+            path: `/api/threads/${encodeURIComponent(tid)}/edges`,
+            body: { from_id: from, to_id: to, type: edgeType },
+          },
+          // Compatibility fallbacks
+          { path: "/api/edges", body: { thread_id: tid, from_id: from, to_id: to, type: edgeType } },
+          { path: "/edges", body: { thread_id: tid, from_id: from, to_id: to, type: edgeType } },
+          { path: "/v1/edges", body: { thread_id: tid, from_id: from, to_id: to, type: edgeType } },
+          { path: "/api/nodes/edges", body: { thread_id: tid, from_node_id: from, to_node_id: to, edge_type: edgeType } },
+        ],
+      });
+      if (String(process.env.GOC_DEBUG || "").trim().toLowerCase() === "true") {
+        console.log(`[goc] createEdge ok thread=${tid} from=${from} to=${to} type=${edgeType}`);
+      }
+      return true;
+    } catch (e) {
+      console.warn(`[goc] createEdge failed thread=${tid} from=${from} to=${to} type=${edgeType}: ${String(e?.message ?? e)}`);
+      throw e;
+    }
   }
 
   async getCompiledContext(contextSetId) {
@@ -304,4 +318,3 @@ export class GocClient {
     return { token, exp };
   }
 }
-

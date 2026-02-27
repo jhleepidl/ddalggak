@@ -12,10 +12,23 @@ function parseBool(raw, fallback = false) {
   return fallback;
 }
 
-function clipText(text, max = 420) {
-  const s = String(text || "");
-  if (s.length <= max) return s;
-  return `${s.slice(0, max)}…`;
+function parseOptionalPositiveInt(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.floor(n);
+}
+
+function maybeLimitChunkText(text) {
+  const src = String(text || "");
+  const limit = parseOptionalPositiveInt(process.env.GOC_TRACKING_CHUNK_MAX_LEN);
+  if (!limit || src.length <= limit) {
+    return { text: src, truncated: false, originalLength: src.length };
+  }
+  return {
+    text: src.slice(0, limit),
+    truncated: true,
+    originalLength: src.length,
+  };
 }
 
 function defaultJobThreadTitle(jobId) {
@@ -142,22 +155,35 @@ export async function appendTrackingChunkToGoc(client, {
   const shouldActivate = typeof autoActivate === "boolean"
     ? autoActivate
     : (name === "progress.md" ? progressActivate : true);
+  const nowIso = new Date().toISOString();
+  const limited = maybeLimitChunkText(chunkText);
+  const preview = limited.text.slice(0, 180);
 
   const created = await client.createResource(map.threadId, {
-    name: `${name.replace(/\.md$/i, "")}_append`,
-    summary: clipText(chunkText),
+    name: `${name.replace(/\.md$/i, "")}@${nowIso}`,
+    // NOTE: backend stores summary as node text, so summary must carry the full chunk by default.
+    summary: limited.text,
     resource_kind: "tracking_append",
     uri: `ddalggak://runs/${jobId}/shared/${name}`,
     context_set_id: map.ctxSharedId,
     auto_activate: shouldActivate,
     attach_to: prevId || undefined,
-    text: String(chunkText || ""),
+    payload_json: {
+      doc_name: name,
+      preview,
+      ts: nowIso,
+      original_length: limited.originalLength,
+      truncated: limited.truncated,
+      max_len: parseOptionalPositiveInt(process.env.GOC_TRACKING_CHUNK_MAX_LEN),
+    },
   });
 
   if (prevId && created?.id && prevId !== created.id) {
     try {
       await client.createEdge(map.threadId, prevId, created.id, "NEXT_PART");
-    } catch {}
+    } catch (e) {
+      console.warn(`[goc] createEdge NEXT_PART failed doc=${name} prev=${prevId} next=${created?.id}: ${String(e?.message ?? e)}`);
+    }
   }
   setLastNodeByDoc(jobDir, jobId, name, created.id);
   return created;
