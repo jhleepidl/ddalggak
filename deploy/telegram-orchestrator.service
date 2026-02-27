@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram Orchestrator (Codex/Gemini CLI) Runner
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/telegram-orchestrator
+EnvironmentFile=-/opt/telegram-orchestrator/.env
+ExecStart=/usr/bin/node /opt/telegram-orchestrator/telegram_runner.js
+Restart=always
+RestartSec=2
+User=www-data
+Group=www-data
+
+[Install]
+WantedBy=multi-user.target
