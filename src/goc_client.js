@@ -24,7 +24,18 @@ function pick(obj, keys) {
 }
 
 function pickId(entity) {
-  const id = pick(entity, ["id", "thread_id", "context_set_id", "resource_id", "node_id", "uuid"]);
+  const id = pick(entity, [
+    "id",
+    "thread_id",
+    "threadId",
+    "context_set_id",
+    "contextSetId",
+    "resource_id",
+    "resourceId",
+    "node_id",
+    "nodeId",
+    "uuid",
+  ]);
   return id ? String(id) : null;
 }
 
@@ -204,7 +215,23 @@ export class GocClient {
       ],
     });
     const entity = normalizeEntity(data, ["thread", "data"]);
-    const thread = this.normalizeThread(entity);
+    let thread = this.normalizeThread(entity);
+    if (!thread.id) {
+      const candidates = normalizeArrayResponse(data);
+      for (const row of candidates) {
+        const normalized = this.normalizeThread(normalizeEntity(row, ["thread", "data"]));
+        if (normalized.id) {
+          thread = normalized;
+          break;
+        }
+      }
+    }
+    if (!thread.id) {
+      try {
+        const found = await this.findThreadByTitle(cleanTitle);
+        if (found?.id) thread = found;
+      } catch {}
+    }
     if (!thread.id) throw new Error("GoC createThread returned no id");
     return thread;
   }

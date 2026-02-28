@@ -4,6 +4,8 @@ import path from "node:path";
 const DEFAULT_JOB_THREAD_TITLE_PREFIX = "job:";
 const DEFAULT_GLOBAL_THREAD_TITLE = "global:shared";
 const DEFAULT_AGENTS_THREAD_TITLE = "agents";
+const inflightServiceThreadEnsures = new Map();
+const inflightJobThreadEnsures = new Map();
 
 function parseBool(raw, fallback = false) {
   const v = String(raw ?? "").trim().toLowerCase();
@@ -113,59 +115,75 @@ function saveGocServiceMap(baseDir, map) {
   return final;
 }
 
+function runWithInflight(map, key, task) {
+  const k = String(key || "").trim();
+  if (!k) return Promise.resolve().then(task);
+  const existing = map.get(k);
+  if (existing) return existing;
+  const p = Promise.resolve()
+    .then(task)
+    .finally(() => {
+      if (map.get(k) === p) map.delete(k);
+    });
+  map.set(k, p);
+  return p;
+}
+
 async function ensureServiceThread(client, { baseDir, key, title, lookupTitles = [] }) {
   const serviceKey = String(key || "").trim();
   if (!serviceKey) throw new Error("ensureServiceThread requires key");
+  const lockKey = `${path.resolve(baseDir || process.cwd())}::${serviceKey}`;
+  return await runWithInflight(inflightServiceThreadEnsures, lockKey, async () => {
+    const current = loadGocServiceMap(baseDir);
+    const slot = current[serviceKey] && typeof current[serviceKey] === "object" ? current[serviceKey] : {};
 
-  const current = loadGocServiceMap(baseDir);
-  const slot = current[serviceKey] && typeof current[serviceKey] === "object" ? current[serviceKey] : {};
+    let threadId = String(slot.threadId || "").trim();
+    let ctxId = String(slot.ctxId || "").trim();
 
-  let threadId = String(slot.threadId || "").trim();
-  let ctxId = String(slot.ctxId || "").trim();
+    if (!threadId) {
+      const desiredTitle = String(title || "").trim();
+      const candidates = [...lookupTitles, desiredTitle]
+        .map((row) => String(row || "").trim())
+        .filter(Boolean)
+        .filter((row, idx, arr) => arr.indexOf(row) === idx);
 
-  if (!threadId) {
-    const desiredTitle = String(title || "").trim();
-    const candidates = [...lookupTitles, desiredTitle]
-      .map((row) => String(row || "").trim())
-      .filter(Boolean)
-      .filter((row, idx, arr) => arr.indexOf(row) === idx);
-
-    for (const candidate of candidates) {
-      try {
-        const found = await client.findThreadByTitle(candidate);
-        if (found?.id) {
-          threadId = found.id;
-          break;
-        }
-      } catch {}
+      for (const candidate of candidates) {
+        try {
+          const found = await client.findThreadByTitle(candidate);
+          if (found?.id) {
+            threadId = found.id;
+            break;
+          }
+        } catch {}
+      }
     }
-  }
 
-  if (!threadId) {
-    const created = await client.createThread(String(title || "").trim());
-    threadId = created.id;
-  }
-  if (!ctxId) {
-    const shared = await ensureSharedContextSet(client, threadId);
-    ctxId = shared.id;
-  }
+    if (!threadId) {
+      const created = await client.createThread(String(title || "").trim());
+      threadId = created.id;
+    }
+    if (!ctxId) {
+      const shared = await ensureSharedContextSet(client, threadId);
+      ctxId = shared.id;
+    }
 
-  const next = saveGocServiceMap(baseDir, {
-    ...current,
-    version: 1,
-    [serviceKey]: {
+    const next = saveGocServiceMap(baseDir, {
+      ...current,
+      version: 1,
+      [serviceKey]: {
+        threadId,
+        ctxId,
+        updatedAt: new Date().toISOString(),
+      },
+      updatedAt: new Date().toISOString(),
+    });
+
+    return {
       threadId,
       ctxId,
-      updatedAt: new Date().toISOString(),
-    },
-    updatedAt: new Date().toISOString(),
+      raw: next[serviceKey],
+    };
   });
-
-  return {
-    threadId,
-    ctxId,
-    raw: next[serviceKey],
-  };
 }
 
 export async function ensureAgentsThread(client, { baseDir, title = "" }) {
@@ -187,32 +205,41 @@ export async function ensureAgentsThread(client, { baseDir, title = "" }) {
 export async function ensureJobThread(client, { jobId, jobDir, title = "" }) {
   const cleanJobId = String(jobId || "").trim();
   if (!cleanJobId) throw new Error("ensureJobThread requires jobId");
+  const desiredTitle = String(title || "").trim() || defaultJobThreadTitle(cleanJobId);
+  const lockKey = `${path.resolve(jobDir || process.cwd())}::${cleanJobId}`;
+  return await runWithInflight(inflightJobThreadEnsures, lockKey, async () => {
+    const current = loadGocMap(jobDir, cleanJobId);
+    let threadId = current.threadId;
+    if (!threadId) {
+      try {
+        const found = await client.findThreadByTitle(desiredTitle);
+        if (found?.id) threadId = found.id;
+      } catch {}
+    }
+    if (!threadId) {
+      const created = await client.createThread(desiredTitle);
+      threadId = created.id;
+    }
 
-  const current = loadGocMap(jobDir, cleanJobId);
-  let threadId = current.threadId;
-  if (!threadId) {
-    const created = await client.createThread(String(title || "").trim() || defaultJobThreadTitle(cleanJobId));
-    threadId = created.id;
-  }
+    let sharedId = current.ctxSharedId;
+    if (!sharedId) {
+      const shared = await ensureSharedContextSet(client, threadId);
+      sharedId = shared.id;
+    }
 
-  let sharedId = current.ctxSharedId;
-  if (!sharedId) {
-    const shared = await ensureSharedContextSet(client, threadId);
-    sharedId = shared.id;
-  }
-
-  const merged = saveGocMap(jobDir, {
-    ...current,
-    jobId: cleanJobId,
-    threadId,
-    ctxId: sharedId,
-    ctxSharedId: sharedId,
-    ctxByAgentId: {
-      ...(current.ctxByAgentId || {}),
-      shared: sharedId,
-    },
+    const merged = saveGocMap(jobDir, {
+      ...current,
+      jobId: cleanJobId,
+      threadId,
+      ctxId: sharedId,
+      ctxSharedId: sharedId,
+      ctxByAgentId: {
+        ...(current.ctxByAgentId || {}),
+        shared: sharedId,
+      },
+    });
+    return merged;
   });
-  return merged;
 }
 
 export function setLastNodeByDoc(jobDir, jobId, docName, nodeId) {

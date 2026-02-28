@@ -394,6 +394,30 @@ function formatMemorySummary() {
   ].join("\n");
 }
 
+function formatRunningJobs(chatId) {
+  const chatKey = String(chatId);
+  const active = activeJobByChat.get(chatKey) || "";
+  const awaitingJob = getAwait(chatId)?.jobId || "";
+  const running = Array.from(jobAbortControllers.keys());
+  const queued = queue
+    .map((item) => String(item?.jobId || "").trim())
+    .filter(Boolean);
+  const dedup = (list) => Array.from(new Set(list.filter(Boolean)));
+
+  const lines = [
+    "🏃 Running jobs",
+    `chat_active=${active || "(none)"}`,
+    `chat_gptawait=${awaitingJob || "(none)"}`,
+    `running_count=${running.length}`,
+    ...dedup(running).map((id) => `- running: ${id}`),
+    `queue_count=${queued.length}`,
+    ...dedup(queued).map((id) => `- queued: ${id}`),
+    "",
+    "중단: /stop <jobId>",
+  ];
+  return lines.join("\n");
+}
+
 function getAgentRolesText() {
   const roles = memory.getAgentRoles();
   return [
@@ -1437,7 +1461,7 @@ bot.on("message", async (msg) => {
   const args = rest.join(" ").trim();
 
   if (cmd === "/help") {
-    await bot.sendMessage(chatId, "Commands:\n- /whoami\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents\n- /chat <message>\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply <jobId>\n- /gptdone\n- /commit <jobId> <message>");
+    await bot.sendMessage(chatId, "Commands:\n- /whoami\n- /running\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents\n- /chat <message>\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply <jobId>\n- /gptdone\n- /commit <jobId> <message>");
     return;
   }
 
@@ -1446,12 +1470,17 @@ bot.on("message", async (msg) => {
     return;
   }
 
+  if (cmd === "/running") {
+    await sendLong(bot, chatId, formatRunningJobs(chatId));
+    return;
+  }
+
   if (cmd === "/stop") {
     const chatKey = String(chatId);
     const fromAwait = getAwait(chatId)?.jobId;
     const targetJobId = args || activeJobByChat.get(chatKey) || fromAwait;
     if (!targetJobId) {
-      await bot.sendMessage(chatId, "중단할 jobId를 찾지 못했어요. Usage: /stop <jobId>");
+      await bot.sendMessage(chatId, `중단할 jobId를 찾지 못했어요. Usage: /stop <jobId>\n\n${formatRunningJobs(chatId)}`);
       return;
     }
 
@@ -1460,7 +1489,7 @@ bot.on("message", async (msg) => {
     if (fromAwait && String(fromAwait) === String(targetJobId)) clearAwait(chatId);
 
     if (!aborted && dropped === 0) {
-      await bot.sendMessage(chatId, `중단할 실행이 없어요. (jobId=${targetJobId})`);
+      await bot.sendMessage(chatId, `중단할 실행이 없어요. (jobId=${targetJobId})\n이미 종료되었거나 큐에 없습니다.\n\n${formatRunningJobs(chatId)}`);
       return;
     }
     await bot.sendMessage(chatId, `⏹️ 중단 요청 완료\njobId=${targetJobId}\n실행중 중단=${aborted}\n큐 제거=${dropped}`);
