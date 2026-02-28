@@ -78,11 +78,18 @@ function normalizeAgentProfile(raw) {
   const provider = normalizeProvider(row.provider || row.model);
   return {
     id,
-    name: String(row.name || id).trim(),
+    name: String(row.name || row.title || id).trim(),
     description: String(row.description || "").trim(),
     provider,
     model: String(row.model || row.provider || "").trim() || provider,
-    prompt: String(row.prompt || row.system_prompt || row.systemPrompt || "").trim(),
+    prompt: String(
+      row.prompt
+      || row.base_prompt
+      || row.basePrompt
+      || row.system_prompt
+      || row.systemPrompt
+      || ""
+    ).trim(),
     meta: row.meta && typeof row.meta === "object" ? row.meta : {},
   };
 }

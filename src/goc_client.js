@@ -56,6 +56,29 @@ function normalizeEntity(data, keys = []) {
   return obj;
 }
 
+function normalizeGraphNodes(data) {
+  const obj = asObject(data);
+  if (Array.isArray(obj.nodes)) return obj.nodes;
+  if (obj.graph && typeof obj.graph === "object" && Array.isArray(obj.graph.nodes)) {
+    return obj.graph.nodes;
+  }
+  return normalizeArrayResponse(data);
+}
+
+function isGraphResourceNode(entity) {
+  const row = asObject(entity);
+  const hint = String(
+    pick(row, ["node_type", "nodeType", "entity_type", "entityType", "type", "kind", "node_kind", "nodeKind", "label"])
+    || ""
+  ).trim().toLowerCase();
+  if (hint.includes("resource")) return true;
+  if (pick(row, ["resource_kind", "resourceKind"])) return true;
+  if (typeof row.payload_json !== "undefined" || typeof row.payloadJson !== "undefined" || typeof row.payload !== "undefined") {
+    return true;
+  }
+  return false;
+}
+
 export class GocClient {
   constructor({ apiBase, serviceKey } = {}) {
     const base = String(apiBase || process.env.GOC_API_BASE || "").trim();
@@ -138,7 +161,13 @@ export class GocClient {
 
   normalizeResource(entity) {
     const row = asObject(entity);
-    const payload = asObject(pick(row, ["payload_json", "payloadJson", "payload"]));
+    const payloadRaw = pick(row, ["payload_json", "payloadJson", "payload"]);
+    let payload = {};
+    if (payloadRaw && typeof payloadRaw === "object") {
+      payload = asObject(payloadRaw);
+    } else if (typeof payloadRaw === "string") {
+      payload = asObject(parseJsonMaybe(payloadRaw));
+    }
     return {
       id: pickId(row),
       name: String(pick(row, ["name", "title"]) || ""),
@@ -266,19 +295,39 @@ export class GocClient {
     const resourceKind = String(options.resourceKind || "").trim().toLowerCase();
     const contextSetId = String(options.contextSetId || "").trim();
 
-    const data = await this._requestAny({
-      method: "GET",
-      attempts: [
-        { path: "/api/resources", query: { thread_id: tid, resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
-        { path: "/api/resources", query: { threadId: tid, resourceKind: resourceKind || undefined, contextSetId: contextSetId || undefined } },
-        { path: "/resources", query: { thread_id: tid, resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
-        { path: "/v1/resources", query: { thread_id: tid, resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
-        { path: `/api/threads/${encodeURIComponent(tid)}/resources`, query: { resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
-        { path: `/threads/${encodeURIComponent(tid)}/resources`, query: { resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
-      ],
-    });
+    let rawRows = [];
+    let usedGraphFallback = false;
+    try {
+      const data = await this._requestAny({
+        method: "GET",
+        attempts: [
+          { path: "/api/resources", query: { thread_id: tid, resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
+          { path: "/api/resources", query: { threadId: tid, resourceKind: resourceKind || undefined, contextSetId: contextSetId || undefined } },
+          { path: "/resources", query: { thread_id: tid, resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
+          { path: "/v1/resources", query: { thread_id: tid, resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
+          { path: `/api/threads/${encodeURIComponent(tid)}/resources`, query: { resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
+          { path: `/threads/${encodeURIComponent(tid)}/resources`, query: { resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
+        ],
+      });
+      rawRows = normalizeArrayResponse(data);
+    } catch (listErr) {
+      const graphData = await this._requestAny({
+        method: "GET",
+        attempts: [
+          { path: `/api/threads/${encodeURIComponent(tid)}/graph` },
+          { path: `/threads/${encodeURIComponent(tid)}/graph` },
+          { path: `/v1/threads/${encodeURIComponent(tid)}/graph` },
+        ],
+      }).catch(() => null);
 
-    let rows = normalizeArrayResponse(data).map((row) => this.normalizeResource(row)).filter((row) => row.id);
+      if (!graphData) throw listErr;
+      usedGraphFallback = true;
+      rawRows = normalizeGraphNodes(graphData).filter((row) => isGraphResourceNode(row));
+    }
+
+    let rows = rawRows
+      .map((row) => this.normalizeResource(usedGraphFallback ? normalizeEntity(row, ["resource", "node", "data"]) : row))
+      .filter((row) => row.id);
     if (resourceKind) {
       rows = rows.filter((row) => row.resourceKind === resourceKind);
     }

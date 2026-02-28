@@ -37,11 +37,18 @@ function normalizeAgent(raw) {
   const model = String(row.model || row.provider || "").trim() || provider;
   return {
     id,
-    name: String(row.name || id).trim(),
+    name: String(row.name || row.title || id).trim(),
     description: String(row.description || "").trim(),
     provider,
     model,
-    prompt: String(row.prompt || row.system_prompt || row.systemPrompt || "").trim(),
+    prompt: String(
+      row.prompt
+      || row.base_prompt
+      || row.basePrompt
+      || row.system_prompt
+      || row.systemPrompt
+      || ""
+    ).trim(),
     meta: row.meta && typeof row.meta === "object" ? row.meta : {},
   };
 }
@@ -293,7 +300,7 @@ function buildRegistry(agents, meta = {}) {
 export async function loadAgentsFromGoc({ client, baseDir, includeCompiled = true } = {}) {
   if (!client) throw new Error("loadAgentsFromGoc requires client");
   const fallback = loadAgents();
-  const slot = await ensureAgentsThread(client, { baseDir, title: "agents:profiles" });
+  const slot = await ensureAgentsThread(client, { baseDir });
 
   const resources = await client.listResources(slot.threadId, { resourceKind: "agent_profile" });
   const parsedFromNodes = [];
@@ -343,7 +350,7 @@ async function upsertAgentProfile(client, { baseDir, profile, format = "json", o
   const agent = normalizeAgent(profile);
   if (!agent) throw new Error("invalid agent profile (id is required)");
 
-  const slot = await ensureAgentsThread(client, { baseDir, title: "agents:profiles" });
+  const slot = await ensureAgentsThread(client, { baseDir });
   const nowIso = new Date().toISOString();
   const fmt = String(format || "json").trim().toLowerCase() === "yaml" ? "yaml" : "json";
   const text = fmt === "yaml" ? serializeAgentProfileYaml(agent) : `${JSON.stringify(agent, null, 2)}\n`;

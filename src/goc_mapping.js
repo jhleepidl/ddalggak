@@ -3,7 +3,7 @@ import path from "node:path";
 
 const DEFAULT_JOB_THREAD_TITLE_PREFIX = "job:";
 const DEFAULT_GLOBAL_THREAD_TITLE = "global:shared";
-const DEFAULT_AGENTS_THREAD_TITLE = "agents:profiles";
+const DEFAULT_AGENTS_THREAD_TITLE = "agents";
 
 function parseBool(raw, fallback = false) {
   const v = String(raw ?? "").trim().toLowerCase();
@@ -113,7 +113,7 @@ function saveGocServiceMap(baseDir, map) {
   return final;
 }
 
-async function ensureServiceThread(client, { baseDir, key, title }) {
+async function ensureServiceThread(client, { baseDir, key, title, lookupTitles = [] }) {
   const serviceKey = String(key || "").trim();
   if (!serviceKey) throw new Error("ensureServiceThread requires key");
 
@@ -122,6 +122,24 @@ async function ensureServiceThread(client, { baseDir, key, title }) {
 
   let threadId = String(slot.threadId || "").trim();
   let ctxId = String(slot.ctxId || "").trim();
+
+  if (!threadId) {
+    const desiredTitle = String(title || "").trim();
+    const candidates = [...lookupTitles, desiredTitle]
+      .map((row) => String(row || "").trim())
+      .filter(Boolean)
+      .filter((row, idx, arr) => arr.indexOf(row) === idx);
+
+    for (const candidate of candidates) {
+      try {
+        const found = await client.findThreadByTitle(candidate);
+        if (found?.id) {
+          threadId = found.id;
+          break;
+        }
+      } catch {}
+    }
+  }
 
   if (!threadId) {
     const created = await client.createThread(String(title || "").trim());
@@ -151,10 +169,18 @@ async function ensureServiceThread(client, { baseDir, key, title }) {
 }
 
 export async function ensureAgentsThread(client, { baseDir, title = "" }) {
+  const hintedTitle = String(title || "").trim();
+  const lookupTitles = [
+    "agents:profiles",
+    "agents",
+  ];
+  if (hintedTitle && !lookupTitles.includes(hintedTitle)) lookupTitles.unshift(hintedTitle);
+
   return await ensureServiceThread(client, {
     baseDir,
     key: "agents",
-    title: String(title || "").trim() || DEFAULT_AGENTS_THREAD_TITLE,
+    title: DEFAULT_AGENTS_THREAD_TITLE,
+    lookupTitles,
   });
 }
 
