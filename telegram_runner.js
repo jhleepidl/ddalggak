@@ -28,6 +28,7 @@ import {
   ensureAgentsThread,
   ensureToolsThread,
   ensureGlobalThread,
+  normalizeJobConfig as normalizeSupervisorJobConfig,
   appendTrackingChunkToGoc,
 } from "./src/goc_mapping.js";
 import { ChatSessionStore } from "./src/chat/session.js";
@@ -1083,6 +1084,12 @@ function chatActionLabel(action) {
   if (type === "search_public_agents") return `search_public_agents:${action.query || ""}`;
   if (type === "install_agent_blueprint") return `install_agent_blueprint:${action.blueprint_id || action.public_node_id || ""}`;
   if (type === "publish_agent") return `publish_agent:${action.agent_id || action.agent_node_id || ""}`;
+  if (type === "disable_agent") return `disable_agent:${action.agent_id || "unknown"}`;
+  if (type === "enable_agent") return `enable_agent:${action.agent_id || "unknown"}`;
+  if (type === "disable_tool") return `disable_tool:${action.tool_id || "unknown"}`;
+  if (type === "enable_tool") return `enable_tool:${action.tool_id || "unknown"}`;
+  if (type === "list_agents") return "list_agents";
+  if (type === "list_tools") return "list_tools";
   if (type === "open_context") return `open_context:${action.scope || "current"}`;
   if (type === "create_agent") return `create_agent:${action.agent?.id || "unknown"}`;
   if (type === "update_agent") return `update_agent:${action.agentId || "unknown"}`;
@@ -1193,6 +1200,11 @@ function summarizeSpecialChatOutputs(outputs) {
   const searchRows = rows.filter((row) => String(row?.mode || "") === "public_search");
   const installRows = rows.filter((row) => String(row?.mode || "") === "install_agent_blueprint");
   const publishRows = rows.filter((row) => String(row?.mode || "") === "publish_agent_request");
+  const selectionRows = rows.filter((row) => String(row?.mode || "") === "job_config_selection");
+  const listRows = rows.filter((row) => {
+    const mode = String(row?.mode || "");
+    return mode === "list_agents" || mode === "list_tools";
+  });
   const lines = [];
 
   for (const row of searchRows) {
@@ -1229,6 +1241,16 @@ function summarizeSpecialChatOutputs(outputs) {
       lines.push("공개 요청이 생성되었습니다.");
     }
     lines.push("관리자 승인 후 public library에 반영됩니다.");
+  }
+
+  for (const row of selectionRows) {
+    const text = String(row?.output || "").trim();
+    if (text) lines.push(text);
+  }
+
+  for (const row of listRows) {
+    const text = String(row?.output || "").trim();
+    if (text) lines.push(text);
   }
 
   return lines.join("\n").trim();
@@ -1408,78 +1430,6 @@ async function listActiveResourcesByKind(client, { threadId, ctxId, resourceKind
   }
 }
 
-function defaultSupervisorJobConfig(jobId) {
-  return {
-    version: 1,
-    job_id: String(jobId || "").trim(),
-    mode: "supervisor",
-    final_response_style: "concise",
-    participants: [],
-    allow_actions: [
-      "run_agent",
-      "propose_agent",
-      "need_more_detail",
-      "open_context",
-      "summarize",
-      "search_public_agents",
-      "install_agent_blueprint",
-      "publish_agent",
-    ],
-    budget: {
-      max_actions: 4,
-      max_chars: 16000,
-      max_risk: "L2",
-    },
-    approval: {
-      require_for_risk: ["L3"],
-      require_file_write: false,
-    },
-  };
-}
-
-function normalizeJobConfig(raw, jobId) {
-  const base = defaultSupervisorJobConfig(jobId);
-  const row = raw && typeof raw === "object" ? raw : {};
-  const participants = Array.isArray(row.participants) ? row.participants : base.participants;
-  const allowActions = Array.isArray(row.allow_actions || row.allowed_actions || row.actions_allowlist)
-    ? (row.allow_actions || row.allowed_actions || row.actions_allowlist)
-    : base.allow_actions;
-  const budgetRaw = row.budget && typeof row.budget === "object" ? row.budget : {};
-  const approvalRaw = row.approval && typeof row.approval === "object" ? row.approval : {};
-  return {
-    ...base,
-    ...row,
-    job_id: String(row.job_id || row.jobId || base.job_id),
-    mode: "supervisor",
-    final_response_style: String(row.final_response_style || row.finalResponseStyle || base.final_response_style).trim().toLowerCase() === "detailed"
-      ? "detailed"
-      : "concise",
-    participants: participants
-      .map((v) => String(v || "").trim().toLowerCase())
-      .filter(Boolean),
-    allow_actions: allowActions
-      .map((v) => String(v || "").trim().toLowerCase())
-      .filter(Boolean),
-    budget: {
-      ...base.budget,
-      ...budgetRaw,
-      max_actions: Number.isFinite(Number(budgetRaw.max_actions))
-        ? Math.max(1, Math.floor(Number(budgetRaw.max_actions)))
-        : base.budget.max_actions,
-    },
-    approval: {
-      ...base.approval,
-      ...approvalRaw,
-      require_for_risk: Array.isArray(approvalRaw.require_for_risk)
-        ? approvalRaw.require_for_risk.map((v) => String(v || "").trim().toUpperCase()).filter(Boolean)
-        : base.approval.require_for_risk,
-      require_file_write: typeof approvalRaw.require_file_write === "boolean"
-        ? approvalRaw.require_file_write
-        : base.approval.require_file_write,
-    },
-  };
-}
-
 function normalizeToolSpec(raw) {
   const row = raw && typeof raw === "object" ? raw : {};
   const id = String(row.id || row.tool_id || row.name || "").trim();
@@ -1496,6 +1446,44 @@ function normalizeToolSpec(raw) {
     action_types: actionTypes,
     risk: String(row.risk || "L1").trim().toUpperCase(),
     raw: row,
+  };
+}
+
+function normalizeCatalogIds(list = [], { lower = true } = {}) {
+  const rows = Array.isArray(list) ? list : [];
+  const out = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const raw = typeof row === "string"
+      ? row
+      : String(
+        row?.id
+        || row?.tool_id
+        || row?.toolId
+        || row?.agent_id
+        || row?.agentId
+        || row?.name
+        || ""
+      ).trim();
+    if (!raw) continue;
+    const cleanRaw = String(raw || "").trim();
+    const id = lower ? cleanRaw.toLowerCase() : cleanRaw;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+function summarizeSelectionState({ catalog = [], enabled = [] } = {}) {
+  const catalogIds = normalizeCatalogIds(catalog);
+  const enabledIds = normalizeCatalogIds(enabled);
+  const enabledSet = new Set(enabledIds);
+  const disabledIds = catalogIds.filter((id) => !enabledSet.has(id));
+  return {
+    catalog_ids: catalogIds,
+    enabled_ids: enabledIds,
+    disabled_ids: disabledIds,
   };
 }
 
@@ -1617,7 +1605,17 @@ async function findLatestAgentProfileNodeForPublish(client, agentsSlot, { agentN
 
 async function loadSupervisorRuntime(jobId) {
   const reg = await refreshAgentRegistry({ includeCompiled: true });
-  const fallbackConfig = normalizeJobConfig({}, jobId);
+  const fallbackNormalized = normalizeSupervisorJobConfig(
+    { job_id: String(jobId || "").trim() },
+    { agentsCatalog: reg.agents, toolsCatalog: [] }
+  );
+  const fallbackAgentSet = new Set(
+    (Array.isArray(fallbackNormalized.enabledAgentIds) ? fallbackNormalized.enabledAgentIds : [])
+      .map((id) => String(id || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const fallbackAgents = (Array.isArray(reg.agents) ? reg.agents : [])
+    .filter((row) => fallbackAgentSet.has(String(row?.id || "").trim().toLowerCase()));
 
   if (memoryModeWithFallback() !== "goc") {
     return {
@@ -1625,8 +1623,15 @@ async function loadSupervisorRuntime(jobId) {
       map: null,
       agentsSlot: null,
       toolsSlot: null,
-      jobConfig: fallbackConfig,
-      agents: reg.agents,
+      jobConfig: fallbackNormalized.configNormalized,
+      jobConfigNodeId: "",
+      agentsCatalog: reg.agents,
+      toolsCatalog: [],
+      enabledAgentIds: fallbackNormalized.enabledAgentIds,
+      enabledToolIds: fallbackNormalized.enabledToolIds,
+      agentSelection: summarizeSelectionState({ catalog: reg.agents, enabled: fallbackAgents }),
+      toolSelection: summarizeSelectionState({ catalog: [], enabled: [] }),
+      agents: fallbackAgents,
       tools: [],
       contextSummary: loadLocalContextDocs(jobId, TRACK_DOC_NAMES, 2200),
       globalSummary: "",
@@ -1649,16 +1654,34 @@ async function loadSupervisorRuntime(jobId) {
   });
   const latestJobNode = jobResources[jobResources.length - 1] || null;
   const rawJobConfig = latestJobNode ? parseStructuredFromResource(latestJobNode, "job_config") : null;
-  const jobConfig = normalizeJobConfig(rawJobConfig || {}, jobId);
 
   const toolRows = await listActiveResourcesByKind(client, {
     threadId: toolsSlot.threadId,
     ctxId: toolsSlot.ctxId,
     resourceKind: "tool_spec",
   });
-  const tools = toolRows
+  const toolsCatalog = toolRows
     .map((resource) => normalizeToolSpec(parseStructuredFromResource(resource, "tool_spec")))
     .filter(Boolean);
+
+  const normalized = normalizeSupervisorJobConfig(
+    rawJobConfig || { job_id: String(jobId || "").trim() },
+    { agentsCatalog: reg.agents, toolsCatalog }
+  );
+  const enabledAgentSet = new Set(
+    (Array.isArray(normalized.enabledAgentIds) ? normalized.enabledAgentIds : [])
+      .map((id) => String(id || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const enabledToolSet = new Set(
+    (Array.isArray(normalized.enabledToolIds) ? normalized.enabledToolIds : [])
+      .map((id) => String(id || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const enabledAgents = (Array.isArray(reg.agents) ? reg.agents : [])
+    .filter((agent) => enabledAgentSet.has(String(agent?.id || "").trim().toLowerCase()));
+  const enabledTools = toolsCatalog
+    .filter((tool) => enabledToolSet.has(String(tool?.id || "").trim().toLowerCase()));
 
   let contextSummary = "";
   try {
@@ -1680,9 +1703,16 @@ async function loadSupervisorRuntime(jobId) {
     map,
     agentsSlot,
     toolsSlot,
-    jobConfig,
-    agents: reg.agents,
-    tools,
+    jobConfig: normalized.configNormalized,
+    jobConfigNodeId: String(latestJobNode?.id || "").trim(),
+    agentsCatalog: reg.agents,
+    toolsCatalog,
+    enabledAgentIds: normalized.enabledAgentIds,
+    enabledToolIds: normalized.enabledToolIds,
+    agentSelection: summarizeSelectionState({ catalog: reg.agents, enabled: enabledAgents }),
+    toolSelection: summarizeSelectionState({ catalog: toolsCatalog, enabled: enabledTools }),
+    agents: enabledAgents,
+    tools: enabledTools,
     contextSummary: contextSummary || "",
     globalSummary: globalSummary || "",
   };
@@ -1826,14 +1856,45 @@ async function appendParticipantToJobConfig(client, { jobId, agentId, actor = ""
     resourceKind: "job_config",
   });
   const latest = resources[resources.length - 1] || null;
-  const current = normalizeJobConfig(latest ? parseStructuredFromResource(latest, "job_config") : {}, jobId);
+  const currentRaw = latest ? parseStructuredFromResource(latest, "job_config") : {};
+  const normalizedCurrent = normalizeSupervisorJobConfig(
+    currentRaw || { job_id: String(jobId || "").trim() },
+    { agentsCatalog: [{ id: String(agentId || "").trim().toLowerCase() }], toolsCatalog: [] }
+  );
+  const current = normalizedCurrent.configNormalized;
+  const uniq = (list = []) => {
+    const out = [];
+    const seen = new Set();
+    for (const entry of Array.isArray(list) ? list : []) {
+      const value = String(entry || "").trim().toLowerCase();
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      out.push(value);
+    }
+    return out;
+  };
+  const cleanAgentId = String(agentId || "").trim().toLowerCase();
   const participants = Array.from(new Set([
     ...(Array.isArray(current.participants) ? current.participants : []),
-    String(agentId || "").trim().toLowerCase(),
+    cleanAgentId,
   ].filter(Boolean)));
+  const currentAgentSet = current.agent_set && typeof current.agent_set === "object"
+    ? current.agent_set
+    : { mode: "all_enabled", selected: [], disabled: [] };
+  const nextAgentSet = {
+    mode: String(currentAgentSet.mode || "").trim().toLowerCase() === "selected" ? "selected" : "all_enabled",
+    selected: uniq(currentAgentSet.selected),
+    disabled: uniq((Array.isArray(currentAgentSet.disabled) ? currentAgentSet.disabled : []).filter((id) => id !== cleanAgentId)),
+  };
+  if (nextAgentSet.mode === "selected" && cleanAgentId) {
+    nextAgentSet.selected = uniq([...nextAgentSet.selected, cleanAgentId]);
+  }
   const nextConfig = {
     ...current,
+    version: Math.max(2, Number(current.version || 2) || 2),
+    schema_version: Math.max(2, Number(current.schema_version || current.schemaVersion || 2) || 2),
     participants,
+    agent_set: nextAgentSet,
     updated_at: new Date().toISOString(),
   };
 
@@ -1862,6 +1923,154 @@ async function appendParticipantToJobConfig(client, { jobId, agentId, actor = ""
     } catch {}
   }
   return { map, created, config: nextConfig };
+}
+
+async function updateJobConfigSelection(client, {
+  jobId,
+  op,
+  kind,
+  id,
+  actor = "",
+  agentsCatalog = [],
+  toolsCatalog = [],
+} = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  const cleanOp = String(op || "").trim().toLowerCase();
+  const cleanKind = String(kind || "").trim().toLowerCase();
+  const cleanId = String(id || "").trim().toLowerCase();
+  if (!cleanJobId) throw new Error("updateJobConfigSelection requires jobId");
+  if (!["enable", "disable"].includes(cleanOp)) throw new Error("updateJobConfigSelection op must be enable|disable");
+  if (!["agent", "tool"].includes(cleanKind)) throw new Error("updateJobConfigSelection kind must be agent|tool");
+  if (!cleanId) throw new Error("updateJobConfigSelection requires id");
+
+  const map = await ensureJobThread(client, {
+    jobId: cleanJobId,
+    jobDir: runDir(cleanJobId),
+    title: `job:${cleanJobId}`,
+  });
+  const resources = await listActiveResourcesByKind(client, {
+    threadId: map.threadId,
+    ctxId: map.ctxSharedId,
+    resourceKind: "job_config",
+  });
+  const latest = resources[resources.length - 1] || null;
+  const currentRaw = latest ? parseStructuredFromResource(latest, "job_config") : null;
+  const normalized = normalizeSupervisorJobConfig(
+    currentRaw || { job_id: cleanJobId },
+    { agentsCatalog, toolsCatalog }
+  );
+  const current = normalized.configNormalized;
+
+  const uniq = (list = []) => {
+    const out = [];
+    const seen = new Set();
+    for (const entry of Array.isArray(list) ? list : []) {
+      const value = String(entry || "").trim().toLowerCase();
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      out.push(value);
+    }
+    return out;
+  };
+
+  const currentAgentSet = current.agent_set && typeof current.agent_set === "object"
+    ? current.agent_set
+    : { mode: "all_enabled", selected: [], disabled: [] };
+  const currentToolSet = current.tool_set && typeof current.tool_set === "object"
+    ? current.tool_set
+    : { mode: "all_enabled", selected: [], disabled: [] };
+  const nextAgentSet = {
+    mode: String(currentAgentSet.mode || "").trim().toLowerCase() === "selected" ? "selected" : "all_enabled",
+    selected: uniq(currentAgentSet.selected),
+    disabled: uniq(currentAgentSet.disabled),
+  };
+  const nextToolSet = {
+    mode: String(currentToolSet.mode || "").trim().toLowerCase() === "selected" ? "selected" : "all_enabled",
+    selected: uniq(currentToolSet.selected),
+    disabled: uniq(currentToolSet.disabled),
+  };
+  let participants = uniq(current.participants);
+
+  if (cleanKind === "agent") {
+    if (cleanOp === "disable") {
+      nextAgentSet.disabled = uniq([...nextAgentSet.disabled, cleanId]);
+      if (nextAgentSet.mode === "selected") {
+        nextAgentSet.selected = nextAgentSet.selected.filter((entry) => entry !== cleanId);
+      }
+      participants = participants.filter((entry) => entry !== cleanId);
+    } else {
+      nextAgentSet.disabled = nextAgentSet.disabled.filter((entry) => entry !== cleanId);
+      if (nextAgentSet.mode === "selected") {
+        nextAgentSet.selected = uniq([...nextAgentSet.selected, cleanId]);
+      }
+      participants = uniq([...participants, cleanId]);
+    }
+  } else if (cleanOp === "disable") {
+    nextToolSet.disabled = uniq([...nextToolSet.disabled, cleanId]);
+    if (nextToolSet.mode === "selected") {
+      nextToolSet.selected = nextToolSet.selected.filter((entry) => entry !== cleanId);
+    }
+  } else {
+    nextToolSet.disabled = nextToolSet.disabled.filter((entry) => entry !== cleanId);
+    if (nextToolSet.mode === "selected") {
+      nextToolSet.selected = uniq([...nextToolSet.selected, cleanId]);
+    }
+  }
+
+  const nextConfig = {
+    ...current,
+    version: Math.max(2, Number(current.version || 2) || 2),
+    schema_version: Math.max(2, Number(current.schema_version || current.schemaVersion || 2) || 2),
+    participants,
+    agent_set: nextAgentSet,
+    tool_set: nextToolSet,
+    updated_at: new Date().toISOString(),
+  };
+  const rawText = `${JSON.stringify(nextConfig, null, 2)}\n`;
+
+  if (latest?.id) {
+    await client.updateNode(String(latest.id), {
+      text_mode: "plain",
+      text: rawText,
+      raw_text: rawText,
+      summary: `job_config ${cleanOp}_${cleanKind}:${cleanId}`,
+    });
+  } else {
+    await client.createResource(map.threadId, {
+      name: `job_config@${new Date().toISOString()}`,
+      summary: `job_config ${cleanOp}_${cleanKind}:${cleanId}`,
+      text_mode: "plain",
+      raw_text: rawText,
+      resource_kind: "job_config",
+      uri: `ddalggak://jobs/${cleanJobId}/job_config`,
+      context_set_id: map.ctxSharedId,
+      auto_activate: true,
+      payload_json: {
+        op: `${cleanOp}_${cleanKind}`,
+        ts: new Date().toISOString(),
+        job_id: cleanJobId,
+        actor: actor || undefined,
+        job_config: nextConfig,
+      },
+    });
+  }
+
+  tracking.append(cleanJobId, "decisions.md", [
+    "## /chat update_job_config_selection",
+    `- op: ${cleanOp}`,
+    `- kind: ${cleanKind}`,
+    `- id: ${cleanId}`,
+    actor ? `- actor: ${actor}` : "",
+  ].filter(Boolean).join("\n"));
+
+  return {
+    job_id: cleanJobId,
+    op: cleanOp,
+    kind: cleanKind,
+    id: cleanId,
+    config: nextConfig,
+    node_id: String(latest?.id || "").trim(),
+  };
 }
 
 function buildSupervisorExecutionCallbacks({
@@ -2032,6 +2241,83 @@ function buildSupervisorExecutionCallbacks({
         "- note: admin approval required",
       ].join("\n"));
       return request;
+    },
+    listAgents: async ({ action }) => {
+      const enabled = normalizeCatalogIds(runtime.agentSelection?.enabled_ids || runtime.agents || []);
+      const disabled = action?.include_disabled === false
+        ? []
+        : normalizeCatalogIds(runtime.agentSelection?.disabled_ids || []);
+      const lines = ["현재 job agent 상태"];
+      lines.push(enabled.length > 0
+        ? `- enabled: ${enabled.map((id) => `@${id}`).join(", ")}`
+        : "- enabled: (none)");
+      if (action?.include_disabled !== false) {
+        lines.push(disabled.length > 0
+          ? `- disabled: ${disabled.map((id) => `@${id}`).join(", ")}`
+          : "- disabled: (none)");
+      }
+      return { text: lines.join("\n") };
+    },
+    listTools: async ({ action }) => {
+      const enabled = normalizeCatalogIds(runtime.toolSelection?.enabled_ids || runtime.tools || []);
+      const disabled = action?.include_disabled === false
+        ? []
+        : normalizeCatalogIds(runtime.toolSelection?.disabled_ids || []);
+      const lines = ["현재 job tool 상태"];
+      lines.push(enabled.length > 0
+        ? `- enabled: ${enabled.join(", ")}`
+        : "- enabled: (none)");
+      if (action?.include_disabled !== false) {
+        lines.push(disabled.length > 0
+          ? `- disabled: ${disabled.join(", ")}`
+          : "- disabled: (none)");
+      }
+      return { text: lines.join("\n") };
+    },
+    updateJobConfigSelection: async ({ op, kind, id }) => {
+      if (memoryModeWithFallback() !== "goc") {
+        throw new Error("selection update requires MEMORY_MODE=goc");
+      }
+      const updated = await updateJobConfigSelection(requireGocClient(), {
+        jobId,
+        op,
+        kind,
+        id,
+        actor: `telegram:${userId}`,
+        agentsCatalog: runtime.agentsCatalog || runtime.agents || [],
+        toolsCatalog: runtime.toolsCatalog || runtime.tools || [],
+      });
+      const normalized = normalizeSupervisorJobConfig(
+        updated.config || {},
+        {
+          agentsCatalog: runtime.agentsCatalog || runtime.agents || [],
+          toolsCatalog: runtime.toolsCatalog || runtime.tools || [],
+        }
+      );
+      const enabledAgentSet = new Set(
+        (Array.isArray(normalized.enabledAgentIds) ? normalized.enabledAgentIds : [])
+          .map((entry) => String(entry || "").trim().toLowerCase())
+          .filter(Boolean)
+      );
+      const enabledToolSet = new Set(
+        (Array.isArray(normalized.enabledToolIds) ? normalized.enabledToolIds : [])
+          .map((entry) => String(entry || "").trim().toLowerCase())
+          .filter(Boolean)
+      );
+      runtime.jobConfig = normalized.configNormalized;
+      runtime.enabledAgentIds = normalized.enabledAgentIds;
+      runtime.enabledToolIds = normalized.enabledToolIds;
+      runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
+        .filter((agent) => enabledAgentSet.has(String(agent?.id || "").trim().toLowerCase()));
+      runtime.tools = (Array.isArray(runtime.toolsCatalog) ? runtime.toolsCatalog : [])
+        .filter((tool) => enabledToolSet.has(String(tool?.id || "").trim().toLowerCase()));
+      runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
+      runtime.toolSelection = summarizeSelectionState({ catalog: runtime.toolsCatalog || [], enabled: runtime.tools });
+      return {
+        ...updated,
+        enabled_agent_ids: runtime.enabledAgentIds,
+        enabled_tool_ids: runtime.enabledToolIds,
+      };
     },
   };
 }

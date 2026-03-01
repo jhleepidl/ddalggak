@@ -72,19 +72,33 @@ function normalizeProvider(raw) {
   return "gemini";
 }
 
-function pickDefaultAgent(agents = [], preferredIds = []) {
+function pickDefaultAgent(agents = []) {
   const rows = Array.isArray(agents) ? agents : [];
-  const byId = new Map(rows.map((row) => [String(row?.id || "").trim().toLowerCase(), row]));
-  for (const raw of preferredIds) {
-    const key = String(raw || "").trim().toLowerCase();
-    if (key && byId.has(key)) return key;
-  }
   const gemini = rows.find((row) => normalizeProvider(row?.provider) === "gemini");
   if (gemini?.id) return String(gemini.id).trim().toLowerCase();
   const nonChatgpt = rows.find((row) => normalizeProvider(row?.provider) !== "chatgpt");
   if (nonChatgpt?.id) return String(nonChatgpt.id).trim().toLowerCase();
   const first = rows[0];
   return first?.id ? String(first.id).trim().toLowerCase() : "";
+}
+
+function normalizeStringList(raw) {
+  const list = Array.isArray(raw)
+    ? raw
+    : (typeof raw === "string" ? raw.split(",") : []);
+  const out = [];
+  const seen = new Set();
+  for (const entry of list) {
+    const value = String(entry || "").trim().toLowerCase();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+function escapeRegExp(text) {
+  return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function parseRequestedAgentId(message) {
@@ -161,6 +175,72 @@ function isPublishAgentRequest(message) {
   return hasPublishKeyword && hasAgentKeyword;
 }
 
+function isDisableSelectionRequest(message) {
+  const text = String(message || "").toLowerCase();
+  return text.includes("빼줘")
+    || text.includes("제외")
+    || text.includes("비활성")
+    || text.includes("막아")
+    || text.includes("차단")
+    || text.includes("disable");
+}
+
+function isEnableSelectionRequest(message) {
+  const text = String(message || "").toLowerCase();
+  return text.includes("다시 넣")
+    || text.includes("다시 포함")
+    || text.includes("다시 활성")
+    || text.includes("다시 허용")
+    || text.includes("복구")
+    || text.includes("활성화")
+    || text.includes("허용")
+    || text.includes("enable");
+}
+
+function isListAgentsRequest(message) {
+  const text = String(message || "").toLowerCase();
+  const asksAgent = text.includes("agent") || text.includes("에이전트");
+  if (!asksAgent) return false;
+  return text.includes("목록")
+    || text.includes("list")
+    || text.includes("상태")
+    || text.includes("보여")
+    || text.includes("어떤");
+}
+
+function isListToolsRequest(message) {
+  const text = String(message || "").toLowerCase();
+  const asksTool = text.includes("tool") || text.includes("툴");
+  if (!asksTool) return false;
+  return text.includes("목록")
+    || text.includes("list")
+    || text.includes("상태")
+    || text.includes("보여")
+    || text.includes("어떤");
+}
+
+function parseRequestedToolId(message, { tools = [], jobConfig = {} } = {}) {
+  const src = String(message || "").trim();
+  const lower = src.toLowerCase();
+  const explicit = src.match(/\btool\s*[:=]\s*([a-zA-Z0-9_-]+)/i);
+  if (explicit?.[1]) return explicit[1].toLowerCase();
+  const hinted = src.match(/\b([a-zA-Z0-9_-]+)\s*(?:tool|툴)\b/i);
+  if (hinted?.[1]) return hinted[1].toLowerCase();
+
+  const toolSet = asObject(jobConfig?.tool_set || jobConfig?.toolSet);
+  const disabled = normalizeStringList(toolSet.disabled);
+  const candidates = normalizeStringList([
+    ...(Array.isArray(tools) ? tools.map((row) => row?.id || row?.tool_id || row?.name || "") : []),
+    ...disabled,
+  ]);
+  for (const id of candidates) {
+    if (!id) continue;
+    const pattern = new RegExp(`(^|[^a-z0-9_])${escapeRegExp(id)}([^a-z0-9_]|$)`, "i");
+    if (pattern.test(lower)) return id;
+  }
+  return "";
+}
+
 function normalizePublicSearchQuery(message) {
   return String(message || "")
     .replace(/public|공개|library|라이브러리|blueprint|블루프린트|agent|에이전트/gi, " ")
@@ -169,19 +249,73 @@ function normalizePublicSearchQuery(message) {
     .trim();
 }
 
-function fallbackPlan(message, { agents = [], jobConfig = {} } = {}) {
+function fallbackPlan(message, { agents = [], tools = [], jobConfig = {} } = {}) {
   const msg = String(message || "").trim();
-  const participants = Array.isArray(jobConfig?.participants) ? jobConfig.participants : [];
-  const defaultAgent = pickDefaultAgent(agents, participants);
+  const config = asObject(jobConfig);
+  const defaultAgent = pickDefaultAgent(agents);
   const requestedAgent = parseRequestedAgentId(msg);
+  const requestedTool = parseRequestedToolId(msg, { tools, jobConfig: config });
   const requestedExists = (Array.isArray(agents) ? agents : [])
     .some((row) => String(row?.id || "").trim().toLowerCase() === requestedAgent);
+  const agentSet = asObject(config.agent_set || config.agentSet);
+  const disabledAgents = new Set(normalizeStringList(agentSet.disabled));
+  const wantsDisable = isDisableSelectionRequest(msg);
+  const wantsEnable = isEnableSelectionRequest(msg);
+
   if (!msg) {
     return {
       reason: "empty message fallback",
       actions: defaultAgent
         ? [{ type: "run_agent", agent_id: defaultAgent, goal: "현재 상태를 요약하고 다음 단계를 제안해줘.", risk: "L1" }]
         : [{ type: "summarize" }],
+      final_response_style: "concise",
+    };
+  }
+
+  if (isListAgentsRequest(msg)) {
+    return {
+      reason: "list agents fallback",
+      actions: [{ type: "list_agents", include_disabled: true, risk: "L0" }],
+      final_response_style: "concise",
+    };
+  }
+
+  if (isListToolsRequest(msg)) {
+    return {
+      reason: "list tools fallback",
+      actions: [{ type: "list_tools", include_disabled: true, risk: "L0" }],
+      final_response_style: "concise",
+    };
+  }
+
+  if (requestedAgent && wantsDisable) {
+    return {
+      reason: "disable agent fallback",
+      actions: [{ type: "disable_agent", agent_id: requestedAgent, risk: "L1" }],
+      final_response_style: "concise",
+    };
+  }
+
+  if (requestedAgent && wantsEnable) {
+    return {
+      reason: "enable agent fallback",
+      actions: [{ type: "enable_agent", agent_id: requestedAgent, risk: "L1" }],
+      final_response_style: "concise",
+    };
+  }
+
+  if (requestedTool && wantsDisable) {
+    return {
+      reason: "disable tool fallback",
+      actions: [{ type: "disable_tool", tool_id: requestedTool, risk: "L1" }],
+      final_response_style: "concise",
+    };
+  }
+
+  if (requestedTool && wantsEnable) {
+    return {
+      reason: "enable tool fallback",
+      actions: [{ type: "enable_tool", tool_id: requestedTool, risk: "L1" }],
       final_response_style: "concise",
     };
   }
@@ -256,6 +390,14 @@ function fallbackPlan(message, { agents = [], jobConfig = {} } = {}) {
     };
   }
 
+  if (requestedAgent && disabledAgents.has(requestedAgent)) {
+    return {
+      reason: "requested agent is disabled in this job; suggest enable_agent",
+      actions: [{ type: "enable_agent", agent_id: requestedAgent, risk: "L1" }],
+      final_response_style: "concise",
+    };
+  }
+
   if (!defaultAgent) {
     return {
       reason: "no available agents",
@@ -275,7 +417,6 @@ function buildRouterPrompt(message, context = {}) {
   const agents = Array.isArray(row.agents) ? row.agents : [];
   const tools = Array.isArray(row.tools) ? row.tools : [];
   const jobConfig = asObject(row.jobConfig);
-  const participants = Array.isArray(jobConfig.participants) ? jobConfig.participants : [];
   const allowChatGPTPlanner = !!row.allowChatGPTPlanner;
   const agentText = agents.length
     ? agents
@@ -303,9 +444,15 @@ function buildRouterPrompt(message, context = {}) {
     "    {\"type\":\"search_public_agents\",\"query\":\"...\",\"limit\":5},",
     "    {\"type\":\"install_agent_blueprint\",\"blueprint_id\":\"optional\",\"public_node_id\":\"optional\",\"agent_id_override\":\"optional\"},",
     "    {\"type\":\"publish_agent\",\"agent_node_id\":\"optional\",\"agent_id\":\"optional\"},",
+    "    {\"type\":\"disable_agent\",\"agent_id\":\"...\"},",
+    "    {\"type\":\"enable_agent\",\"agent_id\":\"...\"},",
+    "    {\"type\":\"disable_tool\",\"tool_id\":\"...\"},",
+    "    {\"type\":\"enable_tool\",\"tool_id\":\"...\"},",
+    "    {\"type\":\"list_agents\",\"include_disabled\":true},",
+    "    {\"type\":\"list_tools\",\"include_disabled\":true},",
     "    {\"type\":\"open_context\",\"scope\":\"current|global\"},",
     "    {\"type\":\"summarize\",\"hint\":\"...\"}",
-    "  ],",
+  "  ],",
     "  \"final_response_style\": \"concise|detailed\"",
     "}",
     "",
@@ -316,6 +463,9 @@ function buildRouterPrompt(message, context = {}) {
     "- public agent 검색 요청은 search_public_agents를 사용한다.",
     "- 설치 요청은 먼저 search_public_agents로 후보를 좁히고, 1개로 좁혀지면 install_agent_blueprint를 사용한다.",
     "- publish_agent는 admin 승인/검토가 필요함을 reason 또는 summarize 힌트에 명시한다.",
+    "- agent/tool 제외 요청은 disable_agent/disable_tool을 사용한다.",
+    "- agent/tool 재포함 요청은 enable_agent/enable_tool을 사용한다.",
+    "- 현재 job에서 비활성화된 agent가 명시되면 run_agent 대신 enable_agent를 우선 제안한다.",
     "- provider=chatgpt(planner) run_agent는 기본 금지다.",
     allowChatGPTPlanner
       ? "- 이번 요청은 사용자가 ChatGPT 의사결정을 명시적으로 요청했다. chatgpt 사용 가능."
@@ -361,7 +511,7 @@ export async function routeWithSupervisor(message, {
   const msg = String(message || "").trim();
   const allowChatGPTPlanner = isExplicitChatGptPlannerRequest(msg);
   const fallback = normalizeActionPlan(
-    fallbackPlan(msg, { agents, jobConfig }),
+    fallbackPlan(msg, { agents, tools, jobConfig }),
     { maxActions: 4 }
   );
 

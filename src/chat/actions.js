@@ -134,6 +134,46 @@ function normalizePublishAgent(raw) {
   };
 }
 
+function normalizeToggleAgent(raw, enabled = true) {
+  const row = asObject(raw);
+  const agentId = String(row.agent_id || row.agentId || row.agent || row.id || "").trim().toLowerCase();
+  if (!agentId) return null;
+  return {
+    type: enabled ? "enable_agent" : "disable_agent",
+    agent_id: agentId,
+    risk: "L1",
+  };
+}
+
+function normalizeToggleTool(raw, enabled = true) {
+  const row = asObject(raw);
+  const toolId = String(row.tool_id || row.toolId || row.tool || row.id || row.name || "").trim().toLowerCase();
+  if (!toolId) return null;
+  return {
+    type: enabled ? "enable_tool" : "disable_tool",
+    tool_id: toolId,
+    risk: "L1",
+  };
+}
+
+function normalizeListAgents(raw) {
+  const row = asObject(raw);
+  return {
+    type: "list_agents",
+    include_disabled: row.include_disabled !== false,
+    risk: "L0",
+  };
+}
+
+function normalizeListTools(raw) {
+  const row = asObject(raw);
+  return {
+    type: "list_tools",
+    include_disabled: row.include_disabled !== false,
+    risk: "L0",
+  };
+}
+
 export function normalizeAction(raw) {
   const row = asObject(raw);
   const type = String(row.type || "").trim().toLowerCase();
@@ -147,6 +187,12 @@ export function normalizeAction(raw) {
   if (type === "search_public_agents" || type === "find_public_agents") return normalizeSearchPublicAgents(row);
   if (type === "install_agent_blueprint" || type === "install_public_agent") return normalizeInstallAgentBlueprint(row);
   if (type === "publish_agent" || type === "request_publish_agent") return normalizePublishAgent(row);
+  if (type === "disable_agent") return normalizeToggleAgent(row, false);
+  if (type === "enable_agent") return normalizeToggleAgent(row, true);
+  if (type === "disable_tool") return normalizeToggleTool(row, false);
+  if (type === "enable_tool") return normalizeToggleTool(row, true);
+  if (type === "list_agents") return normalizeListAgents(row);
+  if (type === "list_tools") return normalizeListTools(row);
   return null;
 }
 
@@ -178,6 +224,12 @@ export function defaultAllowlist() {
     "search_public_agents",
     "install_agent_blueprint",
     "publish_agent",
+    "disable_agent",
+    "enable_agent",
+    "disable_tool",
+    "enable_tool",
+    "list_agents",
+    "list_tools",
   ]);
 }
 

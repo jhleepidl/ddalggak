@@ -50,13 +50,81 @@ function defaultJobThreadTitle(jobId) {
   return `${prefix}${jobId}`;
 }
 
+function normalizeStringList(raw, { lower = false } = {}) {
+  const list = Array.isArray(raw)
+    ? raw
+    : (typeof raw === "string" ? raw.split(",") : []);
+  const out = [];
+  const seen = new Set();
+  for (const entry of list) {
+    const value = String(entry || "").trim();
+    if (!value) continue;
+    const normalized = lower ? value.toLowerCase() : value;
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function normalizeSelectionSet(raw, { lower = true } = {}) {
+  const row = raw && typeof raw === "object" ? raw : {};
+  const modeRaw = String(row.mode || "").trim().toLowerCase();
+  return {
+    mode: modeRaw === "selected" ? "selected" : "all_enabled",
+    selected: normalizeStringList(row.selected, { lower }),
+    disabled: normalizeStringList(row.disabled, { lower }),
+  };
+}
+
+function normalizeFinalResponseStyle(raw, fallback = "concise") {
+  return String(raw || fallback).trim().toLowerCase() === "detailed"
+    ? "detailed"
+    : "concise";
+}
+
+function normalizeCatalogIds(list = []) {
+  const ids = (Array.isArray(list) ? list : []).map((row) => String(
+    row?.id
+    || row?.tool_id
+    || row?.toolId
+    || row?.agent_id
+    || row?.agentId
+    || row?.name
+    || ""
+  ).trim().toLowerCase());
+  return normalizeStringList(ids, { lower: true });
+}
+
+function computeEnabledIds(selectionSet, allIds = []) {
+  const config = normalizeSelectionSet(selectionSet, { lower: true });
+  const catalog = normalizeStringList(allIds, { lower: true });
+  const disabled = new Set(config.disabled);
+  if (config.mode === "selected") {
+    const catalogSet = new Set(catalog);
+    return config.selected.filter((id) => !disabled.has(id) && catalogSet.has(id));
+  }
+  return catalog.filter((id) => !disabled.has(id));
+}
+
 function defaultJobConfig(jobId) {
   return {
-    version: 1,
+    version: 2,
+    schema_version: 2,
     job_id: String(jobId || "").trim(),
     mode: "supervisor",
     final_response_style: "concise",
     participants: [],
+    agent_set: {
+      mode: "all_enabled",
+      selected: [],
+      disabled: [],
+    },
+    tool_set: {
+      mode: "all_enabled",
+      selected: [],
+      disabled: [],
+    },
     allow_actions: [
       "run_agent",
       "propose_agent",
@@ -66,6 +134,12 @@ function defaultJobConfig(jobId) {
       "search_public_agents",
       "install_agent_blueprint",
       "publish_agent",
+      "disable_agent",
+      "enable_agent",
+      "disable_tool",
+      "enable_tool",
+      "list_agents",
+      "list_tools",
     ],
     budget: {
       max_actions: 4,
@@ -80,6 +154,87 @@ function defaultJobConfig(jobId) {
       forbid_chatgpt_planner_by_default: true,
     },
     updated_at: new Date().toISOString(),
+  };
+}
+
+export function normalizeJobConfig(jobConfig, { agentsCatalog = [], toolsCatalog = [] } = {}) {
+  const row = jobConfig && typeof jobConfig === "object" ? jobConfig : {};
+  const jobId = String(row.job_id || row.jobId || "").trim();
+  const base = defaultJobConfig(jobId);
+  const participants = normalizeStringList(
+    Array.isArray(row.participants) ? row.participants : base.participants,
+    { lower: true }
+  );
+  const allowActions = normalizeStringList(
+    row.allow_actions || row.allowed_actions || row.actions_allowlist || row.action_allowlist || base.allow_actions,
+    { lower: true }
+  );
+  const budgetRaw = row.budget && typeof row.budget === "object" ? row.budget : {};
+  const approvalRaw = row.approval && typeof row.approval === "object" ? row.approval : {};
+  const requiresForRisk = normalizeStringList(
+    Array.isArray(approvalRaw.require_for_risk)
+      ? approvalRaw.require_for_risk
+      : base.approval.require_for_risk,
+    { lower: false }
+  ).map((entry) => entry.toUpperCase());
+
+  const fromParticipantAgentSet = participants.length > 0
+    ? { mode: "selected", selected: participants, disabled: [] }
+    : base.agent_set;
+  const rawAgentSet = row.agent_set && typeof row.agent_set === "object"
+    ? row.agent_set
+    : (row.agentSet && typeof row.agentSet === "object" ? row.agentSet : null);
+  const rawToolSet = row.tool_set && typeof row.tool_set === "object"
+    ? row.tool_set
+    : (row.toolSet && typeof row.toolSet === "object" ? row.toolSet : null);
+
+  const agentSet = normalizeSelectionSet(rawAgentSet || fromParticipantAgentSet, { lower: true });
+  const toolSet = normalizeSelectionSet(rawToolSet || base.tool_set, { lower: true });
+  const allAgentIds = normalizeCatalogIds(agentsCatalog);
+  const allToolIds = normalizeCatalogIds(toolsCatalog);
+  const enabledAgentIds = computeEnabledIds(agentSet, allAgentIds);
+  const enabledToolIds = computeEnabledIds(toolSet, allToolIds);
+
+  const configNormalized = {
+    ...base,
+    ...row,
+    version: Number.isFinite(Number(row.version))
+      ? Math.max(2, Math.floor(Number(row.version)))
+      : base.version,
+    schema_version: Number.isFinite(Number(row.schema_version || row.schemaVersion))
+      ? Math.max(2, Math.floor(Number(row.schema_version || row.schemaVersion)))
+      : 2,
+    job_id: jobId || base.job_id,
+    mode: "supervisor",
+    final_response_style: normalizeFinalResponseStyle(
+      row.final_response_style || row.finalResponseStyle || base.final_response_style,
+      base.final_response_style
+    ),
+    participants,
+    allow_actions: allowActions.length > 0 ? allowActions : [...base.allow_actions],
+    budget: {
+      ...base.budget,
+      ...budgetRaw,
+      max_actions: Number.isFinite(Number(budgetRaw.max_actions))
+        ? Math.max(1, Math.floor(Number(budgetRaw.max_actions)))
+        : base.budget.max_actions,
+    },
+    approval: {
+      ...base.approval,
+      ...approvalRaw,
+      require_for_risk: requiresForRisk.length > 0 ? requiresForRisk : [...base.approval.require_for_risk],
+      require_file_write: typeof approvalRaw.require_file_write === "boolean"
+        ? approvalRaw.require_file_write
+        : base.approval.require_file_write,
+    },
+    agent_set: agentSet,
+    tool_set: toolSet,
+  };
+
+  return {
+    configNormalized,
+    enabledAgentIds,
+    enabledToolIds,
   };
 }
 

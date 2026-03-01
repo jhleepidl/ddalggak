@@ -18,6 +18,12 @@ function actionLabel(action) {
   if (type === "search_public_agents") return `search_public_agents:${action.query || ""}`;
   if (type === "install_agent_blueprint") return `install_agent_blueprint:${action.blueprint_id || action.public_node_id || ""}`;
   if (type === "publish_agent") return `publish_agent:${action.agent_id || action.agent_node_id || ""}`;
+  if (type === "disable_agent") return `disable_agent:${action.agent_id || "unknown"}`;
+  if (type === "enable_agent") return `enable_agent:${action.agent_id || "unknown"}`;
+  if (type === "disable_tool") return `disable_tool:${action.tool_id || "unknown"}`;
+  if (type === "enable_tool") return `enable_tool:${action.tool_id || "unknown"}`;
+  if (type === "list_agents") return "list_agents";
+  if (type === "list_tools") return "list_tools";
   if (type === "open_context") return `open_context:${action.scope || "current"}`;
   return type;
 }
@@ -298,6 +304,115 @@ export async function executeSupervisorActions({
           jobId: String(jobId || ""),
         });
         results.push({ label, status: "ok", note: String(opened?.scope || action.scope || "current") });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "disable_agent" || action.type === "enable_agent" || action.type === "disable_tool" || action.type === "enable_tool") {
+        if (typeof callbacks.updateJobConfigSelection !== "function") {
+          throw new Error("updateJobConfigSelection callback is missing");
+        }
+        const kind = action.type.endsWith("_tool") ? "tool" : "agent";
+        const op = action.type.startsWith("enable_") ? "enable" : "disable";
+        const targetId = kind === "tool"
+          ? String(action.tool_id || "").trim().toLowerCase()
+          : String(action.agent_id || "").trim().toLowerCase();
+        if (!targetId) throw new Error(`${action.type} requires ${kind}_id`);
+
+        const updated = await callbacks.updateJobConfigSelection({
+          jobId,
+          op,
+          kind,
+          id: targetId,
+          action,
+          chatId,
+          userId,
+        });
+        const marker = op === "enable" ? "✅" : "🚫";
+        const line = kind === "agent"
+          ? `${marker} @${targetId} ${op === "enable" ? "enabled" : "disabled"}`
+          : `${marker} tool ${targetId} ${op === "enable" ? "enabled" : "disabled"}`;
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "job_config_selection",
+          output: line,
+          kind,
+          op,
+          id: targetId,
+          updated: updated || null,
+          jobId: String(jobId || ""),
+        });
+        results.push({ label, status: "ok", note: line.replace(/^[✅🚫]\s*/, "") });
+        usedActions += 1;
+        if (i < actions.length - 1) {
+          results.push({
+            label: "selection_update",
+            status: "skip",
+            note: "job_config updated; apply on next /chat",
+          });
+        }
+        break;
+      }
+
+      if (action.type === "list_agents") {
+        let text = "";
+        if (typeof callbacks.listAgents === "function") {
+          const listed = await callbacks.listAgents({
+            action,
+            jobId,
+            chatId,
+            userId,
+          });
+          text = String(listed?.text || "").trim();
+        }
+        if (!text) {
+          const ids = (Array.isArray(agents) ? agents : [])
+            .map((row) => String(row?.id || "").trim().toLowerCase())
+            .filter(Boolean);
+          text = ids.length > 0
+            ? `현재 job에서 사용 가능한 agent:\n${ids.map((id) => `- @${id}`).join("\n")}`
+            : "현재 job에서 사용 가능한 agent가 없습니다.";
+        }
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "list_agents",
+          output: text,
+          jobId: String(jobId || ""),
+        });
+        results.push({ label, status: "ok", note: "listed" });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "list_tools") {
+        let text = "";
+        if (typeof callbacks.listTools === "function") {
+          const listed = await callbacks.listTools({
+            action,
+            jobId,
+            chatId,
+            userId,
+          });
+          text = String(listed?.text || "").trim();
+        }
+        if (!text) {
+          const ids = (Array.isArray(tools) ? tools : [])
+            .map((row) => String(row?.id || row?.name || "").trim().toLowerCase())
+            .filter(Boolean);
+          text = ids.length > 0
+            ? `현재 job에서 사용 가능한 tool:\n${ids.map((id) => `- ${id}`).join("\n")}`
+            : "현재 job에서 사용 가능한 tool이 없습니다.";
+        }
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "list_tools",
+          output: text,
+          jobId: String(jobId || ""),
+        });
+        results.push({ label, status: "ok", note: "listed" });
         usedActions += 1;
         continue;
       }

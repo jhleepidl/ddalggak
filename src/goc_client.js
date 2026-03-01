@@ -596,6 +596,25 @@ export class GocClient {
     return await this._setNodesActivation(contextSetId, nodeIds, false);
   }
 
+  async updateNode(nodeId, body = {}) {
+    const nid = String(nodeId || "").trim();
+    if (!nid) throw new Error("updateNode requires nodeId");
+    const payload = asObject(body);
+    const data = await this._requestAny({
+      method: "PATCH",
+      attempts: [
+        { path: `/api/nodes/${encodeURIComponent(nid)}`, body: payload },
+        { path: `/nodes/${encodeURIComponent(nid)}`, body: payload },
+        { path: `/v1/nodes/${encodeURIComponent(nid)}`, body: payload },
+        { path: `/api/resources/${encodeURIComponent(nid)}`, body: payload },
+        { path: `/resources/${encodeURIComponent(nid)}`, body: payload },
+      ],
+    });
+    const entity = normalizeEntity(data, ["node", "resource", "data"]);
+    const normalized = this.normalizeResource(entity);
+    return normalized?.id ? normalized : { id: nid, raw: data };
+  }
+
   async _setNodesActivation(contextSetId, nodeIds = [], active = true) {
     const ctxId = String(contextSetId || "").trim();
     if (!ctxId) throw new Error("_setNodesActivation requires contextSetId");
