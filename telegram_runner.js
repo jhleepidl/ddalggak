@@ -33,7 +33,7 @@ import {
 } from "./src/goc_mapping.js";
 import { ChatSessionStore } from "./src/chat/session.js";
 import { routeWithSupervisor } from "./src/chat/supervisor_router.js";
-import { executeSupervisorActions } from "./src/chat/executor.js";
+import { executeSupervisorActions, isMutatingAction } from "./src/chat/executor.js";
 import { expandDetailContext } from "./src/chat/unfold.js";
 import { ChatRunManager } from "./src/chat/run_manager.js";
 
@@ -1433,6 +1433,123 @@ function chatActionLabel(action) {
   if (type === "spawn_agents") return `spawn_agents:${Array.isArray(action.agents) ? action.agents.length : 0}`;
   if (type === "open_context") return `open_context:${action.scope || "current"}`;
   return type;
+}
+
+const READ_ONLY_CONTROL_ACTION_TYPES = new Set([
+  "open_context",
+  "list_agents",
+  "list_tools",
+  "get_status",
+]);
+
+function normalizeForceMode(raw) {
+  return String(raw || "").trim().toLowerCase() === "work" ? "work" : "normal";
+}
+
+function isReadOnlyControlAction(action) {
+  const type = String(action?.type || "").trim().toLowerCase();
+  return READ_ONLY_CONTROL_ACTION_TYPES.has(type);
+}
+
+function pickRuntimeDefaultAgentId(agents = []) {
+  const rows = Array.isArray(agents) ? agents : [];
+  const gemini = rows.find((row) => String(row?.provider || "").trim().toLowerCase() === "gemini");
+  if (gemini?.id) return String(gemini.id).trim().toLowerCase();
+  const nonChatgpt = rows.find((row) => String(row?.provider || "").trim().toLowerCase() !== "chatgpt");
+  if (nonChatgpt?.id) return String(nonChatgpt.id).trim().toLowerCase();
+  const first = rows.find((row) => String(row?.id || "").trim());
+  return first?.id ? String(first.id).trim().toLowerCase() : "";
+}
+
+function sanitizeSupervisorRoutePlan(
+  routePlan,
+  {
+    message = "",
+    agents = [],
+    allowReadOnlyControl = false,
+    forceMode = "normal",
+  } = {}
+) {
+  const cleanForceMode = normalizeForceMode(forceMode);
+  const sourceActions = Array.isArray(routePlan?.actions) ? routePlan.actions : [];
+  const filtered = sourceActions.filter((action) => {
+    if (!action || typeof action !== "object") return false;
+    if (!allowReadOnlyControl && isReadOnlyControlAction(action)) return false;
+    if (cleanForceMode === "work" && isMutatingAction(action)) return false;
+    return true;
+  });
+
+  let actions = filtered;
+  let reason = String(routePlan?.reason || "supervisor route").trim() || "supervisor route";
+  if (actions.length === 0) {
+    const fallbackAgent = pickRuntimeDefaultAgentId(agents) || findDefaultChatAgentId();
+    if (fallbackAgent) {
+      actions = [{
+        type: "run_agent",
+        agent_id: fallbackAgent,
+        goal: String(message || "").trim() || "현재 우선순위 작업을 진행해줘.",
+        risk: "L1",
+      }];
+      reason = `${reason}; filtered_to_work_fallback`;
+    } else {
+      actions = [{
+        type: "summarize",
+        hint: "작업 실행 가능한 agent가 없어 summarize로 종료",
+        risk: "L0",
+      }];
+      reason = `${reason}; filtered_to_summary_fallback`;
+    }
+  }
+  return {
+    reason,
+    actions: actions.slice(0, 4),
+    final_response_style: routePlan?.final_response_style || "concise",
+  };
+}
+
+function markMutatingActionsConfirmed(actions = []) {
+  const rows = Array.isArray(actions) ? actions : [];
+  return rows.map((action) => {
+    if (!isMutatingAction(action)) return action;
+    return {
+      ...action,
+      _mutating_confirmed: true,
+    };
+  });
+}
+
+function buildPendingApprovalPrompt(pending = {}) {
+  const id = String(pending?.id || "").trim();
+  const gateType = String(pending?.gate_type || "").trim().toLowerCase();
+  if (gateType === "mutating_confirm" && id) {
+    const previewLines = Array.isArray(pending?.preview_lines)
+      ? pending.preview_lines.map((row) => String(row || "").trim()).filter(Boolean).slice(0, 8)
+      : [];
+    const lines = [
+      "⚠️ 변경 제안(Preview)",
+      `reason=${String(pending?.reason || "관리 변경 적용 전 확인이 필요합니다.").trim()}`,
+      previewLines.length > 0 ? "예정 변경:" : "",
+      ...previewLines,
+      pending?.work_like_hint
+        ? "관리 변경으로 해석했지만 작업 요청일 수도 있어요. 아래에서 선택하세요."
+        : "적용 전에 아래에서 진행 방식을 선택해 주세요.",
+    ].filter(Boolean);
+    return {
+      text: lines.join("\n"),
+      keyboard: [[
+        { text: "적용 ✅", callback_data: `approve_action:${id}` },
+        { text: "취소 ❌", callback_data: `reject_action:${id}` },
+        { text: "작업으로 처리 🧩", callback_data: `work_action:${id}` },
+      ]],
+    };
+  }
+  return {
+    text: `승인 대기 중입니다.\nreason=${pending?.reason || "(none)"}\naction=${chatActionLabel(pending?.action)}`,
+    keyboard: [[
+      { text: "✅ Approve", callback_data: `approve_action:${id}` },
+      { text: "❌ Reject", callback_data: `reject_action:${id}` },
+    ]],
+  };
 }
 
 function formatChatSummary(routePlan, results) {
@@ -2858,10 +2975,12 @@ async function runSupervisorChat(
     chatInfo = null,
     inputKind = "chat_message",
     telegramMessageId = null,
+    forceMode = "normal",
   } = {}
 ) {
   const chatKey = String(chatId);
   const verbose = !!(debug || CHAT_VERBOSE);
+  const cleanForceMode = normalizeForceMode(forceMode);
   let currentJobId = resolveCurrentJobIdForChat(chatId);
   let createdNewJob = false;
   if (currentJobId) {
@@ -2908,7 +3027,7 @@ async function runSupervisorChat(
     const runtime = await loadSupervisorRuntime(currentJobId, {
       chatMeta: chatInfo,
     });
-    const routePlan = await routeWithSupervisor(message, {
+    const rawRoutePlan = await routeWithSupervisor(message, {
       agents: runtime.agents,
       tools: runtime.tools,
       jobConfig: runtime.jobConfig,
@@ -2920,6 +3039,12 @@ async function runSupervisorChat(
       locale: "ko-KR",
       routerPolicy: memory.getRouterPrompt(),
       contextSummary: runtime.contextSummary,
+    });
+    const routePlan = sanitizeSupervisorRoutePlan(rawRoutePlan, {
+      message,
+      agents: runtime.agents,
+      allowReadOnlyControl: false,
+      forceMode: cleanForceMode,
     });
 
     chatSessionStore.upsert(chatId, {
@@ -2944,6 +3069,8 @@ async function runSupervisorChat(
       userId,
       jobId: currentJobId,
       plan: routePlan,
+      originalUserText: message,
+      forceMode: cleanForceMode,
       jobConfig: runtime.jobConfig,
       agents: runtime.agents,
       tools: runtime.tools,
@@ -2997,17 +3124,27 @@ async function runSupervisorChat(
       .filter(Boolean);
     const hasAgentOutput = (Array.isArray(execution.outputs) ? execution.outputs : [])
       .some((row) => String(row?.agentId || "").trim().toLowerCase() !== "system");
-    const finalReply = (!hasAgentOutput && contextOutputs.length > 0)
-      ? contextOutputs.join("\n\n")
-      : await synthesizeChatReply(message, routePlan, execution);
+    const pendingPrompt = execution.pendingApproval?.id
+      ? buildPendingApprovalPrompt(execution.pendingApproval)
+      : null;
+    const isMutatingConfirm = String(execution.pendingApproval?.gate_type || "").trim().toLowerCase() === "mutating_confirm";
+    const finalReply = isMutatingConfirm
+      ? String(pendingPrompt?.text || "변경 적용 전 확인이 필요합니다.")
+      : ((!hasAgentOutput && contextOutputs.length > 0)
+        ? contextOutputs.join("\n\n")
+        : await synthesizeChatReply(message, routePlan, execution));
     const replyText = execution.pendingApproval
-      ? `${finalReply}\n\n⚠️ 승인 필요: ${execution.pendingApproval.reason}\n다음 명령으로 risk를 낮추거나 요청을 분할해 주세요.`
+      ? (isMutatingConfirm
+        ? finalReply
+        : `${finalReply}\n\n⚠️ 승인 필요: ${execution.pendingApproval.reason}\n다음 명령으로 risk를 낮추거나 요청을 분할해 주세요.`)
       : finalReply;
 
     if (verbose) {
       await sendLong(bot, chatId, formatChatSummary(routePlan, execution.results));
     }
-    await sendLong(bot, chatId, replyText);
+    if (!isMutatingConfirm) {
+      await sendLong(bot, chatId, replyText);
+    }
     jobs.appendConversation(currentJobId, "assistant", replyText, {
       kind: execution.pendingApproval ? "chat_reply_pending_approval" : "chat_reply",
       chat_id: String(chatId || ""),
@@ -3021,15 +3158,13 @@ async function runSupervisorChat(
       userId,
     });
     if (execution.pendingApproval?.id) {
+      const prompt = pendingPrompt || buildPendingApprovalPrompt(execution.pendingApproval);
       await bot.sendMessage(
         chatId,
-        `승인 대기 중입니다.\nreason=${execution.pendingApproval.reason}\naction=${chatActionLabel(execution.pendingApproval.action)}`,
+        prompt.text,
         {
           reply_markup: {
-            inline_keyboard: [[
-              { text: "✅ Approve", callback_data: `approve_action:${execution.pendingApproval.id}` },
-              { text: "❌ Reject", callback_data: `reject_action:${execution.pendingApproval.id}` },
-            ]],
+            inline_keyboard: prompt.keyboard,
           },
         }
       );
@@ -3350,40 +3485,6 @@ function isHardStopMessage(text) {
     || msg.includes("cancel");
 }
 
-function classifyPlainChatIntent(text) {
-  const src = String(text || "").trim().toLowerCase();
-  if (!src) return "normal";
-
-  const hasAny = (list) => list.some((token) => src.includes(token));
-  const hasListHint = hasAny(["목록", "list", "보여", "어떤", "조회", "show"]);
-  const hasWorkChangeHint = hasAny([
-    "해줘", "해 줘", "수정", "업데이트", "생성", "추가", "삭제", "바꿔",
-    "disable", "enable", "설치", "publish", "중단", "취소", "멈춰",
-  ]);
-
-  const asksApprovalReason = src.includes("승인")
-    && (src.includes("왜") || src.includes("이유") || src.includes("필요"));
-  if (asksApprovalReason) return "soft_status";
-
-  const hasStatus = hasAny(["상태", "진행", "뭐하고", "running", "get_status", "status"]);
-  if (hasStatus && !hasWorkChangeHint) return "soft_status";
-
-  const hasContext = hasAny(["컨텍스트", "context", "goc", "링크", "open goc"]);
-  if (hasContext && !hasWorkChangeHint) return "soft_context";
-
-  const hasAgentWord = hasAny(["에이전트", "agents", "agent 목록", "agent list"]);
-  if (hasAgentWord && (hasListHint || src === "agents" || src === "에이전트") && !hasWorkChangeHint) {
-    return "soft_list_agents";
-  }
-
-  const hasToolWord = hasAny(["툴", "tools", "tool 목록", "tool list"]);
-  if (hasToolWord && (hasListHint || src === "tools" || src === "툴") && !hasWorkChangeHint) {
-    return "soft_list_tools";
-  }
-
-  return "normal";
-}
-
 async function sendTextWithOptionalGocButton(
   bot,
   chatId,
@@ -3455,20 +3556,6 @@ async function sendChatStatus(bot, chatId) {
   }
   const card = buildChatStatusCard(chatId, runtime);
   await sendLong(bot, chatId, card.text);
-}
-
-async function sendContextLinkQuick(bot, chatId, msg) {
-  const src = String(msg?.text || msg || "").toLowerCase();
-  const wantsGlobal = src.includes("global") || src.includes("글로벌");
-  const target = wantsGlobal ? "global" : "";
-  try {
-    await sendContextInfo(bot, chatId, target, {
-      userId: msg?.from?.id ?? null,
-      createIfMissing: true,
-    });
-  } catch (e) {
-    await bot.sendMessage(chatId, `❌ 컨텍스트 링크 생성 실패: ${String(e?.message ?? e)}`);
-  }
 }
 
 async function sendAgentOrToolListQuick(bot, chatId, kind = "agent") {
@@ -3617,7 +3704,7 @@ const chatRunManager = new ChatRunManager({
     if (isCancelledError(error)) return;
     await bot.sendMessage(chatId, `❌ /chat 실패: ${String(error?.message ?? error)}`);
   },
-  runChat: async ({ chatId, userId, message, inputKind, pendingCount, telegramMessageId, chatInfo }) => {
+  runChat: async ({ chatId, userId, message, inputKind, pendingCount, telegramMessageId, forceMode, chatInfo }) => {
     await runSupervisorChat(
       bot,
       chatId,
@@ -3630,6 +3717,7 @@ const chatRunManager = new ChatRunManager({
           : { chat_id: String(chatId || "") },
         inputKind: inputKind || (pendingCount > 1 ? "interrupt_update" : "chat_message"),
         telegramMessageId,
+        forceMode: normalizeForceMode(forceMode),
       }
     );
   },
@@ -3691,8 +3779,9 @@ bot.on("callback_query", async (q) => {
     if (!isAllowedChat(chatId) || !isAllowedUser(userId)) return;
 
     const data = String(q.data || "").trim();
-    if (data.startsWith("approve_action:") || data.startsWith("reject_action:")) {
+    if (data.startsWith("approve_action:") || data.startsWith("reject_action:") || data.startsWith("work_action:")) {
       const isApprove = data.startsWith("approve_action:");
+      const isWorkMode = data.startsWith("work_action:");
       const approvalId = String(data.split(":")[1] || "").trim();
       const session = chatSessionStore.get(chatId);
       const pending = session?.pending_approval && typeof session.pending_approval === "object"
@@ -3711,6 +3800,44 @@ bot.on("callback_query", async (q) => {
       }
 
       const pendingJobId = String(pending.job_id || session.jobId || resolveCurrentJobIdForChat(chatId) || "").trim();
+      if (isWorkMode) {
+        chatSessionStore.upsert(chatId, {
+          jobId: pendingJobId || String(session.jobId || "").trim(),
+          state: "idle",
+          pending_approval: null,
+          interrupt: null,
+        });
+        if (pendingJobId) {
+          tracking.append(pendingJobId, "decisions.md", [
+            "## /chat approval switched_to_work",
+            `- approval_id: ${approvalId}`,
+            `- action: ${chatActionLabel(pending.action)}`,
+            `- switched_by: telegram:${userId}`,
+          ].join("\n"));
+        }
+
+        const originalText = String(pending.original_user_text || "").trim();
+        await bot.answerCallbackQuery(q.id, { text: "work mode" });
+        if (!originalText) {
+          await bot.sendMessage(chatId, "원문 메시지를 찾지 못해 작업 모드 재실행을 할 수 없습니다. 새 지시를 보내 주세요.");
+          return;
+        }
+        await bot.sendMessage(chatId, "🧩 작업 모드로 다시 처리할게요.");
+        await chatRunManager.handleIncoming({
+          chatId,
+          userId,
+          text: originalText,
+          telegramMessageId: msg.message_id,
+          kind: "normal",
+          forceMode: "work",
+          chatInfo: {
+            chat_id: String(chatId || ""),
+            title: String(msg.chat?.title || msg.chat?.username || "").trim(),
+            type: String(msg.chat?.type || "").trim(),
+          },
+        });
+        return;
+      }
       if (!pendingJobId) {
         chatSessionStore.upsert(chatId, { state: "idle", pending_approval: null });
         await bot.answerCallbackQuery(q.id, { text: "job 없음" });
@@ -3749,8 +3876,8 @@ bot.on("callback_query", async (q) => {
         return;
       }
 
-      const resumedActions = remainingActions.map((action, index) => {
-        if (index !== 0) return action;
+      const resumedActions = markMutatingActionsConfirmed(remainingActions).map((action, index) => {
+        if (index !== 0 || !action || typeof action !== "object") return action;
         return { ...action, approved: true, _approved: true };
       });
       const runtime = await loadSupervisorRuntime(pendingJobId, {
@@ -3777,6 +3904,8 @@ bot.on("callback_query", async (q) => {
           userId,
           jobId: pendingJobId,
           plan: resumePlan,
+          originalUserText: String(pending.original_user_text || "승인된 액션 재개"),
+          forceMode: normalizeForceMode(pending.force_mode || "normal"),
           jobConfig: runtime.jobConfig,
           agents: runtime.agents,
           tools: runtime.tools,
@@ -3840,15 +3969,13 @@ bot.on("callback_query", async (q) => {
                   : []),
             },
           });
+          const prompt = buildPendingApprovalPrompt(resumedExecution.pendingApproval);
           await bot.sendMessage(
             chatId,
-            `추가 승인 대기 중입니다.\nreason=${resumedExecution.pendingApproval.reason}\naction=${chatActionLabel(resumedExecution.pendingApproval.action)}`,
+            prompt.text,
             {
               reply_markup: {
-                inline_keyboard: [[
-                  { text: "✅ Approve", callback_data: `approve_action:${resumedExecution.pendingApproval.id}` },
-                  { text: "❌ Reject", callback_data: `reject_action:${resumedExecution.pendingApproval.id}` },
-                ]],
+                inline_keyboard: prompt.keyboard,
               },
             }
           );
@@ -4062,27 +4189,11 @@ bot.on("message", async (msg) => {
       });
       return;
     }
-    const intent = classifyPlainChatIntent(plain);
-    if (intent === "soft_status") {
-      await sendChatStatus(bot, chatId);
-      return;
-    }
-    if (intent === "soft_context") {
-      await sendContextLinkQuick(bot, chatId, msg);
-      return;
-    }
-    if (intent === "soft_list_agents") {
-      await sendAgentOrToolListQuick(bot, chatId, "agent");
-      return;
-    }
-    if (intent === "soft_list_tools") {
-      await sendAgentOrToolListQuick(bot, chatId, "tool");
-      return;
-    }
     await chatRunManager.handleIncoming({
       chatId,
       userId,
       text: plain,
+      kind: "normal",
       telegramMessageId: msg.message_id,
       chatInfo: {
         chat_id: String(chatId || ""),
@@ -4099,10 +4210,10 @@ bot.on("message", async (msg) => {
   if (cmd === "/help") {
     const sub = String(args || "").trim().toLowerCase();
     if (sub === "advanced") {
-      await bot.sendMessage(chatId, "Commands:\n- plain text: 기본 /chat(supervisor) 처리\n- /whoami\n- /running\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
+      await bot.sendMessage(chatId, "Commands:\n- plain text: 기본 /chat(supervisor) 처리\n- /whoami\n- /running\n- /status\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents\n- /tools\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
       return;
     }
-    await bot.sendMessage(chatId, "Commands:\n- plain text: 대화/작업 지시\n- /context [global]\n- /stop [jobId]\n- /running\n- /whoami\n- /help advanced");
+    await bot.sendMessage(chatId, "Commands:\n- plain text: 대화/작업 지시\n- /context [global]\n- /agents\n- /tools\n- /status\n- /stop [jobId]\n- /running\n- /whoami\n- /help advanced");
     return;
   }
 
@@ -4255,16 +4366,18 @@ bot.on("message", async (msg) => {
     return;
   }
 
+  if (cmd === "/status") {
+    await sendChatStatus(bot, chatId);
+    return;
+  }
+
   if (cmd === "/agents") {
-    const reg = await refreshAgentRegistry();
-    const lines = [
-      `memory_mode=${MEMORY_MODE}`,
-      `effective_mode=${memoryModeWithFallback()}`,
-      `registry=${reg.path}`,
-      "",
-      ...reg.agents.map((row) => `- ${row.id}: provider=${row.provider}, model=${row.model}${row.description ? `, ${row.description}` : ""}`),
-    ];
-    await sendLong(bot, chatId, lines.join("\n"));
+    await sendAgentOrToolListQuick(bot, chatId, "agent");
+    return;
+  }
+
+  if (cmd === "/tools") {
+    await sendAgentOrToolListQuick(bot, chatId, "tool");
     return;
   }
 
@@ -4295,27 +4408,11 @@ bot.on("message", async (msg) => {
 
     try {
       if (!parsed.debug) {
-        const intent = classifyPlainChatIntent(message);
-        if (intent === "soft_status") {
-          await sendChatStatus(bot, chatId);
-          return;
-        }
-        if (intent === "soft_context") {
-          await sendContextLinkQuick(bot, chatId, { text: message });
-          return;
-        }
-        if (intent === "soft_list_agents") {
-          await sendAgentOrToolListQuick(bot, chatId, "agent");
-          return;
-        }
-        if (intent === "soft_list_tools") {
-          await sendAgentOrToolListQuick(bot, chatId, "tool");
-          return;
-        }
         await chatRunManager.handleIncoming({
           chatId,
           userId,
           text: message,
+          kind: "normal",
           telegramMessageId: msg.message_id,
           chatInfo: {
             chat_id: String(chatId || ""),

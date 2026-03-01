@@ -9,6 +9,46 @@ function asObject(v) {
   return v && typeof v === "object" ? v : {};
 }
 
+const MUTATING_ACTION_TYPES = new Set([
+  "propose_agent",
+  "create_agent",
+  "update_agent",
+  "enable_agent",
+  "disable_agent",
+  "enable_tool",
+  "disable_tool",
+  "install_agent_blueprint",
+  "publish_agent",
+]);
+
+export function isMutatingAction(actionOrType) {
+  const type = typeof actionOrType === "string"
+    ? actionOrType
+    : actionOrType?.type;
+  const key = String(type || "").trim().toLowerCase();
+  return MUTATING_ACTION_TYPES.has(key);
+}
+
+function isMutatingApproved(action) {
+  if (!action || typeof action !== "object") return false;
+  return action.approved === true
+    || action._approved === true
+    || action._mutating_confirmed === true;
+}
+
+function looksLikeWorkRequest(text) {
+  const src = String(text || "").toLowerCase();
+  if (!src) return false;
+  return /만들어줘|작성해줘|과제|리서치|분석|구현|코드|work|task|research|analy/i.test(src);
+}
+
+function mutatingPreviewLines(actions = []) {
+  const rows = Array.isArray(actions)
+    ? actions.filter((action) => isMutatingAction(action))
+    : [];
+  return rows.slice(0, 8).map((action) => `- ${actionLabel(action)}`);
+}
+
 function actionLabel(action) {
   const type = String(action?.type || "").trim().toLowerCase();
   if (!type) return "(unknown)";
@@ -80,6 +120,8 @@ export async function executeSupervisorActions({
   userId,
   jobId,
   plan,
+  originalUserText = "",
+  forceMode = "normal",
   jobConfig = {},
   agents = [],
   tools = [],
@@ -104,6 +146,10 @@ export async function executeSupervisorActions({
   let usedActions = 0;
   let blockedActions = 0;
   let interruptedByReplan = false;
+  const cleanOriginalUserText = String(originalUserText || "").trim();
+  const cleanForceMode = String(forceMode || "").trim().toLowerCase() === "work"
+    ? "work"
+    : "normal";
 
   if (sessionStore) {
     sessionStore.upsert(chatId, {
@@ -116,7 +162,48 @@ export async function executeSupervisorActions({
     });
   }
 
-  for (let i = 0; i < actions.length; i += 1) {
+  const mutatingIndex = actions.findIndex((action) => isMutatingAction(action) && !isMutatingApproved(action));
+  if (mutatingIndex >= 0) {
+    blockedActions += 1;
+    blockedIndex = mutatingIndex;
+    remainingActions = actions.slice(mutatingIndex);
+    const mutatingAction = actions[mutatingIndex];
+    const workLikeHint = looksLikeWorkRequest(cleanOriginalUserText);
+    pendingApproval = {
+      id: nextApprovalId(),
+      chat_id: String(chatId || ""),
+      job_id: String(jobId || ""),
+      action: mutatingAction,
+      reason: "관리 변경 적용 전 확인이 필요합니다.",
+      gate_type: "mutating_confirm",
+      mode_choice_required: true,
+      blocked_index: mutatingIndex,
+      remaining_actions: actions,
+      already_done: {
+        results: [...results],
+        outputs: [...outputs],
+      },
+      requested_by: String(userId || ""),
+      ts: new Date().toISOString(),
+      original_user_text: cleanOriginalUserText,
+      force_mode: cleanForceMode,
+      work_like_hint: workLikeHint,
+      preview_lines: mutatingPreviewLines(actions),
+    };
+    results.push({
+      label: actionLabel(mutatingAction),
+      status: "blocked",
+      note: "mutating confirm required",
+    });
+    if (sessionStore) {
+      sessionStore.upsert(chatId, {
+        state: "awaiting_approval",
+        pending_approval: pendingApproval,
+      });
+    }
+  }
+
+  for (let i = 0; i < actions.length && !pendingApproval; i += 1) {
     const action = actions[i];
     const label = actionLabel(action);
     const interruptBefore = readInterruptState(sessionStore, chatId);

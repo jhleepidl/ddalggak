@@ -2,6 +2,10 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function normalizeForceMode(raw) {
+  return String(raw || "").trim().toLowerCase() === "work" ? "work" : "normal";
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -14,6 +18,7 @@ function normalizePendingEntry(raw = {}) {
     ts: String(row.ts || nowIso()),
     user_id: String(row.user_id || row.userId || "").trim(),
     text,
+    force_mode: normalizeForceMode(row.force_mode || row.forceMode || "normal"),
     telegram_message_id: Number.isFinite(Number(row.telegram_message_id))
       ? Number(row.telegram_message_id)
       : (Number.isFinite(Number(row.telegramMessageId))
@@ -83,6 +88,7 @@ export class ChatRunManager {
         lastAckAtMs: 0,
         chatInfo: null,
         nextInputKind: null,
+        nextForceMode: "normal",
       });
     }
     return this.chatState.get(key);
@@ -101,11 +107,12 @@ export class ChatRunManager {
     }));
   }
 
-  _appendPending(chatId, { userId = "", text = "", telegramMessageId = null } = {}) {
+  _appendPending(chatId, { userId = "", text = "", forceMode = "normal", telegramMessageId = null } = {}) {
     const normalized = normalizePendingEntry({
       ts: nowIso(),
       user_id: String(userId || "").trim(),
       text,
+      force_mode: normalizeForceMode(forceMode),
       telegram_message_id: telegramMessageId,
     });
     if (!normalized) return;
@@ -183,7 +190,9 @@ export class ChatRunManager {
       const slot = this._slot(chatId);
       const inputKind = slot.nextInputKind
         || (merged.count > 1 ? "interrupt_update" : "chat_message");
+      const forceMode = normalizeForceMode(slot.nextForceMode || merged.latest?.force_mode || "normal");
       slot.nextInputKind = null;
+      slot.nextForceMode = "normal";
       this.sessionStore.upsert(chatId, (session) => ({
         ...session,
         active_run_id: runId,
@@ -204,6 +213,7 @@ export class ChatRunManager {
           pendingCount: merged.count,
           pendingRows: merged.rows,
           telegramMessageId: merged.latest?.telegram_message_id || null,
+          forceMode,
           chatInfo,
         });
       } catch (e) {
@@ -245,6 +255,7 @@ export class ChatRunManager {
     const cleanReason = String(reason || "").trim();
     const slot = this._slot(chatId);
     slot.nextInputKind = null;
+    slot.nextForceMode = "normal";
     this.sessionStore.upsert(chatId, (session) => ({
       ...session,
       pending_approval: null,
@@ -270,10 +281,12 @@ export class ChatRunManager {
     telegramMessageId = null,
     chatInfo = null,
     kind = "normal",
+    forceMode = "normal",
   } = {}) {
     const cleanText = String(text || "").trim();
     if (!cleanText) return { status: "ignored" };
     const incomingKind = String(kind || "normal").trim().toLowerCase();
+    const cleanForceMode = normalizeForceMode(forceMode);
 
     const slot = this._slot(chatId);
     if (chatInfo && typeof chatInfo === "object") {
@@ -285,6 +298,7 @@ export class ChatRunManager {
     this._appendPending(chatId, {
       userId,
       text: cleanText,
+      forceMode: cleanForceMode,
       telegramMessageId,
     });
 
@@ -301,6 +315,7 @@ export class ChatRunManager {
         });
       }
       slot.nextInputKind = "interrupt_update";
+      slot.nextForceMode = cleanForceMode;
       this._markInterrupt(chatId, "replan", cleanText);
       await this._cancelCurrent(chatId, { mode: "replan", reason: cleanText });
       await this._ack(chatId, "replan", cleanText);

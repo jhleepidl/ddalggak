@@ -9,6 +9,27 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function normalizePendingApproval(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const row = { ...raw };
+  const previewLines = Array.isArray(row.preview_lines)
+    ? row.preview_lines.map((entry) => String(entry || "").trim()).filter(Boolean).slice(0, 12)
+    : [];
+  return {
+    ...row,
+    id: String(row.id || "").trim(),
+    chat_id: String(row.chat_id || "").trim(),
+    job_id: String(row.job_id || "").trim(),
+    reason: String(row.reason || "").trim(),
+    ts: String(row.ts || nowIso()),
+    original_user_text: String(row.original_user_text || "").trim(),
+    force_mode: String(row.force_mode || "").trim().toLowerCase() === "work" ? "work" : "normal",
+    gate_type: String(row.gate_type || "").trim() || undefined,
+    mode_choice_required: row.mode_choice_required === true,
+    preview_lines: previewLines,
+  };
+}
+
 function normalizePublicSearchCache(raw) {
   const rows = Array.isArray(raw) ? raw : [];
   const out = [];
@@ -48,6 +69,7 @@ function normalizeSession(chatId, raw = {}) {
       ts: String(entry.ts || nowIso()),
       user_id: String(entry.user_id || entry.userId || "").trim(),
       text,
+      force_mode: String(entry.force_mode || entry.forceMode || "").trim().toLowerCase() === "work" ? "work" : "normal",
       telegram_message_id: Number.isFinite(Number(entry.telegram_message_id))
         ? Number(entry.telegram_message_id)
         : (Number.isFinite(Number(entry.telegramMessageId))
@@ -82,7 +104,7 @@ function normalizeSession(chatId, raw = {}) {
       used_actions: Number.isFinite(Number(budgetRaw.used_actions)) ? Math.max(0, Math.floor(Number(budgetRaw.used_actions))) : 0,
       blocked_actions: Number.isFinite(Number(budgetRaw.blocked_actions)) ? Math.max(0, Math.floor(Number(budgetRaw.blocked_actions))) : 0,
     },
-    pending_approval: row.pending_approval && typeof row.pending_approval === "object" ? row.pending_approval : null,
+    pending_approval: normalizePendingApproval(row.pending_approval),
     pending_user_messages: pendingUserMessages,
     interrupt,
     dashboard: dashboardMessageId ? { message_id: dashboardMessageId } : null,
