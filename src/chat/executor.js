@@ -55,6 +55,8 @@ export async function executeSupervisorActions({
   const outputs = [];
   let detailContext = "";
   let pendingApproval = null;
+  let blockedIndex = -1;
+  let remainingActions = [];
   let usedActions = 0;
   let blockedActions = 0;
 
@@ -69,7 +71,8 @@ export async function executeSupervisorActions({
     });
   }
 
-  for (const action of actions) {
+  for (let i = 0; i < actions.length; i += 1) {
+    const action = actions[i];
     const label = actionLabel(action);
     if (!isActionAllowed(action, allowlist)) {
       blockedActions += 1;
@@ -91,12 +94,20 @@ export async function executeSupervisorActions({
     });
     if (approval.required) {
       blockedActions += 1;
+      blockedIndex = i;
+      remainingActions = actions.slice(i);
       pendingApproval = {
         id: nextApprovalId(),
         chat_id: String(chatId || ""),
         job_id: String(jobId || ""),
         action,
         reason: approval.reason,
+        blocked_index: i,
+        remaining_actions: remainingActions,
+        already_done: {
+          results: [...results],
+          outputs: [...outputs],
+        },
         requested_by: String(userId || ""),
         ts: new Date().toISOString(),
       };
@@ -238,6 +249,7 @@ export async function executeSupervisorActions({
     currentJobId: String(jobId || ""),
     detailContext,
     pendingApproval,
+    blocked_index: blockedIndex,
+    remaining_actions: remainingActions,
   };
 }
-

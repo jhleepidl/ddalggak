@@ -168,6 +168,9 @@ export function actionNeedsApproval(action, {
   approval = {},
   provider = "",
 } = {}) {
+  if (action && (action.approved === true || action._approved === true)) {
+    return { required: false, reason: "" };
+  }
   const policy = asObject(approval);
   const requiredRisks = Array.isArray(policy.require_for_risk)
     ? policy.require_for_risk.map((row) => normalizeRisk(row, "L3"))

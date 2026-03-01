@@ -163,7 +163,7 @@ function runWithInflight(map, key, task) {
   return p;
 }
 
-async function ensureServiceThread(client, { baseDir, key, title, lookupTitles = [] }) {
+async function ensureServiceThread(client, { baseDir, key, title, lookupTitles = [], preferLookupTitles = false }) {
   const serviceKey = String(key || "").trim();
   if (!serviceKey) throw new Error("ensureServiceThread requires key");
   const lockKey = `${path.resolve(baseDir || process.cwd())}::${serviceKey}`;
@@ -173,14 +173,28 @@ async function ensureServiceThread(client, { baseDir, key, title, lookupTitles =
 
     let threadId = String(slot.threadId || "").trim();
     let ctxId = String(slot.ctxId || "").trim();
+    const desiredTitle = String(title || "").trim();
+    const candidates = [...lookupTitles, desiredTitle]
+      .map((row) => String(row || "").trim())
+      .filter(Boolean)
+      .filter((row, idx, arr) => arr.indexOf(row) === idx);
+
+    if (preferLookupTitles && candidates.length > 0) {
+      for (const candidate of candidates) {
+        try {
+          const found = await client.findThreadByTitle(candidate);
+          if (found?.id) {
+            if (threadId !== found.id) {
+              threadId = found.id;
+              ctxId = "";
+            }
+            break;
+          }
+        } catch {}
+      }
+    }
 
     if (!threadId) {
-      const desiredTitle = String(title || "").trim();
-      const candidates = [...lookupTitles, desiredTitle]
-        .map((row) => String(row || "").trim())
-        .filter(Boolean)
-        .filter((row, idx, arr) => arr.indexOf(row) === idx);
-
       for (const candidate of candidates) {
         try {
           const found = await client.findThreadByTitle(candidate);
@@ -239,16 +253,18 @@ export async function ensureAgentsThread(client, { baseDir, title = "" }) {
 export async function ensureToolsThread(client, { baseDir, title = "" }) {
   const hintedTitle = String(title || "").trim();
   const lookupTitles = [
+    "tools:specs",
     "tools",
     "tool_specs",
   ];
-  if (hintedTitle && !lookupTitles.includes(hintedTitle)) lookupTitles.unshift(hintedTitle);
+  if (hintedTitle && !lookupTitles.includes(hintedTitle)) lookupTitles.splice(1, 0, hintedTitle);
 
   return await ensureServiceThread(client, {
     baseDir,
     key: "tools",
     title: DEFAULT_TOOLS_THREAD_TITLE,
     lookupTitles,
+    preferLookupTitles: true,
   });
 }
 
@@ -271,16 +287,25 @@ async function ensureDefaultJobConfigResource(client, { threadId, ctxId, jobId }
   const hasValidConfig = resources.some((resource) => {
     const payload = resource?.payload && typeof resource.payload === "object" ? resource.payload : {};
     if (payload.job_config && typeof payload.job_config === "object") return true;
-    const fromText = parseJsonMaybe(resource?.text || resource?.summary || "");
+    const fromText = parseJsonMaybe(
+      resource?.text
+      || resource?.raw?.raw_text
+      || resource?.raw?.rawText
+      || resource?.summary
+      || ""
+    );
     return !!(fromText && typeof fromText === "object");
   });
   if (hasValidConfig) return resources[resources.length - 1] || null;
 
   const nowIso = new Date().toISOString();
   const config = defaultJobConfig(jid);
+  const rawText = `${JSON.stringify(config, null, 2)}\n`;
   return await client.createResource(tid, {
     name: `job_config@${nowIso}`,
-    summary: `${JSON.stringify(config, null, 2)}\n`,
+    summary: "default supervisor job_config",
+    text_mode: "plain",
+    raw_text: rawText,
     resource_kind: "job_config",
     uri: `ddalggak://jobs/${jid}/job_config`,
     context_set_id: cid,

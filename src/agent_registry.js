@@ -211,6 +211,8 @@ function getResourceText(resource) {
   const raw = asObject(row.raw);
   return String(
     row.text
+    || raw.raw_text
+    || raw.rawText
     || row.summary
     || raw.summary
     || raw.text
@@ -353,12 +355,14 @@ async function upsertAgentProfile(client, { baseDir, profile, format = "json", o
   const slot = await ensureAgentsThread(client, { baseDir });
   const nowIso = new Date().toISOString();
   const fmt = String(format || "json").trim().toLowerCase() === "yaml" ? "yaml" : "json";
-  const text = fmt === "yaml" ? serializeAgentProfileYaml(agent) : `${JSON.stringify(agent, null, 2)}\n`;
+  const rawText = `${JSON.stringify(agent, null, 2)}\n`;
   const prev = await findLatestAgentNode(client, slot.threadId, agent.id);
 
   const created = await client.createResource(slot.threadId, {
     name: `agent:${agent.id}@${nowIso}`,
-    summary: text,
+    summary: `agent_profile ${agent.id} (${op})`,
+    text_mode: "plain",
+    raw_text: rawText,
     resource_kind: "agent_profile",
     uri: `ddalggak://agents/${agent.id}`,
     context_set_id: slot.ctxId,

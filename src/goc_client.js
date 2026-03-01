@@ -272,8 +272,8 @@ export class GocClient {
     return {
       id: pickId(row),
       name: String(pick(row, ["name", "title"]) || ""),
-      text: String(pick(row, ["text", "content", "summary", "compiled_text"]) || ""),
-      summary: String(pick(row, ["summary", "text", "content"]) || ""),
+      text: String(pick(row, ["raw_text", "rawText", "text", "content", "summary", "compiled_text"]) || ""),
+      summary: String(pick(row, ["summary", "text", "content", "raw_text", "rawText"]) || ""),
       uri: String(pick(row, ["uri", "url"]) || ""),
       resourceKind: String(
         pick(row, ["resource_kind", "resourceKind", "kind"])

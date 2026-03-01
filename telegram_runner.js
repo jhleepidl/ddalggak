@@ -1289,6 +1289,8 @@ function parseStructuredFromResource(resource, preferredPayloadKey = "") {
 
   const text = String(
     row.text
+    || row.raw?.raw_text
+    || row.raw?.rawText
     || row.summary
     || row.raw?.summary
     || row.raw?.text
@@ -1567,10 +1569,12 @@ async function createAgentDraftProposal(bot, chatId, userId, jobId, action) {
   const client = requireGocClient();
   const slot = await ensureAgentsThread(client, { baseDir: jobs.baseDir });
   const nowIso = new Date().toISOString();
-  const summary = `${JSON.stringify(profile, null, 2)}\n`;
+  const rawText = `${JSON.stringify(profile, null, 2)}\n`;
   const created = await client.createResource(slot.threadId, {
     name: `agent_draft:${profile.id}@${nowIso}`,
-    summary,
+    summary: `agent_profile_draft ${profile.id}`,
+    text_mode: "plain",
+    raw_text: rawText,
     resource_kind: "agent_profile_draft",
     uri: `ddalggak://agents/draft/${profile.id}`,
     context_set_id: slot.ctxId,
@@ -1662,7 +1666,9 @@ async function appendParticipantToJobConfig(client, { jobId, agentId, actor = ""
 
   const created = await client.createResource(map.threadId, {
     name: `job_config@${new Date().toISOString()}`,
-    summary: `${JSON.stringify(nextConfig, null, 2)}\n`,
+    summary: `job_config update (${agentId})`,
+    text_mode: "plain",
+    raw_text: `${JSON.stringify(nextConfig, null, 2)}\n`,
     resource_kind: "job_config",
     uri: `ddalggak://jobs/${jobId}/job_config`,
     context_set_id: map.ctxSharedId,
@@ -1683,6 +1689,69 @@ async function appendParticipantToJobConfig(client, { jobId, agentId, actor = ""
     } catch {}
   }
   return { map, created, config: nextConfig };
+}
+
+function buildSupervisorExecutionCallbacks({
+  bot,
+  chatId,
+  userId,
+  jobId,
+  runtime,
+  controller,
+  verbose,
+}) {
+  return {
+    runAgent: async ({ action, detailContext }) => {
+      const detail = String(detailContext || "").trim();
+      const promptSegments = [
+        String(action.goal || "").trim(),
+        runtime.contextSummary ? `[JOB COMPILED CONTEXT]\n${clip(runtime.contextSummary, 9000)}` : "",
+        detail ? `[DETAIL CONTEXT]\n${detail}` : "",
+        runtime.globalSummary ? `[GLOBAL MEMORY]\n${clip(runtime.globalSummary, 5000)}` : "",
+      ].filter(Boolean);
+      const finalPrompt = promptSegments.join("\n\n");
+      return await enqueue(
+        () => executeAgentRun(
+          bot,
+          chatId,
+          jobId,
+          { type: "agent_run", agent: String(action.agent_id || "").trim().toLowerCase(), prompt: finalPrompt },
+          { signal: controller.signal, notify: verbose }
+        ),
+        { jobId, signal: controller.signal, label: `chat_v2_run_${String(action.agent_id || "agent")}` }
+      );
+    },
+    proposeAgent: async ({ action }) => {
+      return await createAgentDraftProposal(bot, chatId, userId, jobId, action);
+    },
+    openContext: async ({ action }) => {
+      const target = action.scope === "global" ? "global" : jobId;
+      const info = await buildContextInfo(target, { chatId });
+      return {
+        scope: info.scope,
+        link: info.link,
+        text: info.lines.join("\n"),
+      };
+    },
+    needMoreDetail: async ({ action }) => {
+      if (!runtime.map?.ctxSharedId || memoryModeWithFallback() !== "goc") {
+        throw new Error("need_more_detail requires MEMORY_MODE=goc");
+      }
+      const contextSetId = String(action.context_set_id || runtime.map.ctxSharedId).trim() || runtime.map.ctxSharedId;
+      return await expandDetailContext({
+        client: requireGocClient(),
+        contextSetId,
+        nodeIds: action.node_ids || [],
+        depth: action.depth || 1,
+        maxChars: action.max_chars || 7000,
+      });
+    },
+    summarize: async ({ results }) => {
+      const okCount = results.filter((row) => row.status === "ok").length;
+      const errorCount = results.filter((row) => row.status === "error").length;
+      return { text: `실행 완료: ok=${okCount}, error=${errorCount}` };
+    },
+  };
 }
 
 async function runSupervisorChat(bot, chatId, userId, message, { debug = false } = {}) {
@@ -1748,58 +1817,15 @@ async function runSupervisorChat(bot, chatId, userId, message, { debug = false }
       agents: runtime.agents,
       tools: runtime.tools,
       sessionStore: chatSessionStore,
-      callbacks: {
-        runAgent: async ({ action, detailContext }) => {
-          const detail = String(detailContext || "").trim();
-          const promptSegments = [
-            String(action.goal || "").trim(),
-            runtime.contextSummary ? `[JOB COMPILED CONTEXT]\n${clip(runtime.contextSummary, 9000)}` : "",
-            detail ? `[DETAIL CONTEXT]\n${detail}` : "",
-            runtime.globalSummary ? `[GLOBAL MEMORY]\n${clip(runtime.globalSummary, 5000)}` : "",
-          ].filter(Boolean);
-          const finalPrompt = promptSegments.join("\n\n");
-          return await enqueue(
-            () => executeAgentRun(
-              bot,
-              chatId,
-              currentJobId,
-              { type: "agent_run", agent: String(action.agent_id || "").trim().toLowerCase(), prompt: finalPrompt },
-              { signal: controller.signal, notify: verbose }
-            ),
-            { jobId: currentJobId, signal: controller.signal, label: `chat_v2_run_${String(action.agent_id || "agent")}` }
-          );
-        },
-        proposeAgent: async ({ action }) => {
-          return await createAgentDraftProposal(bot, chatId, userId, currentJobId, action);
-        },
-        openContext: async ({ action }) => {
-          const target = action.scope === "global" ? "global" : currentJobId;
-          const info = await buildContextInfo(target, { chatId });
-          return {
-            scope: info.scope,
-            link: info.link,
-            text: info.lines.join("\n"),
-          };
-        },
-        needMoreDetail: async ({ action }) => {
-          if (!runtime.map?.ctxSharedId || memoryModeWithFallback() !== "goc") {
-            throw new Error("need_more_detail requires MEMORY_MODE=goc");
-          }
-          const contextSetId = String(action.context_set_id || runtime.map.ctxSharedId).trim() || runtime.map.ctxSharedId;
-          return await expandDetailContext({
-            client: requireGocClient(),
-            contextSetId,
-            nodeIds: action.node_ids || [],
-            depth: action.depth || 1,
-            maxChars: action.max_chars || 7000,
-          });
-        },
-        summarize: async ({ results }) => {
-          const okCount = results.filter((row) => row.status === "ok").length;
-          const errorCount = results.filter((row) => row.status === "error").length;
-          return { text: `실행 완료: ok=${okCount}, error=${errorCount}` };
-        },
-      },
+      callbacks: buildSupervisorExecutionCallbacks({
+        bot,
+        chatId,
+        userId,
+        jobId: currentJobId,
+        runtime,
+        controller,
+        verbose,
+      }),
     });
 
     tracking.append(currentJobId, "decisions.md", [
@@ -1812,6 +1838,21 @@ async function runSupervisorChat(bot, chatId, userId, message, { debug = false }
     ].join("\n"));
 
     if (execution.pendingApproval) {
+      chatSessionStore.upsert(chatId, {
+        jobId: currentJobId,
+        state: "awaiting_approval",
+        pending_approval: {
+          ...execution.pendingApproval,
+          blocked_index: Number.isFinite(Number(execution.blocked_index))
+            ? Number(execution.blocked_index)
+            : Number(execution.pendingApproval?.blocked_index ?? -1),
+          remaining_actions: Array.isArray(execution.remaining_actions)
+            ? execution.remaining_actions
+            : (Array.isArray(execution.pendingApproval?.remaining_actions)
+              ? execution.pendingApproval.remaining_actions
+              : []),
+        },
+      });
       tracking.append(currentJobId, "decisions.md", [
         "## /chat approval required",
         `- reason: ${execution.pendingApproval.reason}`,
@@ -1836,6 +1877,20 @@ async function runSupervisorChat(bot, chatId, userId, message, { debug = false }
       await sendLong(bot, chatId, formatChatSummary(routePlan, execution.results));
     }
     await sendLong(bot, chatId, replyText);
+    if (execution.pendingApproval?.id) {
+      await bot.sendMessage(
+        chatId,
+        `승인 대기 중입니다.\nreason=${execution.pendingApproval.reason}\naction=${chatActionLabel(execution.pendingApproval.action)}`,
+        {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: "✅ Approve", callback_data: `approve_action:${execution.pendingApproval.id}` },
+              { text: "❌ Reject", callback_data: `reject_action:${execution.pendingApproval.id}` },
+            ]],
+          },
+        }
+      );
+    }
     return { routePlan, execution, jobId: currentJobId };
   } finally {
     if (activeJobByChat.get(chatKey) === currentJobId) activeJobByChat.delete(chatKey);
@@ -2204,6 +2259,179 @@ bot.on("callback_query", async (q) => {
     if (!isAllowedChat(chatId) || !isAllowedUser(userId)) return;
 
     const data = String(q.data || "").trim();
+    if (data.startsWith("approve_action:") || data.startsWith("reject_action:")) {
+      const isApprove = data.startsWith("approve_action:");
+      const approvalId = String(data.split(":")[1] || "").trim();
+      const session = chatSessionStore.get(chatId);
+      const pending = session?.pending_approval && typeof session.pending_approval === "object"
+        ? session.pending_approval
+        : null;
+
+      if (!pending?.id) {
+        await bot.answerCallbackQuery(q.id, { text: "pending approval 없음" });
+        await bot.sendMessage(chatId, "현재 승인 대기 중인 액션이 없습니다.");
+        return;
+      }
+      if (String(pending.id) !== approvalId) {
+        await bot.answerCallbackQuery(q.id, { text: "approval id 불일치" });
+        await bot.sendMessage(chatId, "승인 토큰이 현재 대기 상태와 일치하지 않습니다.");
+        return;
+      }
+
+      const pendingJobId = String(pending.job_id || session.jobId || resolveCurrentJobIdForChat(chatId) || "").trim();
+      if (!pendingJobId) {
+        chatSessionStore.upsert(chatId, { state: "idle", pending_approval: null });
+        await bot.answerCallbackQuery(q.id, { text: "job 없음" });
+        await bot.sendMessage(chatId, "승인 재개 대상 jobId를 찾지 못해 pending 상태를 정리했습니다.");
+        return;
+      }
+
+      if (!isApprove) {
+        chatSessionStore.upsert(chatId, {
+          jobId: pendingJobId,
+          state: "idle",
+          pending_approval: null,
+        });
+        tracking.append(pendingJobId, "decisions.md", [
+          "## /chat approval rejected",
+          `- approval_id: ${approvalId}`,
+          `- action: ${chatActionLabel(pending.action)}`,
+          `- rejected_by: telegram:${userId}`,
+        ].join("\n"));
+        await bot.answerCallbackQuery(q.id, { text: "rejected" });
+        await bot.sendMessage(chatId, "승인 거절됨. 대기 중이던 액션은 취소되었습니다.");
+        return;
+      }
+
+      await bot.answerCallbackQuery(q.id, { text: "approved" });
+      const remainingActions = Array.isArray(pending.remaining_actions) && pending.remaining_actions.length > 0
+        ? pending.remaining_actions
+        : (pending.action ? [pending.action] : []);
+      if (remainingActions.length === 0) {
+        chatSessionStore.upsert(chatId, {
+          jobId: pendingJobId,
+          state: "idle",
+          pending_approval: null,
+        });
+        await bot.sendMessage(chatId, "재개할 남은 action이 없어 승인 대기를 해제했습니다.");
+        return;
+      }
+
+      const resumedActions = remainingActions.map((action, index) => {
+        if (index !== 0) return action;
+        return { ...action, approved: true, _approved: true };
+      });
+      const runtime = await loadSupervisorRuntime(pendingJobId);
+      const controller = resetJobAbortController(pendingJobId);
+      const chatKey = String(chatId);
+      activeJobByChat.set(chatKey, pendingJobId);
+      rememberLastChatJob(chatId, pendingJobId);
+      chatSessionStore.upsert(chatId, {
+        jobId: pendingJobId,
+        state: "executing",
+        pending_approval: null,
+      });
+
+      try {
+        const resumePlan = {
+          reason: `resume_after_approval:${approvalId}`,
+          actions: resumedActions,
+          final_response_style: runtime.jobConfig?.final_response_style || "concise",
+        };
+        const resumedExecution = await executeSupervisorActions({
+          chatId,
+          userId,
+          jobId: pendingJobId,
+          plan: resumePlan,
+          jobConfig: runtime.jobConfig,
+          agents: runtime.agents,
+          tools: runtime.tools,
+          sessionStore: chatSessionStore,
+          callbacks: buildSupervisorExecutionCallbacks({
+            bot,
+            chatId,
+            userId,
+            jobId: pendingJobId,
+            runtime,
+            controller,
+            verbose: CHAT_VERBOSE,
+          }),
+        });
+
+        const prevDone = pending.already_done && typeof pending.already_done === "object"
+          ? pending.already_done
+          : {};
+        const mergedExecution = {
+          ...resumedExecution,
+          currentJobId: pendingJobId,
+          results: [
+            ...(Array.isArray(prevDone.results) ? prevDone.results : []),
+            ...(Array.isArray(resumedExecution.results) ? resumedExecution.results : []),
+          ],
+          outputs: [
+            ...(Array.isArray(prevDone.outputs) ? prevDone.outputs : []),
+            ...(Array.isArray(resumedExecution.outputs) ? resumedExecution.outputs : []),
+          ],
+        };
+        const summaryPlan = session.last_route && typeof session.last_route === "object"
+          ? session.last_route
+          : resumePlan;
+        const finalReply = await synthesizeChatReply("승인된 액션 재개", summaryPlan, mergedExecution);
+        const replyText = resumedExecution.pendingApproval
+          ? `${finalReply}\n\n⚠️ 추가 승인 필요: ${resumedExecution.pendingApproval.reason}`
+          : finalReply;
+        await sendLong(bot, chatId, replyText);
+
+        tracking.append(pendingJobId, "decisions.md", [
+          "## /chat approval resumed",
+          `- approval_id: ${approvalId}`,
+          `- resumed_actions: ${resumedActions.map((row) => chatActionLabel(row)).join(" -> ")}`,
+          `- pending_after_resume: ${resumedExecution.pendingApproval ? "yes" : "no"}`,
+          `- approved_by: telegram:${userId}`,
+        ].join("\n"));
+
+        if (resumedExecution.pendingApproval?.id) {
+          chatSessionStore.upsert(chatId, {
+            jobId: pendingJobId,
+            state: "awaiting_approval",
+            pending_approval: {
+              ...resumedExecution.pendingApproval,
+              blocked_index: Number.isFinite(Number(resumedExecution.blocked_index))
+                ? Number(resumedExecution.blocked_index)
+                : Number(resumedExecution.pendingApproval?.blocked_index ?? -1),
+              remaining_actions: Array.isArray(resumedExecution.remaining_actions)
+                ? resumedExecution.remaining_actions
+                : (Array.isArray(resumedExecution.pendingApproval?.remaining_actions)
+                  ? resumedExecution.pendingApproval.remaining_actions
+                  : []),
+            },
+          });
+          await bot.sendMessage(
+            chatId,
+            `추가 승인 대기 중입니다.\nreason=${resumedExecution.pendingApproval.reason}\naction=${chatActionLabel(resumedExecution.pendingApproval.action)}`,
+            {
+              reply_markup: {
+                inline_keyboard: [[
+                  { text: "✅ Approve", callback_data: `approve_action:${resumedExecution.pendingApproval.id}` },
+                  { text: "❌ Reject", callback_data: `reject_action:${resumedExecution.pendingApproval.id}` },
+                ]],
+              },
+            }
+          );
+        } else {
+          chatSessionStore.upsert(chatId, {
+            jobId: pendingJobId,
+            state: "idle",
+            pending_approval: null,
+          });
+        }
+      } finally {
+        if (activeJobByChat.get(chatKey) === pendingJobId) activeJobByChat.delete(chatKey);
+        jobAbortControllers.delete(pendingJobId);
+      }
+      return;
+    }
+
     if (data === "open_agents_ui") {
       try {
         const info = await openAgentsUiInfo();
