@@ -107,6 +107,14 @@ function computeEnabledIds(selectionSet, allIds = []) {
   return catalog.filter((id) => !disabled.has(id));
 }
 
+function pickDefaultEnabledAgentId(allIds = []) {
+  const catalog = normalizeStringList(allIds, { lower: true });
+  if (catalog.length === 0) return "";
+  if (catalog.includes("router")) return "router";
+  if (catalog.includes("coder")) return "coder";
+  return catalog[0] || "";
+}
+
 function defaultJobConfig(jobId) {
   return {
     version: 2,
@@ -192,7 +200,11 @@ export function normalizeJobConfig(jobConfig, { agentsCatalog = [], toolsCatalog
   const toolSet = normalizeSelectionSet(rawToolSet || base.tool_set, { lower: true });
   const allAgentIds = normalizeCatalogIds(agentsCatalog);
   const allToolIds = normalizeCatalogIds(toolsCatalog);
-  const enabledAgentIds = computeEnabledIds(agentSet, allAgentIds);
+  let enabledAgentIds = computeEnabledIds(agentSet, allAgentIds);
+  if (enabledAgentIds.length === 0) {
+    const fallbackAgentId = pickDefaultEnabledAgentId(allAgentIds);
+    if (fallbackAgentId) enabledAgentIds = [fallbackAgentId];
+  }
   const enabledToolIds = computeEnabledIds(toolSet, allToolIds);
 
   const configNormalized = {
