@@ -36,16 +36,56 @@ function normalizePublicSearchCache(raw) {
 function normalizeSession(chatId, raw = {}) {
   const row = asObject(raw);
   const budgetRaw = asObject(row.budget);
+  const pendingMessagesRaw = Array.isArray(row.pending_user_messages)
+    ? row.pending_user_messages
+    : [];
+  const pendingUserMessages = [];
+  for (const entry of pendingMessagesRaw) {
+    if (!entry || typeof entry !== "object") continue;
+    const text = String(entry.text || "").trim();
+    if (!text) continue;
+    pendingUserMessages.push({
+      ts: String(entry.ts || nowIso()),
+      user_id: String(entry.user_id || entry.userId || "").trim(),
+      text,
+      telegram_message_id: Number.isFinite(Number(entry.telegram_message_id))
+        ? Number(entry.telegram_message_id)
+        : (Number.isFinite(Number(entry.telegramMessageId))
+          ? Number(entry.telegramMessageId)
+          : null),
+    });
+    if (pendingUserMessages.length >= 50) break;
+  }
+  const interruptRaw = row.interrupt && typeof row.interrupt === "object" ? row.interrupt : null;
+  const interruptMode = String(interruptRaw?.mode || "").trim().toLowerCase();
+  const interrupt = interruptRaw
+    ? {
+      requested: interruptRaw.requested !== false,
+      mode: interruptMode === "cancel" ? "cancel" : "replan",
+      reason: String(interruptRaw.reason || "").trim(),
+      ts: String(interruptRaw.ts || nowIso()),
+    }
+    : null;
+  const dashboardRaw = row.dashboard && typeof row.dashboard === "object" ? row.dashboard : null;
+  const dashboardMessageId = Number.isFinite(Number(dashboardRaw?.message_id))
+    ? Number(dashboardRaw.message_id)
+    : (Number.isFinite(Number(dashboardRaw?.messageId))
+      ? Number(dashboardRaw.messageId)
+      : null);
   return {
     chat_id: String(chatId || row.chat_id || "").trim(),
     jobId: String(row.jobId || "").trim(),
     state: String(row.state || "idle").trim() || "idle",
+    active_run_id: String(row.active_run_id || row.activeRunId || "").trim() || null,
     budget: {
       max_actions: Number.isFinite(Number(budgetRaw.max_actions)) ? Math.max(1, Math.floor(Number(budgetRaw.max_actions))) : 4,
       used_actions: Number.isFinite(Number(budgetRaw.used_actions)) ? Math.max(0, Math.floor(Number(budgetRaw.used_actions))) : 0,
       blocked_actions: Number.isFinite(Number(budgetRaw.blocked_actions)) ? Math.max(0, Math.floor(Number(budgetRaw.blocked_actions))) : 0,
     },
     pending_approval: row.pending_approval && typeof row.pending_approval === "object" ? row.pending_approval : null,
+    pending_user_messages: pendingUserMessages,
+    interrupt,
+    dashboard: dashboardMessageId ? { message_id: dashboardMessageId } : null,
     last_route: row.last_route && typeof row.last_route === "object" ? row.last_route : null,
     public_search_cache: normalizePublicSearchCache(row.public_search_cache),
     updated_at: String(row.updated_at || nowIso()),

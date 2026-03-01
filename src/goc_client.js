@@ -244,9 +244,15 @@ export class GocClient {
 
   normalizeThread(entity) {
     const row = asObject(entity);
+    const metaRaw = pick(row, ["meta_json", "metaJson", "meta"]);
+    const meta = metaRaw && typeof metaRaw === "object"
+      ? asObject(metaRaw)
+      : asObject(parseJsonMaybe(String(metaRaw || "")));
     return {
       id: pickId(row),
       title: String(pick(row, ["title", "name"]) || ""),
+      externalRef: String(pick(row, ["external_ref", "externalRef", "ref"]) || ""),
+      meta,
       raw: row,
     };
   }
@@ -343,6 +349,62 @@ export class GocClient {
     if (!clean) return null;
     const list = await this.listThreads();
     return list.find((row) => row.title === clean) || null;
+  }
+
+  async findThreadByExternalRef(externalRef) {
+    const clean = String(externalRef || "").trim();
+    if (!clean) return null;
+    const list = await this.listThreads();
+    return list.find((row) => String(row?.externalRef || "").trim() === clean) || null;
+  }
+
+  async ensureThread({ title = "", externalRef = "", metaJson = null } = {}) {
+    const cleanTitle = String(title || "").trim();
+    const cleanExternalRef = String(externalRef || "").trim();
+    if (!cleanTitle && !cleanExternalRef) {
+      throw new Error("ensureThread requires title or externalRef");
+    }
+
+    const payload = {
+      title: cleanTitle || undefined,
+      external_ref: cleanExternalRef || undefined,
+      externalRef: cleanExternalRef || undefined,
+      meta_json: metaJson && typeof metaJson === "object" ? metaJson : undefined,
+      metaJson: metaJson && typeof metaJson === "object" ? metaJson : undefined,
+    };
+
+    const data = await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: "/api/threads/ensure", body: payload },
+        { path: "/threads/ensure", body: payload },
+        { path: "/v1/threads/ensure", body: payload },
+        { path: "/api/threads:ensure", body: payload },
+      ],
+    });
+    const entity = normalizeEntity(data, ["thread", "data"]);
+    let thread = this.normalizeThread(entity);
+    if (!thread.id) {
+      const list = normalizeArrayResponse(data);
+      for (const row of list) {
+        const normalized = this.normalizeThread(normalizeEntity(row, ["thread", "data"]));
+        if (!normalized.id) continue;
+        thread = normalized;
+        break;
+      }
+    }
+    if (!thread.id) {
+      if (cleanExternalRef) {
+        const foundByRef = await this.findThreadByExternalRef(cleanExternalRef).catch(() => null);
+        if (foundByRef?.id) thread = foundByRef;
+      }
+      if (!thread.id && cleanTitle) {
+        const foundByTitle = await this.findThreadByTitle(cleanTitle).catch(() => null);
+        if (foundByTitle?.id) thread = foundByTitle;
+      }
+    }
+    if (!thread.id) throw new Error("GoC ensureThread returned no id");
+    return thread;
   }
 
   async listContextSets(threadId) {

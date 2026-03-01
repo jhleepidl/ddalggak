@@ -35,6 +35,7 @@ import { ChatSessionStore } from "./src/chat/session.js";
 import { routeWithSupervisor } from "./src/chat/supervisor_router.js";
 import { executeSupervisorActions } from "./src/chat/executor.js";
 import { expandDetailContext } from "./src/chat/unfold.js";
+import { ChatRunManager } from "./src/chat/run_manager.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) { console.error("Missing TELEGRAM_BOT_TOKEN"); process.exit(1); }
@@ -46,11 +47,11 @@ const jobs = new Jobs(workspace);
 const tracking = new Tracking(jobs);
 const approvals = new Approvals(jobs);
 
-const ALLOWED_CHATS = (process.env.TELEGRAM_ALLOWED_CHAT_IDS ?? "").split(",").map(s => s.trim()).filter(Boolean);
 const ALLOWED_USERS = (process.env.TELEGRAM_ALLOWED_USER_IDS ?? "").split(",").map(s => s.trim()).filter(Boolean);
 const MAX_CONCURRENCY = Number(process.env.MAX_CONCURRENCY ?? 1);
 const AUTO_SUGGEST_ENABLED = String(process.env.AUTO_SUGGEST_GPT_PROMPT ?? "true").toLowerCase() !== "false";
 const CHAT_VERBOSE = String(process.env.CHAT_VERBOSE ?? "false").toLowerCase() === "true";
+const TELEGRAM_REQUIRE_MENTION_IN_GROUP = String(process.env.TELEGRAM_REQUIRE_MENTION_IN_GROUP ?? "false").toLowerCase() === "true";
 const TELEGRAM_FORCE_IPV4 = String(process.env.TELEGRAM_FORCE_IPV4 ?? "true").toLowerCase() !== "false";
 const TELEGRAM_POLLING_INTERVAL_MS = Number(process.env.TELEGRAM_POLLING_INTERVAL_MS ?? 1000);
 const TELEGRAM_POLLING_TIMEOUT_SEC = Number(process.env.TELEGRAM_POLLING_TIMEOUT_SEC ?? 15);
@@ -58,6 +59,15 @@ const TELEGRAM_SINGLE_INSTANCE_LOCK = String(process.env.TELEGRAM_SINGLE_INSTANC
 const LOCK_FILE = process.env.TELEGRAM_LOCK_FILE || path.join(workspace.root, ".orchestrator", "telegram_runner.lock");
 const MEMORY_MODE = String(process.env.MEMORY_MODE || "local").trim().toLowerCase() === "goc" ? "goc" : "local";
 const GOC_UI_TOKEN_TTL_SEC = Number(process.env.GOC_UI_TOKEN_TTL_SEC ?? 21600);
+const GOC_UI_LINK_MODE = String(process.env.GOC_UI_LINK_MODE || "telegram_auth").trim().toLowerCase() === "bearer_token"
+  ? "bearer_token"
+  : "telegram_auth";
+const MAX_PARALLEL_PER_RUN = Number.isFinite(Number(process.env.MAX_PARALLEL_PER_RUN))
+  ? Math.max(1, Math.min(8, Math.floor(Number(process.env.MAX_PARALLEL_PER_RUN))))
+  : 3;
+const INTERRUPT_DEBOUNCE_MS = Number.isFinite(Number(process.env.INTERRUPT_DEBOUNCE_MS))
+  ? Math.max(0, Math.floor(Number(process.env.INTERRUPT_DEBOUNCE_MS)))
+  : 500;
 const LEGACY_AGENT_MAP = {
   gemini: "researcher",
   codex: "coder",
@@ -141,7 +151,7 @@ function releaseSingleInstanceLock() {
 acquireSingleInstanceLock();
 process.on("exit", () => { releaseSingleInstanceLock(); });
 
-function isAllowedChat(chatId) { return ALLOWED_CHATS.length === 0 || ALLOWED_CHATS.includes(String(chatId)); }
+function isAllowedChat(chatId) { void chatId; return true; }
 function isAllowedUser(userId) { return ALLOWED_USERS.length === 0 || ALLOWED_USERS.includes(String(userId)); }
 const TRACK_DOC_NAMES = ["plan.md", "research.md", "progress.md", "decisions.md"];
 const gocFallbackByJob = new Map();
@@ -168,15 +178,20 @@ function loadLocalContextDocs(jobId, docNames, maxCharsPerDoc = 3500) {
   return out.trim() || "(none)";
 }
 
-function buildGocUiLink({ threadId, ctxId, token }) {
+function buildGocUiLink({ threadId, ctxId, token = "" }) {
   const base = String(process.env.GOC_UI_BASE || "").trim().replace(/\/+$/, "");
   if (!base) throw new Error("Missing GOC_UI_BASE");
-  return `${base}?thread=${encodeURIComponent(String(threadId || ""))}&ctx=${encodeURIComponent(String(ctxId || ""))}#token=${encodeURIComponent(String(token || ""))}`;
+  const query = `${base}?thread=${encodeURIComponent(String(threadId || ""))}&ctx=${encodeURIComponent(String(ctxId || ""))}`;
+  if (GOC_UI_LINK_MODE === "bearer_token" && token) {
+    return `${query}#token=${encodeURIComponent(String(token || ""))}`;
+  }
+  return query;
 }
 
 function resolveCurrentJobIdForChat(chatId) {
   const chatKey = String(chatId);
-  return activeJobByChat.get(chatKey) || getAwait(chatId)?.jobId || lastChatJobByChat.get(chatKey) || "";
+  const fromSession = chatSessionStore.get(chatId)?.jobId || "";
+  return activeJobByChat.get(chatKey) || getAwait(chatId)?.jobId || fromSession || lastChatJobByChat.get(chatKey) || "";
 }
 
 function rememberLastChatJob(chatId, jobId) {
@@ -188,6 +203,7 @@ function rememberLastChatJob(chatId, jobId) {
 
 function resetChatSession(chatId) {
   const chatKey = String(chatId);
+  requestChatInterrupt(chatId, { mode: "cancel", reason: "chat_reset" });
   activeJobByChat.delete(chatKey);
   lastChatJobByChat.delete(chatKey);
   clearAwait(chatId);
@@ -200,7 +216,9 @@ async function buildContextInfo(target, { chatId = null } = {}) {
   }
 
   const client = requireGocClient();
-  const minted = await client.mintUiToken(GOC_UI_TOKEN_TTL_SEC);
+  const minted = GOC_UI_LINK_MODE === "bearer_token"
+    ? await client.mintUiToken(GOC_UI_TOKEN_TTL_SEC)
+    : null;
   const targetRaw = String(target || "").trim();
   const resolved = targetRaw || (chatId == null ? "" : resolveCurrentJobIdForChat(chatId));
 
@@ -213,18 +231,18 @@ async function buildContextInfo(target, { chatId = null } = {}) {
       baseDir: jobs.baseDir,
       title: "global:shared",
     });
-    const link = buildGocUiLink({ threadId: g.threadId, ctxId: g.ctxId, token: minted.token });
+    const link = buildGocUiLink({ threadId: g.threadId, ctxId: g.ctxId, token: minted?.token || "" });
     return {
       scope: "global",
       threadId: g.threadId,
       ctxId: g.ctxId,
       link,
-      tokenExp: minted.exp || null,
+      tokenExp: minted?.exp || null,
       lines: [
         "global context",
         `thread=${g.threadId}`,
         `ctx=${g.ctxId}`,
-        minted.exp ? `token_exp=${minted.exp}` : "",
+        minted?.exp ? `token_exp=${minted.exp}` : "",
         link,
         "",
         "UI에서 편집/활성 토글/삭제하면 다음 스텝 호출부터 반영됩니다.",
@@ -237,11 +255,12 @@ async function buildContextInfo(target, { chatId = null } = {}) {
     jobId,
     jobDir: runDir(jobId),
     title: `job:${jobId}`,
+    telegram: chatId == null ? null : { chat_id: String(chatId || "") },
   });
   const link = buildGocUiLink({
     threadId: map.threadId,
     ctxId: map.ctxSharedId,
-    token: minted.token,
+    token: minted?.token || "",
   });
   return {
     scope: "job",
@@ -249,12 +268,12 @@ async function buildContextInfo(target, { chatId = null } = {}) {
     threadId: map.threadId,
     ctxId: map.ctxSharedId,
     link,
-    tokenExp: minted.exp || null,
+    tokenExp: minted?.exp || null,
     lines: [
       `jobId=${jobId}`,
       `thread=${map.threadId}`,
       `ctx=${map.ctxSharedId}`,
-      minted.exp ? `token_exp=${minted.exp}` : "",
+      minted?.exp ? `token_exp=${minted.exp}` : "",
       link,
       "",
       "UI에서 편집/활성 토글/삭제하면 다음 스텝 호출부터 반영됩니다.",
@@ -264,7 +283,20 @@ async function buildContextInfo(target, { chatId = null } = {}) {
 
 async function sendContextInfo(bot, chatId, target) {
   const info = await buildContextInfo(target, { chatId });
-  await sendLong(bot, chatId, info.lines.join("\n"));
+  const text = info.lines.join("\n");
+  const keyboard = info.link
+    ? {
+      inline_keyboard: [[
+        { text: "Open GoC", web_app: { url: info.link } },
+        { text: "Open Link", url: info.link },
+      ]],
+    }
+    : undefined;
+  if (keyboard) {
+    await bot.sendMessage(chatId, text, { reply_markup: keyboard });
+  } else {
+    await sendLong(bot, chatId, text);
+  }
   return info;
 }
 
@@ -297,6 +329,49 @@ async function loadContextDocs(jobId, docNames, maxCharsPerDoc = 3500) {
     gocFallbackByJob.set(String(jobId), reason);
     jobs.log(jobId, `GoC compiled context failed; fallback to local: ${reason}`);
     return local;
+  }
+}
+
+async function appendChatMessageToGoc(jobId, {
+  role = "user",
+  text = "",
+  kind = "chat_message",
+  chatId = "",
+  userId = "",
+} = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  const cleanText = String(text || "").trim();
+  if (!cleanJobId || !cleanText) return null;
+  if (memoryModeWithFallback() !== "goc") return null;
+  try {
+    const client = requireGocClient();
+    const map = await ensureJobThread(client, {
+      jobId: cleanJobId,
+      jobDir: runDir(cleanJobId),
+      title: `job:${cleanJobId}`,
+    });
+    const nowIso = new Date().toISOString();
+    return await client.createResource(map.threadId, {
+      name: `message:${role}@${nowIso}`,
+      summary: clip(cleanText, 3200),
+      text_mode: "plain",
+      raw_text: `${cleanText}\n`,
+      resource_kind: "message",
+      uri: `ddalggak://jobs/${cleanJobId}/messages/${role}`,
+      context_set_id: map.ctxSharedId,
+      auto_activate: true,
+      payload_json: {
+        role: String(role || "").trim().toLowerCase() || "user",
+        kind: String(kind || "chat_message").trim().toLowerCase(),
+        text: cleanText,
+        chat_id: String(chatId || "").trim() || undefined,
+        user_id: String(userId || "").trim() || undefined,
+        ts: nowIso,
+      },
+    });
+  } catch (e) {
+    jobs.log(cleanJobId, `GoC message append skipped: ${String(e?.message ?? e)}`);
+    return null;
   }
 }
 
@@ -447,6 +522,61 @@ function formatRunningJobs(chatId) {
     "중단: /stop <jobId>",
   ];
   return lines.join("\n");
+}
+
+function buildChatStatusCard(chatId, runtime = null) {
+  const chatKey = String(chatId || "");
+  const session = chatSessionStore.get(chatId);
+  const activeJobId = activeJobByChat.get(chatKey) || "";
+  const currentJobId = String(
+    session.jobId
+    || activeJobId
+    || resolveCurrentJobIdForChat(chatId)
+    || ""
+  ).trim();
+  const queueItems = queue.filter((item) => String(item?.jobId || "").trim() === currentJobId);
+  const activeController = currentJobId ? jobAbortControllers.get(currentJobId) : null;
+  const interrupt = session.interrupt && typeof session.interrupt === "object" ? session.interrupt : null;
+  const pendingApproval = session.pending_approval && typeof session.pending_approval === "object"
+    ? session.pending_approval
+    : null;
+  const enabledAgents = runtime?.agentSelection?.enabled_ids || runtime?.enabledAgentIds || [];
+  const enabledTools = runtime?.toolSelection?.enabled_ids || runtime?.enabledToolIds || [];
+
+  const lines = [
+    "📋 현재 상태",
+    `- state: ${session.state || "idle"}`,
+    `- job_id: ${currentJobId || "(none)"}`,
+    `- active_run_id: ${session.active_run_id || "(none)"}`,
+    `- running: ${activeJobId ? "yes" : "no"}`,
+    `- queue_for_job: ${queueItems.length}`,
+    `- abort_signal: ${activeController ? (activeController.signal.aborted ? "aborted" : "active") : "none"}`,
+    `- pending_interrupt: ${interrupt?.requested ? `${interrupt.mode}${interrupt.reason ? ` (${clip(interrupt.reason, 90)})` : ""}` : "none"}`,
+    `- pending_approval: ${pendingApproval ? (pendingApproval.reason || "yes") : "none"}`,
+    `- pending_user_messages: ${Array.isArray(session.pending_user_messages) ? session.pending_user_messages.length : 0}`,
+  ];
+  if (Array.isArray(enabledAgents) && enabledAgents.length > 0) {
+    lines.push(`- enabled_agents: ${enabledAgents.map((id) => `@${id}`).join(", ")}`);
+  }
+  if (Array.isArray(enabledTools) && enabledTools.length > 0) {
+    lines.push(`- enabled_tools: ${enabledTools.join(", ")}`);
+  }
+  return {
+    text: lines.join("\n"),
+    status: {
+      chat_id: chatKey,
+      state: session.state || "idle",
+      job_id: currentJobId || null,
+      active_run_id: session.active_run_id || null,
+      running: !!activeJobId,
+      queue_for_job: queueItems.length,
+      pending_interrupt: interrupt,
+      pending_approval: pendingApproval,
+      pending_user_messages: Array.isArray(session.pending_user_messages) ? session.pending_user_messages.length : 0,
+      enabled_agents: Array.isArray(enabledAgents) ? enabledAgents : [],
+      enabled_tools: Array.isArray(enabledTools) ? enabledTools : [],
+    },
+  };
 }
 
 function getAgentRolesText() {
@@ -634,7 +764,13 @@ function makeCancelledError(jobId) {
 }
 
 function isCancelledError(e) {
-  return e?.code === "ECANCELLED" || String(e?.message ?? "").includes("Cancelled job");
+  const code = String(e?.code || "").trim().toUpperCase();
+  if (code === "ECANCELLED" || code === "ABORT_ERR") return true;
+  const message = String(e?.message ?? "").toLowerCase();
+  return message.includes("cancelled job")
+    || message.includes("cancelled")
+    || message.includes("aborted")
+    || message.includes("aborterror");
 }
 
 function resetJobAbortController(jobId) {
@@ -663,6 +799,44 @@ function cancelJobExecution(jobId) {
 
   jobAbortControllers.delete(key);
   return { aborted, dropped };
+}
+
+function requestChatInterrupt(chatId, { mode = "replan", reason = "" } = {}) {
+  const chatKey = String(chatId || "");
+  const interruptMode = String(mode || "").trim().toLowerCase() === "cancel" ? "cancel" : "replan";
+  const targetJobId = resolveCurrentJobIdForChat(chatId);
+  const result = targetJobId
+    ? cancelJobExecution(targetJobId)
+    : { aborted: false, dropped: 0 };
+
+  chatSessionStore.upsert(chatId, (session) => ({
+    ...session,
+    jobId: String(targetJobId || session.jobId || "").trim(),
+    interrupt: {
+      requested: true,
+      mode: interruptMode,
+      reason: String(reason || "").trim(),
+      ts: new Date().toISOString(),
+    },
+    pending_approval: interruptMode === "cancel" ? null : session.pending_approval,
+    pending_user_messages: interruptMode === "cancel" ? [] : session.pending_user_messages,
+    state: interruptMode === "cancel"
+      ? "idle"
+      : (session.pending_approval ? "awaiting_approval" : session.state),
+  }));
+
+  if (interruptMode === "cancel") {
+    if (activeJobByChat.get(chatKey) === String(targetJobId || "")) {
+      activeJobByChat.delete(chatKey);
+    }
+    clearAwait(chatId);
+  }
+
+  return {
+    jobId: String(targetJobId || "").trim(),
+    mode: interruptMode,
+    ...result,
+  };
 }
 
 async function enqueue(fn, { jobId = "", signal = null, label = "" } = {}) {
@@ -1090,9 +1264,12 @@ function chatActionLabel(action) {
   if (type === "enable_tool") return `enable_tool:${action.tool_id || "unknown"}`;
   if (type === "list_agents") return "list_agents";
   if (type === "list_tools") return "list_tools";
+  if (type === "create_agent") return `create_agent:${action.agent?.id || action.agent_id || "unknown"}`;
+  if (type === "update_agent") return `update_agent:${action.agentId || action.agent_id || "unknown"}`;
+  if (type === "get_status") return "get_status";
+  if (type === "interrupt") return `interrupt:${action.mode || "replan"}`;
+  if (type === "spawn_agents") return `spawn_agents:${Array.isArray(action.agents) ? action.agents.length : 0}`;
   if (type === "open_context") return `open_context:${action.scope || "current"}`;
-  if (type === "create_agent") return `create_agent:${action.agent?.id || "unknown"}`;
-  if (type === "update_agent") return `update_agent:${action.agentId || "unknown"}`;
   return type;
 }
 
@@ -1201,6 +1378,13 @@ function summarizeSpecialChatOutputs(outputs) {
   const installRows = rows.filter((row) => String(row?.mode || "") === "install_agent_blueprint");
   const publishRows = rows.filter((row) => String(row?.mode || "") === "publish_agent_request");
   const selectionRows = rows.filter((row) => String(row?.mode || "") === "job_config_selection");
+  const statusRows = rows.filter((row) => String(row?.mode || "") === "get_status");
+  const interruptRows = rows.filter((row) => String(row?.mode || "") === "interrupt");
+  const agentWriteRows = rows.filter((row) => {
+    const mode = String(row?.mode || "");
+    return mode === "create_agent" || mode === "update_agent";
+  });
+  const spawnRows = rows.filter((row) => String(row?.mode || "") === "spawn_agents");
   const listRows = rows.filter((row) => {
     const mode = String(row?.mode || "");
     return mode === "list_agents" || mode === "list_tools";
@@ -1244,6 +1428,26 @@ function summarizeSpecialChatOutputs(outputs) {
   }
 
   for (const row of selectionRows) {
+    const text = String(row?.output || "").trim();
+    if (text) lines.push(text);
+  }
+
+  for (const row of statusRows) {
+    const text = String(row?.output || "").trim();
+    if (text) lines.push(text);
+  }
+
+  for (const row of interruptRows) {
+    const text = String(row?.output || "").trim();
+    if (text) lines.push(text);
+  }
+
+  for (const row of agentWriteRows) {
+    const text = String(row?.output || "").trim();
+    if (text) lines.push(text);
+  }
+
+  for (const row of spawnRows) {
     const text = String(row?.output || "").trim();
     if (text) lines.push(text);
   }
@@ -1603,7 +1807,7 @@ async function findLatestAgentProfileNodeForPublish(client, agentsSlot, { agentN
   return null;
 }
 
-async function loadSupervisorRuntime(jobId) {
+async function loadSupervisorRuntime(jobId, { chatMeta = null } = {}) {
   const reg = await refreshAgentRegistry({ includeCompiled: true });
   const fallbackNormalized = normalizeSupervisorJobConfig(
     { job_id: String(jobId || "").trim() },
@@ -1643,6 +1847,7 @@ async function loadSupervisorRuntime(jobId) {
     jobId,
     jobDir: runDir(jobId),
     title: `job:${jobId}`,
+    telegram: chatMeta,
   });
   const agentsSlot = await ensureAgentsThread(client, { baseDir: jobs.baseDir });
   const toolsSlot = await ensureToolsThread(client, { baseDir: jobs.baseDir });
@@ -1740,23 +1945,25 @@ async function openAgentsUiInfo() {
     throw new Error("open_agents_ui requires MEMORY_MODE=goc");
   }
   const client = requireGocClient();
-  const minted = await client.mintUiToken(GOC_UI_TOKEN_TTL_SEC);
+  const minted = GOC_UI_LINK_MODE === "bearer_token"
+    ? await client.mintUiToken(GOC_UI_TOKEN_TTL_SEC)
+    : null;
   const slot = await ensureAgentsThread(client, { baseDir: jobs.baseDir });
   const link = buildGocUiLink({
     threadId: slot.threadId,
     ctxId: slot.ctxId,
-    token: minted.token,
+    token: minted?.token || "",
   });
   return {
     threadId: slot.threadId,
     ctxId: slot.ctxId,
     link,
-    tokenExp: minted.exp || null,
+    tokenExp: minted?.exp || null,
     lines: [
       "agents context",
       `thread=${slot.threadId}`,
       `ctx=${slot.ctxId}`,
-      minted.exp ? `token_exp=${minted.exp}` : "",
+      minted?.exp ? `token_exp=${minted.exp}` : "",
       link,
     ].filter(Boolean),
   };
@@ -2082,29 +2289,154 @@ function buildSupervisorExecutionCallbacks({
   controller,
   verbose,
 }) {
+  const runSingleAgent = async ({ agentId, goal, detailContext = "" }) => {
+    const detail = String(detailContext || "").trim();
+    const promptSegments = [
+      String(goal || "").trim(),
+      runtime.contextSummary ? `[JOB COMPILED CONTEXT]\n${clip(runtime.contextSummary, 9000)}` : "",
+      detail ? `[DETAIL CONTEXT]\n${detail}` : "",
+      runtime.globalSummary ? `[GLOBAL MEMORY]\n${clip(runtime.globalSummary, 5000)}` : "",
+    ].filter(Boolean);
+    const finalPrompt = promptSegments.join("\n\n");
+    return await enqueue(
+      () => executeAgentRun(
+        bot,
+        chatId,
+        jobId,
+        { type: "agent_run", agent: String(agentId || "").trim().toLowerCase(), prompt: finalPrompt },
+        { signal: controller.signal, notify: verbose }
+      ),
+      { jobId, signal: controller.signal, label: `chat_v2_run_${String(agentId || "agent")}` }
+    );
+  };
+
+  const runSpawnAgents = async ({ action, detailContext }) => {
+    const children = Array.isArray(action?.agents) ? action.agents : [];
+    if (children.length === 0) {
+      return {
+        summary: "spawn할 agent가 없습니다.",
+        children: [],
+      };
+    }
+
+    const limitRaw = Number(action?.max_parallel);
+    const maxParallel = Number.isFinite(limitRaw)
+      ? Math.max(1, Math.min(MAX_PARALLEL_PER_RUN, Math.floor(limitRaw)))
+      : MAX_PARALLEL_PER_RUN;
+    const parentText = String(action?.summary || "").trim()
+      || `병렬 실행 시작: ${children.map((row) => `@${String(row?.agent_id || "").trim().toLowerCase()}`).join(", ")}`;
+    const parent = await bot.sendMessage(chatId, `🔀 ${parentText}`);
+
+    const childResults = [];
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(maxParallel, children.length) }, async () => {
+      while (cursor < children.length) {
+        const idx = cursor;
+        cursor += 1;
+        const child = children[idx];
+        const agentId = String(child?.agent_id || "").trim().toLowerCase();
+        const goal = String(child?.goal || "").trim();
+        if (!agentId || !goal) continue;
+        try {
+          const result = await runSingleAgent({
+            agentId,
+            goal,
+            detailContext,
+          });
+          const text = `✅ @${agentId} 완료\n${clip(String(result?.output || ""), 3200)}`;
+          await bot.sendMessage(chatId, text, {
+            reply_to_message_id: parent.message_id,
+            reply_parameters: { message_id: parent.message_id },
+          });
+          childResults.push({
+            agent_id: agentId,
+            status: "ok",
+            output: String(result?.output || ""),
+            provider: String(result?.provider || ""),
+          });
+        } catch (e) {
+          const errText = `❌ @${agentId} 실패\n${clip(String(e?.message ?? e), 1000)}`;
+          await bot.sendMessage(chatId, errText, {
+            reply_to_message_id: parent.message_id,
+            reply_parameters: { message_id: parent.message_id },
+          });
+          childResults.push({
+            agent_id: agentId,
+            status: "error",
+            error: String(e?.message ?? e),
+          });
+          if (isCancelledError(e)) throw e;
+        }
+      }
+    });
+    const settledWorkers = await Promise.allSettled(workers);
+    for (const row of settledWorkers) {
+      if (row.status === "rejected" && isCancelledError(row.reason)) {
+        throw row.reason;
+      }
+    }
+
+    const okCount = childResults.filter((row) => row.status === "ok").length;
+    const errorCount = childResults.filter((row) => row.status === "error").length;
+    return {
+      summary: `병렬 실행 완료: ok=${okCount}, error=${errorCount}`,
+      children: childResults,
+    };
+  };
+
   return {
     runAgent: async ({ action, detailContext }) => {
-      const detail = String(detailContext || "").trim();
-      const promptSegments = [
-        String(action.goal || "").trim(),
-        runtime.contextSummary ? `[JOB COMPILED CONTEXT]\n${clip(runtime.contextSummary, 9000)}` : "",
-        detail ? `[DETAIL CONTEXT]\n${detail}` : "",
-        runtime.globalSummary ? `[GLOBAL MEMORY]\n${clip(runtime.globalSummary, 5000)}` : "",
-      ].filter(Boolean);
-      const finalPrompt = promptSegments.join("\n\n");
-      return await enqueue(
-        () => executeAgentRun(
-          bot,
-          chatId,
-          jobId,
-          { type: "agent_run", agent: String(action.agent_id || "").trim().toLowerCase(), prompt: finalPrompt },
-          { signal: controller.signal, notify: verbose }
-        ),
-        { jobId, signal: controller.signal, label: `chat_v2_run_${String(action.agent_id || "agent")}` }
-      );
+      return await runSingleAgent({
+        agentId: String(action.agent_id || "").trim().toLowerCase(),
+        goal: String(action.goal || "").trim(),
+        detailContext,
+      });
+    },
+    spawnAgents: async ({ action, detailContext }) => {
+      return await runSpawnAgents({ action, detailContext });
     },
     proposeAgent: async ({ action }) => {
       return await createAgentDraftProposal(bot, chatId, userId, jobId, action);
+    },
+    createAgent: async ({ action }) => {
+      if (memoryModeWithFallback() !== "goc") {
+        throw new Error("create_agent requires MEMORY_MODE=goc");
+      }
+      const profile = action?.agent && typeof action.agent === "object" ? action.agent : {};
+      const created = await createAgentProfile(requireGocClient(), {
+        baseDir: jobs.baseDir,
+        profile,
+        format: action?.format || "json",
+        actor: `telegram:${userId}`,
+      });
+      await refreshAgentRegistry({ includeCompiled: true });
+      const createdId = String(profile.id || created?.created?.id || "").trim();
+      return {
+        agent_id: createdId,
+        text: createdId
+          ? `✅ agent 생성 완료: @${createdId}`
+          : "✅ agent 생성 완료",
+      };
+    },
+    updateAgent: async ({ action }) => {
+      if (memoryModeWithFallback() !== "goc") {
+        throw new Error("update_agent requires MEMORY_MODE=goc");
+      }
+      const targetAgentId = String(action?.agentId || "").trim().toLowerCase();
+      const updated = await updateAgentProfile(requireGocClient(), {
+        baseDir: jobs.baseDir,
+        agentId: targetAgentId,
+        patch: action?.patch || {},
+        format: action?.format || "json",
+        actor: `telegram:${userId}`,
+      });
+      await refreshAgentRegistry({ includeCompiled: true });
+      return {
+        agent_id: targetAgentId || String(updated?.created?.id || "").trim(),
+        text: targetAgentId
+          ? `✅ agent 수정 완료: @${targetAgentId}`
+          : "✅ agent 수정 완료",
+      };
     },
     openContext: async ({ action }) => {
       const target = action.scope === "global" ? "global" : jobId;
@@ -2127,6 +2459,29 @@ function buildSupervisorExecutionCallbacks({
         depth: action.depth || 1,
         maxChars: action.max_chars || 7000,
       });
+    },
+    getStatus: async () => {
+      return buildChatStatusCard(chatId, runtime);
+    },
+    interrupt: async ({ action }) => {
+      const mode = String(action?.mode || "").trim().toLowerCase() === "cancel" ? "cancel" : "replan";
+      requestChatInterrupt(chatId, {
+        mode,
+        reason: String(action?.note || "").trim(),
+      });
+      if (mode === "cancel") {
+        chatSessionStore.upsert(chatId, {
+          pending_user_messages: [],
+          pending_approval: null,
+          state: "idle",
+        });
+      }
+      return {
+        mode,
+        text: mode === "cancel"
+          ? "⛔️ 현재 실행을 중단했어요. 다음 지시를 주세요."
+          : "🔄 현재 실행을 중단하고 새 지시로 재계획할게요.",
+      };
     },
     summarize: async ({ results }) => {
       const okCount = results.filter((row) => row.status === "ok").length;
@@ -2322,15 +2677,33 @@ function buildSupervisorExecutionCallbacks({
   };
 }
 
-async function runSupervisorChat(bot, chatId, userId, message, { debug = false } = {}) {
+async function runSupervisorChat(
+  bot,
+  chatId,
+  userId,
+  message,
+  {
+    debug = false,
+    chatInfo = null,
+    inputKind = "chat_message",
+    telegramMessageId = null,
+  } = {}
+) {
   const chatKey = String(chatId);
   const verbose = !!(debug || CHAT_VERBOSE);
   let currentJobId = resolveCurrentJobIdForChat(chatId);
+  let createdNewJob = false;
+  if (currentJobId) {
+    try {
+      runDir(currentJobId);
+    } catch {
+      currentJobId = "";
+    }
+  }
   if (!currentJobId) {
     const job = await createJob(message, { ownerUserId: userId, ownerChatId: chatId });
     currentJobId = String(job.jobId);
-  } else {
-    runDir(currentJobId);
+    createdNewJob = true;
   }
   tracking.init(currentJobId);
   rememberLastChatJob(chatId, currentJobId);
@@ -2338,13 +2711,32 @@ async function runSupervisorChat(bot, chatId, userId, message, { debug = false }
     jobId: currentJobId,
     state: "routing",
     pending_approval: null,
+    interrupt: null,
+  });
+
+  if (!createdNewJob) {
+    jobs.appendConversation(currentJobId, "user", message, {
+      kind: inputKind || "chat_message",
+      chat_id: String(chatId || ""),
+      user_id: String(userId || ""),
+      telegram_message_id: telegramMessageId || undefined,
+    });
+  }
+  await appendChatMessageToGoc(currentJobId, {
+    role: "user",
+    text: message,
+    kind: inputKind || "chat_message",
+    chatId,
+    userId,
   });
 
   const controller = resetJobAbortController(currentJobId);
   activeJobByChat.set(chatKey, currentJobId);
 
   try {
-    const runtime = await loadSupervisorRuntime(currentJobId);
+    const runtime = await loadSupervisorRuntime(currentJobId, {
+      chatMeta: chatInfo,
+    });
     const routePlan = await routeWithSupervisor(message, {
       agents: runtime.agents,
       tools: runtime.tools,
@@ -2445,6 +2837,18 @@ async function runSupervisorChat(bot, chatId, userId, message, { debug = false }
       await sendLong(bot, chatId, formatChatSummary(routePlan, execution.results));
     }
     await sendLong(bot, chatId, replyText);
+    jobs.appendConversation(currentJobId, "assistant", replyText, {
+      kind: execution.pendingApproval ? "chat_reply_pending_approval" : "chat_reply",
+      chat_id: String(chatId || ""),
+      user_id: String(userId || ""),
+    });
+    await appendChatMessageToGoc(currentJobId, {
+      role: "assistant",
+      text: replyText,
+      kind: execution.pendingApproval ? "chat_reply_pending_approval" : "chat_reply",
+      chatId,
+      userId,
+    });
     if (execution.pendingApproval?.id) {
       await bot.sendMessage(
         chatId,
@@ -2761,6 +3165,53 @@ function getAwait(chatId) {
   return st;
 }
 
+function isHardStopMessage(text) {
+  const msg = String(text || "").trim().toLowerCase();
+  if (!msg) return false;
+  return msg === "/stop"
+    || msg === "stop"
+    || msg.includes("중단")
+    || msg.includes("취소")
+    || msg.includes("멈춰")
+    || msg.includes("cancel");
+}
+
+function extractPlainChatMessage(msg, text, botUsername = "") {
+  const raw = String(text || "").trim();
+  if (!raw) return "";
+  if (!TELEGRAM_REQUIRE_MENTION_IN_GROUP) return raw;
+
+  const chatType = String(msg?.chat?.type || "").trim().toLowerCase();
+  const isGroupChat = chatType === "group" || chatType === "supergroup";
+  if (!isGroupChat) return raw;
+
+  if (raw.startsWith("!")) {
+    return raw.slice(1).trim();
+  }
+
+  const normalizedUsername = String(botUsername || "").trim().toLowerCase();
+  if (!normalizedUsername) return "";
+
+  const mentionPrefix = new RegExp(`^@${normalizedUsername}(?:\\s+|\\s*[:,]\\s*)?`, "i");
+  if (mentionPrefix.test(raw)) {
+    return raw.replace(mentionPrefix, "").trim();
+  }
+
+  const entities = Array.isArray(msg?.entities) ? msg.entities : [];
+  for (const entity of entities) {
+    if (!entity || entity.type !== "mention") continue;
+    const offset = Number(entity.offset);
+    const length = Number(entity.length);
+    if (!Number.isFinite(offset) || !Number.isFinite(length) || length <= 1) continue;
+    const mentioned = raw.slice(offset, offset + length).trim().toLowerCase();
+    if (mentioned === `@${normalizedUsername}`) {
+      const stripped = `${raw.slice(0, offset)} ${raw.slice(offset + length)}`.replace(/\s+/g, " ").trim();
+      return stripped;
+    }
+  }
+  return "";
+}
+
 const botOptions = {
   polling: {
     autoStart: false,
@@ -2770,6 +3221,41 @@ const botOptions = {
 };
 if (TELEGRAM_FORCE_IPV4) botOptions.request = { family: 4 };
 const bot = new TelegramBot(TOKEN, botOptions);
+let botUsername = "";
+
+const chatRunManager = new ChatRunManager({
+  sessionStore: chatSessionStore,
+  interruptDebounceMs: INTERRUPT_DEBOUNCE_MS,
+  cancelCurrent: async ({ chatId, mode, reason }) => {
+    return requestChatInterrupt(chatId, { mode, reason });
+  },
+  onAck: async ({ chatId, mode }) => {
+    const text = mode === "cancel"
+      ? "⛔️ 중단했어요. 다음 지시를 주세요."
+      : "🔄 변경 사항을 반영하기 위해 현재 실행을 중단하고 재계획할게요.";
+    await bot.sendMessage(chatId, text);
+  },
+  onRunError: async ({ chatId, error }) => {
+    if (isCancelledError(error)) return;
+    await bot.sendMessage(chatId, `❌ /chat 실패: ${String(error?.message ?? error)}`);
+  },
+  runChat: async ({ chatId, userId, message, inputKind, pendingCount, telegramMessageId, chatInfo }) => {
+    await runSupervisorChat(
+      bot,
+      chatId,
+      userId,
+      message,
+      {
+        debug: false,
+        chatInfo: chatInfo && typeof chatInfo === "object"
+          ? chatInfo
+          : { chat_id: String(chatId || "") },
+        inputKind: inputKind || (pendingCount > 1 ? "interrupt_update" : "chat_message"),
+        telegramMessageId,
+      }
+    );
+  },
+});
 
 let shuttingDown = false;
 async function shutdown(code = 0) {
@@ -2889,7 +3375,9 @@ bot.on("callback_query", async (q) => {
         if (index !== 0) return action;
         return { ...action, approved: true, _approved: true };
       });
-      const runtime = await loadSupervisorRuntime(pendingJobId);
+      const runtime = await loadSupervisorRuntime(pendingJobId, {
+        chatMeta: { chat_id: String(chatId || "") },
+      });
       const controller = resetJobAbortController(pendingJobId);
       const chatKey = String(chatId);
       activeJobByChat.set(chatKey, pendingJobId);
@@ -3184,11 +3672,37 @@ bot.on("message", async (msg) => {
     return;
   }
 
+  if (!text.startsWith("/")) {
+    const plain = extractPlainChatMessage(msg, text, botUsername);
+    if (!plain) return;
+    if (isHardStopMessage(plain)) {
+      await chatRunManager.hardCancel({
+        chatId,
+        reason: plain,
+        userId,
+        telegramMessageId: msg.message_id,
+      });
+      return;
+    }
+    await chatRunManager.handleIncoming({
+      chatId,
+      userId,
+      text: plain,
+      telegramMessageId: msg.message_id,
+      chatInfo: {
+        chat_id: String(chatId || ""),
+        title: String(msg.chat?.title || msg.chat?.username || "").trim(),
+        type: String(msg.chat?.type || "").trim(),
+      },
+    });
+    return;
+  }
+
   const [cmd, ...rest] = text.split(/\s+/);
   const args = rest.join(" ").trim();
 
   if (cmd === "/help") {
-    await bot.sendMessage(chatId, "Commands:\n- /whoami\n- /running\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
+    await bot.sendMessage(chatId, "Commands:\n- plain text: 기본 /chat(supervisor) 처리\n- /whoami\n- /running\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
     return;
   }
 
@@ -3220,6 +3734,23 @@ bot.on("message", async (msg) => {
     if (activeJobByChat.get(chatKey) === String(targetJobId)) activeJobByChat.delete(chatKey);
     if (fromAwait && String(fromAwait) === String(targetJobId)) clearAwait(chatId);
     if (lastChatJobByChat.get(chatKey) === String(targetJobId)) lastChatJobByChat.delete(chatKey);
+    chatSessionStore.upsert(chatId, (session) => {
+      if (String(session.jobId || "").trim() && String(session.jobId || "").trim() !== String(targetJobId).trim()) {
+        return session;
+      }
+      return {
+        ...session,
+        interrupt: {
+          requested: true,
+          mode: "cancel",
+          reason: "/stop",
+          ts: new Date().toISOString(),
+        },
+        pending_user_messages: [],
+        pending_approval: null,
+        state: "idle",
+      };
+    });
 
     if (!aborted && dropped === 0) {
       await bot.sendMessage(chatId, `중단할 실행이 없어요. (jobId=${targetJobId})\n이미 종료되었거나 큐에 없습니다.\n\n${formatRunningJobs(chatId)}`);
@@ -3360,8 +3891,29 @@ bot.on("message", async (msg) => {
     if (!message) return bot.sendMessage(chatId, "Usage: /chat [--debug] <message>\n세션 초기화: /chat reset");
 
     try {
+      if (!parsed.debug) {
+        await chatRunManager.handleIncoming({
+          chatId,
+          userId,
+          text: message,
+          telegramMessageId: msg.message_id,
+          chatInfo: {
+            chat_id: String(chatId || ""),
+            title: String(msg.chat?.title || msg.chat?.username || "").trim(),
+            type: String(msg.chat?.type || "").trim(),
+          },
+        });
+        return;
+      }
       await runSupervisorChat(bot, chatId, userId, message, {
         debug: parsed.debug,
+        chatInfo: {
+          chat_id: String(chatId || ""),
+          title: String(msg.chat?.title || msg.chat?.username || "").trim(),
+          type: String(msg.chat?.type || "").trim(),
+        },
+        inputKind: "command_chat",
+        telegramMessageId: msg.message_id,
       });
     } catch (e) {
       await bot.sendMessage(chatId, `❌ /chat 실패: ${String(e?.message ?? e)}`);
@@ -3513,6 +4065,15 @@ console.log("Telegram orchestrator v2.1 started (polling).");
 console.log(`Codex workspace root: ${workspace.root}`);
 console.log(`Runs dir: ${jobs.runsDir}`);
 console.log(`Memory mode: ${MEMORY_MODE} (effective=${memoryModeWithFallback()})`);
+try {
+  const me = await bot.getMe();
+  botUsername = String(me?.username || "").trim().toLowerCase();
+} catch {
+  botUsername = "";
+}
+if (botUsername) {
+  console.log(`Telegram bot username: @${botUsername}`);
+}
 if (gocInitError) console.log(`GoC init error: ${gocInitError}`);
 console.log(`Agents registry: ${agentRegistry.path}`);
 await bot.startPolling({ restart: true });

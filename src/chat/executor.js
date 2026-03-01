@@ -24,6 +24,11 @@ function actionLabel(action) {
   if (type === "enable_tool") return `enable_tool:${action.tool_id || "unknown"}`;
   if (type === "list_agents") return "list_agents";
   if (type === "list_tools") return "list_tools";
+  if (type === "create_agent") return `create_agent:${action.agent?.id || action.agent_id || "unknown"}`;
+  if (type === "update_agent") return `update_agent:${action.agentId || action.agent_id || "unknown"}`;
+  if (type === "get_status") return "get_status";
+  if (type === "interrupt") return `interrupt:${action.mode || "replan"}`;
+  if (type === "spawn_agents") return `spawn_agents:${Array.isArray(action.agents) ? action.agents.length : 0}`;
   if (type === "open_context") return `open_context:${action.scope || "current"}`;
   return type;
 }
@@ -38,6 +43,36 @@ function getProviderByAgent(agents = [], agentId = "") {
 
 function nextApprovalId() {
   return `appr_${Date.now().toString(36)}_${crypto.randomBytes(4).toString("hex")}`;
+}
+
+function isAbortLikeError(error) {
+  const code = String(error?.code || "").trim().toUpperCase();
+  if (code === "ECANCELLED" || code === "ABORT_ERR") return true;
+  const message = String(error?.message || "").toLowerCase();
+  return message.includes("cancelled")
+    || message.includes("aborted")
+    || message.includes("aborterror");
+}
+
+function makeCancelledError(reason = "cancelled") {
+  const e = new Error(String(reason || "cancelled"));
+  e.code = "ECANCELLED";
+  return e;
+}
+
+function readInterruptState(sessionStore, chatId) {
+  if (!sessionStore || typeof sessionStore.get !== "function") return null;
+  const session = sessionStore.get(chatId);
+  const interrupt = session?.interrupt && typeof session.interrupt === "object"
+    ? session.interrupt
+    : null;
+  if (!interrupt || interrupt.requested !== true) return null;
+  return {
+    requested: true,
+    mode: String(interrupt.mode || "").trim().toLowerCase() === "cancel" ? "cancel" : "replan",
+    reason: String(interrupt.reason || "").trim(),
+    ts: String(interrupt.ts || "").trim(),
+  };
 }
 
 export async function executeSupervisorActions({
@@ -68,6 +103,7 @@ export async function executeSupervisorActions({
   let remainingActions = [];
   let usedActions = 0;
   let blockedActions = 0;
+  let interruptedByReplan = false;
 
   if (sessionStore) {
     sessionStore.upsert(chatId, {
@@ -83,6 +119,22 @@ export async function executeSupervisorActions({
   for (let i = 0; i < actions.length; i += 1) {
     const action = actions[i];
     const label = actionLabel(action);
+    const interruptBefore = readInterruptState(sessionStore, chatId);
+    if (interruptBefore?.requested) {
+      if (interruptBefore.mode === "cancel") {
+        throw makeCancelledError(interruptBefore.reason || `interrupt(cancel) before ${label}`);
+      }
+      interruptedByReplan = true;
+      results.push({
+        label: "interrupt",
+        status: "skip",
+        note: interruptBefore.reason
+          ? `replan requested before ${label}: ${interruptBefore.reason}`
+          : `replan requested before ${label}`,
+      });
+      break;
+    }
+
     if (!isActionAllowed(action, allowlist)) {
       blockedActions += 1;
       results.push({ label, status: "blocked", note: "not in allowlist" });
@@ -169,6 +221,29 @@ export async function executeSupervisorActions({
         continue;
       }
 
+      if (action.type === "spawn_agents") {
+        if (typeof callbacks.spawnAgents !== "function") {
+          throw new Error("spawnAgents callback is missing");
+        }
+        const spawned = await callbacks.spawnAgents({
+          action,
+          jobId,
+          detailContext,
+        });
+        const children = Array.isArray(spawned?.children) ? spawned.children : [];
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "spawn_agents",
+          output: String(spawned?.summary || spawned?.text || "").trim() || `spawn finished (${children.length})`,
+          children,
+          jobId: String(jobId || ""),
+        });
+        results.push({ label, status: "ok", note: `children=${children.length}` });
+        usedActions += 1;
+        continue;
+      }
+
       if (action.type === "propose_agent") {
         if (typeof callbacks.proposeAgent !== "function") {
           throw new Error("proposeAgent callback is missing");
@@ -183,6 +258,60 @@ export async function executeSupervisorActions({
           label,
           status: "ok",
           note: `draft=${draft?.draft_id || draft?.id || action.agent_id || "unknown"}`,
+        });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "create_agent") {
+        if (typeof callbacks.createAgent !== "function") {
+          throw new Error("createAgent callback is missing");
+        }
+        const created = await callbacks.createAgent({
+          action,
+          jobId,
+          chatId,
+          userId,
+        });
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "create_agent",
+          output: String(created?.text || created?.message || "").trim()
+            || `agent 생성 완료: @${String(created?.agent_id || action.agent?.id || "").trim()}`,
+          jobId: String(jobId || ""),
+        });
+        results.push({
+          label,
+          status: "ok",
+          note: String(created?.agent_id || action.agent?.id || "created"),
+        });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "update_agent") {
+        if (typeof callbacks.updateAgent !== "function") {
+          throw new Error("updateAgent callback is missing");
+        }
+        const updated = await callbacks.updateAgent({
+          action,
+          jobId,
+          chatId,
+          userId,
+        });
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "update_agent",
+          output: String(updated?.text || updated?.message || "").trim()
+            || `agent 수정 완료: @${String(updated?.agent_id || action.agentId || "").trim()}`,
+          jobId: String(jobId || ""),
+        });
+        results.push({
+          label,
+          status: "ok",
+          note: String(updated?.agent_id || action.agentId || "updated"),
         });
         usedActions += 1;
         continue;
@@ -417,6 +546,58 @@ export async function executeSupervisorActions({
         continue;
       }
 
+      if (action.type === "get_status") {
+        if (typeof callbacks.getStatus !== "function") {
+          throw new Error("getStatus callback is missing");
+        }
+        const status = await callbacks.getStatus({
+          action,
+          chatId,
+          jobId,
+          userId,
+          sessionStore,
+        });
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "get_status",
+          output: String(status?.text || "").trim() || "현재 상태를 확인했습니다.",
+          status: status?.status || null,
+          jobId: String(jobId || ""),
+        });
+        results.push({ label, status: "ok", note: "status" });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "interrupt") {
+        if (typeof callbacks.interrupt !== "function") {
+          throw new Error("interrupt callback is missing");
+        }
+        const interrupted = await callbacks.interrupt({
+          action,
+          chatId,
+          jobId,
+          userId,
+        });
+        const mode = String(action.mode || interrupted?.mode || "replan").trim().toLowerCase() === "cancel"
+          ? "cancel"
+          : "replan";
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "interrupt",
+          output: String(interrupted?.text || "").trim()
+            || (mode === "cancel" ? "⛔️ 현재 실행을 중단했습니다." : "🔄 재계획을 위해 현재 실행을 선점 중단합니다."),
+          interrupt_mode: mode,
+          jobId: String(jobId || ""),
+        });
+        results.push({ label, status: "ok", note: `mode=${mode}` });
+        usedActions += 1;
+        interruptedByReplan = true;
+        break;
+      }
+
       if (action.type === "summarize") {
         if (typeof callbacks.summarize === "function") {
           const summary = await callbacks.summarize({
@@ -444,14 +625,34 @@ export async function executeSupervisorActions({
       blockedActions += 1;
       results.push({ label, status: "skip", note: "unsupported action" });
     } catch (e) {
+      if (isAbortLikeError(e)) throw e;
       results.push({ label, status: "error", note: String(e?.message ?? e) });
+    }
+
+    const interruptAfter = readInterruptState(sessionStore, chatId);
+    if (interruptAfter?.requested) {
+      if (interruptAfter.mode === "cancel") {
+        throw makeCancelledError(interruptAfter.reason || `interrupt(cancel) after ${label}`);
+      }
+      interruptedByReplan = true;
+      results.push({
+        label: "interrupt",
+        status: "skip",
+        note: interruptAfter.reason
+          ? `replan requested after ${label}: ${interruptAfter.reason}`
+          : `replan requested after ${label}`,
+      });
+      break;
     }
   }
 
   if (sessionStore) {
     sessionStore.upsert(chatId, {
-      state: pendingApproval ? "awaiting_approval" : "done",
+      state: pendingApproval
+        ? "awaiting_approval"
+        : (interruptedByReplan ? "idle" : "done"),
       pending_approval: pendingApproval,
+      interrupt: null,
       budget: {
         max_actions: maxActions,
         used_actions: usedActions,

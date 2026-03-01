@@ -29,11 +29,12 @@
 - 봇에게 `/whoami` 를 보내면:
   - `chat_id`, `user_id`를 알려줍니다.
 - 보안을 위해 서버의 `.env`에 아래를 설정하는 것을 추천:
-  - `TELEGRAM_ALLOWED_CHAT_IDS=<chat_id>`
   - `TELEGRAM_ALLOWED_USER_IDS=<user_id>`
+  - `TELEGRAM_ALLOWED_CHAT_IDS`는 deprecated(더 이상 검사하지 않음)
 
-> 그룹에서 쓰고 싶다면:
-> - 봇을 그룹에 추가하고, 그룹에서 `/whoami` 실행 → 그룹 chat_id를 allowlist에 넣으면 됨.
+> 그룹에서 멘션 기반으로만 반응시키고 싶다면:
+> - `.env`에 `TELEGRAM_REQUIRE_MENTION_IN_GROUP=true`
+> - 그룹에서 `@botname ...` 또는 `! ...` 형태로 메시지 전송
 
 ---
 
@@ -63,6 +64,7 @@ GoC 모드(`MEMORY_MODE=goc`) 추가 설정:
 - `GOC_API_BASE`, `GOC_UI_BASE`
 - `GOC_SERVICE_KEY`
 - `GOC_UI_TOKEN_TTL_SEC` (기본 21600 = 6시간)
+- `GOC_UI_LINK_MODE` (`telegram_auth` 기본, `bearer_token` legacy)
 - `GOC_AUTO_ACTIVATE_PROGRESS` (기본 false)
 - `GOC_JOB_THREAD_TITLE_PREFIX` (기본: `job:`)
 
@@ -153,7 +155,8 @@ sudo systemctl status telegram-orchestrator
 ### 5) GoC 명령
 - `/agents` : 현재 agent registry 목록 출력
 - `/context <jobId|global>` : GoC UI 링크 반환 (`jobId` 생략 시 현재 job 사용)
-- `/context`로 발급되는 UI 토큰은 쓰기 권한 포함이므로 TTL을 짧게 두고 필요 시 재발급 권장
+- `GOC_UI_LINK_MODE=telegram_auth`면 기본적으로 `#token` 없는 링크를 제공 (Telegram SSO)
+- `GOC_UI_LINK_MODE=bearer_token`일 때만 UI 토큰을 민팅해 링크에 포함
 
 ### 6) Multi-Agent 메모리 커스터마이즈
 - `/memory show` : 전체 요약(반성 프롬프트 + 라우터 프롬프트 + 에이전트 역할)

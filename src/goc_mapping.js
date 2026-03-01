@@ -50,6 +50,36 @@ function defaultJobThreadTitle(jobId) {
   return `${prefix}${jobId}`;
 }
 
+function loadJobMeta(jobDir) {
+  const dir = path.resolve(jobDir || process.cwd());
+  const metaPath = path.join(dir, "meta.json");
+  try {
+    const parsed = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizeTelegramThreadMeta(raw = {}) {
+  const row = raw && typeof raw === "object" ? raw : {};
+  const chatId = String(
+    row.chat_id
+    || row.chatId
+    || row.ownerChatId
+    || ""
+  ).trim();
+  if (!chatId) return null;
+  const title = String(row.title || row.chat_title || row.chatTitle || "").trim();
+  const type = String(row.type || row.chat_type || row.chatType || "").trim().toLowerCase();
+  const normalizedType = ["private", "group", "supergroup", "channel"].includes(type) ? type : "";
+  return {
+    chat_id: chatId,
+    title,
+    type: normalizedType,
+  };
+}
+
 function normalizeStringList(raw, { lower = false } = {}) {
   const list = Array.isArray(raw)
     ? raw
@@ -148,6 +178,11 @@ function defaultJobConfig(jobId) {
       "enable_tool",
       "list_agents",
       "list_tools",
+      "create_agent",
+      "update_agent",
+      "get_status",
+      "interrupt",
+      "spawn_agents",
     ],
     budget: {
       max_actions: 4,
@@ -508,14 +543,41 @@ async function ensureDefaultJobConfigResource(client, { threadId, ctxId, jobId }
   });
 }
 
-export async function ensureJobThread(client, { jobId, jobDir, title = "" }) {
+export async function ensureJobThread(client, { jobId, jobDir, title = "", telegram = null }) {
   const cleanJobId = String(jobId || "").trim();
   if (!cleanJobId) throw new Error("ensureJobThread requires jobId");
   const desiredTitle = String(title || "").trim() || defaultJobThreadTitle(cleanJobId);
+  const telegramMeta = normalizeTelegramThreadMeta(telegram || loadJobMeta(jobDir));
+  const externalRef = telegramMeta?.chat_id ? `telegram:chat:${telegramMeta.chat_id}` : "";
+  const metaJson = telegramMeta
+    ? {
+      telegram: {
+        chat_id: telegramMeta.chat_id,
+        title: telegramMeta.title || undefined,
+        type: telegramMeta.type || undefined,
+      },
+    }
+    : null;
   const lockKey = `${path.resolve(jobDir || process.cwd())}::${cleanJobId}`;
   return await runWithInflight(inflightJobThreadEnsures, lockKey, async () => {
     const current = loadGocMap(jobDir, cleanJobId);
     let threadId = current.threadId;
+    if (!threadId && typeof client.ensureThread === "function") {
+      try {
+        const ensured = await client.ensureThread({
+          title: desiredTitle,
+          externalRef,
+          metaJson,
+        });
+        if (ensured?.id) threadId = ensured.id;
+      } catch {}
+    }
+    if (!threadId && externalRef && typeof client.findThreadByExternalRef === "function") {
+      try {
+        const found = await client.findThreadByExternalRef(externalRef);
+        if (found?.id) threadId = found.id;
+      } catch {}
+    }
     if (!threadId) {
       try {
         const found = await client.findThreadByTitle(desiredTitle);

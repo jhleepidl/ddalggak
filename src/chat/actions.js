@@ -174,6 +174,98 @@ function normalizeListTools(raw) {
   };
 }
 
+function normalizeCreateAgent(raw) {
+  const row = asObject(raw);
+  const draft = asObject(row.agent || row.profile || row);
+  const agentId = String(
+    row.agent_id
+    || row.agentId
+    || draft.id
+    || draft.agent_id
+    || ""
+  ).trim().toLowerCase();
+  if (!agentId) return null;
+  return {
+    type: "create_agent",
+    agent: {
+      id: agentId,
+      name: String(draft.name || agentId).trim() || agentId,
+      description: String(draft.description || "").trim(),
+      provider: String(draft.provider || "gemini").trim().toLowerCase() || "gemini",
+      model: String(draft.model || draft.provider || "gemini").trim() || "gemini",
+      prompt: String(draft.prompt || "").trim(),
+      meta: draft.meta && typeof draft.meta === "object" ? draft.meta : {},
+    },
+    format: String(row.format || "json").trim() || "json",
+    risk: normalizeRisk(row.risk, "L2"),
+  };
+}
+
+function normalizeUpdateAgent(raw) {
+  const row = asObject(raw);
+  const agentId = String(row.agent_id || row.agentId || row.id || "").trim().toLowerCase();
+  const patchRaw = asObject(row.patch || row.agent || row.profile_patch);
+  if (!agentId || Object.keys(patchRaw).length === 0) return null;
+  return {
+    type: "update_agent",
+    agentId,
+    patch: patchRaw,
+    format: String(row.format || "json").trim() || "json",
+    risk: normalizeRisk(row.risk, "L2"),
+  };
+}
+
+function normalizeGetStatus(raw) {
+  const row = asObject(raw);
+  return {
+    type: "get_status",
+    detail: String(row.detail || "summary").trim().toLowerCase() === "full" ? "full" : "summary",
+    risk: "L0",
+  };
+}
+
+function normalizeInterrupt(raw) {
+  const row = asObject(raw);
+  const mode = String(row.mode || row.interrupt_mode || "").trim().toLowerCase();
+  return {
+    type: "interrupt",
+    mode: mode === "cancel" ? "cancel" : "replan",
+    note: String(row.note || row.reason || "").trim(),
+    risk: "L0",
+  };
+}
+
+function normalizeSpawnAgents(raw) {
+  const row = asObject(raw);
+  const entries = Array.isArray(row.agents)
+    ? row.agents
+    : (Array.isArray(row.children) ? row.children : []);
+  const children = [];
+  for (const entry of entries) {
+    const child = asObject(entry);
+    const agentId = String(child.agent_id || child.agentId || child.agent || "").trim().toLowerCase();
+    const goal = String(child.goal || child.prompt || child.task || "").trim();
+    if (!agentId || !goal) continue;
+    children.push({
+      agent_id: agentId,
+      goal,
+      inputs: child.inputs && typeof child.inputs === "object" ? child.inputs : {},
+      risk: normalizeRisk(child.risk, "L1"),
+    });
+    if (children.length >= 8) break;
+  }
+  if (children.length === 0) return null;
+  return {
+    type: "spawn_agents",
+    summary: String(row.summary || row.goal || row.reason || "").trim(),
+    agents: children,
+    max_parallel: Number.isFinite(Number(row.max_parallel))
+      ? Math.max(1, Math.min(8, Math.floor(Number(row.max_parallel))))
+      : null,
+    risk: normalizeRisk(row.risk, "L1"),
+  };
+}
+
 export function normalizeAction(raw) {
   const row = asObject(raw);
   const type = String(row.type || "").trim().toLowerCase();
@@ -193,6 +285,11 @@ export function normalizeAction(raw) {
   if (type === "enable_tool") return normalizeToggleTool(row, true);
   if (type === "list_agents") return normalizeListAgents(row);
   if (type === "list_tools") return normalizeListTools(row);
+  if (type === "create_agent") return normalizeCreateAgent(row);
+  if (type === "update_agent") return normalizeUpdateAgent(row);
+  if (type === "get_status" || type === "status") return normalizeGetStatus(row);
+  if (type === "interrupt" || type === "cancel") return normalizeInterrupt(row);
+  if (type === "spawn_agents" || type === "fork_join" || type === "spawn") return normalizeSpawnAgents(row);
   return null;
 }
 
@@ -230,6 +327,11 @@ export function defaultAllowlist() {
     "enable_tool",
     "list_agents",
     "list_tools",
+    "create_agent",
+    "update_agent",
+    "get_status",
+    "interrupt",
+    "spawn_agents",
   ]);
 }
 

@@ -219,6 +219,66 @@ function isListToolsRequest(message) {
     || text.includes("어떤");
 }
 
+function isStatusRequest(message) {
+  const text = String(message || "").toLowerCase();
+  return text.includes("상태")
+    || text.includes("진행")
+    || text.includes("running")
+    || text.includes("뭐 하고")
+    || text.includes("뭐하고")
+    || text.includes("status");
+}
+
+function isInterruptRequest(message) {
+  const text = String(message || "").toLowerCase();
+  return text.includes("stop")
+    || text.includes("중단")
+    || text.includes("취소")
+    || text.includes("멈춰")
+    || text === "/stop"
+    || text.includes("cancel");
+}
+
+function parseInterruptMode(message) {
+  const text = String(message || "").toLowerCase();
+  if (text.includes("hard") || text.includes("강제") || text.includes("취소") || text.includes("cancel")) {
+    return "cancel";
+  }
+  return "replan";
+}
+
+function isOpenContextRequest(message) {
+  const text = String(message || "").toLowerCase();
+  return text.includes("context")
+    || text.includes("컨텍스트")
+    || text.includes("goc 링크")
+    || text.includes("goc 열")
+    || text.includes("open goc");
+}
+
+function parseMentionedAgentIds(message) {
+  const text = String(message || "");
+  const out = [];
+  const seen = new Set();
+  const matches = text.matchAll(/@([a-zA-Z0-9_-]+)/g);
+  for (const match of matches) {
+    const id = String(match?.[1] || "").trim().toLowerCase();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+function isSpawnRequest(message) {
+  const text = String(message || "").toLowerCase();
+  return text.includes("병렬")
+    || text.includes("동시에")
+    || text.includes("parallel")
+    || text.includes("spawn")
+    || text.includes("각자");
+}
+
 function parseRequestedToolId(message, { tools = [], jobConfig = {} } = {}) {
   const src = String(message || "").trim();
   const lower = src.toLowerCase();
@@ -257,8 +317,15 @@ function fallbackPlan(message, { agents = [], tools = [], jobConfig = {} } = {})
   const requestedTool = parseRequestedToolId(msg, { tools, jobConfig: config });
   const requestedExists = (Array.isArray(agents) ? agents : [])
     .some((row) => String(row?.id || "").trim().toLowerCase() === requestedAgent);
+  const availableAgentSet = new Set(
+    (Array.isArray(agents) ? agents : [])
+      .map((row) => String(row?.id || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
   const agentSet = asObject(config.agent_set || config.agentSet);
   const disabledAgents = new Set(normalizeStringList(agentSet.disabled));
+  const mentionedAgents = parseMentionedAgentIds(msg)
+    .filter((id) => availableAgentSet.has(id) && !disabledAgents.has(id));
   const wantsDisable = isDisableSelectionRequest(msg);
   const wantsEnable = isEnableSelectionRequest(msg);
 
@@ -284,6 +351,56 @@ function fallbackPlan(message, { agents = [], tools = [], jobConfig = {} } = {})
     return {
       reason: "list tools fallback",
       actions: [{ type: "list_tools", include_disabled: true, risk: "L0" }],
+      final_response_style: "concise",
+    };
+  }
+
+  if (isStatusRequest(msg)) {
+    return {
+      reason: "status request fallback",
+      actions: [{ type: "get_status", detail: "summary", risk: "L0" }],
+      final_response_style: "concise",
+    };
+  }
+
+  if (isInterruptRequest(msg)) {
+    return {
+      reason: "interrupt fallback",
+      actions: [{
+        type: "interrupt",
+        mode: parseInterruptMode(msg),
+        note: msg,
+        risk: "L0",
+      }],
+      final_response_style: "concise",
+    };
+  }
+
+  if (isOpenContextRequest(msg)) {
+    return {
+      reason: "open context fallback",
+      actions: [{
+        type: "open_context",
+        scope: msg.toLowerCase().includes("global") ? "global" : "current",
+        risk: "L0",
+      }],
+      final_response_style: "concise",
+    };
+  }
+
+  if (isSpawnRequest(msg) && mentionedAgents.length >= 2) {
+    return {
+      reason: "parallel spawn fallback",
+      actions: [{
+        type: "spawn_agents",
+        summary: "병렬 위임 실행",
+        agents: mentionedAgents.slice(0, 4).map((agentId) => ({
+          agent_id: agentId,
+          goal: msg,
+          risk: "L1",
+        })),
+        risk: "L1",
+      }],
       final_response_style: "concise",
     };
   }
@@ -450,6 +567,11 @@ function buildRouterPrompt(message, context = {}) {
     "    {\"type\":\"enable_tool\",\"tool_id\":\"...\"},",
     "    {\"type\":\"list_agents\",\"include_disabled\":true},",
     "    {\"type\":\"list_tools\",\"include_disabled\":true},",
+    "    {\"type\":\"create_agent\",\"agent\":{\"id\":\"...\",\"name\":\"...\",\"provider\":\"gemini|codex|chatgpt\",\"model\":\"...\",\"prompt\":\"...\",\"description\":\"...\",\"meta\":{}},\"format\":\"json\"},",
+    "    {\"type\":\"update_agent\",\"agent_id\":\"...\",\"patch\":{\"prompt\":\"...\",\"description\":\"...\"},\"format\":\"json\"},",
+    "    {\"type\":\"get_status\",\"detail\":\"summary|full\"},",
+    "    {\"type\":\"interrupt\",\"mode\":\"cancel|replan\",\"note\":\"...\"},",
+    "    {\"type\":\"spawn_agents\",\"summary\":\"...\",\"agents\":[{\"agent_id\":\"...\",\"goal\":\"...\",\"risk\":\"L1\"}],\"max_parallel\":2},",
     "    {\"type\":\"open_context\",\"scope\":\"current|global\"},",
     "    {\"type\":\"summarize\",\"hint\":\"...\"}",
   "  ],",
@@ -465,6 +587,11 @@ function buildRouterPrompt(message, context = {}) {
     "- publish_agent는 admin 승인/검토가 필요함을 reason 또는 summarize 힌트에 명시한다.",
     "- agent/tool 제외 요청은 disable_agent/disable_tool을 사용한다.",
     "- agent/tool 재포함 요청은 enable_agent/enable_tool을 사용한다.",
+    "- 상태/진행 상황 요청은 get_status를 우선 사용한다.",
+    "- 중단/취소/멈춤 요청은 interrupt를 사용한다.",
+    "- 컨텍스트/GoC 링크 요청은 open_context를 사용한다.",
+    "- agent를 생성/수정해달라는 요청은 create_agent/update_agent를 사용한다.",
+    "- 병렬/동시 실행 요청이고 @agent가 2개 이상이면 spawn_agents를 고려한다.",
     "- 현재 job에서 비활성화된 agent가 명시되면 run_agent 대신 enable_agent를 우선 제안한다.",
     "- provider=chatgpt(planner) run_agent는 기본 금지다.",
     allowChatGPTPlanner
@@ -534,7 +661,14 @@ export async function routeWithSupervisor(message, {
       prompt,
       signal,
     });
-    if (!r?.ok) return fallback;
+    if (!r?.ok) {
+      if (signal?.aborted) {
+        const aborted = new Error("supervisor router aborted");
+        aborted.code = "ECANCELLED";
+        throw aborted;
+      }
+      return fallback;
+    }
     const parsed = parseJsonObjectFromText(r.stdout || r.stderr || "");
     if (!parsed) return fallback;
 
@@ -572,7 +706,8 @@ export async function routeWithSupervisor(message, {
       actions: hardened,
       final_response_style: normalized.final_response_style,
     };
-  } catch {
+  } catch (e) {
+    if (signal?.aborted) throw e;
     return fallback;
   }
 }
