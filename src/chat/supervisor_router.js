@@ -126,6 +126,49 @@ function isAgentProposalRequest(message) {
     || text.includes("초대");
 }
 
+function isPublicSearchRequest(message) {
+  const text = String(message || "").toLowerCase();
+  const asksPublic = text.includes("public")
+    || text.includes("공개")
+    || text.includes("library")
+    || text.includes("라이브러리")
+    || text.includes("blueprint")
+    || text.includes("블루프린트");
+  if (!asksPublic) return false;
+  return text.includes("찾")
+    || text.includes("search")
+    || text.includes("추천")
+    || text.includes("목록")
+    || text.includes("보여");
+}
+
+function isInstallPublicRequest(message) {
+  const text = String(message || "").toLowerCase();
+  return text.includes("설치")
+    || text.includes("install")
+    || text.includes("가져와")
+    || text.includes("복제");
+}
+
+function isPublishAgentRequest(message) {
+  const text = String(message || "").toLowerCase();
+  const hasPublishKeyword = text.includes("게시")
+    || text.includes("공개 요청")
+    || text.includes("공개해")
+    || text.includes("publish");
+  const hasAgentKeyword = text.includes("agent")
+    || text.includes("에이전트");
+  return hasPublishKeyword && hasAgentKeyword;
+}
+
+function normalizePublicSearchQuery(message) {
+  return String(message || "")
+    .replace(/public|공개|library|라이브러리|blueprint|블루프린트|agent|에이전트/gi, " ")
+    .replace(/찾아줘|찾아 봐|찾아봐|search|install|설치해줘|설치/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function fallbackPlan(message, { agents = [], jobConfig = {} } = {}) {
   const msg = String(message || "").trim();
   const participants = Array.isArray(jobConfig?.participants) ? jobConfig.participants : [];
@@ -156,6 +199,50 @@ function fallbackPlan(message, { agents = [], jobConfig = {} } = {}) {
         model: "gemini",
         prompt: msg,
         risk: "L2",
+      }],
+      final_response_style: "concise",
+    };
+  }
+
+  if (isPublishAgentRequest(msg)) {
+    return {
+      reason: "publish request fallback (admin approval required)",
+      actions: [{
+        type: "publish_agent",
+        agent_id: parseRequestedAgentId(msg) || "",
+        risk: "L1",
+      }],
+      final_response_style: "concise",
+    };
+  }
+
+  if (isInstallPublicRequest(msg)) {
+    const query = normalizePublicSearchQuery(msg);
+    return {
+      reason: "install public fallback",
+      actions: [
+        {
+          type: "search_public_agents",
+          query,
+          risk: "L0",
+        },
+        {
+          type: "install_agent_blueprint",
+          agent_id_override: parseRequestedAgentId(msg) || "",
+          risk: "L1",
+        },
+      ],
+      final_response_style: "concise",
+    };
+  }
+
+  if (isPublicSearchRequest(msg)) {
+    return {
+      reason: "public search fallback",
+      actions: [{
+        type: "search_public_agents",
+        query: normalizePublicSearchQuery(msg),
+        risk: "L0",
       }],
       final_response_style: "concise",
     };
@@ -213,6 +300,9 @@ function buildRouterPrompt(message, context = {}) {
     "    {\"type\":\"run_agent\",\"agent_id\":\"...\",\"goal\":\"...\",\"inputs\":{},\"risk\":\"L0|L1|L2|L3\"},",
     "    {\"type\":\"propose_agent\",\"agent_id\":\"...\",\"name\":\"...\",\"description\":\"...\",\"provider\":\"gemini|codex|chatgpt\",\"model\":\"...\",\"prompt\":\"...\",\"meta\":{},\"risk\":\"L2|L3\"},",
     "    {\"type\":\"need_more_detail\",\"context_set_id\":\"...\",\"node_ids\":[\"...\"],\"depth\":1,\"max_chars\":7000},",
+    "    {\"type\":\"search_public_agents\",\"query\":\"...\",\"limit\":5},",
+    "    {\"type\":\"install_agent_blueprint\",\"blueprint_id\":\"optional\",\"public_node_id\":\"optional\",\"agent_id_override\":\"optional\"},",
+    "    {\"type\":\"publish_agent\",\"agent_node_id\":\"optional\",\"agent_id\":\"optional\"},",
     "    {\"type\":\"open_context\",\"scope\":\"current|global\"},",
     "    {\"type\":\"summarize\",\"hint\":\"...\"}",
     "  ],",
@@ -223,6 +313,9 @@ function buildRouterPrompt(message, context = {}) {
     "- action은 필요한 최소만 선택한다 (최대 4개).",
     "- 일반 요청은 run_agent 1개로 우선 처리한다.",
     "- 컨텍스트가 부족하면 need_more_detail 후 run_agent를 배치한다.",
+    "- public agent 검색 요청은 search_public_agents를 사용한다.",
+    "- 설치 요청은 먼저 search_public_agents로 후보를 좁히고, 1개로 좁혀지면 install_agent_blueprint를 사용한다.",
+    "- publish_agent는 admin 승인/검토가 필요함을 reason 또는 summarize 힌트에 명시한다.",
     "- provider=chatgpt(planner) run_agent는 기본 금지다.",
     allowChatGPTPlanner
       ? "- 이번 요청은 사용자가 ChatGPT 의사결정을 명시적으로 요청했다. chatgpt 사용 가능."

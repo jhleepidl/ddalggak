@@ -15,7 +15,13 @@ import { OrchestratorMemory } from "./src/settings.js";
 import { orchestratorNotes, buildChatGPTNextStepPrompt } from "./src/prompts.js";
 import { clip, chunk, extractCodexInstruction, extractJsonPlan } from "./src/textutil.js";
 import { loadAgents, getAgent } from "./src/agents.js";
-import { loadAgentsFromGoc, createAgentProfile, updateAgentProfile } from "./src/agent_registry.js";
+import {
+  loadAgentsFromGoc,
+  createAgentProfile,
+  updateAgentProfile,
+  listPublicBlueprints,
+  installBlueprint,
+} from "./src/agent_registry.js";
 import { GocClient } from "./src/goc_client.js";
 import {
   ensureJobThread,
@@ -1074,6 +1080,9 @@ function chatActionLabel(action) {
   if (type === "run_agent") return `run_agent:${action.agent_id || action.agent || "unknown"}`;
   if (type === "propose_agent") return `propose_agent:${action.agent_id || action.agent || "unknown"}`;
   if (type === "need_more_detail") return `need_more_detail:${action.context_set_id || "ctx"}`;
+  if (type === "search_public_agents") return `search_public_agents:${action.query || ""}`;
+  if (type === "install_agent_blueprint") return `install_agent_blueprint:${action.blueprint_id || action.public_node_id || ""}`;
+  if (type === "publish_agent") return `publish_agent:${action.agent_id || action.agent_node_id || ""}`;
   if (type === "open_context") return `open_context:${action.scope || "current"}`;
   if (type === "create_agent") return `create_agent:${action.agent?.id || "unknown"}`;
   if (type === "update_agent") return `update_agent:${action.agentId || "unknown"}`;
@@ -1179,7 +1188,55 @@ function pickPrimaryChatOutput(outputs) {
   return "";
 }
 
+function summarizeSpecialChatOutputs(outputs) {
+  const rows = Array.isArray(outputs) ? outputs : [];
+  const searchRows = rows.filter((row) => String(row?.mode || "") === "public_search");
+  const installRows = rows.filter((row) => String(row?.mode || "") === "install_agent_blueprint");
+  const publishRows = rows.filter((row) => String(row?.mode || "") === "publish_agent_request");
+  const lines = [];
+
+  for (const row of searchRows) {
+    const items = Array.isArray(row?.items) ? row.items : [];
+    lines.push("Public agent 검색 결과");
+    if (items.length === 0) {
+      lines.push("- 검색 결과가 없습니다.");
+      continue;
+    }
+    for (const item of items.slice(0, 6)) {
+      const agentId = String(item?.agent_id || "").trim();
+      const title = String(item?.title || "").trim() || String(item?.blueprint_id || "").trim();
+      const blueprintId = String(item?.blueprint_id || "").trim();
+      const tags = Array.isArray(item?.tags) && item.tags.length > 0 ? ` tags=${item.tags.join(",")}` : "";
+      lines.push(`- ${title} (${agentId ? `@${agentId}` : "agent:n/a"}, blueprint=${blueprintId || "n/a"})${tags}`);
+    }
+  }
+
+  for (const row of installRows) {
+    const agentId = String(row?.installed_agent_id || "").trim().toLowerCase();
+    if (agentId) {
+      lines.push(`설치 완료: @${agentId}`);
+      lines.push(`이제 @${agentId} 로 사용 가능`);
+    } else {
+      lines.push("설치 완료");
+    }
+  }
+
+  for (const row of publishRows) {
+    const requestId = String(row?.request_id || "").trim();
+    if (requestId) {
+      lines.push(`공개 요청 접수됨: request_id=${requestId}`);
+    } else {
+      lines.push("공개 요청이 생성되었습니다.");
+    }
+    lines.push("관리자 승인 후 public library에 반영됩니다.");
+  }
+
+  return lines.join("\n").trim();
+}
+
 function buildChatSynthesisFallback(message, execution = {}) {
+  const special = summarizeSpecialChatOutputs(execution.outputs);
+  if (special) return special;
   const primary = pickPrimaryChatOutput(execution.outputs);
   if (primary) return clip(primary, 3600);
 
@@ -1202,6 +1259,9 @@ function buildChatSynthesisFallback(message, execution = {}) {
 async function synthesizeChatReply(message, routePlan, execution = {}) {
   const outputs = Array.isArray(execution.outputs) ? execution.outputs : [];
   if (outputs.length === 0) return buildChatSynthesisFallback(message, execution);
+  const special = summarizeSpecialChatOutputs(outputs);
+  const hasAgentOutput = outputs.some((row) => String(row?.agentId || "").trim().toLowerCase() !== "system");
+  if (special && !hasAgentOutput) return special;
 
   const outputText = outputs
     .map((row, idx) => [
@@ -1239,6 +1299,8 @@ async function synthesizeChatReply(message, routePlan, execution = {}) {
     "",
     "실행 결과:",
     outputText,
+    special ? "특수 실행 요약:" : "",
+    special ? special : "",
     "",
     "최종 답변:",
   ].join("\n");
@@ -1353,7 +1415,16 @@ function defaultSupervisorJobConfig(jobId) {
     mode: "supervisor",
     final_response_style: "concise",
     participants: [],
-    allow_actions: ["run_agent", "propose_agent", "need_more_detail", "open_context", "summarize"],
+    allow_actions: [
+      "run_agent",
+      "propose_agent",
+      "need_more_detail",
+      "open_context",
+      "summarize",
+      "search_public_agents",
+      "install_agent_blueprint",
+      "publish_agent",
+    ],
     budget: {
       max_actions: 4,
       max_chars: 16000,
@@ -1440,6 +1511,108 @@ function buildAgentProfileFromProposal(action) {
     prompt: String(action?.prompt || action?.goal || "").trim(),
     meta: action?.meta && typeof action.meta === "object" ? action.meta : {},
   };
+}
+
+function normalizeBlueprintSearchItems(items = []) {
+  return (Array.isArray(items) ? items : [])
+    .map((row) => ({
+      blueprint_id: String(row?.blueprint_id || "").trim(),
+      public_node_id: String(row?.public_node_id || "").trim(),
+      agent_id: String(row?.agent_id || "").trim().toLowerCase(),
+      title: String(row?.title || "").trim(),
+      tags: Array.isArray(row?.tags) ? row.tags.map((v) => String(v || "").trim()).filter(Boolean) : [],
+      description: String(row?.description || "").trim(),
+    }))
+    .filter((row) => row.blueprint_id || row.public_node_id || row.agent_id);
+}
+
+function filterPublicBlueprintCandidates(items = [], query = "", limit = 5) {
+  const rows = normalizeBlueprintSearchItems(items);
+  const q = String(query || "").trim().toLowerCase();
+  const max = Number.isFinite(Number(limit)) ? Math.max(1, Math.min(10, Math.floor(Number(limit)))) : 5;
+  if (!q) return rows.slice(0, max);
+  const tokens = q.split(/\s+/).filter(Boolean);
+  const scored = rows.map((row) => {
+    const hay = [
+      row.title,
+      row.agent_id,
+      row.blueprint_id,
+      row.description,
+      ...(Array.isArray(row.tags) ? row.tags : []),
+    ].join(" ").toLowerCase();
+    let score = 0;
+    for (const token of tokens) {
+      if (!token) continue;
+      if (hay.includes(token)) score += 1;
+      if (row.agent_id === token) score += 3;
+      if (row.blueprint_id === token) score += 3;
+    }
+    return { row, score };
+  });
+  return scored
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map((entry) => entry.row)
+    .slice(0, max);
+}
+
+function resolveInstallCandidateFromSession(session, action = {}) {
+  const cache = normalizeBlueprintSearchItems(session?.public_search_cache || []);
+  if (cache.length === 0) return null;
+  const publicNodeId = String(action.public_node_id || "").trim();
+  const blueprintId = String(action.blueprint_id || "").trim();
+  const overrideAgentId = String(action.agent_id_override || "").trim().toLowerCase();
+
+  if (publicNodeId) {
+    const found = cache.find((row) => row.public_node_id === publicNodeId);
+    if (found) return found;
+  }
+  if (blueprintId) {
+    const found = cache.find((row) => row.blueprint_id === blueprintId);
+    if (found) return found;
+  }
+  if (overrideAgentId) {
+    const found = cache.find((row) => row.agent_id === overrideAgentId);
+    if (found) return found;
+  }
+  return cache[0] || null;
+}
+
+function parseAgentIdFromProfileResource(resource) {
+  const payload = resource?.payload && typeof resource.payload === "object" ? resource.payload : {};
+  const candidate = payload.agent_profile && typeof payload.agent_profile === "object"
+    ? payload.agent_profile
+    : parseStructuredFromResource(resource, "agent_profile");
+  const id = String(
+    candidate?.id
+    || candidate?.agent_id
+    || payload.agent_id
+    || ""
+  ).trim().toLowerCase();
+  return id;
+}
+
+async function findLatestAgentProfileNodeForPublish(client, agentsSlot, { agentNodeId = "", agentId = "" } = {}) {
+  const directNodeId = String(agentNodeId || "").trim();
+  if (directNodeId) {
+    const node = await client.getNode(directNodeId);
+    if (!node) return null;
+    return { id: directNodeId, node };
+  }
+
+  const targetAgentId = String(agentId || "").trim().toLowerCase();
+  const resources = await listActiveResourcesByKind(client, {
+    threadId: agentsSlot.threadId,
+    ctxId: agentsSlot.ctxId,
+    resourceKind: "agent_profile",
+  });
+  for (let i = resources.length - 1; i >= 0; i -= 1) {
+    const row = resources[i];
+    const parsedAgentId = parseAgentIdFromProfileResource(row);
+    if (targetAgentId && parsedAgentId !== targetAgentId) continue;
+    if (row?.id) return row;
+  }
+  return null;
 }
 
 async function loadSupervisorRuntime(jobId) {
@@ -1750,6 +1923,115 @@ function buildSupervisorExecutionCallbacks({
       const okCount = results.filter((row) => row.status === "ok").length;
       const errorCount = results.filter((row) => row.status === "error").length;
       return { text: `실행 완료: ok=${okCount}, error=${errorCount}` };
+    },
+    searchPublicAgents: async ({ action }) => {
+      if (memoryModeWithFallback() !== "goc") {
+        throw new Error("search_public_agents requires MEMORY_MODE=goc");
+      }
+      const client = requireGocClient();
+      const allBlueprints = await listPublicBlueprints(client);
+      const filtered = filterPublicBlueprintCandidates(
+        allBlueprints,
+        action.query || "",
+        action.limit || 5
+      );
+      chatSessionStore.upsert(chatId, {
+        public_search_cache: filtered.map((row) => ({
+          blueprint_id: row.blueprint_id,
+          public_node_id: row.public_node_id,
+          agent_id: row.agent_id,
+          title: row.title,
+          tags: row.tags,
+          updated_at: new Date().toISOString(),
+        })),
+      });
+      return { items: filtered, total: allBlueprints.length };
+    },
+    installAgentBlueprint: async ({ action }) => {
+      if (memoryModeWithFallback() !== "goc") {
+        throw new Error("install_agent_blueprint requires MEMORY_MODE=goc");
+      }
+      if (!runtime.agentsSlot?.threadId || !runtime.agentsSlot?.ctxId) {
+        throw new Error("agents thread/context is not ready");
+      }
+      const client = requireGocClient();
+      const allBlueprints = await listPublicBlueprints(client);
+      const byNode = new Map(allBlueprints.map((row) => [String(row.public_node_id || "").trim(), row]));
+      const byBlueprintId = new Map(allBlueprints.map((row) => [String(row.blueprint_id || "").trim(), row]));
+      const byAgentId = new Map(
+        allBlueprints
+          .map((row) => [String(row.agent_id || "").trim().toLowerCase(), row])
+          .filter((entry) => entry[0])
+      );
+
+      let selected = null;
+      const requestedNode = String(action.public_node_id || "").trim();
+      const requestedBlueprint = String(action.blueprint_id || "").trim();
+      const override = String(action.agent_id_override || "").trim().toLowerCase();
+      if (requestedNode && byNode.has(requestedNode)) selected = byNode.get(requestedNode);
+      if (!selected && requestedBlueprint && byBlueprintId.has(requestedBlueprint)) selected = byBlueprintId.get(requestedBlueprint);
+      if (!selected && override && byAgentId.has(override)) selected = byAgentId.get(override);
+      if (!selected) {
+        const session = chatSessionStore.get(chatId);
+        const cached = resolveInstallCandidateFromSession(session, action);
+        if (cached?.public_node_id && byNode.has(cached.public_node_id)) {
+          selected = byNode.get(cached.public_node_id);
+        } else if (cached?.blueprint_id && byBlueprintId.has(cached.blueprint_id)) {
+          selected = byBlueprintId.get(cached.blueprint_id);
+        } else if (cached?.agent_id && byAgentId.has(cached.agent_id)) {
+          selected = byAgentId.get(cached.agent_id);
+        }
+      }
+      if (!selected && allBlueprints.length === 1) selected = allBlueprints[0];
+      if (!selected) {
+        throw new Error("설치할 blueprint를 특정하지 못했습니다. 먼저 public agent 검색 후 후보를 지정하세요.");
+      }
+
+      const installed = await installBlueprint(client, selected.resource || selected, {
+        agentsThreadId: runtime.agentsSlot.threadId,
+        ctxId: runtime.agentsSlot.ctxId,
+        agentIdOverride: override || "",
+      });
+      await refreshAgentRegistry({ includeCompiled: true });
+      tracking.append(jobId, "decisions.md", [
+        "## /chat install_agent_blueprint",
+        `- blueprint_id: ${installed.blueprint_id || selected.blueprint_id || "unknown"}`,
+        `- public_node_id: ${installed.public_node_id || selected.public_node_id || "unknown"}`,
+        `- installed_agent_id: ${installed.agent_id || "unknown"}`,
+        `- created_node: ${installed.created?.id || "unknown"}`,
+      ].join("\n"));
+      return {
+        ...installed,
+        node_id: installed?.created?.id || "",
+      };
+    },
+    publishAgent: async ({ action }) => {
+      if (memoryModeWithFallback() !== "goc") {
+        throw new Error("publish_agent requires MEMORY_MODE=goc");
+      }
+      if (!runtime.agentsSlot?.threadId || !runtime.agentsSlot?.ctxId) {
+        throw new Error("agents thread/context is not ready");
+      }
+      const client = requireGocClient();
+      const targetNode = await findLatestAgentProfileNodeForPublish(
+        client,
+        runtime.agentsSlot,
+        {
+          agentNodeId: action.agent_node_id || "",
+          agentId: action.agent_id || "",
+        }
+      );
+      if (!targetNode?.id) {
+        throw new Error("publish 대상 agent_profile node를 찾지 못했습니다.");
+      }
+      const request = await client.createPublishRequest(String(targetNode.id));
+      tracking.append(jobId, "decisions.md", [
+        "## /chat publish_agent",
+        `- source_node_id: ${String(targetNode.id)}`,
+        `- request_id: ${request.request_id || "unknown"}`,
+        "- note: admin approval required",
+      ].join("\n"));
+      return request;
     },
   };
 }

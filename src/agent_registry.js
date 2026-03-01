@@ -1,5 +1,5 @@
 import { loadAgents } from "./agents.js";
-import { ensureAgentsThread } from "./goc_mapping.js";
+import { ensureAgentsThread, ensurePublicLibraryThreadId } from "./goc_mapping.js";
 
 const PROVIDER_ALIASES = {
   gpt: "chatgpt",
@@ -21,6 +21,11 @@ function parseJsonMaybe(text) {
   } catch {
     return null;
   }
+}
+
+function normalizeStringArray(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((row) => String(row || "").trim()).filter(Boolean);
 }
 
 function normalizeProvider(raw) {
@@ -299,6 +304,188 @@ function buildRegistry(agents, meta = {}) {
   };
 }
 
+function getResourceRawText(resource) {
+  const row = asObject(resource);
+  const raw = asObject(row.raw);
+  const text = String(
+    raw.raw_text
+    || raw.rawText
+    || row.text
+    || raw.text
+    || raw.summary
+    || row.summary
+    || ""
+  );
+  return text;
+}
+
+function parsePublicBlueprintFromResource(resource) {
+  const row = asObject(resource);
+  const payload = getResourcePayload(row);
+  const payloadBlueprint = asObject(
+    payload.agent_blueprint
+    || payload.blueprint
+    || payload
+  );
+  const rawText = getResourceRawText(row);
+  const textRows = parseAgentProfilesFromText(rawText);
+  const payloadAgent = normalizeAgent(
+    payloadBlueprint.agent
+    || payloadBlueprint.profile
+    || payloadBlueprint.agent_profile
+    || payloadBlueprint
+  );
+  const agent = textRows[0] || payloadAgent;
+  const blueprintId = String(
+    payloadBlueprint.blueprint_id
+    || payloadBlueprint.id
+    || payload.blueprint_id
+    || row.id
+    || ""
+  ).trim();
+  const publicNodeId = String(row.id || "").trim();
+  if (!publicNodeId) return null;
+
+  const tags = normalizeStringArray(
+    payloadBlueprint.tags
+    || payload.tags
+  );
+  const title = String(
+    payloadBlueprint.title
+    || row.name
+    || `blueprint:${blueprintId || publicNodeId}`
+  ).trim();
+  const description = String(
+    payloadBlueprint.description
+    || agent?.description
+    || ""
+  ).trim();
+  const fallbackAgentId = String(
+    payloadBlueprint.agent_id
+    || payload.agent_id
+    || agent?.id
+    || ""
+  ).trim().toLowerCase();
+  const preparedRawText = rawText.trim()
+    ? rawText
+    : `${JSON.stringify({
+      id: fallbackAgentId || `agent_${publicNodeId}`,
+      name: payloadBlueprint.name || fallbackAgentId || `agent_${publicNodeId}`,
+      description,
+      provider: payloadBlueprint.provider || agent?.provider || "gemini",
+      model: payloadBlueprint.model || agent?.model || payloadBlueprint.provider || agent?.provider || "gemini",
+      prompt: payloadBlueprint.prompt || agent?.prompt || "",
+      meta: payloadBlueprint.meta && typeof payloadBlueprint.meta === "object" ? payloadBlueprint.meta : {},
+    }, null, 2)}\n`;
+
+  return {
+    blueprint_id: blueprintId || publicNodeId,
+    public_node_id: publicNodeId,
+    title,
+    description,
+    tags,
+    agent_id: fallbackAgentId || "",
+    provider: String(payloadBlueprint.provider || agent?.provider || "").trim().toLowerCase(),
+    model: String(payloadBlueprint.model || agent?.model || "").trim(),
+    prompt: String(payloadBlueprint.prompt || agent?.prompt || "").trim(),
+    raw_text: preparedRawText.endsWith("\n") ? preparedRawText : `${preparedRawText}\n`,
+    payload_json: payload,
+    resource: row,
+  };
+}
+
+export async function listPublicBlueprints(client) {
+  if (!client) throw new Error("listPublicBlueprints requires client");
+  const libraryThreadId = await ensurePublicLibraryThreadId(client);
+  if (!libraryThreadId) return [];
+
+  const resources = await client.listResources(libraryThreadId, {
+    resourceKind: "agent_blueprint",
+  });
+  const out = [];
+  for (const resource of sortByCreatedAt(resources)) {
+    const parsed = parsePublicBlueprintFromResource(resource);
+    if (!parsed) continue;
+    out.push({
+      ...parsed,
+      library_thread_id: libraryThreadId,
+    });
+  }
+  return out;
+}
+
+export async function installBlueprint(client, blueprintNode, { agentsThreadId, ctxId, agentIdOverride = "" } = {}) {
+  if (!client) throw new Error("installBlueprint requires client");
+  const threadId = String(agentsThreadId || "").trim();
+  const contextId = String(ctxId || "").trim();
+  if (!threadId) throw new Error("installBlueprint requires agentsThreadId");
+  if (!contextId) throw new Error("installBlueprint requires ctxId");
+
+  const parsed = parsePublicBlueprintFromResource(blueprintNode);
+  if (!parsed) throw new Error("installBlueprint requires valid blueprint node");
+
+  const overrideId = String(agentIdOverride || "").trim().toLowerCase();
+  let profileRaw = parsed.raw_text;
+  let parsedProfile = null;
+  const parsedDirect = parseJsonMaybe(profileRaw);
+  if (parsedDirect && typeof parsedDirect === "object") {
+    parsedProfile = parsedDirect;
+  } else {
+    const fromText = parseAgentProfilesFromText(profileRaw);
+    if (fromText.length > 0) parsedProfile = fromText[0];
+  }
+
+  if (!parsedProfile || typeof parsedProfile !== "object") {
+    parsedProfile = {
+      id: parsed.agent_id || `agent_${parsed.blueprint_id}`,
+      name: parsed.title || parsed.agent_id || parsed.blueprint_id,
+      description: parsed.description || "",
+      provider: parsed.provider || "gemini",
+      model: parsed.model || parsed.provider || "gemini",
+      prompt: parsed.prompt || "",
+      meta: {},
+    };
+  }
+
+  if (overrideId) parsedProfile.id = overrideId;
+  const finalAgentId = String(parsedProfile.id || parsed.agent_id || "").trim().toLowerCase();
+  if (!finalAgentId) throw new Error("installBlueprint resolved empty agent id");
+  parsedProfile.id = finalAgentId;
+  profileRaw = `${JSON.stringify(parsedProfile, null, 2)}\n`;
+
+  const nowIso = new Date().toISOString();
+  const payloadJson = {
+    ...(parsed.payload_json && typeof parsed.payload_json === "object" ? parsed.payload_json : {}),
+    installed_from_public: true,
+    origin: {
+      type: "public",
+      blueprint_id: parsed.blueprint_id,
+      public_node_id: parsed.public_node_id,
+      installed_at: nowIso,
+    },
+    agent_profile: parsedProfile,
+  };
+
+  const created = await client.createResource(threadId, {
+    name: `agent:${finalAgentId}@${nowIso}`,
+    summary: `installed from public blueprint ${parsed.blueprint_id}`,
+    text_mode: "plain",
+    raw_text: profileRaw,
+    resource_kind: "agent_profile",
+    uri: `ddalggak://agents/${finalAgentId}`,
+    context_set_id: contextId,
+    auto_activate: true,
+    payload_json: payloadJson,
+  });
+
+  return {
+    created,
+    agent_id: finalAgentId,
+    blueprint_id: parsed.blueprint_id,
+    public_node_id: parsed.public_node_id,
+  };
+}
+
 export async function loadAgentsFromGoc({ client, baseDir, includeCompiled = true } = {}) {
   if (!client) throw new Error("loadAgentsFromGoc requires client");
   const fallback = loadAgents();
@@ -306,8 +493,20 @@ export async function loadAgentsFromGoc({ client, baseDir, includeCompiled = tru
 
   const resources = await client.listResources(slot.threadId, { resourceKind: "agent_profile" });
   const parsedFromNodes = [];
+  const publicOriginByAgentId = new Map();
   for (const resource of sortByCreatedAt(resources)) {
-    for (const row of parseProfilesFromResource(resource)) parsedFromNodes.push(row);
+    const payload = getResourcePayload(resource);
+    const origin = payload?.origin && typeof payload.origin === "object" ? payload.origin : null;
+    const isPublicOrigin = String(origin?.type || "").trim().toLowerCase() === "public";
+    for (const row of parseProfilesFromResource(resource)) {
+      parsedFromNodes.push(row);
+      if (isPublicOrigin && row?.id) {
+        publicOriginByAgentId.set(String(row.id).toLowerCase(), {
+          ...origin,
+          installed_from_public: true,
+        });
+      }
+    }
   }
 
   let compiledText = "";
@@ -325,8 +524,18 @@ export async function loadAgentsFromGoc({ client, baseDir, includeCompiled = tru
   const selected = parsedFromCompiled.length > 0
     ? parsedFromCompiled
     : (parsedFromNodes.length > 0 ? parsedFromNodes : fallback.agents);
+  const selectedWithOrigin = selected.map((agent) => {
+    const key = String(agent?.id || "").trim().toLowerCase();
+    const origin = key ? publicOriginByAgentId.get(key) : null;
+    if (!origin) return agent;
+    return {
+      ...agent,
+      installed_from_public: true,
+      origin,
+    };
+  });
 
-  return buildRegistry(selected, {
+  return buildRegistry(selectedWithOrigin, {
     source: parsedFromCompiled.length > 0 ? "goc_compiled" : (parsedFromNodes.length > 0 ? "goc_nodes" : "fallback_local"),
     threadId: slot.threadId,
     ctxId: slot.ctxId,

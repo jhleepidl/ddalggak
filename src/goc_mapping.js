@@ -57,6 +57,16 @@ function defaultJobConfig(jobId) {
     mode: "supervisor",
     final_response_style: "concise",
     participants: [],
+    allow_actions: [
+      "run_agent",
+      "propose_agent",
+      "need_more_detail",
+      "open_context",
+      "summarize",
+      "search_public_agents",
+      "install_agent_blueprint",
+      "publish_agent",
+    ],
     budget: {
       max_actions: 4,
       max_chars: 16000,
@@ -266,6 +276,18 @@ export async function ensureToolsThread(client, { baseDir, title = "" }) {
     lookupTitles,
     preferLookupTitles: true,
   });
+}
+
+export async function ensurePublicLibraryThreadId(client) {
+  if (!client || typeof client.listThreads !== "function") return null;
+  try {
+    const threads = await client.listThreads();
+    const found = (Array.isArray(threads) ? threads : [])
+      .find((row) => String(row?.title || "").trim() === "agents:library");
+    return found?.id ? String(found.id).trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 async function ensureDefaultJobConfigResource(client, { threadId, ctxId, jobId }) {

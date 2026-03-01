@@ -9,6 +9,30 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function normalizePublicSearchCache(raw) {
+  const rows = Array.isArray(raw) ? raw : [];
+  const out = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const blueprintId = String(row.blueprint_id || row.blueprintId || "").trim();
+    const publicNodeId = String(row.public_node_id || row.publicNodeId || row.node_id || "").trim();
+    const agentId = String(row.agent_id || row.agentId || "").trim().toLowerCase();
+    if (!blueprintId && !publicNodeId && !agentId) continue;
+    out.push({
+      blueprint_id: blueprintId,
+      public_node_id: publicNodeId,
+      agent_id: agentId,
+      title: String(row.title || "").trim(),
+      tags: Array.isArray(row.tags)
+        ? row.tags.map((v) => String(v || "").trim()).filter(Boolean).slice(0, 16)
+        : [],
+      updated_at: String(row.updated_at || nowIso()),
+    });
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
 function normalizeSession(chatId, raw = {}) {
   const row = asObject(raw);
   const budgetRaw = asObject(row.budget);
@@ -23,6 +47,7 @@ function normalizeSession(chatId, raw = {}) {
     },
     pending_approval: row.pending_approval && typeof row.pending_approval === "object" ? row.pending_approval : null,
     last_route: row.last_route && typeof row.last_route === "object" ? row.last_route : null,
+    public_search_cache: normalizePublicSearchCache(row.public_search_cache),
     updated_at: String(row.updated_at || nowIso()),
   };
 }
@@ -111,4 +136,3 @@ export class ChatSessionStore {
     });
   }
 }
-

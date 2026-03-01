@@ -98,6 +98,42 @@ function normalizeSummarize(raw) {
   };
 }
 
+function normalizeSearchPublicAgents(raw) {
+  const row = asObject(raw);
+  return {
+    type: "search_public_agents",
+    query: String(row.query || row.keyword || row.q || "").trim(),
+    limit: Number.isFinite(Number(row.limit)) ? Math.max(1, Math.min(10, Math.floor(Number(row.limit)))) : 5,
+    risk: "L0",
+  };
+}
+
+function normalizeInstallAgentBlueprint(raw) {
+  const row = asObject(raw);
+  const blueprintId = String(row.blueprint_id || row.blueprintId || row.id || "").trim();
+  const publicNodeId = String(row.public_node_id || row.publicNodeId || row.node_id || row.nodeId || "").trim();
+  const override = String(row.agent_id_override || row.agentIdOverride || row.agent_id || "").trim().toLowerCase();
+  return {
+    type: "install_agent_blueprint",
+    blueprint_id: blueprintId,
+    public_node_id: publicNodeId,
+    agent_id_override: override,
+    risk: "L1",
+  };
+}
+
+function normalizePublishAgent(raw) {
+  const row = asObject(raw);
+  const agentNodeId = String(row.agent_node_id || row.agentNodeId || row.node_id || row.nodeId || "").trim();
+  const agentId = String(row.agent_id || row.agentId || row.agent || "").trim().toLowerCase();
+  return {
+    type: "publish_agent",
+    agent_node_id: agentNodeId,
+    agent_id: agentId,
+    risk: "L1",
+  };
+}
+
 export function normalizeAction(raw) {
   const row = asObject(raw);
   const type = String(row.type || "").trim().toLowerCase();
@@ -108,6 +144,9 @@ export function normalizeAction(raw) {
   if (type === "need_more_detail" || type === "expand_context") return normalizeNeedMoreDetail(row);
   if (type === "open_context" || type === "context") return normalizeOpenContext(row);
   if (type === "summarize" || type === "summary") return normalizeSummarize(row);
+  if (type === "search_public_agents" || type === "find_public_agents") return normalizeSearchPublicAgents(row);
+  if (type === "install_agent_blueprint" || type === "install_public_agent") return normalizeInstallAgentBlueprint(row);
+  if (type === "publish_agent" || type === "request_publish_agent") return normalizePublishAgent(row);
   return null;
 }
 
@@ -130,20 +169,27 @@ export function normalizeActionPlan(rawPlan = {}, { maxActions = 4 } = {}) {
 }
 
 export function defaultAllowlist() {
-  return new Set(["run_agent", "propose_agent", "need_more_detail", "open_context", "summarize"]);
+  return new Set([
+    "run_agent",
+    "propose_agent",
+    "need_more_detail",
+    "open_context",
+    "summarize",
+    "search_public_agents",
+    "install_agent_blueprint",
+    "publish_agent",
+  ]);
 }
 
 export function parseAllowlist(jobConfig = {}, tools = []) {
   const cfg = asObject(jobConfig);
   const raw = cfg.allowed_actions || cfg.allow_actions || cfg.actions_allowlist || cfg.action_allowlist;
   const list = Array.isArray(raw) ? raw : [];
-  const set = new Set(
-    list
-      .map((row) => String(row || "").trim().toLowerCase())
-      .filter(Boolean)
-  );
-  if (set.size === 0) {
-    for (const value of defaultAllowlist()) set.add(value);
+  const set = new Set(defaultAllowlist());
+  for (const row of list) {
+    const key = String(row || "").trim().toLowerCase();
+    if (!key) continue;
+    set.add(key);
   }
 
   for (const spec of Array.isArray(tools) ? tools : []) {

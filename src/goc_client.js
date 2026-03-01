@@ -621,6 +621,30 @@ export class GocClient {
     };
   }
 
+  async createPublishRequest(sourceNodeId) {
+    const nodeId = String(sourceNodeId || "").trim();
+    if (!nodeId) throw new Error("createPublishRequest requires sourceNodeId");
+    const data = await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: "/api/publish_requests", body: { source_node_id: nodeId } },
+        { path: "/publish_requests", body: { source_node_id: nodeId } },
+        { path: "/v1/publish_requests", body: { source_node_id: nodeId } },
+      ],
+    });
+    const row = normalizeEntity(data, ["publish_request", "data", "request"]);
+    const requestId = String(
+      pick(row, ["id", "request_id", "requestId"])
+      || pick(data, ["id", "request_id", "requestId"])
+      || ""
+    ).trim();
+    return {
+      request_id: requestId,
+      source_node_id: nodeId,
+      raw: data,
+    };
+  }
+
   async mintUiToken(ttlSec) {
     const n = Number(ttlSec);
     const ttl = Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;

@@ -15,6 +15,9 @@ function actionLabel(action) {
   if (type === "run_agent") return `run_agent:${action.agent_id || "unknown"}`;
   if (type === "propose_agent") return `propose_agent:${action.agent_id || "unknown"}`;
   if (type === "need_more_detail") return `need_more_detail:${action.context_set_id || "unknown"}`;
+  if (type === "search_public_agents") return `search_public_agents:${action.query || ""}`;
+  if (type === "install_agent_blueprint") return `install_agent_blueprint:${action.blueprint_id || action.public_node_id || ""}`;
+  if (type === "publish_agent") return `publish_agent:${action.agent_id || action.agent_node_id || ""}`;
   if (type === "open_context") return `open_context:${action.scope || "current"}`;
   return type;
 }
@@ -175,6 +178,105 @@ export async function executeSupervisorActions({
           status: "ok",
           note: `draft=${draft?.draft_id || draft?.id || action.agent_id || "unknown"}`,
         });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "search_public_agents") {
+        if (typeof callbacks.searchPublicAgents !== "function") {
+          throw new Error("searchPublicAgents callback is missing");
+        }
+        const found = await callbacks.searchPublicAgents({
+          action,
+          jobId,
+          chatId,
+          userId,
+        });
+        const list = Array.isArray(found?.items) ? found.items : [];
+        const lines = list.length > 0
+          ? list.map((row, index) => {
+            const agentId = String(row?.agent_id || "").trim();
+            const blueprintId = String(row?.blueprint_id || "").trim();
+            const title = String(row?.title || "").trim();
+            const tags = Array.isArray(row?.tags) && row.tags.length > 0 ? ` tags=${row.tags.join(",")}` : "";
+            return `${index + 1}. ${title || blueprintId || agentId} (${agentId ? `@${agentId}` : "agent:n/a"}, blueprint=${blueprintId || "n/a"})${tags}`;
+          }).join("\n")
+          : "검색 결과가 없습니다.";
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "public_search",
+          output: lines,
+          items: list,
+          query: String(action.query || ""),
+          jobId: String(jobId || ""),
+        });
+        results.push({ label, status: "ok", note: `candidates=${list.length}` });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "install_agent_blueprint") {
+        if (typeof callbacks.installAgentBlueprint !== "function") {
+          throw new Error("installAgentBlueprint callback is missing");
+        }
+        const installed = await callbacks.installAgentBlueprint({
+          action,
+          jobId,
+          chatId,
+          userId,
+          outputs,
+          results,
+        });
+        const agentId = String(installed?.agent_id || "").trim().toLowerCase();
+        const blueprintId = String(installed?.blueprint_id || "").trim();
+        const line = agentId
+          ? `설치 완료: @${agentId}\n이제 @${agentId} 로 사용 가능`
+          : "설치 완료";
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "install_agent_blueprint",
+          output: line,
+          installed_agent_id: agentId,
+          blueprint_id: blueprintId,
+          public_node_id: String(installed?.public_node_id || "").trim(),
+          node_id: String(installed?.node_id || installed?.created?.id || "").trim(),
+          jobId: String(jobId || ""),
+        });
+        results.push({ label, status: "ok", note: agentId ? `@${agentId}` : (blueprintId || "installed") });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "publish_agent") {
+        if (typeof callbacks.publishAgent !== "function") {
+          throw new Error("publishAgent callback is missing");
+        }
+        const requested = await callbacks.publishAgent({
+          action,
+          jobId,
+          chatId,
+          userId,
+        });
+        const requestId = String(
+          requested?.request_id
+          || requested?.id
+          || requested?.publish_request_id
+          || ""
+        ).trim();
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "publish_agent_request",
+          output: requestId
+            ? `공개 요청 접수됨: request_id=${requestId}\n관리자 승인 후 라이브러리에 반영됩니다.`
+            : "공개 요청이 생성되었습니다. 관리자 승인 후 반영됩니다.",
+          request_id: requestId,
+          source_node_id: String(requested?.source_node_id || "").trim(),
+          jobId: String(jobId || ""),
+        });
+        results.push({ label, status: "ok", note: requestId || "request created" });
         usedActions += 1;
         continue;
       }
