@@ -272,7 +272,8 @@ export function normalizeAction(raw) {
   if (!type) return null;
 
   if (type === "run_agent" || type === "agent_run") return normalizeRunAgent(row);
-  if (type === "propose_agent" || type === "create_agent" || type === "invite_agent") return normalizeProposeAgent(row);
+  if (type === "create_agent") return normalizeCreateAgent(row);
+  if (type === "propose_agent" || type === "invite_agent") return normalizeProposeAgent(row);
   if (type === "need_more_detail" || type === "expand_context") return normalizeNeedMoreDetail(row);
   if (type === "open_context" || type === "context") return normalizeOpenContext(row);
   if (type === "summarize" || type === "summary") return normalizeSummarize(row);
@@ -285,7 +286,6 @@ export function normalizeAction(raw) {
   if (type === "enable_tool") return normalizeToggleTool(row, true);
   if (type === "list_agents") return normalizeListAgents(row);
   if (type === "list_tools") return normalizeListTools(row);
-  if (type === "create_agent") return normalizeCreateAgent(row);
   if (type === "update_agent") return normalizeUpdateAgent(row);
   if (type === "get_status" || type === "status") return normalizeGetStatus(row);
   if (type === "interrupt" || type === "cancel") return normalizeInterrupt(row);

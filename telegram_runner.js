@@ -524,6 +524,36 @@ function formatRunningJobs(chatId) {
   return lines.join("\n");
 }
 
+function listPendingManualApprovals(jobId) {
+  const cleanJobId = String(jobId || "").trim();
+  if (!cleanJobId) return [];
+  let approvalsDir = "";
+  try {
+    approvalsDir = path.join(jobs.jobDir(cleanJobId), "approvals");
+  } catch {
+    return [];
+  }
+  if (!approvalsDir || !fs.existsSync(approvalsDir)) return [];
+  const files = fs.readdirSync(approvalsDir, { withFileTypes: true })
+    .filter((row) => row.isFile() && row.name.endsWith(".json"))
+    .map((row) => row.name)
+    .slice(0, 40);
+  const pending = [];
+  for (const name of files) {
+    try {
+      const filePath = path.join(approvalsDir, name);
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      if (String(parsed?.status || "").trim().toLowerCase() !== "pending") continue;
+      pending.push({
+        token: String(parsed?.token || "").trim(),
+        purpose: String(parsed?.purpose || "").trim(),
+        summary: String(parsed?.summary || "").trim(),
+      });
+    } catch {}
+  }
+  return pending.slice(0, 5);
+}
+
 function buildChatStatusCard(chatId, runtime = null) {
   const chatKey = String(chatId || "");
   const session = chatSessionStore.get(chatId);
@@ -540,6 +570,13 @@ function buildChatStatusCard(chatId, runtime = null) {
   const pendingApproval = session.pending_approval && typeof session.pending_approval === "object"
     ? session.pending_approval
     : null;
+  const pendingApprovalActionLabel = pendingApproval?.action
+    ? chatActionLabel(pendingApproval.action)
+    : "";
+  const lastRoute = session.last_route && typeof session.last_route === "object"
+    ? session.last_route
+    : null;
+  const manualApprovals = listPendingManualApprovals(currentJobId);
   const enabledAgents = runtime?.agentSelection?.enabled_ids || runtime?.enabledAgentIds || [];
   const enabledTools = runtime?.toolSelection?.enabled_ids || runtime?.enabledToolIds || [];
 
@@ -553,8 +590,18 @@ function buildChatStatusCard(chatId, runtime = null) {
     `- abort_signal: ${activeController ? (activeController.signal.aborted ? "aborted" : "active") : "none"}`,
     `- pending_interrupt: ${interrupt?.requested ? `${interrupt.mode}${interrupt.reason ? ` (${clip(interrupt.reason, 90)})` : ""}` : "none"}`,
     `- pending_approval: ${pendingApproval ? (pendingApproval.reason || "yes") : "none"}`,
+    pendingApprovalActionLabel ? `- pending_approval_action: ${pendingApprovalActionLabel}` : "",
+    lastRoute
+      ? `- last_route: ${String(lastRoute.reason || "(none)")}, actions=${Array.isArray(lastRoute.actions) ? lastRoute.actions.length : 0}`
+      : "",
     `- pending_user_messages: ${Array.isArray(session.pending_user_messages) ? session.pending_user_messages.length : 0}`,
+    manualApprovals.length > 0 ? `- pending_manual_approvals: ${manualApprovals.length}` : "",
   ];
+  if (manualApprovals.length > 0) {
+    for (const row of manualApprovals) {
+      lines.push(`  - ${row.purpose || "approval"}: ${clip(row.summary || row.token || "", 120)}`);
+    }
+  }
   if (Array.isArray(enabledAgents) && enabledAgents.length > 0) {
     lines.push(`- enabled_agents: ${enabledAgents.map((id) => `@${id}`).join(", ")}`);
   }
@@ -1807,7 +1854,14 @@ async function findLatestAgentProfileNodeForPublish(client, agentsSlot, { agentN
   return null;
 }
 
-async function loadSupervisorRuntime(jobId, { chatMeta = null } = {}) {
+async function loadSupervisorRuntime(
+  jobId,
+  {
+    chatMeta = null,
+    includeContext = true,
+    includeGlobal = true,
+  } = {}
+) {
   const reg = await refreshAgentRegistry({ includeCompiled: true });
   const fallbackNormalized = normalizeSupervisorJobConfig(
     { job_id: String(jobId || "").trim() },
@@ -1837,7 +1891,7 @@ async function loadSupervisorRuntime(jobId, { chatMeta = null } = {}) {
       toolSelection: summarizeSelectionState({ catalog: [], enabled: [] }),
       agents: fallbackAgents,
       tools: [],
-      contextSummary: loadLocalContextDocs(jobId, TRACK_DOC_NAMES, 2200),
+      contextSummary: includeContext ? loadLocalContextDocs(jobId, TRACK_DOC_NAMES, 2200) : "",
       globalSummary: "",
     };
   }
@@ -1889,18 +1943,22 @@ async function loadSupervisorRuntime(jobId, { chatMeta = null } = {}) {
     .filter((tool) => enabledToolSet.has(String(tool?.id || "").trim().toLowerCase()));
 
   let contextSummary = "";
-  try {
-    contextSummary = await client.getCompiledContext(map.ctxSharedId);
-  } catch {
-    contextSummary = loadLocalContextDocs(jobId, TRACK_DOC_NAMES, 2200);
+  if (includeContext) {
+    try {
+      contextSummary = await client.getCompiledContext(map.ctxSharedId);
+    } catch {
+      contextSummary = loadLocalContextDocs(jobId, TRACK_DOC_NAMES, 2200);
+    }
   }
 
   let globalSummary = "";
-  try {
-    const globalSlot = await ensureGlobalThread(client, { baseDir: jobs.baseDir, title: "global:shared" });
-    globalSummary = await client.getCompiledContext(globalSlot.ctxId);
-  } catch {
-    globalSummary = "";
+  if (includeGlobal) {
+    try {
+      const globalSlot = await ensureGlobalThread(client, { baseDir: jobs.baseDir, title: "global:shared" });
+      globalSummary = await client.getCompiledContext(globalSlot.ctxId);
+    } catch {
+      globalSummary = "";
+    }
   }
 
   return {
@@ -2346,7 +2404,6 @@ function buildSupervisorExecutionCallbacks({
           const text = `✅ @${agentId} 완료\n${clip(String(result?.output || ""), 3200)}`;
           await bot.sendMessage(chatId, text, {
             reply_to_message_id: parent.message_id,
-            reply_parameters: { message_id: parent.message_id },
           });
           childResults.push({
             agent_id: agentId,
@@ -2358,7 +2415,6 @@ function buildSupervisorExecutionCallbacks({
           const errText = `❌ @${agentId} 실패\n${clip(String(e?.message ?? e), 1000)}`;
           await bot.sendMessage(chatId, errText, {
             reply_to_message_id: parent.message_id,
-            reply_parameters: { message_id: parent.message_id },
           });
           childResults.push({
             agent_id: agentId,
@@ -3176,6 +3232,164 @@ function isHardStopMessage(text) {
     || msg.includes("cancel");
 }
 
+function classifyPlainChatIntent(text) {
+  const src = String(text || "").trim().toLowerCase();
+  if (!src) return "normal";
+
+  const hasAny = (list) => list.some((token) => src.includes(token));
+  const hasListHint = hasAny(["목록", "list", "보여", "어떤", "조회", "show"]);
+  const hasWorkChangeHint = hasAny([
+    "해줘", "해 줘", "수정", "업데이트", "생성", "추가", "삭제", "바꿔",
+    "disable", "enable", "설치", "publish", "중단", "취소", "멈춰",
+  ]);
+
+  const asksApprovalReason = src.includes("승인")
+    && (src.includes("왜") || src.includes("이유") || src.includes("필요"));
+  if (asksApprovalReason) return "soft_status";
+
+  const hasStatus = hasAny(["상태", "진행", "뭐하고", "running", "get_status", "status"]);
+  if (hasStatus && !hasWorkChangeHint) return "soft_status";
+
+  const hasContext = hasAny(["컨텍스트", "context", "goc", "링크", "open goc"]);
+  if (hasContext && !hasWorkChangeHint) return "soft_context";
+
+  const hasAgentWord = hasAny(["에이전트", "agents", "agent 목록", "agent list"]);
+  if (hasAgentWord && (hasListHint || src === "agents" || src === "에이전트") && !hasWorkChangeHint) {
+    return "soft_list_agents";
+  }
+
+  const hasToolWord = hasAny(["툴", "tools", "tool 목록", "tool list"]);
+  if (hasToolWord && (hasListHint || src === "tools" || src === "툴") && !hasWorkChangeHint) {
+    return "soft_list_tools";
+  }
+
+  return "normal";
+}
+
+async function sendTextWithOptionalGocButton(bot, chatId, text, link = "") {
+  const cleanText = String(text || "").trim();
+  if (!cleanText) return;
+  const cleanLink = String(link || "").trim();
+  if (!cleanLink) {
+    await sendLong(bot, chatId, cleanText);
+    return;
+  }
+  await bot.sendMessage(chatId, cleanText, {
+    reply_markup: {
+      inline_keyboard: [[
+        { text: "Open GoC", web_app: { url: cleanLink } },
+        { text: "Open Link", url: cleanLink },
+      ]],
+    },
+  });
+}
+
+async function sendChatStatus(bot, chatId) {
+  const currentJobId = String(resolveCurrentJobIdForChat(chatId) || "").trim();
+  let runtime = null;
+  if (currentJobId) {
+    try {
+      runtime = await loadSupervisorRuntime(currentJobId, {
+        chatMeta: { chat_id: String(chatId || "") },
+        includeContext: false,
+        includeGlobal: false,
+      });
+    } catch {
+      runtime = null;
+    }
+  }
+  const card = buildChatStatusCard(chatId, runtime);
+  await sendLong(bot, chatId, card.text);
+}
+
+async function sendContextLinkQuick(bot, chatId, msg) {
+  const src = String(msg?.text || msg || "").toLowerCase();
+  const wantsGlobal = src.includes("global") || src.includes("글로벌");
+  const target = wantsGlobal ? "global" : "";
+  try {
+    await sendContextInfo(bot, chatId, target);
+  } catch (e) {
+    await bot.sendMessage(chatId, `❌ 컨텍스트 링크 생성 실패: ${String(e?.message ?? e)}`);
+  }
+}
+
+async function sendAgentOrToolListQuick(bot, chatId, kind = "agent") {
+  const cleanKind = String(kind || "").trim().toLowerCase() === "tool" ? "tool" : "agent";
+  const currentJobId = String(resolveCurrentJobIdForChat(chatId) || "").trim();
+  if (!currentJobId) {
+    if (cleanKind === "agent") {
+      const reg = await refreshAgentRegistry({ includeCompiled: true });
+      const ids = (Array.isArray(reg.agents) ? reg.agents : [])
+        .map((row) => String(row?.id || "").trim().toLowerCase())
+        .filter(Boolean)
+        .slice(0, 10);
+      const lines = [
+        "현재 활성 job이 없습니다.",
+        ids.length > 0
+          ? `등록된 agent(샘플): ${ids.map((id) => `@${id}`).join(", ")}`
+          : "등록된 agent가 없습니다.",
+        "작업 지시를 보내면 chat별 job이 생성됩니다.",
+      ];
+      await sendLong(bot, chatId, lines.join("\n"));
+      return;
+    }
+    await bot.sendMessage(chatId, "현재 활성 job이 없어 tool 목록을 확인할 수 없습니다.");
+    return;
+  }
+
+  let runtime = null;
+  try {
+    runtime = await loadSupervisorRuntime(currentJobId, {
+      chatMeta: { chat_id: String(chatId || "") },
+      includeContext: false,
+      includeGlobal: false,
+    });
+  } catch (e) {
+    await bot.sendMessage(chatId, `❌ 목록 조회 실패: ${String(e?.message ?? e)}`);
+    return;
+  }
+
+  let info = null;
+  try {
+    info = await buildContextInfo(currentJobId, { chatId });
+  } catch {
+    info = null;
+  }
+
+  if (cleanKind === "agent") {
+    const enabled = runtime?.agentSelection?.enabled_ids || runtime?.enabledAgentIds || [];
+    const disabled = runtime?.agentSelection?.disabled_ids || [];
+    const lines = [
+      "현재 job agent 목록",
+      `- job_id: ${currentJobId}`,
+      enabled.length > 0
+        ? `- enabled: ${enabled.slice(0, 10).map((id) => `@${id}`).join(", ")}`
+        : "- enabled: (none)",
+      disabled.length > 0
+        ? `- disabled: ${disabled.slice(0, 10).map((id) => `@${id}`).join(", ")}`
+        : "- disabled: (none)",
+      "정밀 편집은 GoC UI에서 할 수 있습니다.",
+    ];
+    await sendTextWithOptionalGocButton(bot, chatId, lines.join("\n"), info?.link || "");
+    return;
+  }
+
+  const enabled = runtime?.toolSelection?.enabled_ids || runtime?.enabledToolIds || [];
+  const disabled = runtime?.toolSelection?.disabled_ids || [];
+  const lines = [
+    "현재 job tool 목록",
+    `- job_id: ${currentJobId}`,
+    enabled.length > 0
+      ? `- enabled: ${enabled.slice(0, 10).join(", ")}`
+      : "- enabled: (none)",
+    disabled.length > 0
+      ? `- disabled: ${disabled.slice(0, 10).join(", ")}`
+      : "- disabled: (none)",
+    "정밀 편집은 GoC UI에서 할 수 있습니다.",
+  ];
+  await sendTextWithOptionalGocButton(bot, chatId, lines.join("\n"), info?.link || "");
+}
+
 function extractPlainChatMessage(msg, text, botUsername = "") {
   const raw = String(text || "").trim();
   if (!raw) return "";
@@ -3684,6 +3898,23 @@ bot.on("message", async (msg) => {
       });
       return;
     }
+    const intent = classifyPlainChatIntent(plain);
+    if (intent === "soft_status") {
+      await sendChatStatus(bot, chatId);
+      return;
+    }
+    if (intent === "soft_context") {
+      await sendContextLinkQuick(bot, chatId, msg);
+      return;
+    }
+    if (intent === "soft_list_agents") {
+      await sendAgentOrToolListQuick(bot, chatId, "agent");
+      return;
+    }
+    if (intent === "soft_list_tools") {
+      await sendAgentOrToolListQuick(bot, chatId, "tool");
+      return;
+    }
     await chatRunManager.handleIncoming({
       chatId,
       userId,
@@ -3892,6 +4123,23 @@ bot.on("message", async (msg) => {
 
     try {
       if (!parsed.debug) {
+        const intent = classifyPlainChatIntent(message);
+        if (intent === "soft_status") {
+          await sendChatStatus(bot, chatId);
+          return;
+        }
+        if (intent === "soft_context") {
+          await sendContextLinkQuick(bot, chatId, { text: message });
+          return;
+        }
+        if (intent === "soft_list_agents") {
+          await sendAgentOrToolListQuick(bot, chatId, "agent");
+          return;
+        }
+        if (intent === "soft_list_tools") {
+          await sendAgentOrToolListQuick(bot, chatId, "tool");
+          return;
+        }
         await chatRunManager.handleIncoming({
           chatId,
           userId,

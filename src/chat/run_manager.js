@@ -269,13 +269,18 @@ export class ChatRunManager {
     text = "",
     telegramMessageId = null,
     chatInfo = null,
+    kind = "normal",
   } = {}) {
     const cleanText = String(text || "").trim();
     if (!cleanText) return { status: "ignored" };
+    const incomingKind = String(kind || "normal").trim().toLowerCase();
 
     const slot = this._slot(chatId);
     if (chatInfo && typeof chatInfo === "object") {
       slot.chatInfo = { ...chatInfo };
+    }
+    if (incomingKind === "soft_query") {
+      return { status: "ignored_soft_query" };
     }
     this._appendPending(chatId, {
       userId,
@@ -289,9 +294,12 @@ export class ChatRunManager {
     const awaitingApproval = state === "awaiting_approval" || !!session.pending_approval;
 
     if (busy || awaitingApproval) {
-      this.sessionStore.upsert(chatId, {
-        pending_approval: null,
-      });
+      const busyKind = incomingKind === "soft_query" ? "soft_query" : "interrupt_update";
+      if (busyKind === "interrupt_update") {
+        this.sessionStore.upsert(chatId, {
+          pending_approval: null,
+        });
+      }
       slot.nextInputKind = "interrupt_update";
       this._markInterrupt(chatId, "replan", cleanText);
       await this._cancelCurrent(chatId, { mode: "replan", reason: cleanText });
