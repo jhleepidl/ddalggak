@@ -59,6 +59,9 @@ const TELEGRAM_SINGLE_INSTANCE_LOCK = String(process.env.TELEGRAM_SINGLE_INSTANC
 const LOCK_FILE = process.env.TELEGRAM_LOCK_FILE || path.join(workspace.root, ".orchestrator", "telegram_runner.lock");
 const MEMORY_MODE = String(process.env.MEMORY_MODE || "local").trim().toLowerCase() === "goc" ? "goc" : "local";
 const GOC_UI_TOKEN_TTL_SEC = Number(process.env.GOC_UI_TOKEN_TTL_SEC ?? 21600);
+const GOC_UI_BROWSER_TOKEN_TTL_SEC = Number.isFinite(Number(process.env.GOC_UI_BROWSER_TOKEN_TTL_SEC))
+  ? Math.max(60, Math.floor(Number(process.env.GOC_UI_BROWSER_TOKEN_TTL_SEC)))
+  : 3600;
 const GOC_UI_LINK_MODE = String(process.env.GOC_UI_LINK_MODE || "telegram_auth").trim().toLowerCase() === "bearer_token"
   ? "bearer_token"
   : "telegram_auth";
@@ -178,14 +181,68 @@ function loadLocalContextDocs(jobId, docNames, maxCharsPerDoc = 3500) {
   return out.trim() || "(none)";
 }
 
-function buildGocUiLink({ threadId, ctxId, token = "" }) {
-  const base = String(process.env.GOC_UI_BASE || "").trim().replace(/\/+$/, "");
-  if (!base) throw new Error("Missing GOC_UI_BASE");
-  const query = `${base}?thread=${encodeURIComponent(String(threadId || ""))}&ctx=${encodeURIComponent(String(ctxId || ""))}`;
-  if (GOC_UI_LINK_MODE === "bearer_token" && token) {
+function resolveGocUiBase() {
+  const publicBase = String(process.env.GOC_UI_PUBLIC_BASE || "").trim().replace(/\/+$/, "");
+  const internalBase = String(process.env.GOC_UI_BASE || "").trim().replace(/\/+$/, "");
+  return publicBase || internalBase;
+}
+
+function isHttps(url) {
+  return /^https:\/\//i.test(String(url || "").trim());
+}
+
+function isTelegramWebAppHttpsError(error) {
+  const code = String(error?.code || "").trim().toUpperCase();
+  const desc = String(error?.response?.body?.description || "");
+  const msg = String(error?.message || error || "");
+  const merged = `${desc}\n${msg}`;
+  return code === "ETELEGRAM" && /Only HTTPS links are allowed/i.test(merged);
+}
+
+function buildGocUiLink({ threadId, ctxId, token = "", base = "", withToken = null }) {
+  const resolvedBase = String(base || resolveGocUiBase() || "").trim().replace(/\/+$/, "");
+  if (!resolvedBase) throw new Error("Missing GOC_UI_BASE (or GOC_UI_PUBLIC_BASE)");
+  const query = `${resolvedBase}?thread=${encodeURIComponent(String(threadId || ""))}&ctx=${encodeURIComponent(String(ctxId || ""))}`;
+  const useToken = typeof withToken === "boolean"
+    ? withToken
+    : (GOC_UI_LINK_MODE === "bearer_token");
+  if (useToken && token) {
     return `${query}#token=${encodeURIComponent(String(token || ""))}`;
   }
   return query;
+}
+
+async function buildContextLinks(client, { threadId, ctxId } = {}) {
+  const base = resolveGocUiBase();
+  if (!base) throw new Error("Missing GOC_UI_BASE (or GOC_UI_PUBLIC_BASE)");
+
+  let miniAppToken = null;
+  if (GOC_UI_LINK_MODE === "bearer_token") {
+    miniAppToken = await client.mintUiToken(GOC_UI_TOKEN_TTL_SEC);
+  }
+  const browserToken = await client.mintUiToken(GOC_UI_BROWSER_TOKEN_TTL_SEC);
+
+  const miniAppLink = buildGocUiLink({
+    threadId,
+    ctxId,
+    token: miniAppToken?.token || "",
+    base,
+    withToken: GOC_UI_LINK_MODE === "bearer_token",
+  });
+  const browserLink = buildGocUiLink({
+    threadId,
+    ctxId,
+    token: browserToken?.token || "",
+    base,
+    withToken: true,
+  });
+  return {
+    miniAppLink,
+    browserLink,
+    miniAppTokenExp: miniAppToken?.exp || null,
+    browserTokenExp: browserToken?.exp || null,
+    miniAppSupported: isHttps(miniAppLink),
+  };
 }
 
 function resolveCurrentJobIdForChat(chatId) {
@@ -210,20 +267,37 @@ function resetChatSession(chatId) {
   chatSessionStore.clear(chatId);
 }
 
-async function buildContextInfo(target, { chatId = null } = {}) {
+async function buildContextInfo(
+  target,
+  {
+    chatId = null,
+    userId = null,
+    createIfMissing = false,
+  } = {}
+) {
   if (memoryModeWithFallback() !== "goc") {
     throw new Error(`GoC disabled (mode=${MEMORY_MODE}, effective=${memoryModeWithFallback()})`);
   }
 
   const client = requireGocClient();
-  const minted = GOC_UI_LINK_MODE === "bearer_token"
-    ? await client.mintUiToken(GOC_UI_TOKEN_TTL_SEC)
-    : null;
   const targetRaw = String(target || "").trim();
-  const resolved = targetRaw || (chatId == null ? "" : resolveCurrentJobIdForChat(chatId));
+  let resolved = targetRaw || (chatId == null ? "" : resolveCurrentJobIdForChat(chatId));
 
   if (!resolved) {
-    throw new Error("Usage: /context <jobId|global>  (jobId omitted uses current running job)");
+    if (!createIfMissing || chatId == null) {
+      throw new Error("Usage: /context <jobId|global>  (jobId omitted uses current running job)");
+    }
+    const seeded = await createJob("Open GoC context link", {
+      ownerUserId: userId,
+      ownerChatId: chatId,
+    });
+    resolved = String(seeded?.jobId || "").trim();
+    if (!resolved) throw new Error("Failed to create context job");
+    rememberLastChatJob(chatId, resolved);
+    chatSessionStore.upsert(chatId, {
+      jobId: resolved,
+      state: "idle",
+    });
   }
 
   if (resolved.toLowerCase() === "global") {
@@ -231,19 +305,32 @@ async function buildContextInfo(target, { chatId = null } = {}) {
       baseDir: jobs.baseDir,
       title: "global:shared",
     });
-    const link = buildGocUiLink({ threadId: g.threadId, ctxId: g.ctxId, token: minted?.token || "" });
+    const links = await buildContextLinks(client, {
+      threadId: g.threadId,
+      ctxId: g.ctxId,
+    });
+    const miniAppNotice = links.miniAppSupported
+      ? ""
+      : "Mini App 버튼은 HTTPS만 지원합니다. 지금은 브라우저 링크를 사용하세요.";
     return {
       scope: "global",
       threadId: g.threadId,
       ctxId: g.ctxId,
-      link,
-      tokenExp: minted?.exp || null,
+      link: links.miniAppLink,
+      miniAppLink: links.miniAppLink,
+      browserLink: links.browserLink,
+      miniAppSupported: links.miniAppSupported,
+      miniAppTokenExp: links.miniAppTokenExp,
+      browserTokenExp: links.browserTokenExp,
       lines: [
         "global context",
         `thread=${g.threadId}`,
         `ctx=${g.ctxId}`,
-        minted?.exp ? `token_exp=${minted.exp}` : "",
-        link,
+        links.miniAppTokenExp ? `miniapp_token_exp=${links.miniAppTokenExp}` : "",
+        links.browserTokenExp ? `browser_token_exp=${links.browserTokenExp}` : "",
+        `miniapp_link=${links.miniAppLink}`,
+        `browser_link=${links.browserLink}`,
+        miniAppNotice,
         "",
         "UI에서 편집/활성 토글/삭제하면 다음 스텝 호출부터 반영됩니다.",
       ].filter(Boolean),
@@ -257,45 +344,73 @@ async function buildContextInfo(target, { chatId = null } = {}) {
     title: `job:${jobId}`,
     telegram: chatId == null ? null : { chat_id: String(chatId || "") },
   });
-  const link = buildGocUiLink({
+  const links = await buildContextLinks(client, {
     threadId: map.threadId,
     ctxId: map.ctxSharedId,
-    token: minted?.token || "",
   });
+  const miniAppNotice = links.miniAppSupported
+    ? ""
+    : "Mini App 버튼은 HTTPS만 지원합니다. 지금은 브라우저 링크를 사용하세요.";
   return {
     scope: "job",
     jobId,
     threadId: map.threadId,
     ctxId: map.ctxSharedId,
-    link,
-    tokenExp: minted?.exp || null,
+    link: links.miniAppLink,
+    miniAppLink: links.miniAppLink,
+    browserLink: links.browserLink,
+    miniAppSupported: links.miniAppSupported,
+    miniAppTokenExp: links.miniAppTokenExp,
+    browserTokenExp: links.browserTokenExp,
     lines: [
       `jobId=${jobId}`,
       `thread=${map.threadId}`,
       `ctx=${map.ctxSharedId}`,
-      minted?.exp ? `token_exp=${minted.exp}` : "",
-      link,
+      links.miniAppTokenExp ? `miniapp_token_exp=${links.miniAppTokenExp}` : "",
+      links.browserTokenExp ? `browser_token_exp=${links.browserTokenExp}` : "",
+      `miniapp_link=${links.miniAppLink}`,
+      `browser_link=${links.browserLink}`,
+      miniAppNotice,
       "",
       "UI에서 편집/활성 토글/삭제하면 다음 스텝 호출부터 반영됩니다.",
     ].filter(Boolean),
   };
 }
 
-async function sendContextInfo(bot, chatId, target) {
-  const info = await buildContextInfo(target, { chatId });
+async function sendContextInfo(bot, chatId, target, { userId = null, createIfMissing = true } = {}) {
+  const info = await buildContextInfo(target, { chatId, userId, createIfMissing });
   const text = info.lines.join("\n");
-  const keyboard = info.link
-    ? {
-      inline_keyboard: [[
-        { text: "Open GoC", web_app: { url: info.link } },
-        { text: "Open Link", url: info.link },
-      ]],
-    }
-    : undefined;
-  if (keyboard) {
-    await bot.sendMessage(chatId, text, { reply_markup: keyboard });
-  } else {
+  const hasMiniApp = isHttps(info.miniAppLink || "");
+  const buttons = [];
+  if (hasMiniApp) {
+    buttons.push({ text: "Open GoC (Mini App)", web_app: { url: info.miniAppLink } });
+  }
+  if (info.browserLink) {
+    buttons.push({ text: "Open GoC (Browser)", url: info.browserLink });
+  } else if (info.miniAppLink) {
+    buttons.push({ text: "Open GoC (Browser)", url: info.miniAppLink });
+  }
+
+  if (buttons.length === 0) {
     await sendLong(bot, chatId, text);
+    return info;
+  }
+  try {
+    await bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [buttons] } });
+  } catch (e) {
+    if (hasMiniApp && isTelegramWebAppHttpsError(e)) {
+      const fallbackText = `${text}\n\nMini App 버튼은 HTTPS만 지원합니다. 지금은 브라우저 링크를 사용하세요.`;
+      const browserOnly = info.browserLink
+        ? [{ text: "Open GoC (Browser)", url: info.browserLink }]
+        : [];
+      if (browserOnly.length > 0) {
+        await bot.sendMessage(chatId, fallbackText, { reply_markup: { inline_keyboard: [browserOnly] } });
+      } else {
+        await sendLong(bot, chatId, fallbackText);
+      }
+      return info;
+    }
+    throw e;
   }
   return info;
 }
@@ -2950,7 +3065,10 @@ async function executeChatActions(bot, chatId, userId, message, routePlan, { ver
         const target = action.scope === "global"
           ? "global"
           : String(action.jobId || currentJobId || "").trim();
-        await sendContextInfo(bot, chatId, target);
+        await sendContextInfo(bot, chatId, target, {
+          userId,
+          createIfMissing: true,
+        });
         results.push({ label, status: "ok", note: target || "current" });
         continue;
       }
@@ -3266,22 +3384,59 @@ function classifyPlainChatIntent(text) {
   return "normal";
 }
 
-async function sendTextWithOptionalGocButton(bot, chatId, text, link = "") {
+async function sendTextWithOptionalGocButton(
+  bot,
+  chatId,
+  text,
+  {
+    miniAppLink = "",
+    browserLink = "",
+  } = {}
+) {
   const cleanText = String(text || "").trim();
   if (!cleanText) return;
-  const cleanLink = String(link || "").trim();
-  if (!cleanLink) {
+  const cleanMiniAppLink = String(miniAppLink || "").trim();
+  const cleanBrowserLink = String(browserLink || "").trim();
+  if (!cleanMiniAppLink && !cleanBrowserLink) {
     await sendLong(bot, chatId, cleanText);
     return;
   }
-  await bot.sendMessage(chatId, cleanText, {
-    reply_markup: {
-      inline_keyboard: [[
-        { text: "Open GoC", web_app: { url: cleanLink } },
-        { text: "Open Link", url: cleanLink },
-      ]],
-    },
-  });
+
+  const buttons = [];
+  const hasMiniApp = isHttps(cleanMiniAppLink);
+  if (hasMiniApp) {
+    buttons.push({ text: "Open GoC (Mini App)", web_app: { url: cleanMiniAppLink } });
+  }
+  if (cleanBrowserLink) {
+    buttons.push({ text: "Open GoC (Browser)", url: cleanBrowserLink });
+  } else if (cleanMiniAppLink) {
+    buttons.push({ text: "Open GoC (Browser)", url: cleanMiniAppLink });
+  }
+  if (buttons.length === 0) {
+    await sendLong(bot, chatId, cleanText);
+    return;
+  }
+  try {
+    await bot.sendMessage(chatId, cleanText, {
+      reply_markup: {
+        inline_keyboard: [buttons],
+      },
+    });
+  } catch (e) {
+    if (hasMiniApp && isTelegramWebAppHttpsError(e)) {
+      const fallbackText = `${cleanText}\n\nMini App 버튼은 HTTPS만 지원합니다. 지금은 브라우저 링크를 사용하세요.`;
+      const browserOnly = cleanBrowserLink
+        ? [{ text: "Open GoC (Browser)", url: cleanBrowserLink }]
+        : [{ text: "Open GoC (Browser)", url: cleanMiniAppLink }];
+      await bot.sendMessage(chatId, fallbackText, {
+        reply_markup: {
+          inline_keyboard: [browserOnly],
+        },
+      });
+      return;
+    }
+    throw e;
+  }
 }
 
 async function sendChatStatus(bot, chatId) {
@@ -3307,7 +3462,10 @@ async function sendContextLinkQuick(bot, chatId, msg) {
   const wantsGlobal = src.includes("global") || src.includes("글로벌");
   const target = wantsGlobal ? "global" : "";
   try {
-    await sendContextInfo(bot, chatId, target);
+    await sendContextInfo(bot, chatId, target, {
+      userId: msg?.from?.id ?? null,
+      createIfMissing: true,
+    });
   } catch (e) {
     await bot.sendMessage(chatId, `❌ 컨텍스트 링크 생성 실패: ${String(e?.message ?? e)}`);
   }
@@ -3370,7 +3528,10 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent") {
         : "- disabled: (none)",
       "정밀 편집은 GoC UI에서 할 수 있습니다.",
     ];
-    await sendTextWithOptionalGocButton(bot, chatId, lines.join("\n"), info?.link || "");
+    await sendTextWithOptionalGocButton(bot, chatId, lines.join("\n"), {
+      miniAppLink: info?.miniAppLink || info?.link || "",
+      browserLink: info?.browserLink || "",
+    });
     return;
   }
 
@@ -3387,7 +3548,10 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent") {
       : "- disabled: (none)",
     "정밀 편집은 GoC UI에서 할 수 있습니다.",
   ];
-  await sendTextWithOptionalGocButton(bot, chatId, lines.join("\n"), info?.link || "");
+  await sendTextWithOptionalGocButton(bot, chatId, lines.join("\n"), {
+    miniAppLink: info?.miniAppLink || info?.link || "",
+    browserLink: info?.browserLink || "",
+  });
 }
 
 function extractPlainChatMessage(msg, text, botUsername = "") {
@@ -3933,7 +4097,12 @@ bot.on("message", async (msg) => {
   const args = rest.join(" ").trim();
 
   if (cmd === "/help") {
-    await bot.sendMessage(chatId, "Commands:\n- plain text: 기본 /chat(supervisor) 처리\n- /whoami\n- /running\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
+    const sub = String(args || "").trim().toLowerCase();
+    if (sub === "advanced") {
+      await bot.sendMessage(chatId, "Commands:\n- plain text: 기본 /chat(supervisor) 처리\n- /whoami\n- /running\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
+      return;
+    }
+    await bot.sendMessage(chatId, "Commands:\n- plain text: 대화/작업 지시\n- /context [global]\n- /stop [jobId]\n- /running\n- /whoami\n- /help advanced");
     return;
   }
 
@@ -4102,7 +4271,10 @@ bot.on("message", async (msg) => {
   if (cmd === "/context") {
     try {
       const arg = String(rest[0] || "").trim();
-      await sendContextInfo(bot, chatId, arg);
+      await sendContextInfo(bot, chatId, arg, {
+        userId,
+        createIfMissing: true,
+      });
     } catch (e) {
       await bot.sendMessage(chatId, `❌ /context 실패: ${String(e?.message ?? e)}`);
     }
