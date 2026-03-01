@@ -161,10 +161,48 @@ function parseRequestedAgentId(message) {
   return "";
 }
 
+function isExplicitChatGPTDecisionRequest(message) {
+  const text = String(message || "").toLowerCase();
+  const asksChatGPT = text.includes("chatgpt")
+    || text.includes("gpt")
+    || text.includes("챗지피티")
+    || text.includes("지피티");
+  if (!asksChatGPT) return false;
+  return text.includes("결정")
+    || text.includes("정해")
+    || text.includes("판단")
+    || text.includes("action plan")
+    || text.includes("plan")
+    || text.includes("플랜")
+    || text.includes("계획")
+    || text.includes("decide");
+}
+
+function getAgentProvider(agents, agentId) {
+  const key = String(agentId || "").trim().toLowerCase();
+  if (!key) return "";
+  const row = (Array.isArray(agents) ? agents : []).find((it) => String(it?.id || "").trim().toLowerCase() === key);
+  return String(row?.provider || "").trim().toLowerCase();
+}
+
+function preferredGeminiAgentId(agents) {
+  const rows = Array.isArray(agents) ? agents : [];
+  const byId = new Map(rows.map((row) => [String(row?.id || "").trim().toLowerCase(), row]));
+  if (byId.has("researcher")) return "researcher";
+  const gemini = rows.find((row) => String(row?.provider || "").trim().toLowerCase() === "gemini");
+  if (gemini?.id) return String(gemini.id).trim().toLowerCase();
+  const nonChatgpt = rows.find((row) => String(row?.provider || "").trim().toLowerCase() !== "chatgpt");
+  if (nonChatgpt?.id) return String(nonChatgpt.id).trim().toLowerCase();
+  return "";
+}
+
 function fallbackRoute(message, context = {}) {
   const msg = String(message || "").trim();
   const low = msg.toLowerCase();
   const agents = Array.isArray(context.agents) ? context.agents : [];
+  const allowChatGPTPlanner = typeof context.allowChatGPTPlanner === "boolean"
+    ? context.allowChatGPTPlanner
+    : isExplicitChatGPTDecisionRequest(msg);
 
   if (!msg) {
     return { reason: "empty message fallback", actions: [{ type: "show_agents" }] };
@@ -202,9 +240,22 @@ function fallbackRoute(message, context = {}) {
 
   const mentionedAgent = detectAgentId(msg, agents);
   if (mentionedAgent) {
+    if (!allowChatGPTPlanner && getAgentProvider(agents, mentionedAgent) === "chatgpt") {
+      const geminiAgent = preferredGeminiAgentId(agents);
+      if (geminiAgent) {
+        return {
+          reason: "chatgpt planner blocked by policy fallback",
+          actions: [{ type: "run_agent", agent: geminiAgent, prompt: msg }],
+        };
+      }
+    }
     return { reason: "run intent fallback", actions: [{ type: "run_agent", agent: mentionedAgent, prompt: msg }] };
   }
 
+  const geminiAgent = preferredGeminiAgentId(agents);
+  if (geminiAgent) {
+    return { reason: "default conversational fallback", actions: [{ type: "run_agent", agent: geminiAgent, prompt: msg }] };
+  }
   return { reason: "default fallback", actions: [{ type: "show_agents" }] };
 }
 
@@ -217,6 +268,9 @@ function buildRouterPrompt(message, context = {}) {
   const currentJobId = String(context.currentJobId || "").trim();
   const locale = String(context.locale || "ko-KR");
   const routerPolicy = String(context.routerPolicy || "").trim();
+  const allowChatGPTPlanner = typeof context.allowChatGPTPlanner === "boolean"
+    ? context.allowChatGPTPlanner
+    : isExplicitChatGPTDecisionRequest(message);
 
   return [
     "너는 Telegram /chat 오케스트레이터 라우터다.",
@@ -233,6 +287,10 @@ function buildRouterPrompt(message, context = {}) {
     "규칙:",
     "- action은 필요한 최소 개수만 선택한다.",
     "- run_agent는 반드시 명시된 에이전트 id 중 하나를 사용한다.",
+    "- /chat 기본 동작은 대화형 응답이며, 일반 요청은 gemini provider 에이전트 우선으로 처리한다.",
+    allowChatGPTPlanner
+      ? "- 이번 요청은 사용자가 ChatGPT 결정을 명시했다. provider=chatgpt 에이전트는 꼭 필요할 때만 1회 사용한다."
+      : "- provider=chatgpt(예: planner) run_agent는 금지한다. 사용자가 명시적으로 'ChatGPT로 결정해줘'라고 요청할 때만 허용된다.",
     "- 에이전트 목록 요청이면 show_agents만 사용한다.",
     "- 컨텍스트 링크 요청이면 open_context를 사용한다.",
     "",
@@ -256,10 +314,20 @@ function buildRouterPrompt(message, context = {}) {
 
 export async function route(message, context = {}) {
   const msg = String(message || "").trim();
-  const fallback = fallbackRoute(msg, context);
+  const allowChatGPTPlanner = typeof context.allowChatGPTPlanner === "boolean"
+    ? context.allowChatGPTPlanner
+    : isExplicitChatGPTDecisionRequest(msg);
+  const fallback = fallbackRoute(msg, { ...context, allowChatGPTPlanner });
+  const agents = Array.isArray(context.agents) ? context.agents : [];
+  const providerByAgent = new Map(
+    agents.map((row) => [
+      String(row?.id || "").trim().toLowerCase(),
+      String(row?.provider || "").trim().toLowerCase(),
+    ])
+  );
   const workspaceRoot = String(context.workspaceRoot || process.cwd()).trim() || process.cwd();
   const cwd = String(context.cwd || context.runDir || workspaceRoot).trim() || workspaceRoot;
-  const prompt = buildRouterPrompt(msg, context);
+  const prompt = buildRouterPrompt(msg, { ...context, allowChatGPTPlanner });
 
   try {
     const r = await runGeminiPrompt({
@@ -274,9 +342,16 @@ export async function route(message, context = {}) {
     if (!parsed || !Array.isArray(parsed.actions)) return fallback;
     const normalized = parsed.actions.map(normalizeRouteAction).filter(Boolean).slice(0, 4);
     if (normalized.length === 0) return fallback;
+    const filtered = normalized.filter((action) => {
+      if (action.type !== "run_agent") return true;
+      if (allowChatGPTPlanner) return true;
+      const provider = providerByAgent.get(String(action.agent || "").trim().toLowerCase());
+      return provider !== "chatgpt";
+    });
+    if (filtered.length === 0) return fallback;
     return {
       reason: String(parsed.reason || "").trim() || "router decision",
-      actions: normalized,
+      actions: filtered,
     };
   } catch {
     return fallback;

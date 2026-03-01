@@ -128,7 +128,7 @@ sudo systemctl status telegram-orchestrator
   - ChatGPT는 반드시 `actions` JSON을 포함하도록 유도됨
 
 - ChatGPT에서 답을 받은 후:
-  - `/gptapply <jobId>` 를 먼저 보내고
+  - 봇 메시지의 `🟣 답변 붙여넣기 시작` 버튼을 누르거나 `/gptapply [jobId]` 실행
   - ChatGPT 답을 그대로 붙여넣기
   - 답에 JSON이 있으면 자동으로:
     - gemini/codex 실행

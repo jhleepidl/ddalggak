@@ -16,13 +16,18 @@ import { orchestratorNotes, buildChatGPTNextStepPrompt } from "./src/prompts.js"
 import { clip, chunk, extractCodexInstruction, extractJsonPlan } from "./src/textutil.js";
 import { loadAgents, getAgent } from "./src/agents.js";
 import { loadAgentsFromGoc, createAgentProfile, updateAgentProfile } from "./src/agent_registry.js";
-import { route as routeChatMessage } from "./src/router_agent.js";
 import { GocClient } from "./src/goc_client.js";
 import {
   ensureJobThread,
+  ensureAgentsThread,
+  ensureToolsThread,
   ensureGlobalThread,
   appendTrackingChunkToGoc,
 } from "./src/goc_mapping.js";
+import { ChatSessionStore } from "./src/chat/session.js";
+import { routeWithSupervisor } from "./src/chat/supervisor_router.js";
+import { executeSupervisorActions } from "./src/chat/executor.js";
+import { expandDetailContext } from "./src/chat/unfold.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) { console.error("Missing TELEGRAM_BOT_TOKEN"); process.exit(1); }
@@ -38,6 +43,7 @@ const ALLOWED_CHATS = (process.env.TELEGRAM_ALLOWED_CHAT_IDS ?? "").split(",").m
 const ALLOWED_USERS = (process.env.TELEGRAM_ALLOWED_USER_IDS ?? "").split(",").map(s => s.trim()).filter(Boolean);
 const MAX_CONCURRENCY = Number(process.env.MAX_CONCURRENCY ?? 1);
 const AUTO_SUGGEST_ENABLED = String(process.env.AUTO_SUGGEST_GPT_PROMPT ?? "true").toLowerCase() !== "false";
+const CHAT_VERBOSE = String(process.env.CHAT_VERBOSE ?? "false").toLowerCase() === "true";
 const TELEGRAM_FORCE_IPV4 = String(process.env.TELEGRAM_FORCE_IPV4 ?? "true").toLowerCase() !== "false";
 const TELEGRAM_POLLING_INTERVAL_MS = Number(process.env.TELEGRAM_POLLING_INTERVAL_MS ?? 1000);
 const TELEGRAM_POLLING_TIMEOUT_SEC = Number(process.env.TELEGRAM_POLLING_TIMEOUT_SEC ?? 15);
@@ -52,6 +58,7 @@ const LEGACY_AGENT_MAP = {
 };
 
 const memory = new OrchestratorMemory({ baseDir: jobs.baseDir });
+const chatSessionStore = new ChatSessionStore({ baseDir: jobs.baseDir });
 let agentRegistry = loadAgents();
 let gocClient = null;
 let gocReady = false;
@@ -162,7 +169,22 @@ function buildGocUiLink({ threadId, ctxId, token }) {
 
 function resolveCurrentJobIdForChat(chatId) {
   const chatKey = String(chatId);
-  return activeJobByChat.get(chatKey) || getAwait(chatId)?.jobId || "";
+  return activeJobByChat.get(chatKey) || getAwait(chatId)?.jobId || lastChatJobByChat.get(chatKey) || "";
+}
+
+function rememberLastChatJob(chatId, jobId) {
+  const chatKey = String(chatId);
+  const key = String(jobId || "").trim();
+  if (!key) return;
+  lastChatJobByChat.set(chatKey, key);
+}
+
+function resetChatSession(chatId) {
+  const chatKey = String(chatId);
+  activeJobByChat.delete(chatKey);
+  lastChatJobByChat.delete(chatKey);
+  clearAwait(chatId);
+  chatSessionStore.clear(chatId);
 }
 
 async function buildContextInfo(target, { chatId = null } = {}) {
@@ -398,6 +420,7 @@ function formatRunningJobs(chatId) {
   const chatKey = String(chatId);
   const active = activeJobByChat.get(chatKey) || "";
   const awaitingJob = getAwait(chatId)?.jobId || "";
+  const lastChatJob = lastChatJobByChat.get(chatKey) || "";
   const running = Array.from(jobAbortControllers.keys());
   const queued = queue
     .map((item) => String(item?.jobId || "").trim())
@@ -408,6 +431,7 @@ function formatRunningJobs(chatId) {
     "🏃 Running jobs",
     `chat_active=${active || "(none)"}`,
     `chat_gptawait=${awaitingJob || "(none)"}`,
+    `chat_last=${lastChatJob || "(none)"}`,
     `running_count=${running.length}`,
     ...dedup(running).map((id) => `- running: ${id}`),
     `queue_count=${queued.length}`,
@@ -594,6 +618,7 @@ let running = 0;
 const queue = [];
 const jobAbortControllers = new Map(); // jobId -> AbortController
 const activeJobByChat = new Map(); // chatId -> jobId
+const lastChatJobByChat = new Map(); // chatId -> last /chat jobId
 
 function makeCancelledError(jobId) {
   const e = new Error(`Cancelled job ${jobId}`);
@@ -962,7 +987,17 @@ async function sendChatGPTPrompt(bot, chatId, jobId, question) {
     routerPrompt: memory.getRouterPrompt(),
     agentRolesText: getAgentRolesText(),
   });
-  await bot.sendMessage(chatId, `🧩 다음 단계 결정을 위해 ChatGPT에 물어볼 프롬프트를 자동 생성했어요.\n답을 받은 뒤 /gptapply ${jobId} 후 답을 붙여넣으면 자동 실행됩니다.`);
+  await bot.sendMessage(
+    chatId,
+    "🧩 다음 단계 결정을 위해 ChatGPT 프롬프트를 생성했어요.\n답변을 받은 뒤 아래 버튼으로 붙여넣기 모드를 시작하세요.",
+    {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "🟣 답변 붙여넣기 시작", callback_data: `gptapply:${jobId}` },
+        ]],
+      },
+    }
+  );
   await sendLong(bot, chatId, prompt);
 }
 
@@ -1036,7 +1071,9 @@ function formatRegistryLines(reg) {
 function chatActionLabel(action) {
   const type = String(action?.type || "").trim().toLowerCase();
   if (!type) return "(unknown)";
-  if (type === "run_agent") return `run_agent:${action.agent}`;
+  if (type === "run_agent") return `run_agent:${action.agent_id || action.agent || "unknown"}`;
+  if (type === "propose_agent") return `propose_agent:${action.agent_id || action.agent || "unknown"}`;
+  if (type === "need_more_detail") return `need_more_detail:${action.context_set_id || "ctx"}`;
   if (type === "open_context") return `open_context:${action.scope || "current"}`;
   if (type === "create_agent") return `create_agent:${action.agent?.id || "unknown"}`;
   if (type === "update_agent") return `update_agent:${action.agentId || "unknown"}`;
@@ -1055,9 +1092,765 @@ function formatChatSummary(routePlan, results) {
   return lines.join("\n");
 }
 
-async function executeChatActions(bot, chatId, userId, message, routePlan) {
+function findDefaultChatAgentId() {
+  if (agentRegistry?.byId?.has("researcher")) return "researcher";
+  const agents = Array.isArray(agentRegistry?.agents) ? agentRegistry.agents : [];
+  const gemini = agents.find((row) => String(row?.provider || "").trim().toLowerCase() === "gemini");
+  if (gemini?.id) return String(gemini.id).trim().toLowerCase();
+  const nonChatgpt = agents.find((row) => String(row?.provider || "").trim().toLowerCase() !== "chatgpt");
+  if (nonChatgpt?.id) return String(nonChatgpt.id).trim().toLowerCase();
+  return "";
+}
+
+function isExplicitChatGptDecisionRequest(message) {
+  const text = String(message || "").toLowerCase();
+  const asksChatGPT = text.includes("chatgpt")
+    || text.includes("gpt")
+    || text.includes("챗지피티")
+    || text.includes("지피티");
+  if (!asksChatGPT) return false;
+  return text.includes("결정")
+    || text.includes("정해")
+    || text.includes("판단")
+    || text.includes("action plan")
+    || text.includes("plan")
+    || text.includes("플랜")
+    || text.includes("계획")
+    || text.includes("decide");
+}
+
+function sanitizeChatRoutePlan(routePlan, message) {
+  const allowChatGPTPlanner = isExplicitChatGptDecisionRequest(message);
+  const actions = Array.isArray(routePlan?.actions) ? routePlan.actions : [];
+  const filtered = [];
+  let removedChatGpt = 0;
+
+  for (const action of actions) {
+    if (action?.type !== "run_agent") {
+      filtered.push(action);
+      continue;
+    }
+
+    const agentId = resolveAgentId(action.agent || "");
+    const provider = String(findAgentConfig(agentId)?.provider || "").trim().toLowerCase();
+    if (!allowChatGPTPlanner && provider === "chatgpt") {
+      removedChatGpt += 1;
+      continue;
+    }
+    filtered.push({ ...action, agent: agentId || action.agent });
+  }
+
+  if (filtered.length > 0) {
+    const reasonTail = removedChatGpt > 0 ? `; filtered_chatgpt=${removedChatGpt}` : "";
+    return {
+      reason: `${String(routePlan?.reason || "(none)")}${reasonTail}`,
+      actions: filtered,
+      allowChatGPTPlanner,
+    };
+  }
+
+  const fallbackAgent = findDefaultChatAgentId();
+  if (!fallbackAgent) {
+    return {
+      reason: `${String(routePlan?.reason || "(none)")} ; no routable actions`,
+      actions: [{ type: "show_agents" }],
+      allowChatGPTPlanner,
+    };
+  }
+  return {
+    reason: `${String(routePlan?.reason || "(none)")} ; fallback_to=${fallbackAgent}`,
+    actions: [{ type: "run_agent", agent: fallbackAgent, prompt: String(message || "").trim() }],
+    allowChatGPTPlanner,
+  };
+}
+
+function pickPrimaryChatOutput(outputs) {
+  const rows = Array.isArray(outputs) ? outputs : [];
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    if (rows[i]?.agentId === "researcher") return String(rows[i]?.output || "").trim();
+  }
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    if (String(rows[i]?.provider || "").trim().toLowerCase() === "gemini") return String(rows[i]?.output || "").trim();
+  }
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const out = String(rows[i]?.output || "").trim();
+    if (out) return out;
+  }
+  return "";
+}
+
+function buildChatSynthesisFallback(message, execution = {}) {
+  const primary = pickPrimaryChatOutput(execution.outputs);
+  if (primary) return clip(primary, 3600);
+
+  const errors = (Array.isArray(execution.results) ? execution.results : [])
+    .filter((row) => row?.status === "error")
+    .map((row) => String(row?.note || "").trim())
+    .filter(Boolean);
+  if (errors.length > 0) {
+    return `요청을 처리하는 중 오류가 발생했습니다.\n${errors.map((row) => `- ${row}`).join("\n")}`;
+  }
+  const oks = (Array.isArray(execution.results) ? execution.results : [])
+    .filter((row) => row?.status === "ok")
+    .map((row) => `${row?.label || "action"}${row?.note ? ` (${row.note})` : ""}`);
+  if (oks.length > 0) {
+    return `요청을 처리했습니다.\n${oks.map((row) => `- ${row}`).join("\n")}`;
+  }
+  return `요청: ${clip(String(message || ""), 300)}\n응답을 생성하지 못했습니다. 같은 요청을 다시 보내주세요.`;
+}
+
+async function synthesizeChatReply(message, routePlan, execution = {}) {
+  const outputs = Array.isArray(execution.outputs) ? execution.outputs : [];
+  if (outputs.length === 0) return buildChatSynthesisFallback(message, execution);
+
+  const outputText = outputs
+    .map((row, idx) => [
+      `## output_${idx + 1}`,
+      `agent=${row.agentId || "unknown"}`,
+      `provider=${row.provider || "unknown"}`,
+      clip(String(row.output || ""), 3200),
+    ].join("\n"))
+    .join("\n\n");
+
+  const jobId = String(execution.currentJobId || "").trim();
+  const cwd = (() => {
+    if (!jobId) return workspace.root;
+    try {
+      return runDir(jobId);
+    } catch {
+      return workspace.root;
+    }
+  })();
+
+  const prompt = [
+    "너는 Telegram /chat의 최종 응답 작성기다.",
+    "아래 내부 실행 결과를 바탕으로 사용자에게 보여줄 최종 답변 1개만 작성하라.",
+    "규칙:",
+    "- 한국어로 답하라.",
+    "- 내부 라우팅/잡ID/run_dir/provider/agent 이름/로그는 숨겨라.",
+    "- 핵심 답변을 먼저 주고, 필요하면 간단한 다음 단계 1~3개를 번호로 제시하라.",
+    "",
+    "사용자 요청:",
+    String(message || ""),
+    "",
+    "내부 라우팅 요약:",
+    `reason=${String(routePlan?.reason || "(none)")}`,
+    `actions=${(Array.isArray(routePlan?.actions) ? routePlan.actions : []).map((a) => chatActionLabel(a)).join(", ") || "(none)"}`,
+    "",
+    "실행 결과:",
+    outputText,
+    "",
+    "최종 답변:",
+  ].join("\n");
+
+  try {
+    const r = await enqueue(
+      () => runGeminiPrompt({ workspaceRoot: workspace.root, cwd, prompt }),
+      { jobId, label: "chat_synthesize" }
+    );
+    const out = String(r?.stdout || r?.stderr || "").trim();
+    if (r?.ok && out) return clip(out, 3800);
+  } catch {}
+
+  return buildChatSynthesisFallback(message, execution);
+}
+
+function parseJsonMaybeLoose(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeProviderName(raw) {
+  const key = String(raw || "").trim().toLowerCase();
+  if (["chatgpt", "gpt", "openai"].includes(key)) return "chatgpt";
+  if (["codex"].includes(key)) return "codex";
+  if (["gemini"].includes(key)) return "gemini";
+  return "gemini";
+}
+
+function parseStructuredFromResource(resource, preferredPayloadKey = "") {
+  const row = resource && typeof resource === "object" ? resource : {};
+  const payload = row.payload && typeof row.payload === "object"
+    ? row.payload
+    : (row.raw?.payload_json && typeof row.raw.payload_json === "object" ? row.raw.payload_json : {});
+
+  if (preferredPayloadKey && payload[preferredPayloadKey] && typeof payload[preferredPayloadKey] === "object") {
+    return payload[preferredPayloadKey];
+  }
+  if (payload && typeof payload === "object" && Object.keys(payload).length > 0) {
+    const directPayload = payload[preferredPayloadKey] ?? payload.job_config ?? payload.tool_spec ?? payload.agent_profile_draft ?? payload.agent_profile;
+    if (directPayload && typeof directPayload === "object") return directPayload;
+  }
+
+  const text = String(
+    row.text
+    || row.summary
+    || row.raw?.summary
+    || row.raw?.text
+    || row.raw?.content
+    || ""
+  ).trim();
+  if (!text) return null;
+
+  const direct = parseJsonMaybeLoose(text);
+  if (direct && typeof direct === "object") {
+    if (preferredPayloadKey && direct[preferredPayloadKey] && typeof direct[preferredPayloadKey] === "object") {
+      return direct[preferredPayloadKey];
+    }
+    return direct;
+  }
+  const parsedFromText = parseJsonObjectFromText(text);
+  if (parsedFromText && typeof parsedFromText === "object") {
+    if (preferredPayloadKey && parsedFromText[preferredPayloadKey] && typeof parsedFromText[preferredPayloadKey] === "object") {
+      return parsedFromText[preferredPayloadKey];
+    }
+    return parsedFromText;
+  }
+  return null;
+}
+
+function sortResourcesByCreatedAt(list = []) {
+  return [...(Array.isArray(list) ? list : [])].sort((a, b) => {
+    const ta = Date.parse(String(a?.createdAt || ""));
+    const tb = Date.parse(String(b?.createdAt || ""));
+    if (Number.isFinite(ta) && Number.isFinite(tb)) return ta - tb;
+    return 0;
+  });
+}
+
+async function listActiveResourcesByKind(client, { threadId, ctxId, resourceKind }) {
+  const resources = await client.listResources(threadId, {
+    resourceKind,
+    contextSetId: ctxId,
+  });
+  const ordered = sortResourcesByCreatedAt(resources);
+  try {
+    const explain = await client.getCompiledContextExplain(ctxId);
+    const activeSet = new Set(
+      (Array.isArray(explain?.active_node_ids) ? explain.active_node_ids : [])
+        .map((id) => String(id || "").trim())
+        .filter(Boolean)
+    );
+    if (activeSet.size === 0) return ordered;
+    const activeRows = ordered.filter((row) => activeSet.has(String(row?.id || "").trim()));
+    return activeRows.length > 0 ? activeRows : ordered;
+  } catch {
+    return ordered;
+  }
+}
+
+function defaultSupervisorJobConfig(jobId) {
+  return {
+    version: 1,
+    job_id: String(jobId || "").trim(),
+    mode: "supervisor",
+    final_response_style: "concise",
+    participants: [],
+    allow_actions: ["run_agent", "propose_agent", "need_more_detail", "open_context", "summarize"],
+    budget: {
+      max_actions: 4,
+      max_chars: 16000,
+      max_risk: "L2",
+    },
+    approval: {
+      require_for_risk: ["L3"],
+      require_file_write: false,
+    },
+  };
+}
+
+function normalizeJobConfig(raw, jobId) {
+  const base = defaultSupervisorJobConfig(jobId);
+  const row = raw && typeof raw === "object" ? raw : {};
+  const participants = Array.isArray(row.participants) ? row.participants : base.participants;
+  const allowActions = Array.isArray(row.allow_actions || row.allowed_actions || row.actions_allowlist)
+    ? (row.allow_actions || row.allowed_actions || row.actions_allowlist)
+    : base.allow_actions;
+  const budgetRaw = row.budget && typeof row.budget === "object" ? row.budget : {};
+  const approvalRaw = row.approval && typeof row.approval === "object" ? row.approval : {};
+  return {
+    ...base,
+    ...row,
+    job_id: String(row.job_id || row.jobId || base.job_id),
+    mode: "supervisor",
+    final_response_style: String(row.final_response_style || row.finalResponseStyle || base.final_response_style).trim().toLowerCase() === "detailed"
+      ? "detailed"
+      : "concise",
+    participants: participants
+      .map((v) => String(v || "").trim().toLowerCase())
+      .filter(Boolean),
+    allow_actions: allowActions
+      .map((v) => String(v || "").trim().toLowerCase())
+      .filter(Boolean),
+    budget: {
+      ...base.budget,
+      ...budgetRaw,
+      max_actions: Number.isFinite(Number(budgetRaw.max_actions))
+        ? Math.max(1, Math.floor(Number(budgetRaw.max_actions)))
+        : base.budget.max_actions,
+    },
+    approval: {
+      ...base.approval,
+      ...approvalRaw,
+      require_for_risk: Array.isArray(approvalRaw.require_for_risk)
+        ? approvalRaw.require_for_risk.map((v) => String(v || "").trim().toUpperCase()).filter(Boolean)
+        : base.approval.require_for_risk,
+      require_file_write: typeof approvalRaw.require_file_write === "boolean"
+        ? approvalRaw.require_file_write
+        : base.approval.require_file_write,
+    },
+  };
+}
+
+function normalizeToolSpec(raw) {
+  const row = raw && typeof raw === "object" ? raw : {};
+  const id = String(row.id || row.tool_id || row.name || "").trim();
+  if (!id) return null;
+  const actionTypes = Array.isArray(row.action_types || row.actions)
+    ? (row.action_types || row.actions)
+      .map((v) => String(v || "").trim().toLowerCase())
+      .filter(Boolean)
+    : [];
+  return {
+    id,
+    name: String(row.name || id).trim(),
+    description: String(row.description || "").trim(),
+    action_types: actionTypes,
+    risk: String(row.risk || "L1").trim().toUpperCase(),
+    raw: row,
+  };
+}
+
+function buildAgentProfileFromProposal(action) {
+  const id = String(action?.agent_id || "").trim().toLowerCase();
+  if (!id) return null;
+  return {
+    id,
+    name: String(action?.name || id).trim() || id,
+    description: String(action?.description || "").trim(),
+    provider: normalizeProviderName(action?.provider || action?.model || "gemini"),
+    model: String(action?.model || action?.provider || "gemini").trim() || "gemini",
+    prompt: String(action?.prompt || action?.goal || "").trim(),
+    meta: action?.meta && typeof action.meta === "object" ? action.meta : {},
+  };
+}
+
+async function loadSupervisorRuntime(jobId) {
+  const reg = await refreshAgentRegistry({ includeCompiled: true });
+  const fallbackConfig = normalizeJobConfig({}, jobId);
+
+  if (memoryModeWithFallback() !== "goc") {
+    return {
+      mode: "local",
+      map: null,
+      agentsSlot: null,
+      toolsSlot: null,
+      jobConfig: fallbackConfig,
+      agents: reg.agents,
+      tools: [],
+      contextSummary: loadLocalContextDocs(jobId, TRACK_DOC_NAMES, 2200),
+      globalSummary: "",
+    };
+  }
+
+  const client = requireGocClient();
+  const map = await ensureJobThread(client, {
+    jobId,
+    jobDir: runDir(jobId),
+    title: `job:${jobId}`,
+  });
+  const agentsSlot = await ensureAgentsThread(client, { baseDir: jobs.baseDir });
+  const toolsSlot = await ensureToolsThread(client, { baseDir: jobs.baseDir });
+
+  const jobResources = await listActiveResourcesByKind(client, {
+    threadId: map.threadId,
+    ctxId: map.ctxSharedId,
+    resourceKind: "job_config",
+  });
+  const latestJobNode = jobResources[jobResources.length - 1] || null;
+  const rawJobConfig = latestJobNode ? parseStructuredFromResource(latestJobNode, "job_config") : null;
+  const jobConfig = normalizeJobConfig(rawJobConfig || {}, jobId);
+
+  const toolRows = await listActiveResourcesByKind(client, {
+    threadId: toolsSlot.threadId,
+    ctxId: toolsSlot.ctxId,
+    resourceKind: "tool_spec",
+  });
+  const tools = toolRows
+    .map((resource) => normalizeToolSpec(parseStructuredFromResource(resource, "tool_spec")))
+    .filter(Boolean);
+
+  let contextSummary = "";
+  try {
+    contextSummary = await client.getCompiledContext(map.ctxSharedId);
+  } catch {
+    contextSummary = loadLocalContextDocs(jobId, TRACK_DOC_NAMES, 2200);
+  }
+
+  let globalSummary = "";
+  try {
+    const globalSlot = await ensureGlobalThread(client, { baseDir: jobs.baseDir, title: "global:shared" });
+    globalSummary = await client.getCompiledContext(globalSlot.ctxId);
+  } catch {
+    globalSummary = "";
+  }
+
+  return {
+    mode: "goc",
+    map,
+    agentsSlot,
+    toolsSlot,
+    jobConfig,
+    agents: reg.agents,
+    tools,
+    contextSummary: contextSummary || "",
+    globalSummary: globalSummary || "",
+  };
+}
+
+function parseChatMessageWithFlags(rawArgs) {
+  const tokens = String(rawArgs || "").split(/\s+/).filter(Boolean);
+  const out = [];
+  let debug = false;
+  for (const token of tokens) {
+    if (token === "--debug") {
+      debug = true;
+      continue;
+    }
+    out.push(token);
+  }
+  return {
+    debug,
+    message: out.join(" ").trim(),
+  };
+}
+
+async function openAgentsUiInfo() {
+  if (memoryModeWithFallback() !== "goc") {
+    throw new Error("open_agents_ui requires MEMORY_MODE=goc");
+  }
+  const client = requireGocClient();
+  const minted = await client.mintUiToken(GOC_UI_TOKEN_TTL_SEC);
+  const slot = await ensureAgentsThread(client, { baseDir: jobs.baseDir });
+  const link = buildGocUiLink({
+    threadId: slot.threadId,
+    ctxId: slot.ctxId,
+    token: minted.token,
+  });
+  return {
+    threadId: slot.threadId,
+    ctxId: slot.ctxId,
+    link,
+    tokenExp: minted.exp || null,
+    lines: [
+      "agents context",
+      `thread=${slot.threadId}`,
+      `ctx=${slot.ctxId}`,
+      minted.exp ? `token_exp=${minted.exp}` : "",
+      link,
+    ].filter(Boolean),
+  };
+}
+
+async function createAgentDraftProposal(bot, chatId, userId, jobId, action) {
+  if (memoryModeWithFallback() !== "goc") {
+    throw new Error("propose_agent requires MEMORY_MODE=goc");
+  }
+  const profile = buildAgentProfileFromProposal(action);
+  if (!profile?.id) throw new Error("propose_agent requires agent_id");
+
+  const client = requireGocClient();
+  const slot = await ensureAgentsThread(client, { baseDir: jobs.baseDir });
+  const nowIso = new Date().toISOString();
+  const summary = `${JSON.stringify(profile, null, 2)}\n`;
+  const created = await client.createResource(slot.threadId, {
+    name: `agent_draft:${profile.id}@${nowIso}`,
+    summary,
+    resource_kind: "agent_profile_draft",
+    uri: `ddalggak://agents/draft/${profile.id}`,
+    context_set_id: slot.ctxId,
+    auto_activate: true,
+    payload_json: {
+      op: "draft",
+      ts: nowIso,
+      agent_id: profile.id,
+      job_id: String(jobId || "").trim() || undefined,
+      proposed_by: `telegram:${userId}`,
+      agent_profile_draft: profile,
+    },
+  });
+
+  if (jobId) {
+    tracking.append(jobId, "decisions.md", [
+      "## /chat propose_agent",
+      `- agent_id: ${profile.id}`,
+      `- draft_node: ${created?.id || "unknown"}`,
+      `- proposed_by: telegram:${userId}`,
+    ].join("\n"));
+  }
+
+  await bot.sendMessage(
+    chatId,
+    `🧪 agent draft 생성됨\nagent_id=${profile.id}\ndraft_node=${created?.id || "unknown"}\n승인 후 participants에 반영됩니다.`,
+    {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "✅ Approve", callback_data: `approve_agent:${profile.id}` },
+          { text: "❌ Reject", callback_data: `reject_agent:${profile.id}` },
+          { text: "🧭 Agents UI", callback_data: "open_agents_ui" },
+        ]],
+      },
+    }
+  );
+
+  return { draft_id: created?.id || "", profile, slot };
+}
+
+async function findLatestDraftByAgentId(client, agentId) {
+  const key = String(agentId || "").trim().toLowerCase();
+  if (!key) return null;
+  const slot = await ensureAgentsThread(client, { baseDir: jobs.baseDir });
+  const resources = await listActiveResourcesByKind(client, {
+    threadId: slot.threadId,
+    ctxId: slot.ctxId,
+    resourceKind: "agent_profile_draft",
+  });
+
+  for (let i = resources.length - 1; i >= 0; i -= 1) {
+    const row = resources[i];
+    const payload = row?.payload && typeof row.payload === "object" ? row.payload : {};
+    const draft = parseStructuredFromResource(row, "agent_profile_draft") || parseStructuredFromResource(row, "agent_profile");
+    const id = String(
+      payload.agent_id
+      || draft?.id
+      || ""
+    ).trim().toLowerCase();
+    if (id !== key) continue;
+    return { slot, resource: row, payload, draft };
+  }
+  return null;
+}
+
+async function appendParticipantToJobConfig(client, { jobId, agentId, actor = "" }) {
+  const map = await ensureJobThread(client, {
+    jobId,
+    jobDir: runDir(jobId),
+    title: `job:${jobId}`,
+  });
+
+  const resources = await listActiveResourcesByKind(client, {
+    threadId: map.threadId,
+    ctxId: map.ctxSharedId,
+    resourceKind: "job_config",
+  });
+  const latest = resources[resources.length - 1] || null;
+  const current = normalizeJobConfig(latest ? parseStructuredFromResource(latest, "job_config") : {}, jobId);
+  const participants = Array.from(new Set([
+    ...(Array.isArray(current.participants) ? current.participants : []),
+    String(agentId || "").trim().toLowerCase(),
+  ].filter(Boolean)));
+  const nextConfig = {
+    ...current,
+    participants,
+    updated_at: new Date().toISOString(),
+  };
+
+  const created = await client.createResource(map.threadId, {
+    name: `job_config@${new Date().toISOString()}`,
+    summary: `${JSON.stringify(nextConfig, null, 2)}\n`,
+    resource_kind: "job_config",
+    uri: `ddalggak://jobs/${jobId}/job_config`,
+    context_set_id: map.ctxSharedId,
+    auto_activate: true,
+    attach_to: latest?.id || undefined,
+    payload_json: {
+      op: "approve_agent",
+      job_id: jobId,
+      agent_id: agentId,
+      approved_by: actor || undefined,
+      ts: new Date().toISOString(),
+      job_config: nextConfig,
+    },
+  });
+  if (latest?.id && created?.id && latest.id !== created.id) {
+    try {
+      await client.createEdge(map.threadId, latest.id, created.id, "NEXT_PART");
+    } catch {}
+  }
+  return { map, created, config: nextConfig };
+}
+
+async function runSupervisorChat(bot, chatId, userId, message, { debug = false } = {}) {
+  const chatKey = String(chatId);
+  const verbose = !!(debug || CHAT_VERBOSE);
+  let currentJobId = resolveCurrentJobIdForChat(chatId);
+  if (!currentJobId) {
+    const job = await createJob(message, { ownerUserId: userId, ownerChatId: chatId });
+    currentJobId = String(job.jobId);
+  } else {
+    runDir(currentJobId);
+  }
+  tracking.init(currentJobId);
+  rememberLastChatJob(chatId, currentJobId);
+  chatSessionStore.upsert(chatId, {
+    jobId: currentJobId,
+    state: "routing",
+    pending_approval: null,
+  });
+
+  const controller = resetJobAbortController(currentJobId);
+  activeJobByChat.set(chatKey, currentJobId);
+
+  try {
+    const runtime = await loadSupervisorRuntime(currentJobId);
+    const routePlan = await routeWithSupervisor(message, {
+      agents: runtime.agents,
+      tools: runtime.tools,
+      jobConfig: runtime.jobConfig,
+      currentJobId,
+      currentContextSetId: runtime.map?.ctxSharedId || "",
+      workspaceRoot: workspace.root,
+      cwd: runDir(currentJobId),
+      signal: controller.signal,
+      locale: "ko-KR",
+      routerPolicy: memory.getRouterPrompt(),
+      contextSummary: runtime.contextSummary,
+    });
+
+    chatSessionStore.upsert(chatId, {
+      state: "executing",
+      last_route: {
+        reason: routePlan.reason,
+        actions: Array.isArray(routePlan.actions) ? routePlan.actions : [],
+        final_response_style: routePlan.final_response_style || runtime.jobConfig?.final_response_style || "concise",
+      },
+    });
+
+    if (verbose) {
+      await bot.sendMessage(chatId, [
+        "🧭 /chat(supervisor) route",
+        `reason=${routePlan.reason || "(none)"}`,
+        ...(Array.isArray(routePlan.actions) ? routePlan.actions.map((row) => `- ${chatActionLabel(row)}`) : []),
+      ].join("\n"));
+    }
+
+    const execution = await executeSupervisorActions({
+      chatId,
+      userId,
+      jobId: currentJobId,
+      plan: routePlan,
+      jobConfig: runtime.jobConfig,
+      agents: runtime.agents,
+      tools: runtime.tools,
+      sessionStore: chatSessionStore,
+      callbacks: {
+        runAgent: async ({ action, detailContext }) => {
+          const detail = String(detailContext || "").trim();
+          const promptSegments = [
+            String(action.goal || "").trim(),
+            runtime.contextSummary ? `[JOB COMPILED CONTEXT]\n${clip(runtime.contextSummary, 9000)}` : "",
+            detail ? `[DETAIL CONTEXT]\n${detail}` : "",
+            runtime.globalSummary ? `[GLOBAL MEMORY]\n${clip(runtime.globalSummary, 5000)}` : "",
+          ].filter(Boolean);
+          const finalPrompt = promptSegments.join("\n\n");
+          return await enqueue(
+            () => executeAgentRun(
+              bot,
+              chatId,
+              currentJobId,
+              { type: "agent_run", agent: String(action.agent_id || "").trim().toLowerCase(), prompt: finalPrompt },
+              { signal: controller.signal, notify: verbose }
+            ),
+            { jobId: currentJobId, signal: controller.signal, label: `chat_v2_run_${String(action.agent_id || "agent")}` }
+          );
+        },
+        proposeAgent: async ({ action }) => {
+          return await createAgentDraftProposal(bot, chatId, userId, currentJobId, action);
+        },
+        openContext: async ({ action }) => {
+          const target = action.scope === "global" ? "global" : currentJobId;
+          const info = await buildContextInfo(target, { chatId });
+          return {
+            scope: info.scope,
+            link: info.link,
+            text: info.lines.join("\n"),
+          };
+        },
+        needMoreDetail: async ({ action }) => {
+          if (!runtime.map?.ctxSharedId || memoryModeWithFallback() !== "goc") {
+            throw new Error("need_more_detail requires MEMORY_MODE=goc");
+          }
+          const contextSetId = String(action.context_set_id || runtime.map.ctxSharedId).trim() || runtime.map.ctxSharedId;
+          return await expandDetailContext({
+            client: requireGocClient(),
+            contextSetId,
+            nodeIds: action.node_ids || [],
+            depth: action.depth || 1,
+            maxChars: action.max_chars || 7000,
+          });
+        },
+        summarize: async ({ results }) => {
+          const okCount = results.filter((row) => row.status === "ok").length;
+          const errorCount = results.filter((row) => row.status === "error").length;
+          return { text: `실행 완료: ok=${okCount}, error=${errorCount}` };
+        },
+      },
+    });
+
+    tracking.append(currentJobId, "decisions.md", [
+      "## /chat supervisor routing",
+      `- message: ${clip(message, 260)}`,
+      `- reason: ${routePlan.reason || "(none)"}`,
+      `- actions: ${(Array.isArray(routePlan.actions) ? routePlan.actions : []).map((row) => chatActionLabel(row)).join(" -> ") || "(none)"}`,
+      `- mode: ${runtime.mode}`,
+      `- pending_approval: ${execution.pendingApproval ? execution.pendingApproval.reason : "none"}`,
+    ].join("\n"));
+
+    if (execution.pendingApproval) {
+      tracking.append(currentJobId, "decisions.md", [
+        "## /chat approval required",
+        `- reason: ${execution.pendingApproval.reason}`,
+        `- action: ${chatActionLabel(execution.pendingApproval.action)}`,
+      ].join("\n"));
+    }
+
+    const contextOutputs = (Array.isArray(execution.outputs) ? execution.outputs : [])
+      .filter((row) => String(row?.mode || "") === "context_link")
+      .map((row) => String(row?.output || "").trim())
+      .filter(Boolean);
+    const hasAgentOutput = (Array.isArray(execution.outputs) ? execution.outputs : [])
+      .some((row) => String(row?.agentId || "").trim().toLowerCase() !== "system");
+    const finalReply = (!hasAgentOutput && contextOutputs.length > 0)
+      ? contextOutputs.join("\n\n")
+      : await synthesizeChatReply(message, routePlan, execution);
+    const replyText = execution.pendingApproval
+      ? `${finalReply}\n\n⚠️ 승인 필요: ${execution.pendingApproval.reason}\n다음 명령으로 risk를 낮추거나 요청을 분할해 주세요.`
+      : finalReply;
+
+    if (verbose) {
+      await sendLong(bot, chatId, formatChatSummary(routePlan, execution.results));
+    }
+    await sendLong(bot, chatId, replyText);
+    return { routePlan, execution, jobId: currentJobId };
+  } finally {
+    if (activeJobByChat.get(chatKey) === currentJobId) activeJobByChat.delete(chatKey);
+    jobAbortControllers.delete(currentJobId);
+    chatSessionStore.upsert(chatId, (session) => ({
+      ...session,
+      state: session.pending_approval ? "awaiting_approval" : "idle",
+    }));
+  }
+}
+
+async function executeChatActions(bot, chatId, userId, message, routePlan, { verbose = CHAT_VERBOSE } = {}) {
   const actions = Array.isArray(routePlan?.actions) ? routePlan.actions : [];
   const results = [];
+  const outputs = [];
   let currentJobId = resolveCurrentJobIdForChat(chatId);
 
   for (const action of actions) {
@@ -1116,7 +1909,7 @@ async function executeChatActions(bot, chatId, userId, message, routePlan) {
           const job = await createJob(message || prompt, { ownerUserId: userId, ownerChatId: chatId });
           targetJobId = String(job.jobId);
           currentJobId = targetJobId;
-          await bot.sendMessage(chatId, `✅ /chat job created: ${targetJobId}\nrun_dir: ${runDir(targetJobId)}`);
+          if (verbose) await bot.sendMessage(chatId, `✅ /chat job created: ${targetJobId}\nrun_dir: ${runDir(targetJobId)}`);
         } else {
           runDir(targetJobId);
         }
@@ -1124,14 +1917,28 @@ async function executeChatActions(bot, chatId, userId, message, routePlan) {
         const controller = resetJobAbortController(targetJobId);
         const chatKey = String(chatId);
         activeJobByChat.set(chatKey, targetJobId);
-        await bot.sendMessage(chatId, `🤖 ${agentId} 실행 중…`);
+        rememberLastChatJob(chatId, targetJobId);
+        if (verbose) await bot.sendMessage(chatId, `🤖 ${agentId} 실행 중…`);
 
         try {
           const result = await enqueue(
-            () => executeAgentRun(bot, chatId, targetJobId, { type: "agent_run", agent: agentId, prompt }, { signal: controller.signal }),
+            () => executeAgentRun(
+              bot,
+              chatId,
+              targetJobId,
+              { type: "agent_run", agent: agentId, prompt },
+              { signal: controller.signal, notify: verbose }
+            ),
             { jobId: targetJobId, signal: controller.signal, label: `chat_agent_run_${agentId}` }
           );
-          await sendLong(bot, chatId, `🤖 ${agentId} 완료 (${result.mode})\n${clip(result.output, 3000)}`);
+          if (verbose) await sendLong(bot, chatId, `🤖 ${agentId} 완료 (${result.mode})\n${clip(result.output, 3000)}`);
+          outputs.push({
+            agentId,
+            provider: result.provider,
+            mode: result.mode,
+            output: String(result.output || ""),
+            jobId: targetJobId,
+          });
           currentJobId = targetJobId;
           results.push({ label, status: "ok", note: `jobId=${targetJobId}` });
         } finally {
@@ -1147,10 +1954,10 @@ async function executeChatActions(bot, chatId, userId, message, routePlan) {
     }
   }
 
-  return { results, currentJobId };
+  return { results, currentJobId, outputs };
 }
 
-async function executeAgentRun(bot, chatId, jobId, act, { signal = null } = {}) {
+async function executeAgentRun(bot, chatId, jobId, act, { signal = null, notify = true } = {}) {
   await refreshAgentRegistry();
   const agentId = resolveAgentId(act.agent || "");
   const taskPrompt = String(act.prompt || "").trim();
@@ -1195,7 +2002,9 @@ async function executeAgentRun(bot, chatId, jobId, act, { signal = null } = {}) 
     const output = await codexImplement(jobId, combinedInstruction, signal);
     const fallback = gocFallbackByJob.get(String(jobId));
     if (fallback) {
-      await bot.sendMessage(chatId, `⚠️ GoC 컨텍스트 조회 실패로 local fallback 사용 중입니다.\nreason=${clip(fallback, 180)}`);
+      if (notify) {
+        await bot.sendMessage(chatId, `⚠️ GoC 컨텍스트 조회 실패로 local fallback 사용 중입니다.\nreason=${clip(fallback, 180)}`);
+      }
       gocFallbackByJob.delete(String(jobId));
     }
     return { output, mode: memoryModeWithFallback(), agent, provider, model };
@@ -1213,7 +2022,9 @@ async function executeAgentRun(bot, chatId, jobId, act, { signal = null } = {}) 
     });
     const fallback = gocFallbackByJob.get(String(jobId));
     if (fallback) {
-      await bot.sendMessage(chatId, `⚠️ GoC 컨텍스트 조회 실패로 local fallback 사용 중입니다.\nreason=${clip(fallback, 180)}`);
+      if (notify) {
+        await bot.sendMessage(chatId, `⚠️ GoC 컨텍스트 조회 실패로 local fallback 사용 중입니다.\nreason=${clip(fallback, 180)}`);
+      }
       gocFallbackByJob.delete(String(jobId));
     }
     return { output, mode: memoryModeWithFallback(), agent, provider, model };
@@ -1392,10 +2203,130 @@ bot.on("callback_query", async (q) => {
     const userId = q.from?.id;
     if (!isAllowedChat(chatId) || !isAllowedUser(userId)) return;
 
-    const data = String(q.data || "");
-    const [action, jobId, token] = data.split(":");
-    if (!action || !jobId || !token) return;
+    const data = String(q.data || "").trim();
+    if (data === "open_agents_ui") {
+      try {
+        const info = await openAgentsUiInfo();
+        await bot.answerCallbackQuery(q.id, { text: "agents ui" });
+        await sendLong(bot, chatId, info.lines.join("\n"));
+      } catch (e) {
+        await bot.answerCallbackQuery(q.id, { text: "failed" });
+        await bot.sendMessage(chatId, `❌ agents ui 열기 실패: ${String(e?.message ?? e)}`);
+      }
+      return;
+    }
 
+    if (data.startsWith("approve_agent:") || data.startsWith("reject_agent:")) {
+      const isApprove = data.startsWith("approve_agent:");
+      const agentId = String(data.split(":")[1] || "").trim().toLowerCase();
+      if (!agentId) {
+        await bot.answerCallbackQuery(q.id, { text: "agent_id 누락" });
+        return;
+      }
+      if (memoryModeWithFallback() !== "goc") {
+        await bot.answerCallbackQuery(q.id, { text: "MEMORY_MODE=goc 필요" });
+        await bot.sendMessage(chatId, "❌ agent draft 승인/거절은 MEMORY_MODE=goc에서만 동작합니다.");
+        return;
+      }
+
+      const client = requireGocClient();
+      const found = await findLatestDraftByAgentId(client, agentId);
+      if (!found?.resource) {
+        await bot.answerCallbackQuery(q.id, { text: "draft 없음" });
+        await bot.sendMessage(chatId, `draft를 찾지 못했습니다. agent_id=${agentId}`);
+        return;
+      }
+
+      const draftProfile = buildAgentProfileFromProposal(found.draft || { agent_id: agentId })
+        || {
+          id: agentId,
+          name: agentId,
+          description: "",
+          provider: "gemini",
+          model: "gemini",
+          prompt: "",
+          meta: {},
+        };
+      const draftJobId = String(found.payload?.job_id || resolveCurrentJobIdForChat(chatId) || "").trim();
+
+      if (isApprove) {
+        const created = await createAgentProfile(client, {
+          baseDir: jobs.baseDir,
+          profile: draftProfile,
+          format: "json",
+          actor: `telegram:${userId}`,
+        });
+        try {
+          await client.deactivateNodes(found.slot.ctxId, [found.resource.id]);
+        } catch {}
+
+        if (draftJobId) {
+          try {
+            await appendParticipantToJobConfig(client, {
+              jobId: draftJobId,
+              agentId,
+              actor: `telegram:${userId}`,
+            });
+            tracking.append(draftJobId, "decisions.md", [
+              "## /chat approve_agent",
+              `- agent_id: ${agentId}`,
+              `- draft_node: ${found.resource.id}`,
+              `- activated_node: ${created?.created?.id || "unknown"}`,
+              `- approved_by: telegram:${userId}`,
+            ].join("\n"));
+          } catch (e) {
+            if (draftJobId) {
+              tracking.append(draftJobId, "decisions.md", [
+                "## /chat approve_agent (participant update failed)",
+                `- agent_id: ${agentId}`,
+                `- error: ${String(e?.message ?? e)}`,
+              ].join("\n"));
+            }
+          }
+        }
+
+        await refreshAgentRegistry({ includeCompiled: true });
+        await bot.answerCallbackQuery(q.id, { text: `approved ${agentId}` });
+        await bot.sendMessage(chatId, [
+          `✅ approve_agent 완료`,
+          `agent_id=${agentId}`,
+          `agent_profile_node=${created?.created?.id || "unknown"}`,
+          draftJobId ? `job_id=${draftJobId} participants 반영` : "job_id 정보를 찾지 못해 participants 반영은 생략",
+        ].join("\n"));
+      } else {
+        try {
+          await client.deactivateNodes(found.slot.ctxId, [found.resource.id]);
+        } catch {}
+        if (draftJobId) {
+          tracking.append(draftJobId, "decisions.md", [
+            "## /chat reject_agent",
+            `- agent_id: ${agentId}`,
+            `- draft_node: ${found.resource.id}`,
+            `- rejected_by: telegram:${userId}`,
+          ].join("\n"));
+        }
+        await bot.answerCallbackQuery(q.id, { text: `rejected ${agentId}` });
+        await bot.sendMessage(chatId, `🛑 reject_agent 완료\nagent_id=${agentId}\ndraft_node=${found.resource.id}`);
+      }
+      return;
+    }
+
+    if (data.startsWith("gptapply:")) {
+      const targetJobId = String(data.slice("gptapply:".length) || "").trim() || resolveCurrentJobIdForChat(chatId);
+      if (!targetJobId) {
+        await bot.answerCallbackQuery(q.id, { text: "jobId를 찾지 못했습니다." });
+        await bot.sendMessage(chatId, "붙여넣기 모드를 시작할 jobId를 찾지 못했어요.\nUsage: /gptapply [jobId]");
+        return;
+      }
+      setAwait(chatId, targetJobId, userId);
+      rememberLastChatJob(chatId, targetJobId);
+      await bot.answerCallbackQuery(q.id, { text: `paste mode: ${targetJobId}` });
+      await bot.sendMessage(chatId, "🟣 이제 답변을 그대로 붙여넣어 주세요. (20분 내)\nJSON 액션 플랜이 있으면 자동 실행됩니다.\n종료: /gptdone");
+      return;
+    }
+
+    const [action, jobId, token] = data.split(":");
+    if (!["approve", "deny"].includes(action) || !jobId || !token) return;
     const decision = action === "approve" ? "approve" : "deny";
     const rec = approvals.decide(jobId, token, decision, "via telegram button");
     await bot.answerCallbackQuery(q.id, { text: `OK: ${rec.status}` });
@@ -1461,7 +2392,7 @@ bot.on("message", async (msg) => {
   const args = rest.join(" ").trim();
 
   if (cmd === "/help") {
-    await bot.sendMessage(chatId, "Commands:\n- /whoami\n- /running\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents\n- /chat <message>\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply <jobId>\n- /gptdone\n- /commit <jobId> <message>");
+    await bot.sendMessage(chatId, "Commands:\n- /whoami\n- /running\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
     return;
   }
 
@@ -1480,6 +2411,11 @@ bot.on("message", async (msg) => {
     const fromAwait = getAwait(chatId)?.jobId;
     const targetJobId = args || activeJobByChat.get(chatKey) || fromAwait;
     if (!targetJobId) {
+      if (lastChatJobByChat.has(chatKey)) {
+        resetChatSession(chatId);
+        await bot.sendMessage(chatId, "✅ 현재 /chat 세션을 초기화했어요.");
+        return;
+      }
       await bot.sendMessage(chatId, `중단할 jobId를 찾지 못했어요. Usage: /stop <jobId>\n\n${formatRunningJobs(chatId)}`);
       return;
     }
@@ -1487,6 +2423,7 @@ bot.on("message", async (msg) => {
     const { aborted, dropped } = cancelJobExecution(targetJobId);
     if (activeJobByChat.get(chatKey) === String(targetJobId)) activeJobByChat.delete(chatKey);
     if (fromAwait && String(fromAwait) === String(targetJobId)) clearAwait(chatId);
+    if (lastChatJobByChat.get(chatKey) === String(targetJobId)) lastChatJobByChat.delete(chatKey);
 
     if (!aborted && dropped === 0) {
       await bot.sendMessage(chatId, `중단할 실행이 없어요. (jobId=${targetJobId})\n이미 종료되었거나 큐에 없습니다.\n\n${formatRunningJobs(chatId)}`);
@@ -1615,45 +2552,21 @@ bot.on("message", async (msg) => {
   }
 
   if (cmd === "/chat") {
-    if (!args) return bot.sendMessage(chatId, "Usage: /chat <message>");
-    const message = args;
-    const currentJobId = resolveCurrentJobIdForChat(chatId);
-    const routeCwd = (() => {
-      if (!currentJobId) return workspace.root;
-      try {
-        return runDir(currentJobId);
-      } catch {
-        return workspace.root;
-      }
-    })();
+    const raw = String(args || "").trim();
+    if (!raw) return bot.sendMessage(chatId, "Usage: /chat [--debug] <message>\n세션 초기화: /chat reset");
+    if (raw.toLowerCase() === "reset") {
+      resetChatSession(chatId);
+      await bot.sendMessage(chatId, "✅ /chat 세션을 초기화했습니다.");
+      return;
+    }
+    const parsed = parseChatMessageWithFlags(raw);
+    const message = parsed.message;
+    if (!message) return bot.sendMessage(chatId, "Usage: /chat [--debug] <message>\n세션 초기화: /chat reset");
 
     try {
-      const reg = await refreshAgentRegistry({ includeCompiled: true });
-      const routePlan = await routeChatMessage(message, {
-        agents: reg.agents,
-        currentJobId,
-        workspaceRoot: workspace.root,
-        cwd: routeCwd,
-        locale: "ko-KR",
-        routerPolicy: memory.getRouterPrompt(),
+      await runSupervisorChat(bot, chatId, userId, message, {
+        debug: parsed.debug,
       });
-      if (!Array.isArray(routePlan.actions) || routePlan.actions.length === 0) {
-        await bot.sendMessage(chatId, "라우팅 결과 action이 비어 있어 실행하지 않았습니다.");
-        return;
-      }
-
-      await bot.sendMessage(chatId, `🧭 /chat route\n${routePlan.actions.map((a) => `- ${chatActionLabel(a)}`).join("\n")}`);
-      const executed = await executeChatActions(bot, chatId, userId, message, routePlan);
-      const activeJobId = String(executed.currentJobId || currentJobId || "").trim();
-      if (activeJobId) {
-        tracking.append(activeJobId, "decisions.md", [
-          "## /chat routing",
-          `- message: ${clip(message, 240)}`,
-          `- reason: ${routePlan.reason || "(none)"}`,
-          `- actions: ${routePlan.actions.map((a) => chatActionLabel(a)).join(" -> ")}`,
-        ].join("\n"));
-      }
-      await sendLong(bot, chatId, formatChatSummary(routePlan, executed.results));
     } catch (e) {
       await bot.sendMessage(chatId, `❌ /chat 실패: ${String(e?.message ?? e)}`);
     }
@@ -1770,8 +2683,10 @@ bot.on("message", async (msg) => {
   }
 
   if (cmd === "/gptapply") {
-    if (!args) return bot.sendMessage(chatId, "Usage: /gptapply <jobId>");
-    setAwait(chatId, args, userId);
+    const targetJobId = String(args || resolveCurrentJobIdForChat(chatId) || "").trim();
+    if (!targetJobId) return bot.sendMessage(chatId, "Usage: /gptapply [jobId]");
+    setAwait(chatId, targetJobId, userId);
+    rememberLastChatJob(chatId, targetJobId);
     await bot.sendMessage(chatId, "🟣 이제 ChatGPT 답변을 그대로 붙여넣어 주세요. (20분 내)\nJSON 액션 플랜이 있으면 자동 실행됩니다.\n종료: /gptdone");
     return;
   }

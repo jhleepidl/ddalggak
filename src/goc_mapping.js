@@ -4,6 +4,7 @@ import path from "node:path";
 const DEFAULT_JOB_THREAD_TITLE_PREFIX = "job:";
 const DEFAULT_GLOBAL_THREAD_TITLE = "global:shared";
 const DEFAULT_AGENTS_THREAD_TITLE = "agents";
+const DEFAULT_TOOLS_THREAD_TITLE = "tools";
 const inflightServiceThreadEnsures = new Map();
 const inflightJobThreadEnsures = new Map();
 
@@ -34,9 +35,42 @@ function maybeLimitChunkText(text) {
   };
 }
 
+function parseJsonMaybe(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 function defaultJobThreadTitle(jobId) {
   const prefix = String(process.env.GOC_JOB_THREAD_TITLE_PREFIX || DEFAULT_JOB_THREAD_TITLE_PREFIX).trim() || DEFAULT_JOB_THREAD_TITLE_PREFIX;
   return `${prefix}${jobId}`;
+}
+
+function defaultJobConfig(jobId) {
+  return {
+    version: 1,
+    job_id: String(jobId || "").trim(),
+    mode: "supervisor",
+    final_response_style: "concise",
+    participants: [],
+    budget: {
+      max_actions: 4,
+      max_chars: 16000,
+      max_risk: "L2",
+    },
+    approval: {
+      require_for_risk: ["L3"],
+      require_file_write: false,
+    },
+    policies: {
+      forbid_chatgpt_planner_by_default: true,
+    },
+    updated_at: new Date().toISOString(),
+  };
 }
 
 function normalizedMap(jobId, input = {}) {
@@ -202,6 +236,64 @@ export async function ensureAgentsThread(client, { baseDir, title = "" }) {
   });
 }
 
+export async function ensureToolsThread(client, { baseDir, title = "" }) {
+  const hintedTitle = String(title || "").trim();
+  const lookupTitles = [
+    "tools",
+    "tool_specs",
+  ];
+  if (hintedTitle && !lookupTitles.includes(hintedTitle)) lookupTitles.unshift(hintedTitle);
+
+  return await ensureServiceThread(client, {
+    baseDir,
+    key: "tools",
+    title: DEFAULT_TOOLS_THREAD_TITLE,
+    lookupTitles,
+  });
+}
+
+async function ensureDefaultJobConfigResource(client, { threadId, ctxId, jobId }) {
+  const tid = String(threadId || "").trim();
+  const cid = String(ctxId || "").trim();
+  const jid = String(jobId || "").trim();
+  if (!tid || !cid || !jid) return null;
+
+  let resources = [];
+  try {
+    resources = await client.listResources(tid, {
+      resourceKind: "job_config",
+      contextSetId: cid,
+    });
+  } catch {
+    return null;
+  }
+
+  const hasValidConfig = resources.some((resource) => {
+    const payload = resource?.payload && typeof resource.payload === "object" ? resource.payload : {};
+    if (payload.job_config && typeof payload.job_config === "object") return true;
+    const fromText = parseJsonMaybe(resource?.text || resource?.summary || "");
+    return !!(fromText && typeof fromText === "object");
+  });
+  if (hasValidConfig) return resources[resources.length - 1] || null;
+
+  const nowIso = new Date().toISOString();
+  const config = defaultJobConfig(jid);
+  return await client.createResource(tid, {
+    name: `job_config@${nowIso}`,
+    summary: `${JSON.stringify(config, null, 2)}\n`,
+    resource_kind: "job_config",
+    uri: `ddalggak://jobs/${jid}/job_config`,
+    context_set_id: cid,
+    auto_activate: true,
+    payload_json: {
+      op: "init_default",
+      ts: nowIso,
+      job_id: jid,
+      job_config: config,
+    },
+  });
+}
+
 export async function ensureJobThread(client, { jobId, jobDir, title = "" }) {
   const cleanJobId = String(jobId || "").trim();
   if (!cleanJobId) throw new Error("ensureJobThread requires jobId");
@@ -226,6 +318,14 @@ export async function ensureJobThread(client, { jobId, jobDir, title = "" }) {
       const shared = await ensureSharedContextSet(client, threadId);
       sharedId = shared.id;
     }
+
+    try {
+      await ensureDefaultJobConfigResource(client, {
+        threadId,
+        ctxId: sharedId,
+        jobId: cleanJobId,
+      });
+    } catch {}
 
     const merged = saveGocMap(jobDir, {
       ...current,

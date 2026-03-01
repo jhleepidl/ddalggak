@@ -12,6 +12,24 @@ function parseJsonMaybe(text) {
   }
 }
 
+const RETRYABLE_STATUSES = new Set([400, 404, 405, 415, 422, 501]);
+
+function isRetryableStatus(status) {
+  return RETRYABLE_STATUSES.has(Number(status));
+}
+
+function looksLikeHtmlDocument(text) {
+  const raw = String(text || "").trim().toLowerCase();
+  return raw.startsWith("<!doctype html") || raw.startsWith("<html");
+}
+
+function makeCompiledHtmlError(data) {
+  const err = new Error("compiled_text looks like HTML; check GOC_API_BASE/proxy");
+  err.status = 502;
+  err.data = data;
+  return err;
+}
+
 function pick(obj, keys) {
   const src = asObject(obj);
   for (const key of keys) {
@@ -90,6 +108,78 @@ function isGraphResourceNode(entity) {
   return false;
 }
 
+function parseBooleanLike(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  const key = String(value ?? "").trim().toLowerCase();
+  if (!key) return fallback;
+  if (["1", "true", "yes", "on"].includes(key)) return true;
+  if (["0", "false", "no", "off"].includes(key)) return false;
+  return fallback;
+}
+
+function normalizeNodeIdList(raw) {
+  if (Array.isArray(raw)) {
+    return raw
+      .map((row) => String(row ?? "").trim())
+      .filter(Boolean);
+  }
+  if (typeof raw === "string") {
+    return raw
+      .split(",")
+      .map((row) => row.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function normalizeCompiledExplainPayload(data) {
+  if (typeof data === "string") {
+    if (looksLikeHtmlDocument(data)) throw makeCompiledHtmlError(data);
+    return {
+      compiled_text: data,
+      explain: null,
+      active_node_ids: [],
+      raw: data,
+    };
+  }
+
+  const row = asObject(data);
+  const nested = normalizeEntity(row, ["compiled", "result", "data"]);
+  const src = Object.keys(nested).length > 0 ? nested : row;
+
+  const compiledText = String(
+    pick(src, ["compiled_text", "compiledText", "text", "content"])
+    || pick(row, ["compiled_text", "compiledText", "text", "content"])
+    || ""
+  );
+  if (compiledText && looksLikeHtmlDocument(compiledText)) throw makeCompiledHtmlError(compiledText);
+
+  const explain = pick(src, ["explain", "explanation", "explain_data", "details"])
+    ?? pick(row, ["explain", "explanation", "explain_data", "details"])
+    ?? null;
+
+  const activeNodeIds = normalizeNodeIdList(
+    pick(src, ["active_node_ids", "activeNodeIds", "node_ids", "nodeIds"])
+    || pick(row, ["active_node_ids", "activeNodeIds", "node_ids", "nodeIds"])
+  );
+
+  if (!compiledText && data && typeof data === "object") {
+    return {
+      compiled_text: JSON.stringify(data, null, 2),
+      explain: explain ?? null,
+      active_node_ids: activeNodeIds,
+      raw: data,
+    };
+  }
+
+  return {
+    compiled_text: compiledText,
+    explain: explain ?? null,
+    active_node_ids: activeNodeIds,
+    raw: data,
+  };
+}
+
 export class GocClient {
   constructor({ apiBase, serviceKey } = {}) {
     const base = String(apiBase || process.env.GOC_API_BASE || "").trim();
@@ -145,7 +235,7 @@ export class GocClient {
       } catch (e) {
         errors.push(e);
         const status = Number(e?.status);
-        if (![400, 404, 405, 415, 422, 501].includes(status)) break;
+        if (!isRetryableStatus(status)) break;
       }
     }
     if (errors.length) throw errors[errors.length - 1];
@@ -397,27 +487,138 @@ export class GocClient {
     }
   }
 
-  async getCompiledContext(contextSetId) {
+  async getCompiledContext(contextSetId, options = {}) {
     const ctxId = String(contextSetId || "").trim();
     if (!ctxId) throw new Error("getCompiledContext requires contextSetId");
+    const includeExplain = parseBooleanLike(
+      options?.includeExplain ?? options?.include_explain,
+      false
+    );
+
+    const attempts = [
+      {
+        path: `/api/context_sets/${encodeURIComponent(ctxId)}/compiled`,
+        query: includeExplain ? { include_explain: true } : undefined,
+      },
+      { path: "/api/compiled_context", query: { context_set_id: ctxId, include_explain: includeExplain ? true : undefined } },
+      { path: "/api/compiled", query: { context_set_id: ctxId, include_explain: includeExplain ? true : undefined } },
+      // Keep legacy non-/api routes as the last resort to avoid UI fallback HTML.
+      { path: `/context_sets/${encodeURIComponent(ctxId)}/compiled`, query: includeExplain ? { include_explain: true } : undefined },
+      { path: "/compiled_context", query: { context_set_id: ctxId, include_explain: includeExplain ? true : undefined } },
+      { path: "/compiled", query: { context_set_id: ctxId, include_explain: includeExplain ? true : undefined } },
+    ];
+
+    const errors = [];
+    for (const attempt of attempts) {
+      try {
+        const data = await this._request({
+          method: "GET",
+          path: attempt.path,
+          query: attempt.query,
+        });
+        const normalized = normalizeCompiledExplainPayload(data);
+        return normalized.compiled_text;
+      } catch (e) {
+        errors.push(e);
+        if (!isRetryableStatus(e?.status)) break;
+      }
+    }
+
+    if (errors.length) throw errors[errors.length - 1];
+    throw new Error("GoC getCompiledContext failed: no attempts");
+  }
+
+  async getCompiledContextExplain(contextSetId) {
+    const ctxId = String(contextSetId || "").trim();
+    if (!ctxId) throw new Error("getCompiledContextExplain requires contextSetId");
+
+    const attempts = [
+      { path: `/api/context_sets/${encodeURIComponent(ctxId)}/compiled`, query: { include_explain: true } },
+      { path: "/api/compiled_context", query: { context_set_id: ctxId, include_explain: true } },
+      { path: "/api/compiled", query: { context_set_id: ctxId, include_explain: true } },
+      { path: `/context_sets/${encodeURIComponent(ctxId)}/compiled`, query: { include_explain: true } },
+      { path: "/compiled_context", query: { context_set_id: ctxId, include_explain: true } },
+      { path: "/compiled", query: { context_set_id: ctxId, include_explain: true } },
+    ];
+
+    const errors = [];
+    for (const attempt of attempts) {
+      try {
+        const data = await this._request({
+          method: "GET",
+          path: attempt.path,
+          query: attempt.query,
+        });
+        const normalized = normalizeCompiledExplainPayload(data);
+        return {
+          compiled_text: normalized.compiled_text,
+          explain: normalized.explain,
+          active_node_ids: normalized.active_node_ids,
+        };
+      } catch (e) {
+        errors.push(e);
+        if (!isRetryableStatus(e?.status)) break;
+      }
+    }
+
+    if (errors.length) throw errors[errors.length - 1];
+    throw new Error("GoC getCompiledContextExplain failed: no attempts");
+  }
+
+  async getNode(nodeId) {
+    const nid = String(nodeId || "").trim();
+    if (!nid) throw new Error("getNode requires nodeId");
 
     const data = await this._requestAny({
       method: "GET",
       attempts: [
-        { path: "/api/compiled_context", query: { context_set_id: ctxId } },
-        { path: "/api/compiled", query: { context_set_id: ctxId } },
-        { path: "/compiled_context", query: { context_set_id: ctxId } },
-        { path: "/compiled", query: { context_set_id: ctxId } },
-        { path: `/api/context_sets/${encodeURIComponent(ctxId)}/compiled` },
-        { path: `/context_sets/${encodeURIComponent(ctxId)}/compiled` },
+        { path: `/api/nodes/${encodeURIComponent(nid)}`, query: { include_parts: true } },
+        { path: `/api/nodes/${encodeURIComponent(nid)}`, query: { includeParts: true } },
+        { path: `/nodes/${encodeURIComponent(nid)}`, query: { include_parts: true } },
+        { path: `/v1/nodes/${encodeURIComponent(nid)}`, query: { include_parts: true } },
+        { path: `/api/resources/${encodeURIComponent(nid)}`, query: { include_parts: true } },
       ],
     });
 
-    if (typeof data === "string") return data;
-    const compiled = pick(data, ["compiled_text", "compiledText", "text", "content"]);
-    if (typeof compiled === "string") return compiled;
-    if (data && typeof data === "object") return JSON.stringify(data, null, 2);
-    return "";
+    const entity = normalizeEntity(data, ["node", "resource", "data"]);
+    const node = asObject(entity);
+    if (!node.id && !node.node_id && !node.nodeId) {
+      return { ...node, id: nid };
+    }
+    return node;
+  }
+
+  async activateNodes(contextSetId, nodeIds = []) {
+    return await this._setNodesActivation(contextSetId, nodeIds, true);
+  }
+
+  async deactivateNodes(contextSetId, nodeIds = []) {
+    return await this._setNodesActivation(contextSetId, nodeIds, false);
+  }
+
+  async _setNodesActivation(contextSetId, nodeIds = [], active = true) {
+    const ctxId = String(contextSetId || "").trim();
+    if (!ctxId) throw new Error("_setNodesActivation requires contextSetId");
+    const ids = normalizeNodeIdList(nodeIds);
+    if (ids.length === 0) return { ok: true, context_set_id: ctxId, node_ids: [] };
+
+    const suffix = active ? "activate" : "deactivate";
+    const data = await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/context_sets/${encodeURIComponent(ctxId)}/${suffix}_nodes`, body: { node_ids: ids } },
+        { path: `/api/context_sets/${encodeURIComponent(ctxId)}/nodes/${suffix}`, body: { node_ids: ids } },
+        { path: `/api/context_sets/${encodeURIComponent(ctxId)}/nodes:${suffix}`, body: { node_ids: ids } },
+        { path: `/api/context_sets/${encodeURIComponent(ctxId)}/nodes`, body: { node_ids: ids, active } },
+        { path: `/context_sets/${encodeURIComponent(ctxId)}/${suffix}_nodes`, body: { node_ids: ids } },
+      ],
+    });
+    return {
+      ok: true,
+      context_set_id: ctxId,
+      node_ids: ids,
+      raw: data,
+    };
   }
 
   async mintUiToken(ttlSec) {
