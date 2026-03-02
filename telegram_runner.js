@@ -3029,7 +3029,35 @@ function buildSupervisorExecutionCallbacks({
       };
     }
 
+    // shared_only + no extra detail: reuse shared context directly (skip clone/apply)
+    if (lensSpec.mode === "shared_only" && !cleanDetail) {
+      return {
+        final_prompt: [
+          cleanGoal,
+          sharedCompiled ? `[JOB COMPILED CONTEXT]\n${clip(sharedCompiled, 9000)}` : "",
+          runtime.globalSummary ? `[GLOBAL MEMORY]\n${clip(runtime.globalSummary, 5000)}` : "",
+        ].filter(Boolean).join("\n\n"),
+        context_info: {
+          context_set_id: sharedContextSetId,
+          context_version: String(sharedContextMeta?.version || "").trim() || undefined,
+          context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
+            ? sharedContextMeta.active_node_ids
+            : undefined,
+          shared_context_set_id: sharedContextSetId,
+          shared_context_version: String(sharedContextMeta?.version || "").trim() || undefined,
+          shared_context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
+            ? sharedContextMeta.active_node_ids
+            : undefined,
+          lens_context_set_id: sharedContextSetId,
+          lens_spec: lensSpec,
+          lens_added_ids_count: 0,
+          compiled_tokens_estimate: estimateTokens(sharedCompiled),
+        },
+      };
+    }
+
     const lensKey = JSON.stringify({
+      agent_id: cleanAgentId || "",
       shared_context_set_id: sharedContextSetId,
       shared_context_version: String(sharedContextMeta?.version || "").trim(),
       lens: lensSpec,

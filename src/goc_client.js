@@ -548,6 +548,7 @@ export class GocClient {
           path: `/api/context_sets/${encodeURIComponent(baseId)}/clone`,
           body: {
             name: cleanName || undefined,
+            meta: metaJson,
             meta_json: metaJson,
           },
         },
@@ -555,6 +556,7 @@ export class GocClient {
           path: `/api/context-sets/${encodeURIComponent(baseId)}/clone`,
           body: {
             name: cleanName || undefined,
+            meta: metaJson,
             meta_json: metaJson,
           },
         },
@@ -564,6 +566,7 @@ export class GocClient {
             base_context_set_id: baseId,
             context_set_id: baseId,
             name: cleanName || undefined,
+            meta: metaJson,
             meta_json: metaJson,
           },
         },
@@ -573,6 +576,7 @@ export class GocClient {
             base_context_set_id: baseId,
             context_set_id: baseId,
             name: cleanName || undefined,
+            meta: metaJson,
             meta_json: metaJson,
           },
         },
@@ -580,6 +584,7 @@ export class GocClient {
           path: `/context_sets/${encodeURIComponent(baseId)}/clone`,
           body: {
             name: cleanName || undefined,
+            meta: metaJson,
             meta_json: metaJson,
           },
         },
@@ -1023,6 +1028,8 @@ export class GocClient {
     const data = await this._requestAny({
       method: "POST",
       attempts: [
+        { path: `/api/context_sets/${encodeURIComponent(ctxId)}/${suffix}`, body: { node_ids: ids } },
+        { path: `/context_sets/${encodeURIComponent(ctxId)}/${suffix}`, body: { node_ids: ids } },
         { path: `/api/context_sets/${encodeURIComponent(ctxId)}/${suffix}_nodes`, body: { node_ids: ids } },
         { path: `/api/context_sets/${encodeURIComponent(ctxId)}/nodes/${suffix}`, body: { node_ids: ids } },
         { path: `/api/context_sets/${encodeURIComponent(ctxId)}/nodes:${suffix}`, body: { node_ids: ids } },
