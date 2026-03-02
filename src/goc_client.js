@@ -108,6 +108,22 @@ function isGraphResourceNode(entity) {
   return false;
 }
 
+function isGraphMessageNode(entity) {
+  const row = asObject(entity);
+  const hint = String(
+    pick(row, ["node_type", "nodeType", "entity_type", "entityType", "type", "kind", "node_kind", "nodeKind", "label"])
+    || ""
+  ).trim().toLowerCase();
+  if (hint.includes("message")) return true;
+  const payload = normalizePayloadObject(pick(row, ["payload_json", "payloadJson", "payload", "meta_json", "metaJson", "meta"]));
+  const role = String(
+    pick(row, ["role", "author_role", "authorRole"])
+    || pick(payload, ["role"])
+    || ""
+  ).trim().toLowerCase();
+  return ["user", "assistant", "system", "tool"].includes(role);
+}
+
 function normalizePayloadObject(raw) {
   if (raw && typeof raw === "object") return asObject(raw);
   if (typeof raw === "string") return asObject(parseJsonMaybe(raw));
@@ -319,11 +335,17 @@ export class GocClient {
       id: pickId(row),
       name: String(pick(row, ["name", "title"]) || ""),
       summary: String(pick(row, ["summary", "text", "content"]) || ""),
+      createdAt: String(pick(row, ["created_at", "createdAt", "ts", "timestamp"]) || ""),
       type: String(
         pick(row, ["type", "node_type", "nodeType", "kind", "label"])
         || pick(payload, ["type", "node_type", "nodeType", "kind"])
         || ""
       ).trim(),
+      resourceKind: String(
+        pick(row, ["resource_kind", "resourceKind"])
+        || pick(payload, ["resource_kind", "resourceKind", "kind"])
+        || ""
+      ).trim().toLowerCase(),
       contextSetId: String(
         pick(row, ["context_set_id", "contextSetId", "ctx_id", "ctxId"])
         || pick(payload, ["context_set_id", "contextSetId", "ctx_id", "ctxId"])
@@ -853,6 +875,94 @@ export class GocClient {
     }
     if (contextSetId) {
       rows = rows.filter((row) => !row.contextSetId || row.contextSetId === contextSetId);
+    }
+    return rows;
+  }
+
+  async listNodes(threadId, options = {}) {
+    const tid = String(threadId || "").trim();
+    if (!tid) throw new Error("listNodes requires threadId");
+    const contextSetId = String(options.contextSetId || "").trim();
+
+    let rawRows = [];
+    let usedGraphFallback = false;
+    try {
+      const data = await this._requestAny({
+        method: "GET",
+        attempts: [
+          { path: "/api/nodes", query: { thread_id: tid, context_set_id: contextSetId || undefined } },
+          { path: "/api/nodes", query: { threadId: tid, contextSetId: contextSetId || undefined } },
+          { path: "/nodes", query: { thread_id: tid, context_set_id: contextSetId || undefined } },
+          { path: "/v1/nodes", query: { thread_id: tid, context_set_id: contextSetId || undefined } },
+          { path: `/api/threads/${encodeURIComponent(tid)}/nodes`, query: { context_set_id: contextSetId || undefined } },
+          { path: `/threads/${encodeURIComponent(tid)}/nodes`, query: { context_set_id: contextSetId || undefined } },
+        ],
+      });
+      rawRows = normalizeArrayResponse(data);
+    } catch (listErr) {
+      const graphData = await this._requestAny({
+        method: "GET",
+        attempts: [
+          { path: `/api/threads/${encodeURIComponent(tid)}/graph` },
+          { path: `/threads/${encodeURIComponent(tid)}/graph` },
+          { path: `/v1/threads/${encodeURIComponent(tid)}/graph` },
+        ],
+      }).catch(() => null);
+      if (!graphData) throw listErr;
+      usedGraphFallback = true;
+      rawRows = normalizeGraphNodes(graphData);
+    }
+
+    let rows = rawRows
+      .map((row) => this.normalizeNode(usedGraphFallback ? normalizeEntity(row, ["node", "resource", "data"]) : row))
+      .filter((row) => row.id);
+    if (contextSetId) {
+      rows = rows.filter((row) => !row.contextSetId || row.contextSetId === contextSetId);
+    }
+    return rows;
+  }
+
+  async listMessages(threadId, options = {}) {
+    const tid = String(threadId || "").trim();
+    if (!tid) throw new Error("listMessages requires threadId");
+    const limitRaw = Number(options.limit);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0
+      ? Math.max(1, Math.min(200, Math.floor(limitRaw)))
+      : undefined;
+
+    let rawRows = [];
+    let usedGraphFallback = false;
+    try {
+      const data = await this._requestAny({
+        method: "GET",
+        attempts: [
+          { path: `/api/threads/${encodeURIComponent(tid)}/messages`, query: { limit } },
+          { path: `/threads/${encodeURIComponent(tid)}/messages`, query: { limit } },
+          { path: "/api/messages", query: { thread_id: tid, limit } },
+          { path: "/messages", query: { thread_id: tid, limit } },
+          { path: "/v1/messages", query: { thread_id: tid, limit } },
+        ],
+      });
+      rawRows = normalizeArrayResponse(data);
+    } catch (listErr) {
+      const graphData = await this._requestAny({
+        method: "GET",
+        attempts: [
+          { path: `/api/threads/${encodeURIComponent(tid)}/graph` },
+          { path: `/threads/${encodeURIComponent(tid)}/graph` },
+          { path: `/v1/threads/${encodeURIComponent(tid)}/graph` },
+        ],
+      }).catch(() => null);
+      if (!graphData) throw listErr;
+      usedGraphFallback = true;
+      rawRows = normalizeGraphNodes(graphData).filter((row) => isGraphMessageNode(row));
+    }
+
+    let rows = rawRows
+      .map((row) => this.normalizeMessage(usedGraphFallback ? normalizeEntity(row, ["message", "node", "data"]) : row))
+      .filter((row) => row.id);
+    if (typeof limit === "number" && limit > 0 && rows.length > limit) {
+      rows = rows.slice(-limit);
     }
     return rows;
   }

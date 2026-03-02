@@ -8,14 +8,6 @@ const DEFAULT_TOOLS_THREAD_TITLE = "tools";
 const inflightServiceThreadEnsures = new Map();
 const inflightJobThreadEnsures = new Map();
 
-function parseBool(raw, fallback = false) {
-  const v = String(raw ?? "").trim().toLowerCase();
-  if (!v) return fallback;
-  if (["1", "true", "yes", "on"].includes(v)) return true;
-  if (["0", "false", "no", "off"].includes(v)) return false;
-  return fallback;
-}
-
 function parseOptionalPositiveInt(raw) {
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) return null;
@@ -533,7 +525,7 @@ async function ensureDefaultJobConfigResource(client, { threadId, ctxId, jobId }
     resource_kind: "job_config",
     uri: `ddalggak://jobs/${jid}/job_config`,
     context_set_id: cid,
-    auto_activate: true,
+    auto_activate: false,
     payload_json: {
       op: "init_default",
       ts: nowIso,
@@ -648,10 +640,9 @@ export async function appendTrackingChunkToGoc(client, {
   const map = await ensureJobThread(client, { jobId, jobDir });
   const name = String(docName || "").trim();
   const prevId = getLastNodeByDoc(jobDir, jobId, name);
-  const progressActivate = parseBool(process.env.GOC_AUTO_ACTIVATE_PROGRESS, false);
   const shouldActivate = typeof autoActivate === "boolean"
     ? autoActivate
-    : (name === "progress.md" ? progressActivate : true);
+    : false;
   const nowIso = new Date().toISOString();
   const limited = maybeLimitChunkText(chunkText);
   const preview = limited.text.slice(0, 180);

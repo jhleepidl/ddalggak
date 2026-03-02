@@ -680,6 +680,7 @@ export async function routeWithSupervisor(message, {
   contextSummary = "",
   onGeminiRetry = null,
   onGeminiModelSwitch = null,
+  onGeminiGiveUp = null,
   geminiConcurrencyKey = "",
   geminiModel = "",
 } = {}) {
@@ -716,6 +717,7 @@ export async function routeWithSupervisor(message, {
       model: geminiModel || "",
       onRetry: onGeminiRetry,
       onModelSwitch: onGeminiModelSwitch,
+      onGiveUp: onGeminiGiveUp,
     });
     if (!r?.ok) {
       if (signal?.aborted) {

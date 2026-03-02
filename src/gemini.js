@@ -13,13 +13,24 @@ const DEFAULT_GEMINI_MODEL_FALLBACKS = "auto,gemini-2.5-flash,gemini-2.5-pro";
 const DEFAULT_CAPACITY_MAX_RETRIES = 8;
 const DEFAULT_CAPACITY_SWITCH_AFTER = 2;
 const DEFAULT_BACKOFF_BASE_MS = 1000;
-const DEFAULT_BACKOFF_MAX_DELAY_MS = 45000;
+const DEFAULT_BACKOFF_MAX_DELAY_MS = 30000;
 const DEFAULT_BACKOFF_JITTER_MS = 500;
 const DEFAULT_MAX_CONCURRENT_GEMINI = 1;
+const DEFAULT_GEMINI_MIN_INTERVAL_MS = 2000;
+const DEFAULT_GEMINI_RETRY_TIMEBOX_MS = 180000;
+const DEFAULT_GEMINI_CAPACITY_COOLDOWN_MS = 60000;
 
 let planModeAvailability = null;
 let modelFlagAvailability = null;
-const geminiConcurrencyByKey = new Map(); // key -> { running, waiters: [{ resolve }] }
+const geminiGlobalLimiter = {
+  running: 0,
+  waiters: [],
+  lastCallAtMs: 0,
+};
+const geminiCapacityCircuit = {
+  consecutiveCapacityFailures: 0,
+  openUntilMs: 0,
+};
 
 function resolveApprovalMode() {
   const raw = String(process.env.GEMINI_APPROVAL_MODE || "default").trim();
@@ -58,7 +69,7 @@ function getGeminiConcurrencyLimit() {
 
 function getCapacityMaxRetries() {
   return toPositiveInt(
-    process.env.GEMINI_CAPACITY_MAX_RETRIES,
+    process.env.GEMINI_MAX_RETRIES ?? process.env.GEMINI_CAPACITY_MAX_RETRIES,
     DEFAULT_CAPACITY_MAX_RETRIES,
     { min: 0, max: 16 }
   );
@@ -74,7 +85,7 @@ function getCapacitySwitchAfter() {
 
 function getBackoffBaseMs() {
   return toPositiveInt(
-    process.env.GEMINI_CAPACITY_BACKOFF_BASE_MS,
+    process.env.GEMINI_BACKOFF_BASE_MS ?? process.env.GEMINI_CAPACITY_BACKOFF_BASE_MS,
     DEFAULT_BACKOFF_BASE_MS,
     { min: 200, max: 10000 }
   );
@@ -82,7 +93,7 @@ function getBackoffBaseMs() {
 
 function getBackoffMaxDelayMs() {
   return toPositiveInt(
-    process.env.GEMINI_CAPACITY_MAX_DELAY_MS,
+    process.env.GEMINI_BACKOFF_MAX_MS ?? process.env.GEMINI_CAPACITY_MAX_DELAY_MS,
     DEFAULT_BACKOFF_MAX_DELAY_MS,
     { min: 1000, max: 120000 }
   );
@@ -90,9 +101,33 @@ function getBackoffMaxDelayMs() {
 
 function getBackoffJitterMs() {
   return toPositiveInt(
-    process.env.GEMINI_CAPACITY_JITTER_MS,
+    process.env.GEMINI_JITTER_MS ?? process.env.GEMINI_CAPACITY_JITTER_MS,
     DEFAULT_BACKOFF_JITTER_MS,
     { min: 0, max: 5000 }
+  );
+}
+
+function getGeminiMinIntervalMs() {
+  return toPositiveInt(
+    process.env.GEMINI_MIN_INTERVAL_MS,
+    DEFAULT_GEMINI_MIN_INTERVAL_MS,
+    { min: 0, max: 120000 }
+  );
+}
+
+function getGeminiRetryTimeboxMs() {
+  return toPositiveInt(
+    process.env.GEMINI_RETRY_TIMEBOX_MS,
+    DEFAULT_GEMINI_RETRY_TIMEBOX_MS,
+    { min: 5000, max: 600000 }
+  );
+}
+
+function getGeminiCapacityCooldownMs() {
+  return toPositiveInt(
+    process.env.GEMINI_CAPACITY_COOLDOWN_MS,
+    DEFAULT_GEMINI_CAPACITY_COOLDOWN_MS,
+    { min: 1000, max: 600000 }
   );
 }
 
@@ -183,6 +218,16 @@ function makeAbortedResult() {
     exitCode: -1,
     stdout: "",
     stderr: "[gemini] aborted",
+    durationMs: 0,
+  };
+}
+
+function makeFailureResult(stderr, { exitCode = -1, stdout = "" } = {}) {
+  return {
+    ok: false,
+    exitCode,
+    stdout: String(stdout || ""),
+    stderr: String(stderr || ""),
     durationMs: 0,
   };
 }
@@ -337,57 +382,44 @@ async function invokeGeminiWithPlanFallback({
   return first;
 }
 
-function resolveConcurrencyKey(explicitKey, commandCwd, workspaceRoot) {
-  const clean = String(explicitKey || "").trim();
-  if (clean) return clean;
-  const cwdKey = String(commandCwd || workspaceRoot || process.cwd()).trim();
-  return cwdKey || "__gemini_default__";
-}
-
-function getConcurrencyState(key) {
-  const cleanKey = String(key || "__gemini_default__");
-  if (!geminiConcurrencyByKey.has(cleanKey)) {
-    geminiConcurrencyByKey.set(cleanKey, { running: 0, waiters: [] });
-  }
-  return geminiConcurrencyByKey.get(cleanKey);
-}
-
-function releaseGeminiSlot(key) {
-  const cleanKey = String(key || "__gemini_default__");
-  const state = geminiConcurrencyByKey.get(cleanKey);
-  if (!state) return;
-  state.running = Math.max(0, Number(state.running || 0) - 1);
+function releaseGeminiGlobalSlot() {
+  geminiGlobalLimiter.running = Math.max(0, Number(geminiGlobalLimiter.running || 0) - 1);
   const limit = getGeminiConcurrencyLimit();
-  while (state.running < limit && state.waiters.length > 0) {
-    const waiter = state.waiters.shift();
-    state.running += 1;
-    waiter.resolve(() => releaseGeminiSlot(cleanKey));
-  }
-  if (state.running === 0 && state.waiters.length === 0) {
-    geminiConcurrencyByKey.delete(cleanKey);
+  while (geminiGlobalLimiter.running < limit && geminiGlobalLimiter.waiters.length > 0) {
+    const resume = geminiGlobalLimiter.waiters.shift();
+    geminiGlobalLimiter.running += 1;
+    resume();
   }
 }
 
-async function acquireGeminiSlot(key) {
-  const cleanKey = String(key || "__gemini_default__");
-  const state = getConcurrencyState(cleanKey);
+async function acquireGeminiGlobalSlot() {
   const limit = getGeminiConcurrencyLimit();
-  if (state.running < limit) {
-    state.running += 1;
-    return () => releaseGeminiSlot(cleanKey);
+  if (geminiGlobalLimiter.running < limit) {
+    geminiGlobalLimiter.running += 1;
+    return;
   }
-  return await new Promise((resolve) => {
-    state.waiters.push({ resolve });
+  await new Promise((resolve) => {
+    geminiGlobalLimiter.waiters.push(resolve);
   });
 }
 
-async function withGeminiConcurrency(key, fn) {
-  const release = await acquireGeminiSlot(key);
+async function withGeminiGlobalLimiter(fn) {
+  await acquireGeminiGlobalSlot();
   try {
     return await fn();
   } finally {
-    release();
+    geminiGlobalLimiter.lastCallAtMs = Date.now();
+    releaseGeminiGlobalSlot();
   }
+}
+
+async function waitForGeminiMinInterval(signal) {
+  const minIntervalMs = getGeminiMinIntervalMs();
+  if (!(minIntervalMs > 0)) return true;
+  const elapsed = Date.now() - Number(geminiGlobalLimiter.lastCallAtMs || 0);
+  if (elapsed >= minIntervalMs) return true;
+  const waitMs = minIntervalMs - elapsed;
+  return await waitWithAbort(waitMs, signal);
 }
 
 function withGeminiMeta(result, {
@@ -418,6 +450,7 @@ export async function runGeminiPrompt({
   concurrencyKey = "",
   onRetry = null,
   onModelSwitch = null,
+  onGiveUp = null,
 }) {
   // Keep CLI prompt argument simple and stream the real prompt via stdin.
   // This avoids parser issues when prompt text starts with "-" or markdown fences.
@@ -428,20 +461,55 @@ export async function runGeminiPrompt({
 
   const timeoutMs = 30 * 60 * 1000;
   const commandCwd = cwd || workspaceRoot;
+  void concurrencyKey;
   const requestedMode = resolveApprovalMode();
   const modelCandidates = buildModelCandidates(model);
   const maxRetries = getCapacityMaxRetries();
   const switchAfter = getCapacitySwitchAfter();
-  const queueKey = resolveConcurrencyKey(concurrencyKey, commandCwd, workspaceRoot);
+  const retryTimeboxMs = getGeminiRetryTimeboxMs();
+  const circuitCooldownMs = getGeminiCapacityCooldownMs();
 
-  return await withGeminiConcurrency(queueKey, async () => {
+  return await withGeminiGlobalLimiter(async () => {
     let modelIndex = 0;
     let retryCount = 0;
     let consecutiveCapacityErrors = 0;
     const notes = [];
+    const startedAtMs = Date.now();
 
     while (true) {
       if (signal?.aborted) {
+        return withGeminiMeta(makeAbortedResult(), {
+          modelName: modelCandidates[modelIndex] || "auto",
+          errorType: "aborted",
+          retryCount,
+          notes,
+        });
+      }
+
+      const nowMs = Date.now();
+      if (Number(geminiCapacityCircuit.openUntilMs || 0) > 0 && Number(geminiCapacityCircuit.openUntilMs || 0) <= nowMs) {
+        geminiCapacityCircuit.openUntilMs = 0;
+        geminiCapacityCircuit.consecutiveCapacityFailures = 0;
+      }
+      if (Number(geminiCapacityCircuit.openUntilMs || 0) > nowMs) {
+        const remainingMs = Math.max(0, Math.floor(Number(geminiCapacityCircuit.openUntilMs || 0) - nowMs));
+        const circuitMsg = `[gemini] capacity circuit open; retry after ${remainingMs}ms`;
+        await safeHook(onGiveUp, {
+          reason: "capacity_circuit_open",
+          retryCount,
+          maxRetries,
+          remainingMs,
+        });
+        return withGeminiMeta(makeFailureResult(circuitMsg), {
+          modelName: modelCandidates[modelIndex] || "auto",
+          errorType: "capacity_exhausted",
+          retryCount,
+          notes: [...notes, circuitMsg],
+        });
+      }
+
+      const intervalReady = await waitForGeminiMinInterval(signal);
+      if (!intervalReady) {
         return withGeminiMeta(makeAbortedResult(), {
           modelName: modelCandidates[modelIndex] || "auto",
           errorType: "aborted",
@@ -459,7 +527,10 @@ export async function runGeminiPrompt({
         signal,
         modelName: currentModelName,
       });
+      geminiGlobalLimiter.lastCallAtMs = Date.now();
       if (result.ok) {
+        geminiCapacityCircuit.consecutiveCapacityFailures = 0;
+        geminiCapacityCircuit.openUntilMs = 0;
         return withGeminiMeta(result, {
           modelName: currentModelName,
           retryCount,
@@ -469,6 +540,29 @@ export async function runGeminiPrompt({
 
       const errorType = classifyGeminiError(result);
       if (errorType !== "capacity_exhausted") {
+        geminiCapacityCircuit.consecutiveCapacityFailures = 0;
+        return withGeminiMeta(result, {
+          modelName: currentModelName,
+          errorType,
+          retryCount,
+          notes,
+        });
+      }
+
+      geminiCapacityCircuit.consecutiveCapacityFailures = Math.max(
+        0,
+        Number(geminiCapacityCircuit.consecutiveCapacityFailures || 0)
+      ) + 1;
+      if (geminiCapacityCircuit.consecutiveCapacityFailures >= 3) {
+        geminiCapacityCircuit.openUntilMs = Date.now() + circuitCooldownMs;
+        const circuitMsg = `[gemini] capacity circuit opened for ${circuitCooldownMs}ms`;
+        notes.push(circuitMsg);
+        await safeHook(onGiveUp, {
+          reason: "capacity_circuit_opened",
+          retryCount,
+          maxRetries,
+          cooldownMs: circuitCooldownMs,
+        });
         return withGeminiMeta(result, {
           modelName: currentModelName,
           errorType,
@@ -479,6 +573,30 @@ export async function runGeminiPrompt({
 
       if (retryCount >= maxRetries) {
         notes.push(`[gemini] capacity retries exhausted: ${retryCount}/${maxRetries}`);
+        await safeHook(onGiveUp, {
+          reason: "max_retries",
+          retryCount,
+          maxRetries,
+        });
+        return withGeminiMeta(result, {
+          modelName: currentModelName,
+          errorType,
+          retryCount,
+          notes,
+        });
+      }
+
+      const elapsedMs = Date.now() - startedAtMs;
+      if (elapsedMs >= retryTimeboxMs) {
+        const timeboxMsg = `[gemini] retry timebox exceeded: ${elapsedMs}/${retryTimeboxMs}ms`;
+        notes.push(timeboxMsg);
+        await safeHook(onGiveUp, {
+          reason: "timebox_exceeded",
+          retryCount,
+          maxRetries,
+          elapsedMs,
+          retryTimeboxMs,
+        });
         return withGeminiMeta(result, {
           modelName: currentModelName,
           errorType,
@@ -504,7 +622,9 @@ export async function runGeminiPrompt({
       }
 
       retryCount += 1;
-      const delayMs = capacityBackoffDelayMs(retryCount);
+      const delayMsRaw = capacityBackoffDelayMs(retryCount);
+      const remainingTimeboxMs = Math.max(0, retryTimeboxMs - (Date.now() - startedAtMs));
+      const delayMs = Math.min(delayMsRaw, remainingTimeboxMs);
       await safeHook(onRetry, {
         retryCount,
         maxRetries,
@@ -512,6 +632,23 @@ export async function runGeminiPrompt({
         delayMs,
         model: displayModelName(modelCandidates[modelIndex] || "auto"),
       });
+      if (delayMs <= 0) {
+        const timeboxMsg = `[gemini] retry timebox exhausted before wait: ${Date.now() - startedAtMs}/${retryTimeboxMs}ms`;
+        notes.push(timeboxMsg);
+        await safeHook(onGiveUp, {
+          reason: "timebox_exceeded",
+          retryCount,
+          maxRetries,
+          elapsedMs: Date.now() - startedAtMs,
+          retryTimeboxMs,
+        });
+        return withGeminiMeta(result, {
+          modelName: currentModelName,
+          errorType,
+          retryCount,
+          notes,
+        });
+      }
       const waited = await waitWithAbort(delayMs, signal);
       if (!waited) {
         return withGeminiMeta(makeAbortedResult(), {

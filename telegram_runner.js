@@ -89,6 +89,24 @@ const AUTOPILOT_MAX_TURNS = Number.isFinite(Number(process.env.AUTOPILOT_MAX_TUR
 const AUTOPILOT_MAX_TOTAL_ACTIONS = Number.isFinite(Number(process.env.AUTOPILOT_MAX_TOTAL_ACTIONS))
   ? Math.max(1, Math.min(120, Math.floor(Number(process.env.AUTOPILOT_MAX_TOTAL_ACTIONS))))
   : 20;
+const SHARED_CONTEXT_RECENT_USER_MESSAGES = Number.isFinite(Number(process.env.SHARED_CONTEXT_RECENT_USER_MESSAGES))
+  ? Math.max(1, Math.min(40, Math.floor(Number(process.env.SHARED_CONTEXT_RECENT_USER_MESSAGES))))
+  : 6;
+const SHARED_CONTEXT_RECENT_ASSISTANT_MESSAGES = Number.isFinite(Number(process.env.SHARED_CONTEXT_RECENT_ASSISTANT_MESSAGES))
+  ? Math.max(1, Math.min(40, Math.floor(Number(process.env.SHARED_CONTEXT_RECENT_ASSISTANT_MESSAGES))))
+  : 6;
+const SHARED_CONTEXT_RECENT_RUN_STEP = Number.isFinite(Number(process.env.SHARED_CONTEXT_RECENT_RUN_STEP))
+  ? Math.max(1, Math.min(60, Math.floor(Number(process.env.SHARED_CONTEXT_RECENT_RUN_STEP))))
+  : 10;
+const SHARED_CONTEXT_RECENT_TOOL_ARTIFACT = Number.isFinite(Number(process.env.SHARED_CONTEXT_RECENT_TOOL_ARTIFACT))
+  ? Math.max(1, Math.min(40, Math.floor(Number(process.env.SHARED_CONTEXT_RECENT_TOOL_ARTIFACT))))
+  : 5;
+const SHARED_CONTEXT_EXCLUDE_RESOURCE_KINDS = String(
+  process.env.SHARED_CONTEXT_EXCLUDE_RESOURCE_KINDS || "job_config,tracking_append"
+)
+  .split(",")
+  .map((entry) => String(entry || "").trim().toLowerCase())
+  .filter(Boolean);
 const LEGACY_AGENT_MAP = {
   gemini: "researcher",
   codex: "coder",
@@ -735,6 +753,9 @@ function buildChatStatusCard(chatId, runtime = null) {
   if (Array.isArray(enabledTools) && enabledTools.length > 0) {
     lines.push(`- enabled_tools: ${enabledTools.join(", ")}`);
   }
+  if (runtime?.jobConfigDebugSummary) {
+    lines.push(`- job_config(debug): ${clip(String(runtime.jobConfigDebugSummary || ""), 240)}`);
+  }
   return {
     text: lines.join("\n"),
     status: {
@@ -1090,6 +1111,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     concurrencyKey,
     onRetry: opts.onGeminiRetry,
     onModelSwitch: opts.onGeminiModelSwitch,
+    onGiveUp: opts.onGeminiGiveUp,
   });
   const out = (r.stdout || r.stderr || "");
   tracking.append(jobId, "research.md", `## ${sectionTitle}\n\n${out}\n`);
@@ -1783,8 +1805,8 @@ function buildGeminiRetryNoticeText({ retryCount = 0, maxRetries = 0, agentId = 
   const cleanMax = Math.max(cleanRetry, Math.floor(Number(maxRetries) || cleanRetry));
   const suffix = String(agentId || "").trim().toLowerCase();
   return suffix
-    ? `⏳ Gemini 서버 혼잡으로 재시도 중(${cleanRetry}/${cleanMax})… (@${suffix})`
-    : `⏳ Gemini 서버 혼잡으로 재시도 중(${cleanRetry}/${cleanMax})…`;
+    ? `⏳ Gemini 혼잡으로 재시도 중 (${cleanRetry}/${cleanMax})… (@${suffix})`
+    : `⏳ Gemini 혼잡으로 재시도 중 (${cleanRetry}/${cleanMax})…`;
 }
 
 async function sendGeminiRetryMessage(
@@ -1832,6 +1854,31 @@ async function sendGeminiModelSwitchMessage(
   await bot.sendMessage(
     chatId,
     buildGeminiModelSwitchNoticeText({ toModel, agentId }),
+    replyId ? { reply_to_message_id: replyId } : undefined
+  );
+}
+
+function buildGeminiGiveUpNoticeText({ agentId = "" } = {}) {
+  const suffix = String(agentId || "").trim().toLowerCase();
+  const base = "❌ Gemini 혼잡이 지속돼요. 잠시 후 재시도하거나 모델/도구를 바꿀게요.";
+  return suffix ? `${base} (@${suffix})` : base;
+}
+
+async function sendGeminiGiveUpMessage(
+  bot,
+  chatId,
+  {
+    agentId = "",
+    replyToMessageId = null,
+  } = {}
+) {
+  const fallbackReply = getCurrentTurnReplyMessageId(chatId);
+  const replyId = Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
+    ? Number(replyToMessageId)
+    : (Number.isFinite(Number(fallbackReply)) && Number(fallbackReply) > 0 ? Number(fallbackReply) : null);
+  await bot.sendMessage(
+    chatId,
+    buildGeminiGiveUpNoticeText({ agentId }),
     replyId ? { reply_to_message_id: replyId } : undefined
   );
 }
@@ -2643,6 +2690,393 @@ async function listActiveResourcesByKind(client, { threadId, ctxId, resourceKind
   }
 }
 
+function parseTimeMs(raw) {
+  const t = Date.parse(String(raw || "").trim());
+  return Number.isFinite(t) ? t : 0;
+}
+
+function parseNodeCreatedAtMs(row = {}) {
+  const payload = row?.payload && typeof row.payload === "object" ? row.payload : {};
+  const raw = row?.raw && typeof row.raw === "object" ? row.raw : {};
+  return Math.max(
+    parseTimeMs(row?.createdAt),
+    parseTimeMs(raw.created_at),
+    parseTimeMs(raw.createdAt),
+    parseTimeMs(payload.ended_at),
+    parseTimeMs(payload.started_at),
+    parseTimeMs(payload.created_at),
+    parseTimeMs(payload.createdAt),
+    parseTimeMs(payload.ts),
+    parseTimeMs(payload.timestamp)
+  );
+}
+
+function nodeTypeLabel(row = {}) {
+  const payload = row?.payload && typeof row.payload === "object" ? row.payload : {};
+  const raw = row?.raw && typeof row.raw === "object" ? row.raw : {};
+  const direct = String(
+    row?.type
+    || raw.node_type
+    || raw.nodeType
+    || raw.type
+    || payload.type
+    || payload.node_type
+    || payload.nodeType
+    || ""
+  ).trim();
+  if (direct) return direct;
+  const resourceKind = String(
+    row?.resourceKind
+    || raw.resource_kind
+    || raw.resourceKind
+    || payload.resource_kind
+    || payload.resourceKind
+    || ""
+  ).trim().toLowerCase();
+  if (resourceKind === "artifact") return "Artifact";
+  if (resourceKind) return "Resource";
+  if (String(payload.role || "").trim()) return "Message";
+  return "";
+}
+
+function nodeTypeKey(row = {}) {
+  return String(nodeTypeLabel(row) || "").trim().toLowerCase();
+}
+
+function nodeResourceKind(row = {}) {
+  const payload = row?.payload && typeof row.payload === "object" ? row.payload : {};
+  const raw = row?.raw && typeof row.raw === "object" ? row.raw : {};
+  return String(
+    row?.resourceKind
+    || raw.resource_kind
+    || raw.resourceKind
+    || payload.resource_kind
+    || payload.resourceKind
+    || ""
+  ).trim().toLowerCase();
+}
+
+function messageRoleOf(row = {}) {
+  const payload = row?.payload && typeof row.payload === "object" ? row.payload : {};
+  const raw = row?.raw && typeof row.raw === "object" ? row.raw : {};
+  return String(
+    row?.role
+    || raw.role
+    || raw.author_role
+    || raw.authorRole
+    || payload.role
+    || ""
+  ).trim().toLowerCase();
+}
+
+function sortRowsByRecent(rows = []) {
+  return [...(Array.isArray(rows) ? rows : [])]
+    .sort((a, b) => parseNodeCreatedAtMs(b) - parseNodeCreatedAtMs(a));
+}
+
+function uniqNodeIds(rows = []) {
+  const out = [];
+  const seen = new Set();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const id = String(row?.id || "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+function chunkNodeIds(ids = [], size = 100) {
+  const rows = Array.isArray(ids) ? ids : [];
+  const out = [];
+  const n = Math.max(1, Math.floor(Number(size) || 100));
+  for (let i = 0; i < rows.length; i += n) {
+    out.push(rows.slice(i, i + n));
+  }
+  return out;
+}
+
+function summarizeJobConfigDebug(rawConfig = {}) {
+  const row = rawConfig && typeof rawConfig === "object" ? rawConfig : {};
+  const mode = String(row.mode || "supervisor").trim().toLowerCase() || "supervisor";
+  const style = String(row.final_response_style || row.finalResponseStyle || "concise").trim().toLowerCase() || "concise";
+  const participants = Array.isArray(row.participants)
+    ? row.participants.map((entry) => String(entry || "").trim().toLowerCase()).filter(Boolean)
+    : [];
+  const budget = row.budget && typeof row.budget === "object" ? row.budget : {};
+  const maxActions = Number.isFinite(Number(budget.max_actions)) ? Math.max(1, Math.floor(Number(budget.max_actions))) : 4;
+  const maxRisk = String(budget.max_risk || "L2").trim().toUpperCase() || "L2";
+  return [
+    `mode=${mode}`,
+    `style=${style}`,
+    `participants=${participants.length > 0 ? participants.map((id) => `@${id}`).join(", ") : "(none)"}`,
+    `budget.max_actions=${maxActions}`,
+    `budget.max_risk=${maxRisk}`,
+  ].join(", ");
+}
+
+function buildSharedContextSelectionPolicy(runtime = {}) {
+  const row = runtime && typeof runtime === "object" ? runtime : {};
+  const cfg = row?.jobConfig && typeof row.jobConfig === "object" ? row.jobConfig : {};
+  const policy = cfg?.context_policy && typeof cfg.context_policy === "object"
+    ? cfg.context_policy
+    : {};
+  const pinnedNodeIds = Array.isArray(policy.pinned_node_ids)
+    ? policy.pinned_node_ids.map((entry) => String(entry || "").trim()).filter(Boolean)
+    : [];
+  const parseLimit = (value, fallback, maxCap) => {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return fallback;
+    return Math.max(1, Math.min(maxCap, Math.floor(n)));
+  };
+  const excludeKinds = Array.isArray(policy.exclude_resource_kinds)
+    ? policy.exclude_resource_kinds.map((entry) => String(entry || "").trim().toLowerCase()).filter(Boolean)
+    : SHARED_CONTEXT_EXCLUDE_RESOURCE_KINDS;
+  return {
+    pinned_node_ids: pinnedNodeIds,
+    recent_user_messages: parseLimit(policy.recent_user_messages, SHARED_CONTEXT_RECENT_USER_MESSAGES, 40),
+    recent_assistant_messages: parseLimit(policy.recent_assistant_messages, SHARED_CONTEXT_RECENT_ASSISTANT_MESSAGES, 40),
+    recent_run_step: parseLimit(policy.recent_run_step, SHARED_CONTEXT_RECENT_RUN_STEP, 80),
+    recent_tool_artifact: parseLimit(policy.recent_tool_artifact, SHARED_CONTEXT_RECENT_TOOL_ARTIFACT, 40),
+    exclude_resource_kinds: excludeKinds.length > 0 ? excludeKinds : ["job_config", "tracking_append"],
+  };
+}
+
+function summarizeActiveTypeBreakdown(nodeIds = [], nodeMap = new Map()) {
+  const breakdown = {};
+  for (const idRaw of Array.isArray(nodeIds) ? nodeIds : []) {
+    const id = String(idRaw || "").trim();
+    if (!id) continue;
+    const node = nodeMap.get(id);
+    const type = nodeTypeKey(node);
+    const resourceKind = nodeResourceKind(node);
+    const role = messageRoleOf(node);
+    let key = type || "unknown";
+    if (type === "message" && role) key = `message:${role}`;
+    else if ((type === "resource" || type === "artifact") && resourceKind) key = `resource:${resourceKind}`;
+    breakdown[key] = Number(breakdown[key] || 0) + 1;
+  }
+  return breakdown;
+}
+
+async function refreshSharedContext(client, {
+  threadId = "",
+  sharedCtxId = "",
+  policy = {},
+  logger = null,
+} = {}) {
+  const tid = String(threadId || "").trim();
+  const ctxId = String(sharedCtxId || "").trim();
+  if (!tid || !ctxId || !client) {
+    return { ok: false, reason: "missing_thread_or_context" };
+  }
+  const log = typeof logger === "function" ? logger : () => {};
+
+  const normalizedPolicy = {
+    pinned_node_ids: Array.isArray(policy?.pinned_node_ids)
+      ? policy.pinned_node_ids.map((entry) => String(entry || "").trim()).filter(Boolean)
+      : [],
+    recent_user_messages: Number.isFinite(Number(policy?.recent_user_messages))
+      ? Math.max(1, Math.floor(Number(policy.recent_user_messages)))
+      : SHARED_CONTEXT_RECENT_USER_MESSAGES,
+    recent_assistant_messages: Number.isFinite(Number(policy?.recent_assistant_messages))
+      ? Math.max(1, Math.floor(Number(policy.recent_assistant_messages)))
+      : SHARED_CONTEXT_RECENT_ASSISTANT_MESSAGES,
+    recent_run_step: Number.isFinite(Number(policy?.recent_run_step))
+      ? Math.max(1, Math.floor(Number(policy.recent_run_step)))
+      : SHARED_CONTEXT_RECENT_RUN_STEP,
+    recent_tool_artifact: Number.isFinite(Number(policy?.recent_tool_artifact))
+      ? Math.max(1, Math.floor(Number(policy.recent_tool_artifact)))
+      : SHARED_CONTEXT_RECENT_TOOL_ARTIFACT,
+    exclude_resource_kinds: Array.isArray(policy?.exclude_resource_kinds)
+      ? policy.exclude_resource_kinds.map((entry) => String(entry || "").trim().toLowerCase()).filter(Boolean)
+      : SHARED_CONTEXT_EXCLUDE_RESOURCE_KINDS,
+  };
+  const excludedKinds = new Set(normalizedPolicy.exclude_resource_kinds);
+
+  const [messages, nodes, explain] = await Promise.all([
+    client.listMessages(tid, { limit: 120 }).catch(() => []),
+    client.listNodes(tid, { contextSetId: ctxId }).catch(() => []),
+    client.getCompiledContextExplain(ctxId).catch(() => ({ active_node_ids: [] })),
+  ]);
+
+  const nodeMap = new Map();
+  for (const row of Array.isArray(nodes) ? nodes : []) {
+    const id = String(row?.id || "").trim();
+    if (!id) continue;
+    nodeMap.set(id, row);
+  }
+  for (const row of Array.isArray(messages) ? messages : []) {
+    const id = String(row?.id || "").trim();
+    if (!id || nodeMap.has(id)) continue;
+    nodeMap.set(id, row);
+  }
+
+  const currentActiveIds = uniqNodeIds(
+    (Array.isArray(explain?.active_node_ids) ? explain.active_node_ids : [])
+      .map((id) => ({ id }))
+  );
+  const currentActiveSet = new Set(currentActiveIds);
+
+  const messageRows = sortRowsByRecent(messages);
+  const userMessageIds = uniqNodeIds(
+    messageRows
+      .filter((row) => messageRoleOf(row) === "user")
+      .slice(0, normalizedPolicy.recent_user_messages)
+  );
+  const assistantMessageIds = uniqNodeIds(
+    messageRows
+      .filter((row) => messageRoleOf(row) === "assistant")
+      .slice(0, normalizedPolicy.recent_assistant_messages)
+  );
+
+  const nodeRows = sortRowsByRecent(nodes);
+  const runStepIds = uniqNodeIds(
+    nodeRows
+      .filter((row) => {
+        const type = nodeTypeKey(row);
+        return type === "run" || type === "step";
+      })
+      .slice(0, normalizedPolicy.recent_run_step)
+  );
+  const toolArtifactIds = uniqNodeIds(
+    nodeRows
+      .filter((row) => {
+        const type = nodeTypeKey(row);
+        const resourceKind = nodeResourceKind(row);
+        if (type === "toolresult") return true;
+        if (type === "artifact") return true;
+        if (type === "resource" && resourceKind === "artifact") return true;
+        return false;
+      })
+      .slice(0, normalizedPolicy.recent_tool_artifact)
+  );
+
+  const selectedSet = new Set([
+    ...normalizedPolicy.pinned_node_ids,
+    ...userMessageIds,
+    ...assistantMessageIds,
+    ...runStepIds,
+    ...toolArtifactIds,
+  ].map((id) => String(id || "").trim()).filter(Boolean));
+
+  const excludedResourceIds = [];
+  for (const row of nodeRows) {
+    const id = String(row?.id || "").trim();
+    if (!id) continue;
+    const resourceKind = nodeResourceKind(row);
+    if (!resourceKind || !excludedKinds.has(resourceKind)) continue;
+    excludedResourceIds.push(id);
+    selectedSet.delete(id);
+  }
+
+  const toActivate = [...selectedSet].filter((id) => !currentActiveSet.has(id));
+  const toDeactivate = currentActiveIds.filter((id) => !selectedSet.has(id) || excludedResourceIds.includes(id));
+
+  for (const ids of chunkNodeIds(toDeactivate, 120)) {
+    if (ids.length === 0) continue;
+    await client.deactivateNodes(ctxId, ids).catch((e) => {
+      log(`[shared-context] deactivate failed: ${String(e?.message ?? e)}`);
+    });
+  }
+  for (const ids of chunkNodeIds(toActivate, 120)) {
+    if (ids.length === 0) continue;
+    await client.activateNodes(ctxId, ids).catch((e) => {
+      log(`[shared-context] activate failed: ${String(e?.message ?? e)}`);
+    });
+  }
+
+  let refreshedActiveIds = [...selectedSet];
+  let refreshedNodeMap = nodeMap;
+  try {
+    const refreshedExplain = await client.getCompiledContextExplain(ctxId);
+    refreshedActiveIds = uniqNodeIds(
+      (Array.isArray(refreshedExplain?.active_node_ids) ? refreshedExplain.active_node_ids : [])
+        .map((id) => ({ id }))
+    );
+    const refreshedNodes = await client.listNodes(tid, { contextSetId: ctxId }).catch(() => []);
+    if (Array.isArray(refreshedNodes) && refreshedNodes.length > 0) {
+      refreshedNodeMap = new Map();
+      for (const row of refreshedNodes) {
+        const id = String(row?.id || "").trim();
+        if (!id) continue;
+        refreshedNodeMap.set(id, row);
+      }
+    }
+  } catch {}
+
+  return {
+    ok: true,
+    selected_count: selectedSet.size,
+    activated_count: toActivate.length,
+    deactivated_count: toDeactivate.length,
+    excluded_resource_count: excludedResourceIds.length,
+    active_node_ids: refreshedActiveIds,
+    active_type_breakdown: summarizeActiveTypeBreakdown(refreshedActiveIds, refreshedNodeMap),
+    policy: normalizedPolicy,
+  };
+}
+
+async function refreshSharedContextForRuntime(runtime, {
+  jobId = "",
+  reason = "",
+} = {}) {
+  const row = runtime && typeof runtime === "object" ? runtime : null;
+  if (!row || memoryModeWithFallback() !== "goc") return null;
+  const threadId = String(row?.map?.threadId || "").trim();
+  const ctxId = String(row?.map?.ctxSharedId || "").trim();
+  if (!threadId || !ctxId) return null;
+  const client = requireGocClient();
+  const policy = buildSharedContextSelectionPolicy(row);
+  const refreshed = await refreshSharedContext(client, {
+    threadId,
+    sharedCtxId: ctxId,
+    policy,
+    logger: (line) => {
+      if (!jobId) return;
+      jobs.log(jobId, line);
+    },
+  }).catch(() => null);
+  if (!refreshed?.ok) return refreshed;
+
+  try {
+    const compiled = await client.getCompiledContext(ctxId);
+    row.contextSummary = String(compiled || "").trim();
+  } catch {}
+  try {
+    const meta = await client.getContextSet(ctxId);
+    row.contextMeta = {
+      context_set_id: ctxId,
+      version: String(meta?.version || "").trim(),
+      active_node_ids: Array.isArray(meta?.activeNodeIds)
+        ? meta.activeNodeIds.map((entry) => String(entry || "").trim()).filter(Boolean)
+        : [],
+    };
+  } catch {
+    row.contextMeta = row.contextMeta && typeof row.contextMeta === "object"
+      ? row.contextMeta
+      : {
+        context_set_id: ctxId,
+        version: "",
+        active_node_ids: [],
+      };
+  }
+  row.sharedActiveTypeBreakdown = refreshed.active_type_breakdown && typeof refreshed.active_type_breakdown === "object"
+    ? refreshed.active_type_breakdown
+    : {};
+  if (jobId) {
+    tracking.append(jobId, "decisions.md", [
+      "## shared_context_refresh",
+      `- reason: ${reason || "manual"}`,
+      `- selected_count: ${refreshed.selected_count}`,
+      `- activated_count: ${refreshed.activated_count}`,
+      `- deactivated_count: ${refreshed.deactivated_count}`,
+      `- excluded_resource_count: ${refreshed.excluded_resource_count}`,
+    ].join("\n"));
+  }
+  return refreshed;
+}
+
 function normalizeToolSpec(raw) {
   const row = raw && typeof raw === "object" ? raw : {};
   const id = String(row.id || row.tool_id || row.name || "").trim();
@@ -2844,6 +3278,7 @@ async function loadSupervisorRuntime(
       agentsSlot: null,
       toolsSlot: null,
       jobConfig: fallbackNormalized.configNormalized,
+      jobConfigDebugSummary: summarizeJobConfigDebug(fallbackNormalized.configNormalized),
       jobConfigNodeId: "",
       agentsCatalog: reg.agents,
       toolsCatalog: [],
@@ -2853,6 +3288,8 @@ async function loadSupervisorRuntime(
       toolSelection: summarizeSelectionState({ catalog: [], enabled: [] }),
       agents: fallbackAgents,
       tools: [],
+      recentArtifactNodeIds: [],
+      sharedActiveTypeBreakdown: {},
       contextSummary: includeContext ? loadLocalContextDocs(jobId, TRACK_DOC_NAMES, 2200) : "",
       globalSummary: "",
     };
@@ -2904,6 +3341,21 @@ async function loadSupervisorRuntime(
   const enabledTools = toolsCatalog
     .filter((tool) => enabledToolSet.has(String(tool?.id || "").trim().toLowerCase()));
 
+  let recentArtifactNodeIds = [];
+  try {
+    const artifacts = await client.listResources(map.threadId, {
+      resourceKind: "artifact",
+      contextSetId: map.ctxSharedId,
+    });
+    recentArtifactNodeIds = sortResourcesByCreatedAt(artifacts)
+      .slice(-5)
+      .reverse()
+      .map((row) => String(row?.id || "").trim())
+      .filter(Boolean);
+  } catch {
+    recentArtifactNodeIds = [];
+  }
+
   let contextSummary = "";
   if (includeContext) {
     try {
@@ -2929,6 +3381,7 @@ async function loadSupervisorRuntime(
     agentsSlot,
     toolsSlot,
     jobConfig: normalized.configNormalized,
+    jobConfigDebugSummary: summarizeJobConfigDebug(rawJobConfig || normalized.configNormalized),
     jobConfigNodeId: String(latestJobNode?.id || "").trim(),
     agentsCatalog: reg.agents,
     toolsCatalog,
@@ -2938,6 +3391,8 @@ async function loadSupervisorRuntime(
     toolSelection: summarizeSelectionState({ catalog: toolsCatalog, enabled: enabledTools }),
     agents: enabledAgents,
     tools: enabledTools,
+    recentArtifactNodeIds,
+    sharedActiveTypeBreakdown: {},
     contextSummary: contextSummary || "",
     globalSummary: globalSummary || "",
   };
@@ -3008,7 +3463,7 @@ async function createAgentDraftProposal(bot, chatId, userId, jobId, action) {
     resource_kind: "agent_profile_draft",
     uri: `ddalggak://agents/draft/${profile.id}`,
     context_set_id: slot.ctxId,
-    auto_activate: true,
+    auto_activate: false,
     payload_json: {
       op: "draft",
       ts: nowIso,
@@ -3133,7 +3588,7 @@ async function appendParticipantToJobConfig(client, { jobId, agentId, actor = ""
     resource_kind: "job_config",
     uri: `ddalggak://jobs/${jobId}/job_config`,
     context_set_id: map.ctxSharedId,
-    auto_activate: true,
+    auto_activate: false,
     attach_to: latest?.id || undefined,
     payload_json: {
       op: "approve_agent",
@@ -3271,7 +3726,7 @@ async function updateJobConfigSelection(client, {
       resource_kind: "job_config",
       uri: `ddalggak://jobs/${cleanJobId}/job_config`,
       context_set_id: map.ctxSharedId,
-      auto_activate: true,
+      auto_activate: false,
       payload_json: {
         op: `${cleanOp}_${cleanKind}`,
         ts: new Date().toISOString(),
@@ -3312,10 +3767,12 @@ function buildSupervisorExecutionCallbacks({
   executionGraph = null,
 }) {
   const sharedContextSetId = String(runtime?.map?.ctxSharedId || "").trim();
+  const threadId = String(runtime?.map?.threadId || "").trim();
   const lensCacheByKey = new Map();
   const sharedContextMeta = runtime?.contextMeta && typeof runtime.contextMeta === "object"
     ? runtime.contextMeta
     : null;
+  let threadNodeMapCache = null;
 
   function estimateTokens(text) {
     const src = String(text || "");
@@ -3323,14 +3780,20 @@ function buildSupervisorExecutionCallbacks({
     return Math.max(1, Math.ceil(src.length / 4));
   }
 
-  function normalizeLensSpec(rawLens) {
+  function normalizeLensSpec(rawLens, { fallbackBudget = 1200 } = {}) {
     const row = rawLens && typeof rawLens === "object" ? rawLens : {};
     const query = String(row.query || "").trim();
-    const addNodeIds = Array.isArray(row.add_node_ids)
-      ? row.add_node_ids.map((entry) => String(entry || "").trim()).filter(Boolean)
+    const addNodeSource = Array.isArray(row.add_node_ids)
+      ? row.add_node_ids
+      : (Array.isArray(row.addNodeIds) ? row.addNodeIds : []);
+    const addNodeIds = Array.isArray(addNodeSource)
+      ? addNodeSource.map((entry) => String(entry || "").trim()).filter(Boolean)
       : [];
-    const removeNodeIds = Array.isArray(row.remove_node_ids)
-      ? row.remove_node_ids.map((entry) => String(entry || "").trim()).filter(Boolean)
+    const removeNodeSource = Array.isArray(row.remove_node_ids)
+      ? row.remove_node_ids
+      : (Array.isArray(row.removeNodeIds) ? row.removeNodeIds : []);
+    const removeNodeIds = Array.isArray(removeNodeSource)
+      ? removeNodeSource.map((entry) => String(entry || "").trim()).filter(Boolean)
       : [];
     const modeRaw = String(row.mode || "").trim().toLowerCase();
     const inferredMode = query
@@ -3346,7 +3809,7 @@ function buildSupervisorExecutionCallbacks({
       remove_node_ids: removeNodeIds.length > 0 ? removeNodeIds : undefined,
       budget_tokens: Number.isFinite(Number(row.budget_tokens))
         ? Math.max(200, Math.min(12000, Math.floor(Number(row.budget_tokens))))
-        : 1200,
+        : Math.max(200, Math.min(12000, Math.floor(Number(fallbackBudget) || 1200))),
       closure_edge_types: Array.isArray(row.closure_edge_types)
         ? row.closure_edge_types.map((entry) => String(entry || "").trim()).filter(Boolean).slice(0, 16)
         : undefined,
@@ -3359,23 +3822,229 @@ function buildSupervisorExecutionCallbacks({
     };
   }
 
-  function buildSharedContextInfo(lensSpec = null, compiledText = "") {
-    const normalizedLens = normalizeLensSpec(lensSpec);
+  function dedupeNodeIds(nodeIds = []) {
+    const out = [];
+    const seen = new Set();
+    for (const entry of Array.isArray(nodeIds) ? nodeIds : []) {
+      const id = String(entry || "").trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push(id);
+    }
+    return out;
+  }
+
+  function defaultLensSpecForAgent({ agentId = "", goal = "" } = {}) {
+    const cleanAgentId = String(agentId || "").trim().toLowerCase();
+    const query = clip(String(goal || "").trim(), 280) || undefined;
+    if (["planner", "router"].includes(cleanAgentId)) {
+      return {
+        mode: "shared_only",
+        budget_tokens: 900,
+      };
+    }
+    if (cleanAgentId === "researcher") {
+      return {
+        mode: "unfold_query",
+        query: query || "최근 사용자 요구 관련 핵심 맥락",
+        budget_tokens: 1200,
+      };
+    }
+    if (cleanAgentId === "coder") {
+      const artifactIds = dedupeNodeIds(runtime?.recentArtifactNodeIds || []).slice(0, 3);
+      return {
+        mode: "unfold_query",
+        query: query || "코드 변경과 직접 연관된 맥락",
+        add_node_ids: artifactIds.length > 0 ? artifactIds : undefined,
+        budget_tokens: 1400,
+      };
+    }
+    return {
+      mode: "unfold_query",
+      query: query || undefined,
+      budget_tokens: 1200,
+    };
+  }
+
+  function resolveEffectiveLensSpec(rawLens, { agentId = "", goal = "" } = {}) {
+    const hasUserLens = !!(rawLens && typeof rawLens === "object" && Object.keys(rawLens).length > 0);
+    const base = hasUserLens
+      ? rawLens
+      : defaultLensSpecForAgent({ agentId, goal });
+    const fallbackBudget = hasUserLens
+      ? Number(rawLens?.budget_tokens)
+      : Number(defaultLensSpecForAgent({ agentId, goal })?.budget_tokens || 1200);
+    return normalizeLensSpec(base, { fallbackBudget });
+  }
+
+  async function getThreadNodeMap(client, { refresh = false } = {}) {
+    if (!client || !threadId) return new Map();
+    if (!refresh && threadNodeMapCache instanceof Map) return threadNodeMapCache;
+    const nodes = await client.listNodes(threadId, {
+      contextSetId: sharedContextSetId || undefined,
+    }).catch(() => []);
+    const map = new Map();
+    for (const row of Array.isArray(nodes) ? nodes : []) {
+      const id = String(row?.id || "").trim();
+      if (!id) continue;
+      map.set(id, row);
+    }
+    threadNodeMapCache = map;
+    return map;
+  }
+
+  function rankNodeForBudgetRemoval(node = {}) {
+    const type = nodeTypeKey(node);
+    const resourceKind = nodeResourceKind(node);
+    const role = messageRoleOf(node);
+    const createdMs = parseNodeCreatedAtMs(node);
+    if (resourceKind === "job_config" || resourceKind === "tracking_append") {
+      return { rank: 0, createdMs };
+    }
+    if (type === "toolresult" || type === "toolcall") {
+      return { rank: 1, createdMs };
+    }
+    if (type === "run" || type === "step") {
+      return { rank: 2, createdMs };
+    }
+    if (type === "resource" && resourceKind !== "artifact") {
+      return { rank: 3, createdMs };
+    }
+    if (type === "message" && role === "assistant") {
+      return { rank: 4, createdMs };
+    }
+    if (type === "artifact" || resourceKind === "artifact") {
+      return { rank: 6, createdMs };
+    }
+    if (type === "message" && role === "user") {
+      return { rank: 10, createdMs };
+    }
+    return { rank: 5, createdMs };
+  }
+
+  async function enforceLensBudget(client, {
+    contextSetId = "",
+    lensSpec = null,
+    compiledText = "",
+  } = {}) {
+    const ctxId = String(contextSetId || "").trim();
+    const normalizedLens = normalizeLensSpec(lensSpec, { fallbackBudget: 1200 });
+    const budgetTokens = Number(normalizedLens?.budget_tokens) > 0
+      ? Math.floor(Number(normalizedLens.budget_tokens))
+      : 1200;
+
+    let text = String(compiledText || "");
+    let tokenEstimate = estimateTokens(text);
+    let activeNodeIds = [];
+    let breakdown = {};
+
+    if (!ctxId || !client) {
+      const maxChars = Math.max(1200, Math.floor(budgetTokens * 4));
+      if (tokenEstimate > budgetTokens && text.length > maxChars) {
+        text = `${text.slice(0, maxChars)}\n\n[context truncated: budget=${budgetTokens}]`;
+        tokenEstimate = estimateTokens(text);
+      }
+      return {
+        compiledText: text,
+        compiledTokensEstimate: tokenEstimate,
+        compiledChars: text.length,
+        activeNodeIds: [],
+        activeTypeBreakdown: {},
+      };
+    }
+
+    for (let attempt = 0; attempt < 3 && tokenEstimate > budgetTokens; attempt += 1) {
+      let activeIds = [];
+      try {
+        const ctx = await client.getContextSet(ctxId);
+        activeIds = dedupeNodeIds(ctx?.activeNodeIds || []);
+      } catch {
+        activeIds = [];
+      }
+      if (activeIds.length <= 8) break;
+
+      const nodeMap = await getThreadNodeMap(client, { refresh: attempt > 0 });
+      const removable = activeIds
+        .map((id) => ({ id, node: nodeMap.get(id) }))
+        .filter((row) => row.id)
+        .map((row) => ({
+          ...row,
+          ...rankNodeForBudgetRemoval(row.node || {}),
+        }))
+        .filter((row) => Number(row.rank) < 10)
+        .sort((a, b) => {
+          if (a.rank !== b.rank) return a.rank - b.rank;
+          return a.createdMs - b.createdMs;
+        });
+      if (removable.length === 0) break;
+      const removeCount = Math.max(1, Math.ceil(removable.length * 0.25));
+      const removeIds = removable.slice(0, removeCount).map((row) => row.id).filter(Boolean);
+      if (removeIds.length === 0) break;
+      await client.deactivateNodes(ctxId, removeIds).catch(() => {});
+      text = await client.getCompiledContext(ctxId).catch(() => text);
+      tokenEstimate = estimateTokens(text);
+    }
+
+    if (tokenEstimate > budgetTokens) {
+      const maxChars = Math.max(1200, Math.floor(budgetTokens * 4));
+      if (text.length > maxChars) {
+        text = `${text.slice(0, maxChars)}\n\n[context truncated: budget=${budgetTokens}]`;
+        tokenEstimate = estimateTokens(text);
+      }
+    }
+
+    try {
+      const ctx = await client.getContextSet(ctxId);
+      activeNodeIds = dedupeNodeIds(ctx?.activeNodeIds || []);
+      const nodeMap = await getThreadNodeMap(client, { refresh: false });
+      breakdown = summarizeActiveTypeBreakdown(activeNodeIds, nodeMap);
+    } catch {
+      activeNodeIds = [];
+      breakdown = {};
+    }
+
+    return {
+      compiledText: text,
+      compiledTokensEstimate: tokenEstimate,
+      compiledChars: text.length,
+      activeNodeIds,
+      activeTypeBreakdown: breakdown,
+    };
+  }
+
+  function buildSharedContextInfo({
+    lensSpec = null,
+    compiledText = "",
+    lensContextSetId = "",
+    lensAddedCount = 0,
+    contextActiveNodeIds = null,
+    activeTypeBreakdown = null,
+  } = {}) {
+    const normalizedLens = normalizeLensSpec(lensSpec, { fallbackBudget: 1200 });
+    const activeNodeIds = Array.isArray(contextActiveNodeIds)
+      ? contextActiveNodeIds
+      : (Array.isArray(sharedContextMeta?.active_node_ids) ? sharedContextMeta.active_node_ids : []);
+    const breakdown = activeTypeBreakdown && typeof activeTypeBreakdown === "object"
+      ? activeTypeBreakdown
+      : (runtime?.sharedActiveTypeBreakdown && typeof runtime.sharedActiveTypeBreakdown === "object"
+        ? runtime.sharedActiveTypeBreakdown
+        : {});
     return {
       context_set_id: sharedContextSetId || undefined,
       context_version: String(sharedContextMeta?.version || "").trim() || undefined,
-      context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
-        ? sharedContextMeta.active_node_ids
-        : undefined,
+      context_active_node_ids: activeNodeIds.length > 0 ? activeNodeIds : undefined,
       shared_context_set_id: sharedContextSetId || undefined,
       shared_context_version: String(sharedContextMeta?.version || "").trim() || undefined,
       shared_context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
         ? sharedContextMeta.active_node_ids
         : undefined,
-      lens_context_set_id: sharedContextSetId || undefined,
+      lens_context_set_id: String(lensContextSetId || sharedContextSetId || "").trim() || undefined,
       lens_spec: normalizedLens,
-      lens_added_ids_count: 0,
+      lens_budget_tokens: normalizedLens.budget_tokens,
+      lens_added_ids_count: Number.isFinite(Number(lensAddedCount)) ? Math.max(0, Math.floor(Number(lensAddedCount))) : 0,
       compiled_tokens_estimate: estimateTokens(compiledText),
+      compiled_chars: String(compiledText || "").length,
+      active_type_breakdown: breakdown,
     };
   }
 
@@ -3388,7 +4057,10 @@ function buildSupervisorExecutionCallbacks({
     const cleanAgentId = String(agentId || "").trim().toLowerCase();
     const cleanGoal = String(goal || "").trim();
     const cleanDetail = String(detailContext || "").trim();
-    const lensSpec = normalizeLensSpec(lens);
+    const lensSpec = resolveEffectiveLensSpec(lens, {
+      agentId: cleanAgentId,
+      goal: cleanGoal,
+    });
     const sharedCompiled = String(runtime?.contextSummary || "").trim();
 
     const fallbackText = [
@@ -3401,49 +4073,37 @@ function buildSupervisorExecutionCallbacks({
     if (memoryModeWithFallback() !== "goc" || !sharedContextSetId) {
       return {
         final_prompt: fallbackText,
-        context_info: {
-          context_set_id: sharedContextSetId || undefined,
-          context_version: String(sharedContextMeta?.version || "").trim() || undefined,
-          context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
-            ? sharedContextMeta.active_node_ids
-            : undefined,
-          shared_context_set_id: sharedContextSetId || undefined,
-          shared_context_version: String(sharedContextMeta?.version || "").trim() || undefined,
-          shared_context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
-            ? sharedContextMeta.active_node_ids
-            : undefined,
-          lens_context_set_id: sharedContextSetId || undefined,
-          lens_spec: lensSpec,
-          lens_added_ids_count: 0,
-          compiled_tokens_estimate: estimateTokens(fallbackText),
-        },
+        context_info: buildSharedContextInfo({
+          lensSpec,
+          compiledText: fallbackText,
+          lensContextSetId: sharedContextSetId || undefined,
+          lensAddedCount: 0,
+          contextActiveNodeIds: Array.isArray(sharedContextMeta?.active_node_ids) ? sharedContextMeta.active_node_ids : [],
+          activeTypeBreakdown: {},
+        }),
       };
     }
 
-    // shared_only + no extra detail: reuse shared context directly (skip clone/apply)
-    if (lensSpec.mode === "shared_only" && !cleanDetail) {
+    // shared_only + no extra detail + within budget: reuse shared context directly (skip clone/apply)
+    if (
+      lensSpec.mode === "shared_only"
+      && !cleanDetail
+      && estimateTokens(sharedCompiled) <= Number(lensSpec?.budget_tokens || 1200)
+    ) {
       return {
         final_prompt: [
           cleanGoal,
           sharedCompiled ? `[JOB COMPILED CONTEXT]\n${clip(sharedCompiled, 9000)}` : "",
           runtime.globalSummary ? `[GLOBAL MEMORY]\n${clip(runtime.globalSummary, 5000)}` : "",
         ].filter(Boolean).join("\n\n"),
-        context_info: {
-          context_set_id: sharedContextSetId,
-          context_version: String(sharedContextMeta?.version || "").trim() || undefined,
-          context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
-            ? sharedContextMeta.active_node_ids
-            : undefined,
-          shared_context_set_id: sharedContextSetId,
-          shared_context_version: String(sharedContextMeta?.version || "").trim() || undefined,
-          shared_context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
-            ? sharedContextMeta.active_node_ids
-            : undefined,
-          lens_context_set_id: sharedContextSetId,
-          lens_spec: lensSpec,
-          lens_added_ids_count: 0,
-          compiled_tokens_estimate: estimateTokens(sharedCompiled),
-        },
+        context_info: buildSharedContextInfo({
+          lensSpec,
+          compiledText: sharedCompiled,
+          lensContextSetId: sharedContextSetId,
+          lensAddedCount: 0,
+          contextActiveNodeIds: Array.isArray(sharedContextMeta?.active_node_ids) ? sharedContextMeta.active_node_ids : [],
+          activeTypeBreakdown: runtime?.sharedActiveTypeBreakdown || {},
+        }),
       };
     }
 
@@ -3464,24 +4124,16 @@ function buildSupervisorExecutionCallbacks({
       ].filter(Boolean).join("\n\n");
       return {
         final_prompt: prompt,
-        context_info: {
-          context_set_id: sharedContextSetId || undefined,
-          context_version: String(sharedContextMeta?.version || "").trim() || undefined,
-          context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
-            ? sharedContextMeta.active_node_ids
-            : undefined,
-          shared_context_set_id: sharedContextSetId,
-          shared_context_version: String(sharedContextMeta?.version || "").trim() || undefined,
-          shared_context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
-            ? sharedContextMeta.active_node_ids
-            : undefined,
-          lens_context_set_id: cached?.lens_context_set_id || sharedContextSetId,
-          lens_spec: lensSpec,
-          lens_added_ids_count: Number.isFinite(Number(cached?.lens_added_ids_count))
+        context_info: buildSharedContextInfo({
+          lensSpec,
+          compiledText: String(cached?.compiled_text || ""),
+          lensContextSetId: cached?.lens_context_set_id || sharedContextSetId,
+          lensAddedCount: Number.isFinite(Number(cached?.lens_added_ids_count))
             ? Number(cached.lens_added_ids_count)
             : 0,
-          compiled_tokens_estimate: estimateTokens(prompt),
-        },
+          contextActiveNodeIds: Array.isArray(cached?.active_node_ids) ? cached.active_node_ids : [],
+          activeTypeBreakdown: cached?.active_type_breakdown || {},
+        }),
       };
     }
 
@@ -3489,6 +4141,13 @@ function buildSupervisorExecutionCallbacks({
     let lensContextSetId = sharedContextSetId;
     let lensAddedCount = 0;
     let lensCompiledText = sharedCompiled;
+    let enforced = {
+      compiledText: sharedCompiled,
+      compiledTokensEstimate: estimateTokens(sharedCompiled),
+      compiledChars: sharedCompiled.length,
+      activeNodeIds: Array.isArray(sharedContextMeta?.active_node_ids) ? sharedContextMeta.active_node_ids : [],
+      activeTypeBreakdown: runtime?.sharedActiveTypeBreakdown || {},
+    };
     try {
       const cloned = await client.cloneContextSet(
         sharedContextSetId,
@@ -3507,17 +4166,32 @@ function buildSupervisorExecutionCallbacks({
         const plan = await client.unfoldPlan(lensContextSetId, lensSpec.query, lensSpec);
         const applied = await client.applyUnfoldPlan(lensContextSetId, plan, lensSpec);
         lensAddedCount = Array.isArray(applied?.added_node_ids) ? applied.added_node_ids.length : 0;
-      } else if (lensSpec.mode === "add_nodes" && Array.isArray(lensSpec.add_node_ids) && lensSpec.add_node_ids.length > 0) {
+      }
+      if (Array.isArray(lensSpec.add_node_ids) && lensSpec.add_node_ids.length > 0) {
         await client.activateNodes(lensContextSetId, lensSpec.add_node_ids);
-        lensAddedCount = lensSpec.add_node_ids.length;
-      } else if (lensSpec.mode === "remove_nodes" && Array.isArray(lensSpec.remove_node_ids) && lensSpec.remove_node_ids.length > 0) {
+        lensAddedCount += lensSpec.add_node_ids.length;
+      }
+      if (Array.isArray(lensSpec.remove_node_ids) && lensSpec.remove_node_ids.length > 0) {
         await client.deactivateNodes(lensContextSetId, lensSpec.remove_node_ids);
       }
       lensCompiledText = await client.getCompiledContext(lensContextSetId);
+      enforced = await enforceLensBudget(client, {
+        contextSetId: lensContextSetId,
+        lensSpec,
+        compiledText: lensCompiledText,
+      });
+      lensCompiledText = String(enforced?.compiledText || lensCompiledText || "").trim();
     } catch {
       lensContextSetId = sharedContextSetId;
       lensCompiledText = sharedCompiled;
       lensAddedCount = 0;
+      enforced = {
+        compiledText: sharedCompiled,
+        compiledTokensEstimate: estimateTokens(sharedCompiled),
+        compiledChars: sharedCompiled.length,
+        activeNodeIds: Array.isArray(sharedContextMeta?.active_node_ids) ? sharedContextMeta.active_node_ids : [],
+        activeTypeBreakdown: runtime?.sharedActiveTypeBreakdown || {},
+      };
     }
 
     const compiledPrompt = [
@@ -3533,27 +4207,24 @@ function buildSupervisorExecutionCallbacks({
     const cachePayload = {
       lens_context_set_id: lensContextSetId,
       compiled_prompt: compiledPrompt,
+      compiled_text: lensCompiledText,
       lens_added_ids_count: lensAddedCount,
+      active_node_ids: Array.isArray(enforced?.activeNodeIds) ? enforced.activeNodeIds : [],
+      active_type_breakdown: enforced?.activeTypeBreakdown && typeof enforced.activeTypeBreakdown === "object"
+        ? enforced.activeTypeBreakdown
+        : {},
     };
     lensCacheByKey.set(lensKey, cachePayload);
     return {
       final_prompt: finalPrompt,
-      context_info: {
-        context_set_id: sharedContextSetId,
-        context_version: String(sharedContextMeta?.version || "").trim() || undefined,
-        context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
-          ? sharedContextMeta.active_node_ids
-          : undefined,
-        shared_context_set_id: sharedContextSetId,
-        shared_context_version: String(sharedContextMeta?.version || "").trim() || undefined,
-        shared_context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
-          ? sharedContextMeta.active_node_ids
-          : undefined,
-        lens_context_set_id: lensContextSetId,
-        lens_spec: lensSpec,
-        lens_added_ids_count: lensAddedCount,
-        compiled_tokens_estimate: estimateTokens(finalPrompt),
-      },
+      context_info: buildSharedContextInfo({
+        lensSpec,
+        compiledText: lensCompiledText,
+        lensContextSetId,
+        lensAddedCount,
+        contextActiveNodeIds: Array.isArray(enforced?.activeNodeIds) ? enforced.activeNodeIds : [],
+        activeTypeBreakdown: enforced?.activeTypeBreakdown || {},
+      }),
     };
   }
 
@@ -3627,6 +4298,12 @@ function buildSupervisorExecutionCallbacks({
             onGeminiModelSwitch: async ({ toModel = "" } = {}) => {
               await sendGeminiModelSwitchMessage(bot, chatId, {
                 toModel,
+                agentId: cleanAgentId,
+                replyToMessageId: getCurrentTurnReplyMessageId(chatId),
+              });
+            },
+            onGeminiGiveUp: async () => {
+              await sendGeminiGiveUpMessage(bot, chatId, {
                 agentId: cleanAgentId,
                 replyToMessageId: getCurrentTurnReplyMessageId(chatId),
               });
@@ -3707,7 +4384,14 @@ function buildSupervisorExecutionCallbacks({
       })
       : {
         final_prompt: "",
-        context_info: buildSharedContextInfo(action?.lens || null, String(runtime?.contextSummary || "")),
+        context_info: buildSharedContextInfo({
+          lensSpec: action?.lens || null,
+          compiledText: String(runtime?.contextSummary || ""),
+          lensContextSetId: sharedContextSetId || undefined,
+          lensAddedCount: 0,
+          contextActiveNodeIds: Array.isArray(sharedContextMeta?.active_node_ids) ? sharedContextMeta.active_node_ids : [],
+          activeTypeBreakdown: runtime?.sharedActiveTypeBreakdown || {},
+        }),
       };
     if (executionGraph && stepNodeId) {
       await executionGraph.markStepRunning(action, {
@@ -4400,6 +5084,8 @@ async function runSupervisorChat(
   const controller = resetJobAbortController(currentJobId);
   activeJobByChat.set(chatKey, currentJobId);
   let executionGraph = null;
+  let runtime = null;
+  let refreshedSharedContextOnFinish = false;
   const sessionAtStart = chatSessionStore.get(chatId);
   let currentTurnAckMessageId = Number(sessionAtStart?.current_turn_ack_message_id || 0);
   if (!(Number.isFinite(currentTurnAckMessageId) && currentTurnAckMessageId > 0)) {
@@ -4409,25 +5095,31 @@ async function runSupervisorChat(
   }
 
   try {
-    const runtime = await loadSupervisorRuntime(currentJobId, {
+    runtime = await loadSupervisorRuntime(currentJobId, {
       chatMeta: chatInfo,
     });
     if (memoryModeWithFallback() === "goc" && runtime?.map?.ctxSharedId) {
-      try {
-        const meta = await requireGocClient().getContextSet(runtime.map.ctxSharedId);
-        runtime.contextMeta = {
-          context_set_id: runtime.map.ctxSharedId,
-          version: String(meta?.version || "").trim(),
-          active_node_ids: Array.isArray(meta?.activeNodeIds)
-            ? meta.activeNodeIds.map((row) => String(row || "").trim()).filter(Boolean)
-            : [],
-        };
-      } catch {
-        runtime.contextMeta = {
-          context_set_id: runtime.map.ctxSharedId,
-          version: "",
-          active_node_ids: [],
-        };
+      const refreshedAtStart = await refreshSharedContextForRuntime(runtime, {
+        jobId: currentJobId,
+        reason: "run_start",
+      }).catch(() => null);
+      if (!refreshedAtStart?.ok) {
+        try {
+          const meta = await requireGocClient().getContextSet(runtime.map.ctxSharedId);
+          runtime.contextMeta = {
+            context_set_id: runtime.map.ctxSharedId,
+            version: String(meta?.version || "").trim(),
+            active_node_ids: Array.isArray(meta?.activeNodeIds)
+              ? meta.activeNodeIds.map((row) => String(row || "").trim()).filter(Boolean)
+              : [],
+          };
+        } catch {
+          runtime.contextMeta = {
+            context_set_id: runtime.map.ctxSharedId,
+            version: "",
+            active_node_ids: [],
+          };
+        }
       }
     } else {
       runtime.contextMeta = null;
@@ -4534,6 +5226,11 @@ async function runSupervisorChat(
         onGeminiModelSwitch: async ({ toModel = "" } = {}) => {
           await sendGeminiModelSwitchMessage(bot, chatId, {
             toModel,
+            replyToMessageId: getCurrentTurnReplyMessageId(chatId),
+          });
+        },
+        onGeminiGiveUp: async () => {
+          await sendGeminiGiveUpMessage(bot, chatId, {
             replyToMessageId: getCurrentTurnReplyMessageId(chatId),
           });
         },
@@ -4856,6 +5553,13 @@ async function runSupervisorChat(
         summary: clip(replyText, 900),
       });
     }
+    if (memoryModeWithFallback() === "goc" && runtime?.map?.threadId && runtime?.map?.ctxSharedId) {
+      await refreshSharedContextForRuntime(runtime, {
+        jobId: currentJobId,
+        reason: "run_end",
+      }).catch(() => null);
+      refreshedSharedContextOnFinish = true;
+    }
     if (mergedExecution.pendingApproval?.id) {
       const prompt = pendingPrompt || buildPendingApprovalPrompt(mergedExecution.pendingApproval);
       await bot.sendMessage(
@@ -4926,6 +5630,12 @@ async function runSupervisorChat(
     }
     throw e;
   } finally {
+    if (!refreshedSharedContextOnFinish && memoryModeWithFallback() === "goc" && runtime?.map?.threadId && runtime?.map?.ctxSharedId) {
+      await refreshSharedContextForRuntime(runtime, {
+        jobId: currentJobId,
+        reason: "run_finalize",
+      }).catch(() => null);
+    }
     if (activeJobByChat.get(chatKey) === currentJobId) activeJobByChat.delete(chatKey);
     jobAbortControllers.delete(currentJobId);
     chatSessionStore.upsert(chatId, (session) => ({
@@ -5058,6 +5768,7 @@ async function executeAgentRun(
     notify = true,
     onGeminiRetry = null,
     onGeminiModelSwitch = null,
+    onGeminiGiveUp = null,
     geminiConcurrencyKey = "",
   } = {}
 ) {
@@ -5126,6 +5837,7 @@ async function executeAgentRun(
       concurrencyKey: geminiConcurrencyKey || `job:${String(jobId || "").trim()}`,
       onGeminiRetry,
       onGeminiModelSwitch,
+      onGeminiGiveUp,
     });
     const fallback = gocFallbackByJob.get(String(jobId));
     if (fallback) {
