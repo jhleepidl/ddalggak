@@ -49,6 +49,27 @@ function mutatingPreviewLines(actions = []) {
   return rows.slice(0, 8).map((action) => `- ${actionLabel(action)}`);
 }
 
+function approvalReasonCategory(action = {}, fallbackReason = "") {
+  const type = String(action?.type || "").trim().toLowerCase();
+  if ([
+    "create_agent",
+    "update_agent",
+    "propose_agent",
+    "enable_agent",
+    "disable_agent",
+    "enable_tool",
+    "disable_tool",
+  ].includes(type)) return "agent/tool 설정 변경";
+  if (["publish_agent", "install_agent_blueprint"].includes(type)) return "publish/install";
+  if (fallbackReason) return String(fallbackReason || "").trim();
+  return "외부 상태 변경";
+}
+
+function approvalActionSummary(actions = []) {
+  const rows = Array.isArray(actions) ? actions : [];
+  return rows.slice(0, 8).map((action) => `- ${actionLabel(action)}`);
+}
+
 function actionLabel(action) {
   const type = String(action?.type || "").trim().toLowerCase();
   if (!type) return "(unknown)";
@@ -175,6 +196,9 @@ export async function executeSupervisorActions({
       job_id: String(jobId || ""),
       action: mutatingAction,
       reason: "관리 변경 적용 전 확인이 필요합니다.",
+      preview_reason: approvalReasonCategory(mutatingAction, "관리 변경 적용 전 확인이 필요합니다."),
+      actions_summary: approvalActionSummary(actions),
+      cancel_impact: "취소 시 영향 없음",
       gate_type: "mutating_confirm",
       mode_choice_required: true,
       blocked_index: mutatingIndex,
@@ -250,6 +274,9 @@ export async function executeSupervisorActions({
         job_id: String(jobId || ""),
         action,
         reason: approval.reason,
+        preview_reason: approvalReasonCategory(action, approval.reason),
+        actions_summary: approvalActionSummary(remainingActions),
+        cancel_impact: "취소 시 영향 없음",
         blocked_index: i,
         remaining_actions: remainingActions,
         already_done: {

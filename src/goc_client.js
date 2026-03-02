@@ -265,9 +265,22 @@ export class GocClient {
 
   normalizeContextSet(entity) {
     const row = asObject(entity);
+    const payloadRaw = pick(row, ["payload_json", "payloadJson", "payload", "meta_json", "metaJson", "meta"]);
+    const payload = normalizePayloadObject(payloadRaw);
+    const activeNodeIds = normalizeNodeIdList(
+      pick(row, ["active_node_ids", "activeNodeIds", "node_ids", "nodeIds"])
+      || pick(payload, ["active_node_ids", "activeNodeIds", "node_ids", "nodeIds"])
+    );
     return {
       id: pickId(row),
       name: String(pick(row, ["name", "title"]) || ""),
+      version: String(
+        pick(row, ["version", "context_version", "contextVersion", "rev", "etag"])
+        || pick(payload, ["version", "context_version", "contextVersion", "rev", "etag"])
+        || ""
+      ).trim(),
+      activeNodeIds,
+      payload,
       raw: row,
     };
   }
@@ -498,6 +511,192 @@ export class GocClient {
     const ctx = this.normalizeContextSet(entity);
     if (!ctx.id) throw new Error("GoC createContextSet returned no id");
     return ctx;
+  }
+
+  async getContextSet(contextSetId) {
+    const ctxId = String(contextSetId || "").trim();
+    if (!ctxId) throw new Error("getContextSet requires contextSetId");
+    const data = await this._requestAny({
+      method: "GET",
+      attempts: [
+        { path: `/api/context_sets/${encodeURIComponent(ctxId)}` },
+        { path: `/api/context-sets/${encodeURIComponent(ctxId)}` },
+        { path: `/context_sets/${encodeURIComponent(ctxId)}` },
+        { path: `/context-sets/${encodeURIComponent(ctxId)}` },
+      ],
+    });
+    const entity = normalizeEntity(data, ["context_set", "contextSet", "data"]);
+    const contextSet = this.normalizeContextSet(entity);
+    if (!contextSet.id) {
+      return {
+        ...contextSet,
+        id: ctxId,
+      };
+    }
+    return contextSet;
+  }
+
+  async cloneContextSet(baseContextSetId, name = "", meta = null) {
+    const baseId = String(baseContextSetId || "").trim();
+    if (!baseId) throw new Error("cloneContextSet requires baseContextSetId");
+    const cleanName = String(name || "").trim();
+    const metaJson = meta && typeof meta === "object" ? meta : undefined;
+    const data = await this._requestAny({
+      method: "POST",
+      attempts: [
+        {
+          path: `/api/context_sets/${encodeURIComponent(baseId)}/clone`,
+          body: {
+            name: cleanName || undefined,
+            meta_json: metaJson,
+          },
+        },
+        {
+          path: `/api/context-sets/${encodeURIComponent(baseId)}/clone`,
+          body: {
+            name: cleanName || undefined,
+            meta_json: metaJson,
+          },
+        },
+        {
+          path: "/api/context_sets/clone",
+          body: {
+            base_context_set_id: baseId,
+            context_set_id: baseId,
+            name: cleanName || undefined,
+            meta_json: metaJson,
+          },
+        },
+        {
+          path: "/api/context_sets:clone",
+          body: {
+            base_context_set_id: baseId,
+            context_set_id: baseId,
+            name: cleanName || undefined,
+            meta_json: metaJson,
+          },
+        },
+        {
+          path: `/context_sets/${encodeURIComponent(baseId)}/clone`,
+          body: {
+            name: cleanName || undefined,
+            meta_json: metaJson,
+          },
+        },
+      ],
+    });
+    const entity = normalizeEntity(data, ["context_set", "contextSet", "clone", "data"]);
+    const cloned = this.normalizeContextSet(entity);
+    if (!cloned.id) throw new Error("GoC cloneContextSet returned no id");
+    return cloned;
+  }
+
+  async unfoldPlan(contextSetId, query, options = {}) {
+    const ctxId = String(contextSetId || "").trim();
+    const q = String(query || "").trim();
+    if (!ctxId) throw new Error("unfoldPlan requires contextSetId");
+    if (!q) return { context_set_id: ctxId, seed_node_ids: [], raw: null };
+
+    const opts = asObject(options);
+    const body = {
+      query: q,
+      budget_tokens: Number.isFinite(Number(opts.budget_tokens))
+        ? Math.max(100, Math.min(12000, Math.floor(Number(opts.budget_tokens))))
+        : undefined,
+      closure_edge_types: Array.isArray(opts.closure_edge_types)
+        ? opts.closure_edge_types.map((row) => String(row || "").trim()).filter(Boolean)
+        : undefined,
+      closure_direction: String(opts.closure_direction || "").trim() || undefined,
+      max_closure_nodes: Number.isFinite(Number(opts.max_closure_nodes))
+        ? Math.max(1, Math.min(2000, Math.floor(Number(opts.max_closure_nodes))))
+        : undefined,
+    };
+    const data = await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/context_sets/${encodeURIComponent(ctxId)}/unfold_plan`, body },
+        { path: `/api/context_sets/${encodeURIComponent(ctxId)}/unfold/plan`, body },
+        { path: `/api/context_sets/${encodeURIComponent(ctxId)}:unfold_plan`, body },
+        { path: "/api/context_sets/unfold_plan", body: { context_set_id: ctxId, ...body } },
+        { path: `/context_sets/${encodeURIComponent(ctxId)}/unfold_plan`, body },
+      ],
+    });
+    const row = normalizeEntity(data, ["plan", "unfold_plan", "data"]);
+    const seedNodeIds = normalizeNodeIdList(
+      pick(row, ["seed_node_ids", "seedNodeIds", "node_ids", "nodeIds", "add_node_ids", "addNodeIds"])
+      || pick(data, ["seed_node_ids", "seedNodeIds", "node_ids", "nodeIds", "add_node_ids", "addNodeIds"])
+    );
+    return {
+      context_set_id: ctxId,
+      seed_node_ids: seedNodeIds,
+      raw: data,
+    };
+  }
+
+  async applyUnfoldPlan(contextSetId, seedNodeIdsOrPlan, options = {}) {
+    const ctxId = String(contextSetId || "").trim();
+    if (!ctxId) throw new Error("applyUnfoldPlan requires contextSetId");
+
+    const source = asObject(seedNodeIdsOrPlan);
+    const seedNodeIds = normalizeNodeIdList(
+      Array.isArray(seedNodeIdsOrPlan) || typeof seedNodeIdsOrPlan === "string"
+        ? seedNodeIdsOrPlan
+        : (source.seed_node_ids || source.seedNodeIds || source.node_ids || source.nodeIds || [])
+    );
+    if (seedNodeIds.length === 0) {
+      return {
+        context_set_id: ctxId,
+        seed_node_ids: [],
+        added_node_ids: [],
+      };
+    }
+
+    const opts = asObject(options);
+    const body = {
+      seed_node_ids: seedNodeIds,
+      query: String(opts.query || source.query || "").trim() || undefined,
+      budget_tokens: Number.isFinite(Number(opts.budget_tokens ?? source.budget_tokens))
+        ? Math.max(100, Math.min(12000, Math.floor(Number(opts.budget_tokens ?? source.budget_tokens))))
+        : undefined,
+      closure_edge_types: Array.isArray(opts.closure_edge_types)
+        ? opts.closure_edge_types.map((row) => String(row || "").trim()).filter(Boolean)
+        : undefined,
+      closure_direction: String(opts.closure_direction || source.closure_direction || "").trim() || undefined,
+      max_closure_nodes: Number.isFinite(Number(opts.max_closure_nodes ?? source.max_closure_nodes))
+        ? Math.max(1, Math.min(2000, Math.floor(Number(opts.max_closure_nodes ?? source.max_closure_nodes))))
+        : undefined,
+    };
+
+    try {
+      const data = await this._requestAny({
+        method: "POST",
+        attempts: [
+          { path: `/api/context_sets/${encodeURIComponent(ctxId)}/apply_unfold_plan`, body },
+          { path: `/api/context_sets/${encodeURIComponent(ctxId)}/unfold/apply`, body },
+          { path: `/api/context_sets/${encodeURIComponent(ctxId)}:apply_unfold_plan`, body },
+          { path: "/api/context_sets/apply_unfold_plan", body: { context_set_id: ctxId, ...body } },
+          { path: `/context_sets/${encodeURIComponent(ctxId)}/apply_unfold_plan`, body },
+        ],
+      });
+      const row = normalizeEntity(data, ["result", "data", "plan"]);
+      const addedNodeIds = normalizeNodeIdList(
+        pick(row, ["added_node_ids", "addedNodeIds", "node_ids", "nodeIds", "active_node_ids", "activeNodeIds"])
+        || pick(data, ["added_node_ids", "addedNodeIds", "node_ids", "nodeIds", "active_node_ids", "activeNodeIds"])
+      );
+      return {
+        context_set_id: ctxId,
+        seed_node_ids: seedNodeIds,
+        added_node_ids: addedNodeIds.length > 0 ? addedNodeIds : seedNodeIds,
+        raw: data,
+      };
+    } catch {
+      await this.activateNodes(ctxId, seedNodeIds);
+      return {
+        context_set_id: ctxId,
+        seed_node_ids: seedNodeIds,
+        added_node_ids: seedNodeIds,
+      };
+    }
   }
 
   async createResource(threadId, body = {}) {

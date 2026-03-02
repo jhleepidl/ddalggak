@@ -72,9 +72,15 @@ const MAX_PARALLEL_PER_RUN = Number.isFinite(Number(process.env.MAX_PARALLEL_PER
 const INTERRUPT_DEBOUNCE_MS = Number.isFinite(Number(process.env.INTERRUPT_DEBOUNCE_MS))
   ? Math.max(0, Math.floor(Number(process.env.INTERRUPT_DEBOUNCE_MS)))
   : 500;
-const DASHBOARD_EDIT_THROTTLE_MS = Number.isFinite(Number(process.env.DASHBOARD_EDIT_THROTTLE_MS))
-  ? Math.max(200, Math.floor(Number(process.env.DASHBOARD_EDIT_THROTTLE_MS)))
-  : 600;
+const AGENT_STATUS_MESSAGE_THROTTLE_MS = Number.isFinite(Number(
+  process.env.AGENT_STATUS_MESSAGE_THROTTLE_MS
+  ?? process.env.DASHBOARD_EDIT_THROTTLE_MS
+))
+  ? Math.max(200, Math.floor(Number(
+    process.env.AGENT_STATUS_MESSAGE_THROTTLE_MS
+    ?? process.env.DASHBOARD_EDIT_THROTTLE_MS
+  )))
+  : 1000;
 const LEGACY_AGENT_MAP = {
   gemini: "researcher",
   codex: "coder",
@@ -916,7 +922,7 @@ const queue = [];
 const jobAbortControllers = new Map(); // jobId -> AbortController
 const activeJobByChat = new Map(); // chatId -> jobId
 const lastChatJobByChat = new Map(); // chatId -> last /chat jobId
-const dashboardEditStateByChat = new Map(); // chatId -> { lastEditAtMs, pending, timer, flushing }
+const agentStatusMessageStateByChat = new Map(); // chatId -> Map(agentId, { state, atMs })
 
 function makeCancelledError(jobId) {
   const e = new Error(`Cancelled job ${jobId}`);
@@ -1567,159 +1573,121 @@ function buildRoutedDashboardText({ actions = [], agentStatus = {} } = {}) {
   ].join("\n");
 }
 
-function parseTelegramErrorDescription(error) {
-  return String(error?.response?.body?.description || error?.message || error || "").toLowerCase();
-}
-
-function dashboardEditState(chatId) {
-  const key = String(chatId || "");
-  if (!dashboardEditStateByChat.has(key)) {
-    dashboardEditStateByChat.set(key, {
-      lastEditAtMs: 0,
-      pending: null,
-      timer: null,
-      flushing: false,
-    });
-  }
-  return dashboardEditStateByChat.get(key);
-}
-
-async function applyDashboardUpdateNow(bot, chatId, text, { replyToMessageId = null } = {}) {
+function getCurrentTurnReplyMessageId(chatId) {
   const session = chatSessionStore.get(chatId);
-  const existingMessageId = Number(session?.dashboard?.message_id || 0);
-  if (existingMessageId > 0) {
-    try {
-      await bot.editMessageText(text, {
-        chat_id: chatId,
-        message_id: existingMessageId,
-      });
-      return existingMessageId;
-    } catch (e) {
-      const desc = parseTelegramErrorDescription(e);
-      if (desc.includes("message is not modified")) return existingMessageId;
-    }
-  }
+  const planMessageId = Number(session?.current_turn_plan_message_id || 0);
+  if (Number.isFinite(planMessageId) && planMessageId > 0) return planMessageId;
+  const ackMessageId = Number(session?.current_turn_ack_message_id || 0);
+  if (Number.isFinite(ackMessageId) && ackMessageId > 0) return ackMessageId;
+  return null;
+}
 
+async function sendRouterAckMessage(bot, chatId, { replyToMessageId = null } = {}) {
   const sent = await bot.sendMessage(
     chatId,
-    text,
+    "👀 접수했어요. 라우팅/분담 중…",
     Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
       ? { reply_to_message_id: Number(replyToMessageId) }
       : undefined
   );
   const messageId = Number(sent?.message_id || 0);
-  if (messageId > 0) {
-    chatSessionStore.upsert(chatId, {
-      dashboard: {
-        message_id: messageId,
-      },
-    });
-  }
-  return messageId;
+  chatSessionStore.upsert(chatId, {
+    current_turn_ack_message_id: messageId > 0 ? messageId : null,
+    current_turn_plan_message_id: null,
+  });
+  return messageId > 0 ? messageId : null;
 }
 
-async function flushDashboardUpdate(bot, chatId) {
-  const state = dashboardEditState(chatId);
-  if (state.flushing || !state.pending) return;
-  if (state.timer) {
-    clearTimeout(state.timer);
-    state.timer = null;
-  }
-  state.flushing = true;
-  const payload = state.pending;
-  state.pending = null;
-  try {
-    await applyDashboardUpdateNow(bot, chatId, payload.text, {
-      replyToMessageId: payload.replyToMessageId,
-    });
-    state.lastEditAtMs = Date.now();
-  } catch (e) {
-    console.error(`[dashboard] update failed: chat=${chatId} error=${String(e?.message ?? e)}`);
-  } finally {
-    state.flushing = false;
-    if (state.pending) {
-      const elapsed = Date.now() - state.lastEditAtMs;
-      const wait = Math.max(50, DASHBOARD_EDIT_THROTTLE_MS - elapsed);
-      state.timer = setTimeout(() => {
-        state.timer = null;
-        void flushDashboardUpdate(bot, chatId);
-      }, wait);
-    }
-  }
+async function sendPlanPreviewMessage(bot, chatId, { actions = [], replyToMessageId = null } = {}) {
+  const agentStatus = buildQueuedAgentStatusFromActions(actions);
+  const text = buildRoutedDashboardText({
+    actions,
+    agentStatus,
+  });
+  const sent = await bot.sendMessage(
+    chatId,
+    text || "🧭 분담\n- (system) no actions",
+    Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
+      ? { reply_to_message_id: Number(replyToMessageId) }
+      : undefined
+  );
+  const messageId = Number(sent?.message_id || 0);
+  chatSessionStore.upsert(chatId, {
+    current_turn_plan_message_id: messageId > 0 ? messageId : null,
+  });
+  return messageId > 0 ? messageId : null;
 }
 
-async function upsertDashboardMessage(
+function shouldSendAgentStatusMessage(chatId, agentId, state) {
+  const key = String(chatId || "");
+  if (!agentStatusMessageStateByChat.has(key)) {
+    agentStatusMessageStateByChat.set(key, new Map());
+  }
+  const perChat = agentStatusMessageStateByChat.get(key);
+  const agentKey = String(agentId || "").trim().toLowerCase();
+  const cleanState = String(state || "").trim().toLowerCase();
+  const nowMs = Date.now();
+  const prev = perChat.get(agentKey) || null;
+  if (prev && prev.state === cleanState && (nowMs - Number(prev.atMs || 0)) < AGENT_STATUS_MESSAGE_THROTTLE_MS) {
+    return false;
+  }
+  perChat.set(agentKey, { state: cleanState, atMs: nowMs });
+  return true;
+}
+
+function buildAgentTransitionText({ agentId = "", state = "", goal = "", error = "" } = {}) {
+  const cleanAgentId = String(agentId || "").trim().toLowerCase() || "unknown";
+  const cleanState = String(state || "").trim().toLowerCase();
+  if (cleanState === "running") {
+    return `▶️ @${cleanAgentId} 시작: ${clip(String(goal || "").trim() || "(goal 없음)", 240)}`;
+  }
+  if (cleanState === "done") {
+    return `✅ @${cleanAgentId} 완료`;
+  }
+  if (cleanState === "error") {
+    return `❌ @${cleanAgentId} 실패: ${clip(String(error || "unknown error"), 240)}`;
+  }
+  return `ℹ️ @${cleanAgentId} 상태: ${cleanState || "queued"}`;
+}
+
+async function sendAgentStatusTransitionMessage(
   bot,
   chatId,
-  text,
-  { replyToMessageId = null, throttle = true } = {}
+  {
+    agentId = "",
+    state = "",
+    goal = "",
+    error = "",
+    replyToMessageId = null,
+  } = {}
 ) {
-  const state = dashboardEditState(chatId);
-  if (!throttle) {
-    if (state.timer) {
-      clearTimeout(state.timer);
-      state.timer = null;
-    }
-    state.pending = null;
-    try {
-      await applyDashboardUpdateNow(bot, chatId, text, { replyToMessageId });
-      state.lastEditAtMs = Date.now();
-    } catch (e) {
-      console.error(`[dashboard] immediate update failed: chat=${chatId} error=${String(e?.message ?? e)}`);
-    }
-    return;
-  }
+  const cleanAgentId = String(agentId || "").trim().toLowerCase();
+  const cleanState = String(state || "").trim().toLowerCase();
+  if (!cleanAgentId || !cleanState) return;
+  if (!["running", "done", "error"].includes(cleanState)) return;
+  if (!shouldSendAgentStatusMessage(chatId, cleanAgentId, cleanState)) return;
 
-  state.pending = {
-    text,
-    replyToMessageId,
-  };
-
-  if (state.flushing) return;
-  const elapsed = Date.now() - state.lastEditAtMs;
-  if (elapsed >= DASHBOARD_EDIT_THROTTLE_MS && !state.timer) {
-    await flushDashboardUpdate(bot, chatId);
-    return;
-  }
-  if (!state.timer) {
-    const wait = Math.max(50, DASHBOARD_EDIT_THROTTLE_MS - elapsed);
-    state.timer = setTimeout(() => {
-      state.timer = null;
-      void flushDashboardUpdate(bot, chatId);
-    }, wait);
-  }
-}
-
-async function showRoutingDashboard(bot, chatId, { replyToMessageId = null, throttle = true } = {}) {
-  await upsertDashboardMessage(bot, chatId, "✅ 알겠어. 라우팅 중…", {
-    replyToMessageId,
-    throttle,
-  });
-}
-
-async function showRoutedDashboard(bot, chatId, { throttle = true } = {}) {
-  const session = chatSessionStore.get(chatId);
-  const lastRoute = session?.last_route && typeof session.last_route === "object"
-    ? session.last_route
-    : null;
-  const actions = Array.isArray(lastRoute?.actions) ? lastRoute.actions : [];
-  const agentStatus = session?.agent_status && typeof session.agent_status === "object"
-    ? session.agent_status
-    : {};
-  await upsertDashboardMessage(
-    bot,
+  const fallbackReply = getCurrentTurnReplyMessageId(chatId);
+  const replyId = Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
+    ? Number(replyToMessageId)
+    : (Number.isFinite(Number(fallbackReply)) && Number(fallbackReply) > 0 ? Number(fallbackReply) : null);
+  await bot.sendMessage(
     chatId,
-    buildRoutedDashboardText({
-      actions,
-      agentStatus,
+    buildAgentTransitionText({
+      agentId: cleanAgentId,
+      state: cleanState,
+      goal,
+      error,
     }),
-    { throttle }
+    replyId ? { reply_to_message_id: replyId } : undefined
   );
 }
 
 function updateAgentStatus(chatId, agentId, patch = {}) {
   const cleanAgentId = String(agentId || "").trim().toLowerCase();
-  if (!cleanAgentId) return;
+  if (!cleanAgentId) return { changed: false, previousState: "", nextState: "" };
+  let previousState = "";
+  let nextState = "";
   chatSessionStore.upsert(chatId, (session) => {
     const currentMap = session?.agent_status && typeof session.agent_status === "object"
       ? session.agent_status
@@ -1727,11 +1695,13 @@ function updateAgentStatus(chatId, agentId, patch = {}) {
     const previous = currentMap[cleanAgentId] && typeof currentMap[cleanAgentId] === "object"
       ? currentMap[cleanAgentId]
       : {};
+    previousState = String(previous.state || "").trim().toLowerCase();
     const nextRow = {
       ...previous,
       ...patch,
     };
     if (!nextRow.goal && previous.goal) nextRow.goal = previous.goal;
+    nextState = String(nextRow.state || "").trim().toLowerCase();
     return {
       ...session,
       agent_status: {
@@ -1740,6 +1710,11 @@ function updateAgentStatus(chatId, agentId, patch = {}) {
       },
     };
   });
+  return {
+    changed: previousState !== nextState,
+    previousState,
+    nextState,
+  };
 }
 
 function toolInputPreviewFromAction(action, detailContext = "") {
@@ -1852,37 +1827,66 @@ function markMutatingActionsConfirmed(actions = []) {
   });
 }
 
+function inferApprovalPreviewReason(pending = {}) {
+  const explicit = String(pending?.preview_reason || pending?.reason || "").trim();
+  if (explicit) return explicit;
+  const type = String(pending?.action?.type || "").trim().toLowerCase();
+  if ([
+    "create_agent",
+    "update_agent",
+    "propose_agent",
+    "enable_agent",
+    "disable_agent",
+    "enable_tool",
+    "disable_tool",
+  ].includes(type)) return "agent/tool 설정 변경";
+  if (["publish_agent", "install_agent_blueprint"].includes(type)) return "publish/install";
+  return "외부 상태 변경 가능성";
+}
+
+function buildApprovalActionSummaryLines(pending = {}) {
+  if (Array.isArray(pending?.actions_summary) && pending.actions_summary.length > 0) {
+    return pending.actions_summary
+      .map((row) => String(row || "").trim())
+      .filter(Boolean)
+      .slice(0, 8)
+      .map((row) => row.startsWith("- ") ? row : `- ${row}`);
+  }
+  if (Array.isArray(pending?.preview_lines) && pending.preview_lines.length > 0) {
+    return pending.preview_lines
+      .map((row) => String(row || "").trim())
+      .filter(Boolean)
+      .slice(0, 8)
+      .map((row) => row.startsWith("- ") ? row : `- ${row}`);
+  }
+  const remaining = Array.isArray(pending?.remaining_actions) ? pending.remaining_actions : [];
+  if (remaining.length > 0) {
+    return remaining
+      .slice(0, 8)
+      .map((action) => `- ${chatActionLabel(action)}`);
+  }
+  return [`- ${chatActionLabel(pending?.action)}`];
+}
+
 function buildPendingApprovalPrompt(pending = {}) {
   const id = String(pending?.id || "").trim();
-  const gateType = String(pending?.gate_type || "").trim().toLowerCase();
-  if (gateType === "mutating_confirm" && id) {
-    const previewLines = Array.isArray(pending?.preview_lines)
-      ? pending.preview_lines.map((row) => String(row || "").trim()).filter(Boolean).slice(0, 8)
-      : [];
-    const lines = [
-      "⚠️ 변경 제안(Preview)",
-      `reason=${String(pending?.reason || "관리 변경 적용 전 확인이 필요합니다.").trim()}`,
-      previewLines.length > 0 ? "예정 변경:" : "",
-      ...previewLines,
-      pending?.work_like_hint
-        ? "관리 변경으로 해석했지만 작업 요청일 수도 있어요. 아래에서 선택하세요."
-        : "적용 전에 아래에서 진행 방식을 선택해 주세요.",
-    ].filter(Boolean);
-    return {
-      text: lines.join("\n"),
-      keyboard: [[
-        { text: "적용 ✅", callback_data: `approve_action:${id}` },
-        { text: "취소 ❌", callback_data: `reject_action:${id}` },
-        { text: "작업으로 처리 🧩", callback_data: `work_action:${id}` },
-      ]],
-    };
-  }
+  const reason = inferApprovalPreviewReason(pending);
+  const actionLines = buildApprovalActionSummaryLines(pending);
+  const cancelImpact = String(pending?.cancel_impact || "").trim() || "취소 시 영향 없음";
+  const keyboardRow = [
+    { text: "Approve ✅", callback_data: `approve_action:${id}` },
+    { text: "Cancel ❌", callback_data: `reject_action:${id}` },
+    { text: "Work instead 🧩", callback_data: `work_action:${id}` },
+  ];
   return {
-    text: `승인 대기 중입니다.\nreason=${pending?.reason || "(none)"}\naction=${chatActionLabel(pending?.action)}`,
-    keyboard: [[
-      { text: "✅ Approve", callback_data: `approve_action:${id}` },
-      { text: "❌ Reject", callback_data: `reject_action:${id}` },
-    ]],
+    text: [
+      "⚠️ 승인 요청(Preview)",
+      `요청 이유: ${reason}`,
+      "승인 시 수행될 내용:",
+      ...actionLines,
+      cancelImpact,
+    ].join("\n"),
+    keyboard: [keyboardRow],
   };
 }
 
@@ -2916,7 +2920,231 @@ function buildSupervisorExecutionCallbacks({
   onAgentStatusChanged = null,
   executionGraph = null,
 }) {
-  const runSingleAgent = async ({ agentId, goal, detailContext = "", stepNodeId = "" }) => {
+  const sharedContextSetId = String(runtime?.map?.ctxSharedId || "").trim();
+  const lensCacheByKey = new Map();
+  const sharedContextMeta = runtime?.contextMeta && typeof runtime.contextMeta === "object"
+    ? runtime.contextMeta
+    : null;
+
+  function estimateTokens(text) {
+    const src = String(text || "");
+    if (!src) return 0;
+    return Math.max(1, Math.ceil(src.length / 4));
+  }
+
+  function normalizeLensSpec(rawLens) {
+    const row = rawLens && typeof rawLens === "object" ? rawLens : {};
+    const query = String(row.query || "").trim();
+    const addNodeIds = Array.isArray(row.add_node_ids)
+      ? row.add_node_ids.map((entry) => String(entry || "").trim()).filter(Boolean)
+      : [];
+    const removeNodeIds = Array.isArray(row.remove_node_ids)
+      ? row.remove_node_ids.map((entry) => String(entry || "").trim()).filter(Boolean)
+      : [];
+    const modeRaw = String(row.mode || "").trim().toLowerCase();
+    const inferredMode = query
+      ? "unfold_query"
+      : (addNodeIds.length > 0 ? "add_nodes" : (removeNodeIds.length > 0 ? "remove_nodes" : "shared_only"));
+    const mode = ["shared_only", "unfold_query", "add_nodes", "remove_nodes"].includes(modeRaw)
+      ? modeRaw
+      : inferredMode;
+    return {
+      mode,
+      query: query || undefined,
+      add_node_ids: addNodeIds.length > 0 ? addNodeIds : undefined,
+      remove_node_ids: removeNodeIds.length > 0 ? removeNodeIds : undefined,
+      budget_tokens: Number.isFinite(Number(row.budget_tokens))
+        ? Math.max(200, Math.min(12000, Math.floor(Number(row.budget_tokens))))
+        : 1200,
+      closure_edge_types: Array.isArray(row.closure_edge_types)
+        ? row.closure_edge_types.map((entry) => String(entry || "").trim()).filter(Boolean).slice(0, 16)
+        : undefined,
+      closure_direction: ["both", "forward", "backward"].includes(String(row.closure_direction || "").trim().toLowerCase())
+        ? String(row.closure_direction || "").trim().toLowerCase()
+        : "both",
+      max_closure_nodes: Number.isFinite(Number(row.max_closure_nodes))
+        ? Math.max(10, Math.min(2000, Math.floor(Number(row.max_closure_nodes))))
+        : 180,
+    };
+  }
+
+  function buildSharedContextInfo(lensSpec = null, compiledText = "") {
+    const normalizedLens = normalizeLensSpec(lensSpec);
+    return {
+      context_set_id: sharedContextSetId || undefined,
+      context_version: String(sharedContextMeta?.version || "").trim() || undefined,
+      context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
+        ? sharedContextMeta.active_node_ids
+        : undefined,
+      shared_context_set_id: sharedContextSetId || undefined,
+      shared_context_version: String(sharedContextMeta?.version || "").trim() || undefined,
+      shared_context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
+        ? sharedContextMeta.active_node_ids
+        : undefined,
+      lens_context_set_id: sharedContextSetId || undefined,
+      lens_spec: normalizedLens,
+      lens_added_ids_count: 0,
+      compiled_tokens_estimate: estimateTokens(compiledText),
+    };
+  }
+
+  async function prepareStepLensContext({
+    agentId = "",
+    goal = "",
+    lens = null,
+    detailContext = "",
+  } = {}) {
+    const cleanAgentId = String(agentId || "").trim().toLowerCase();
+    const cleanGoal = String(goal || "").trim();
+    const cleanDetail = String(detailContext || "").trim();
+    const lensSpec = normalizeLensSpec(lens);
+    const sharedCompiled = String(runtime?.contextSummary || "").trim();
+
+    const fallbackText = [
+      cleanGoal,
+      sharedCompiled ? `[JOB COMPILED CONTEXT]\n${clip(sharedCompiled, 9000)}` : "",
+      cleanDetail ? `[DETAIL CONTEXT]\n${cleanDetail}` : "",
+      runtime.globalSummary ? `[GLOBAL MEMORY]\n${clip(runtime.globalSummary, 5000)}` : "",
+    ].filter(Boolean).join("\n\n");
+
+    if (memoryModeWithFallback() !== "goc" || !sharedContextSetId) {
+      return {
+        final_prompt: fallbackText,
+        context_info: {
+          context_set_id: sharedContextSetId || undefined,
+          context_version: String(sharedContextMeta?.version || "").trim() || undefined,
+          context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
+            ? sharedContextMeta.active_node_ids
+            : undefined,
+          shared_context_set_id: sharedContextSetId || undefined,
+          shared_context_version: String(sharedContextMeta?.version || "").trim() || undefined,
+          shared_context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
+            ? sharedContextMeta.active_node_ids
+            : undefined,
+          lens_context_set_id: sharedContextSetId || undefined,
+          lens_spec: lensSpec,
+          lens_added_ids_count: 0,
+          compiled_tokens_estimate: estimateTokens(fallbackText),
+        },
+      };
+    }
+
+    const lensKey = JSON.stringify({
+      shared_context_set_id: sharedContextSetId,
+      shared_context_version: String(sharedContextMeta?.version || "").trim(),
+      lens: lensSpec,
+      detail: cleanDetail ? clip(cleanDetail, 600) : "",
+    });
+    if (lensCacheByKey.has(lensKey)) {
+      const cached = lensCacheByKey.get(lensKey);
+      const prompt = [
+        cleanGoal,
+        cached?.compiled_prompt || "",
+        cleanDetail ? `[DETAIL CONTEXT]\n${cleanDetail}` : "",
+        runtime.globalSummary ? `[GLOBAL MEMORY]\n${clip(runtime.globalSummary, 5000)}` : "",
+      ].filter(Boolean).join("\n\n");
+      return {
+        final_prompt: prompt,
+        context_info: {
+          context_set_id: sharedContextSetId || undefined,
+          context_version: String(sharedContextMeta?.version || "").trim() || undefined,
+          context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
+            ? sharedContextMeta.active_node_ids
+            : undefined,
+          shared_context_set_id: sharedContextSetId,
+          shared_context_version: String(sharedContextMeta?.version || "").trim() || undefined,
+          shared_context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
+            ? sharedContextMeta.active_node_ids
+            : undefined,
+          lens_context_set_id: cached?.lens_context_set_id || sharedContextSetId,
+          lens_spec: lensSpec,
+          lens_added_ids_count: Number.isFinite(Number(cached?.lens_added_ids_count))
+            ? Number(cached.lens_added_ids_count)
+            : 0,
+          compiled_tokens_estimate: estimateTokens(prompt),
+        },
+      };
+    }
+
+    const client = requireGocClient();
+    let lensContextSetId = sharedContextSetId;
+    let lensAddedCount = 0;
+    let lensCompiledText = sharedCompiled;
+    try {
+      const cloned = await client.cloneContextSet(
+        sharedContextSetId,
+        `lens:${cleanAgentId || "agent"}@${Date.now().toString(36)}`,
+        {
+          kind: "agent_lens",
+          agent_id: cleanAgentId || undefined,
+          goal: cleanGoal || undefined,
+          job_id: String(jobId || "").trim() || undefined,
+          chat_id: String(chatId || "").trim() || undefined,
+          lens_spec: lensSpec,
+        }
+      );
+      lensContextSetId = String(cloned?.id || sharedContextSetId).trim() || sharedContextSetId;
+      if (lensSpec.mode === "unfold_query" && lensSpec.query) {
+        const plan = await client.unfoldPlan(lensContextSetId, lensSpec.query, lensSpec);
+        const applied = await client.applyUnfoldPlan(lensContextSetId, plan, lensSpec);
+        lensAddedCount = Array.isArray(applied?.added_node_ids) ? applied.added_node_ids.length : 0;
+      } else if (lensSpec.mode === "add_nodes" && Array.isArray(lensSpec.add_node_ids) && lensSpec.add_node_ids.length > 0) {
+        await client.activateNodes(lensContextSetId, lensSpec.add_node_ids);
+        lensAddedCount = lensSpec.add_node_ids.length;
+      } else if (lensSpec.mode === "remove_nodes" && Array.isArray(lensSpec.remove_node_ids) && lensSpec.remove_node_ids.length > 0) {
+        await client.deactivateNodes(lensContextSetId, lensSpec.remove_node_ids);
+      }
+      lensCompiledText = await client.getCompiledContext(lensContextSetId);
+    } catch {
+      lensContextSetId = sharedContextSetId;
+      lensCompiledText = sharedCompiled;
+      lensAddedCount = 0;
+    }
+
+    const compiledPrompt = [
+      sharedCompiled ? `[SHARED SUMMARY]\n${clip(sharedCompiled, 3500)}` : "",
+      lensCompiledText ? `[LENS CONTEXT]\n${clip(lensCompiledText, 9000)}` : "",
+    ].filter(Boolean).join("\n\n");
+    const finalPrompt = [
+      cleanGoal,
+      compiledPrompt || (sharedCompiled ? `[JOB COMPILED CONTEXT]\n${clip(sharedCompiled, 9000)}` : ""),
+      cleanDetail ? `[DETAIL CONTEXT]\n${cleanDetail}` : "",
+      runtime.globalSummary ? `[GLOBAL MEMORY]\n${clip(runtime.globalSummary, 5000)}` : "",
+    ].filter(Boolean).join("\n\n");
+    const cachePayload = {
+      lens_context_set_id: lensContextSetId,
+      compiled_prompt: compiledPrompt,
+      lens_added_ids_count: lensAddedCount,
+    };
+    lensCacheByKey.set(lensKey, cachePayload);
+    return {
+      final_prompt: finalPrompt,
+      context_info: {
+        context_set_id: sharedContextSetId,
+        context_version: String(sharedContextMeta?.version || "").trim() || undefined,
+        context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
+          ? sharedContextMeta.active_node_ids
+          : undefined,
+        shared_context_set_id: sharedContextSetId,
+        shared_context_version: String(sharedContextMeta?.version || "").trim() || undefined,
+        shared_context_active_node_ids: Array.isArray(sharedContextMeta?.active_node_ids) && sharedContextMeta.active_node_ids.length > 0
+          ? sharedContextMeta.active_node_ids
+          : undefined,
+        lens_context_set_id: lensContextSetId,
+        lens_spec: lensSpec,
+        lens_added_ids_count: lensAddedCount,
+        compiled_tokens_estimate: estimateTokens(finalPrompt),
+      },
+    };
+  }
+
+  const runSingleAgent = async ({
+    agentId,
+    goal,
+    detailContext = "",
+    stepNodeId = "",
+    preparedContext = null,
+  }) => {
     const cleanAgentId = String(agentId || "").trim().toLowerCase();
     const cleanGoal = String(goal || "").trim();
     if (cleanAgentId) {
@@ -2927,18 +3155,24 @@ function buildSupervisorExecutionCallbacks({
         ended_at: undefined,
       });
       if (typeof onAgentStatusChanged === "function") {
-        await onAgentStatusChanged({ chatId, agentId: cleanAgentId, state: "running", throttle: true });
+        await onAgentStatusChanged({
+          chatId,
+          agentId: cleanAgentId,
+          state: "running",
+          goal: cleanGoal,
+        });
       }
     }
 
-    const detail = String(detailContext || "").trim();
-    const promptSegments = [
-      cleanGoal,
-      runtime.contextSummary ? `[JOB COMPILED CONTEXT]\n${clip(runtime.contextSummary, 9000)}` : "",
-      detail ? `[DETAIL CONTEXT]\n${detail}` : "",
-      runtime.globalSummary ? `[GLOBAL MEMORY]\n${clip(runtime.globalSummary, 5000)}` : "",
-    ].filter(Boolean);
-    const finalPrompt = promptSegments.join("\n\n");
+    const prepared = preparedContext && typeof preparedContext === "object"
+      ? preparedContext
+      : await prepareStepLensContext({
+        agentId: cleanAgentId,
+        goal: cleanGoal,
+        lens: null,
+        detailContext,
+      });
+    const finalPrompt = String(prepared?.final_prompt || "").trim() || cleanGoal;
     try {
       const result = await enqueue(
         () => executeAgentRun(
@@ -2957,7 +3191,12 @@ function buildSupervisorExecutionCallbacks({
           ended_at: new Date().toISOString(),
         });
         if (typeof onAgentStatusChanged === "function") {
-          await onAgentStatusChanged({ chatId, agentId: cleanAgentId, state: "done", throttle: true });
+          await onAgentStatusChanged({
+            chatId,
+            agentId: cleanAgentId,
+            state: "done",
+            goal: cleanGoal,
+          });
         }
       }
       if (executionGraph && cleanAgentId && stepNodeId && String(result?.output || "").trim()) {
@@ -2982,7 +3221,13 @@ function buildSupervisorExecutionCallbacks({
           ended_at: new Date().toISOString(),
         });
         if (typeof onAgentStatusChanged === "function") {
-          await onAgentStatusChanged({ chatId, agentId: cleanAgentId, state: "error", throttle: true });
+          await onAgentStatusChanged({
+            chatId,
+            agentId: cleanAgentId,
+            state: "error",
+            goal: cleanGoal,
+            error: String(e?.message ?? e),
+          });
         }
       }
       throw e;
@@ -3000,8 +3245,23 @@ function buildSupervisorExecutionCallbacks({
     const stepNodeId = executionGraph ? executionGraph.getStepNodeId(action) : "";
     const cleanToolName = String(toolName || action?.type || "action").trim().toLowerCase() || "action";
     const inputPreview = toolInputPreviewFromAction(action, detailContext);
+    const defaultAgentId = String(action?.agent_id || action?.agent || "").trim().toLowerCase();
+    const actionType = String(action?.type || "").trim().toLowerCase();
+    const preparedContext = (actionType === "run_agent" || actionType === "spawn_agents")
+      ? await prepareStepLensContext({
+        agentId: defaultAgentId,
+        goal: getActionGoal(action),
+        lens: action?.lens && typeof action.lens === "object" ? action.lens : null,
+        detailContext,
+      })
+      : {
+        final_prompt: "",
+        context_info: buildSharedContextInfo(action?.lens || null, String(runtime?.contextSummary || "")),
+      };
     if (executionGraph && stepNodeId) {
-      await executionGraph.markStepRunning(action);
+      await executionGraph.markStepRunning(action, {
+        extra: preparedContext?.context_info || {},
+      });
     }
     const toolCall = executionGraph
       ? await executionGraph.startToolCall(stepNodeId, {
@@ -3013,7 +3273,7 @@ function buildSupervisorExecutionCallbacks({
     const toolCallNodeId = String(toolCall?.id || "").trim();
 
     try {
-      const result = await work({ stepNodeId });
+      const result = await work({ stepNodeId, preparedContext });
       const outputPreview = outputPreviewFromResult(result);
       if (executionGraph && stepNodeId) {
         await executionGraph.finishToolCall(toolCallNodeId, {
@@ -3029,6 +3289,7 @@ function buildSupervisorExecutionCallbacks({
         });
         await executionGraph.markStepDone(action, {
           output: outputPreview,
+          extra: preparedContext?.context_info || {},
         });
       }
       if (typeof onSuccess === "function") {
@@ -3052,6 +3313,7 @@ function buildSupervisorExecutionCallbacks({
         });
         await executionGraph.markStepError(action, e, {
           output: errText,
+          extra: preparedContext?.context_info || {},
         });
       }
       if (typeof onError === "function") {
@@ -3074,9 +3336,19 @@ function buildSupervisorExecutionCallbacks({
     const maxParallel = Number.isFinite(limitRaw)
       ? Math.max(1, Math.min(MAX_PARALLEL_PER_RUN, Math.floor(limitRaw)))
       : MAX_PARALLEL_PER_RUN;
-    const parentText = String(action?.summary || "").trim()
-      || `병렬 실행 시작: ${children.map((row) => `@${String(row?.agent_id || "").trim().toLowerCase()}`).join(", ")}`;
-    const parent = await bot.sendMessage(chatId, `🔀 ${parentText}`);
+    const parentAgentId = String(action?.parent_agent_id || action?.agent_id || "router").trim().toLowerCase() || "router";
+    const childAgentIds = children
+      .map((row) => String(row?.agent_id || "").trim().toLowerCase())
+      .filter(Boolean);
+    if (childAgentIds.length > 0) {
+      await bot.sendMessage(
+        chatId,
+        `📣 @${parentAgentId} → ${childAgentIds.map((id) => `@${id}`).join(", ")} (병렬)`,
+        Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
+          ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
+          : undefined
+      );
+    }
     const childSteps = executionGraph
       ? await executionGraph.createSpawnChildSteps({
         parentAction: action,
@@ -3099,8 +3371,18 @@ function buildSupervisorExecutionCallbacks({
         if (!agentId || !goal) continue;
         const childStep = childStepByIndex.get(idx);
         const childStepNodeId = String(childStep?.node_id || "").trim();
+        const preparedContext = await prepareStepLensContext({
+          agentId,
+          goal,
+          lens: (child?.lens && typeof child.lens === "object")
+            ? child.lens
+            : (action?.lens && typeof action.lens === "object" ? action.lens : null),
+          detailContext,
+        });
         if (executionGraph && childStepNodeId) {
-          await executionGraph.markStepNodeRunning(childStepNodeId);
+          await executionGraph.markStepNodeRunning(childStepNodeId, {
+            extra: preparedContext?.context_info || {},
+          });
         }
         const childToolCall = executionGraph
           ? await executionGraph.startToolCall(childStepNodeId, {
@@ -3116,10 +3398,7 @@ function buildSupervisorExecutionCallbacks({
             goal,
             detailContext,
             stepNodeId: childStepNodeId,
-          });
-          const text = `✅ @${agentId} 완료\n${clip(String(result?.output || ""), 3200)}`;
-          await bot.sendMessage(chatId, text, {
-            reply_to_message_id: parent.message_id,
+            preparedContext,
           });
           if (executionGraph && childStepNodeId) {
             const preview = outputPreviewFromResult(result);
@@ -3136,6 +3415,7 @@ function buildSupervisorExecutionCallbacks({
             });
             await executionGraph.markStepNodeDone(childStepNodeId, {
               output: preview,
+              extra: preparedContext?.context_info || {},
             });
           }
           childResults.push({
@@ -3146,10 +3426,6 @@ function buildSupervisorExecutionCallbacks({
             step_node_id: childStepNodeId || undefined,
           });
         } catch (e) {
-          const errText = `❌ @${agentId} 실패\n${clip(String(e?.message ?? e), 1000)}`;
-          await bot.sendMessage(chatId, errText, {
-            reply_to_message_id: parent.message_id,
-          });
           if (executionGraph && childStepNodeId) {
             const preview = String(e?.message ?? e);
             await executionGraph.finishToolCall(childToolCallNodeId, {
@@ -3166,6 +3442,7 @@ function buildSupervisorExecutionCallbacks({
             });
             await executionGraph.markStepNodeError(childStepNodeId, e, {
               output: preview,
+              extra: preparedContext?.context_info || {},
             });
           }
           childResults.push({
@@ -3198,7 +3475,9 @@ function buildSupervisorExecutionCallbacks({
       const joinNodeId = String(join?.node_id || "").trim();
       if (joinNodeId) {
         await executionGraph.markStepNodeRunning(joinNodeId, {
-          mode: "spawn_join",
+          extra: {
+            mode: "spawn_join",
+          },
         });
         await executionGraph.markStepNodeDone(joinNodeId, {
           output: `ok=${okCount}, error=${errorCount}`,
@@ -3220,12 +3499,13 @@ function buildSupervisorExecutionCallbacks({
         action,
         detailContext,
         toolName: "run_agent",
-        work: async ({ stepNodeId }) => {
+        work: async ({ stepNodeId, preparedContext }) => {
           return await runSingleAgent({
             agentId: String(action.agent_id || "").trim().toLowerCase(),
             goal: String(action.goal || "").trim(),
             detailContext,
             stepNodeId,
+            preparedContext,
           });
         },
       });
@@ -3669,11 +3949,38 @@ async function runSupervisorChat(
   const controller = resetJobAbortController(currentJobId);
   activeJobByChat.set(chatKey, currentJobId);
   let executionGraph = null;
+  const sessionAtStart = chatSessionStore.get(chatId);
+  let currentTurnAckMessageId = Number(sessionAtStart?.current_turn_ack_message_id || 0);
+  if (!(Number.isFinite(currentTurnAckMessageId) && currentTurnAckMessageId > 0)) {
+    currentTurnAckMessageId = Number(await sendRouterAckMessage(bot, chatId, {
+      replyToMessageId: telegramMessageId,
+    }) || 0);
+  }
 
   try {
     const runtime = await loadSupervisorRuntime(currentJobId, {
       chatMeta: chatInfo,
     });
+    if (memoryModeWithFallback() === "goc" && runtime?.map?.ctxSharedId) {
+      try {
+        const meta = await requireGocClient().getContextSet(runtime.map.ctxSharedId);
+        runtime.contextMeta = {
+          context_set_id: runtime.map.ctxSharedId,
+          version: String(meta?.version || "").trim(),
+          active_node_ids: Array.isArray(meta?.activeNodeIds)
+            ? meta.activeNodeIds.map((row) => String(row || "").trim()).filter(Boolean)
+            : [],
+        };
+      } catch {
+        runtime.contextMeta = {
+          context_set_id: runtime.map.ctxSharedId,
+          version: "",
+          active_node_ids: [],
+        };
+      }
+    } else {
+      runtime.contextMeta = null;
+    }
     executionGraph = (
       memoryModeWithFallback() === "goc"
       && runtime?.map?.threadId
@@ -3683,6 +3990,8 @@ async function runSupervisorChat(
         client: requireGocClient(),
         threadId: runtime.map.threadId,
         contextSetId: runtime.map.ctxSharedId,
+        sharedContextSetId: runtime.map.ctxSharedId,
+        contextMeta: runtime.contextMeta || null,
         runId: `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
         chatId: String(chatId || ""),
         jobId: String(currentJobId || ""),
@@ -3695,7 +4004,6 @@ async function runSupervisorChat(
         userText: message,
       });
     }
-    await showRoutingDashboard(bot, chatId, { throttle: false });
     const rawRoutePlan = await routeWithSupervisor(message, {
       agents: runtime.agents,
       tools: runtime.tools,
@@ -3729,7 +4037,15 @@ async function runSupervisorChat(
         final_response_style: routePlan.final_response_style || runtime.jobConfig?.final_response_style || "concise",
       },
     });
-    await showRoutedDashboard(bot, chatId, { throttle: false });
+    const planPreviewMessageId = await sendPlanPreviewMessage(bot, chatId, {
+      actions: Array.isArray(routePlan.actions) ? routePlan.actions : [],
+      replyToMessageId: currentTurnAckMessageId,
+    });
+    if (Number.isFinite(Number(planPreviewMessageId)) && Number(planPreviewMessageId) > 0) {
+      chatSessionStore.upsert(chatId, {
+        current_turn_plan_message_id: Number(planPreviewMessageId),
+      });
+    }
 
     if (verbose) {
       await bot.sendMessage(chatId, [
@@ -3758,13 +4074,18 @@ async function runSupervisorChat(
         runtime,
         controller,
         verbose,
-        onAgentStatusChanged: async ({ throttle = true } = {}) => {
-          await showRoutedDashboard(bot, chatId, { throttle });
+        onAgentStatusChanged: async ({ agentId = "", state = "", goal = "", error = "" } = {}) => {
+          await sendAgentStatusTransitionMessage(bot, chatId, {
+            agentId,
+            state,
+            goal,
+            error,
+            replyToMessageId: getCurrentTurnReplyMessageId(chatId),
+          });
         },
         executionGraph,
       }),
     });
-    await showRoutedDashboard(bot, chatId, { throttle: false });
 
     tracking.append(currentJobId, "decisions.md", [
       "## /chat supervisor routing",
@@ -3856,6 +4177,9 @@ async function runSupervisorChat(
         chatId,
         prompt.text,
         {
+          reply_to_message_id: Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
+            ? Number(getCurrentTurnReplyMessageId(chatId))
+            : undefined,
           reply_markup: {
             inline_keyboard: prompt.keyboard,
           },
@@ -3877,11 +4201,27 @@ async function runSupervisorChat(
         const runtime = await loadSupervisorRuntime(currentJobId, {
           chatMeta: chatInfo,
         });
+        if (runtime?.map?.ctxSharedId) {
+          try {
+            const meta = await requireGocClient().getContextSet(runtime.map.ctxSharedId);
+            runtime.contextMeta = {
+              context_set_id: runtime.map.ctxSharedId,
+              version: String(meta?.version || "").trim(),
+              active_node_ids: Array.isArray(meta?.activeNodeIds)
+                ? meta.activeNodeIds.map((row) => String(row || "").trim()).filter(Boolean)
+                : [],
+            };
+          } catch {
+            runtime.contextMeta = null;
+          }
+        }
         if (runtime?.map?.threadId && runtime?.map?.ctxSharedId) {
           executionGraph = new GocExecutionGraphRecorder({
             client: requireGocClient(),
             threadId: runtime.map.threadId,
             contextSetId: runtime.map.ctxSharedId,
+            sharedContextSetId: runtime.map.ctxSharedId,
+            contextMeta: runtime.contextMeta || null,
             runId: `run_err_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
             chatId: String(chatId || ""),
             jobId: String(currentJobId || ""),
@@ -4426,10 +4766,8 @@ const chatRunManager = new ChatRunManager({
   },
   onAck: async ({ chatId, mode }) => {
     if (mode === "cancel") {
-      await upsertDashboardMessage(bot, chatId, "⛔️ 중단했어요. 다음 지시를 주세요.", { throttle: false });
-      return;
+      await bot.sendMessage(chatId, "⛔️ 중단했어요. 다음 지시를 주세요.");
     }
-    await showRoutingDashboard(bot, chatId, { throttle: false });
   },
   onRunError: async ({ chatId, error }) => {
     if (isCancelledError(error)) return;
@@ -4594,6 +4932,13 @@ bot.on("callback_query", async (q) => {
       }
 
       await bot.answerCallbackQuery(q.id, { text: "approved" });
+      await bot.sendMessage(
+        chatId,
+        "✅ 승인 반영 중…",
+        Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
+          ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
+          : undefined
+      );
       const remainingActions = Array.isArray(pending.remaining_actions) && pending.remaining_actions.length > 0
         ? pending.remaining_actions
         : (pending.action ? [pending.action] : []);
@@ -4614,6 +4959,26 @@ bot.on("callback_query", async (q) => {
       const runtime = await loadSupervisorRuntime(pendingJobId, {
         chatMeta: { chat_id: String(chatId || "") },
       });
+      if (memoryModeWithFallback() === "goc" && runtime?.map?.ctxSharedId) {
+        try {
+          const meta = await requireGocClient().getContextSet(runtime.map.ctxSharedId);
+          runtime.contextMeta = {
+            context_set_id: runtime.map.ctxSharedId,
+            version: String(meta?.version || "").trim(),
+            active_node_ids: Array.isArray(meta?.activeNodeIds)
+              ? meta.activeNodeIds.map((row) => String(row || "").trim()).filter(Boolean)
+              : [],
+          };
+        } catch {
+          runtime.contextMeta = {
+            context_set_id: runtime.map.ctxSharedId,
+            version: "",
+            active_node_ids: [],
+          };
+        }
+      } else {
+        runtime.contextMeta = null;
+      }
       const resumeExecutionGraph = (
         memoryModeWithFallback() === "goc"
         && runtime?.map?.threadId
@@ -4623,6 +4988,8 @@ bot.on("callback_query", async (q) => {
           client: requireGocClient(),
           threadId: runtime.map.threadId,
           contextSetId: runtime.map.ctxSharedId,
+          sharedContextSetId: runtime.map.ctxSharedId,
+          contextMeta: runtime.contextMeta || null,
           runId: `run_resume_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
           chatId: String(chatId || ""),
           jobId: String(pendingJobId || ""),
@@ -4645,7 +5012,10 @@ bot.on("callback_query", async (q) => {
           final_response_style: runtime.jobConfig?.final_response_style || "concise",
         },
       });
-      await showRoutedDashboard(bot, chatId, { throttle: false });
+      await sendPlanPreviewMessage(bot, chatId, {
+        actions: resumedActions,
+        replyToMessageId: getCurrentTurnReplyMessageId(chatId),
+      });
 
       try {
         const resumePlan = {
@@ -4678,13 +5048,18 @@ bot.on("callback_query", async (q) => {
             runtime,
             controller,
             verbose: CHAT_VERBOSE,
-            onAgentStatusChanged: async ({ throttle = true } = {}) => {
-              await showRoutedDashboard(bot, chatId, { throttle });
+            onAgentStatusChanged: async ({ agentId = "", state = "", goal = "", error = "" } = {}) => {
+              await sendAgentStatusTransitionMessage(bot, chatId, {
+                agentId,
+                state,
+                goal,
+                error,
+                replyToMessageId: getCurrentTurnReplyMessageId(chatId),
+              });
             },
             executionGraph: resumeExecutionGraph,
           }),
         });
-        await showRoutedDashboard(bot, chatId, { throttle: false });
 
         const prevDone = pending.already_done && typeof pending.already_done === "object"
           ? pending.already_done
@@ -4717,6 +5092,15 @@ bot.on("callback_query", async (q) => {
           `- pending_after_resume: ${resumedExecution.pendingApproval ? "yes" : "no"}`,
           `- approved_by: telegram:${userId}`,
         ].join("\n"));
+        await bot.sendMessage(
+          chatId,
+          resumedExecution.pendingApproval
+            ? "✅ 승인 적용 완료 (추가 승인 필요)"
+            : "✅ 승인 적용 완료",
+          Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
+            ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
+            : undefined
+        );
 
         if (resumedExecution.pendingApproval?.id) {
           if (resumeExecutionGraph) {
@@ -4745,6 +5129,9 @@ bot.on("callback_query", async (q) => {
             chatId,
             prompt.text,
             {
+              reply_to_message_id: Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
+                ? Number(getCurrentTurnReplyMessageId(chatId))
+                : undefined,
               reply_markup: {
                 inline_keyboard: prompt.keyboard,
               },
@@ -4771,6 +5158,13 @@ bot.on("callback_query", async (q) => {
             summary: "approval resume failed",
           });
         }
+        await bot.sendMessage(
+          chatId,
+          `❌ 승인 적용 실패: ${clip(String(e?.message ?? e), 240)}`,
+          Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
+            ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
+            : undefined
+        );
         throw e;
       } finally {
         if (activeJobByChat.get(chatKey) === pendingJobId) activeJobByChat.delete(chatKey);
@@ -4915,7 +5309,17 @@ bot.on("callback_query", async (q) => {
       await sendLong(bot, chatId, `✅ 커밋 완료\n${clip(commit.stdout || commit.stderr, 3500)}`);
       await suggestNextPrompt(bot, chatId, jobId, "커밋 이후 다음 단계(테스트/PR/배포 등)를 결정해줘.", "commit");
     }
-  } catch {}
+  } catch (e) {
+    const fallbackChatId = q?.message?.chat?.id;
+    try {
+      await bot.answerCallbackQuery(q.id, { text: "실패" });
+    } catch {}
+    if (fallbackChatId) {
+      try {
+        await bot.sendMessage(fallbackChatId, `❌ callback 처리 실패: ${clip(String(e?.message ?? e), 240)}`);
+      } catch {}
+    }
+  }
 });
 
 bot.on("message", async (msg) => {
@@ -4975,9 +5379,8 @@ bot.on("message", async (msg) => {
       });
       return;
     }
-    await showRoutingDashboard(bot, chatId, {
+    await sendRouterAckMessage(bot, chatId, {
       replyToMessageId: msg.message_id,
-      throttle: false,
     });
     await chatRunManager.handleIncoming({
       chatId,
@@ -5198,9 +5601,8 @@ bot.on("message", async (msg) => {
 
     try {
       if (!parsed.debug) {
-        await showRoutingDashboard(bot, chatId, {
+        await sendRouterAckMessage(bot, chatId, {
           replyToMessageId: msg.message_id,
-          throttle: false,
         });
         await chatRunManager.handleIncoming({
           chatId,
@@ -5216,9 +5618,8 @@ bot.on("message", async (msg) => {
         });
         return;
       }
-      await showRoutingDashboard(bot, chatId, {
+      await sendRouterAckMessage(bot, chatId, {
         replyToMessageId: msg.message_id,
-        throttle: false,
       });
       await runSupervisorChat(bot, chatId, userId, message, {
         debug: parsed.debug,

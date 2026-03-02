@@ -42,6 +42,8 @@ export class GocExecutionGraphRecorder {
     client,
     threadId = "",
     contextSetId = "",
+    sharedContextSetId = "",
+    contextMeta = null,
     runId = "",
     chatId = "",
     jobId = "",
@@ -50,6 +52,16 @@ export class GocExecutionGraphRecorder {
     this.client = client || null;
     this.threadId = String(threadId || "").trim();
     this.contextSetId = String(contextSetId || "").trim();
+    this.sharedContextSetId = String(sharedContextSetId || contextSetId || "").trim();
+    const meta = asObject(contextMeta);
+    this.contextMeta = {
+      version: String(meta.version || "").trim(),
+      active_node_ids: Array.isArray(meta.active_node_ids)
+        ? meta.active_node_ids.map((row) => String(row || "").trim()).filter(Boolean)
+        : (Array.isArray(meta.activeNodeIds)
+          ? meta.activeNodeIds.map((row) => String(row || "").trim()).filter(Boolean)
+          : []),
+    };
     this.runId = String(runId || "").trim() || `run_${randomUUID()}`;
     this.chatId = String(chatId || "").trim();
     this.jobId = String(jobId || "").trim();
@@ -58,6 +70,21 @@ export class GocExecutionGraphRecorder {
     this.runNodeId = "";
     this.payloadByNodeId = new Map();
     this.stepMetaByAction = new WeakMap();
+  }
+
+  _sharedContextPayload() {
+    return {
+      context_set_id: this.contextSetId || undefined,
+      context_version: this.contextMeta.version || undefined,
+      context_active_node_ids: this.contextMeta.active_node_ids.length > 0
+        ? this.contextMeta.active_node_ids
+        : undefined,
+      shared_context_set_id: this.sharedContextSetId || this.contextSetId || undefined,
+      shared_context_version: this.contextMeta.version || undefined,
+      shared_context_active_node_ids: this.contextMeta.active_node_ids.length > 0
+        ? this.contextMeta.active_node_ids
+        : undefined,
+    };
   }
 
   isEnabled() {
@@ -164,6 +191,7 @@ export class GocExecutionGraphRecorder {
       ended_at: null,
       user_message_node_id: String(userMessageNodeId || "").trim() || undefined,
       user_message_preview: clipPreview(userText, 300) || undefined,
+      ...this._sharedContextPayload(),
     };
     const run = await this._createNode("Run", {
       name: `run:${this.runId}`,
@@ -215,6 +243,11 @@ export class GocExecutionGraphRecorder {
         started_at: null,
         ended_at: null,
         error: null,
+        lens_context_set_id: this.sharedContextSetId || this.contextSetId || undefined,
+        lens_spec: action?.lens && typeof action.lens === "object"
+          ? action.lens
+          : { mode: "shared_only" },
+        ...this._sharedContextPayload(),
       };
       const created = await this._createNode("Step", {
         name: `step:${stepId}`,
@@ -339,6 +372,11 @@ export class GocExecutionGraphRecorder {
         started_at: null,
         ended_at: null,
         error: null,
+        lens_context_set_id: this.sharedContextSetId || this.contextSetId || undefined,
+        lens_spec: child.lens && typeof child.lens === "object"
+          ? child.lens
+          : { mode: "shared_only" },
+        ...this._sharedContextPayload(),
       };
       const childNode = await this._createNode("Step", {
         name: `step:${childStepId}`,
@@ -382,6 +420,7 @@ export class GocExecutionGraphRecorder {
       started_at: null,
       ended_at: null,
       error: null,
+      ...this._sharedContextPayload(),
     };
     const joinNode = await this._createNode("Step", {
       name: `step:${joinStepId}`,
@@ -522,4 +561,3 @@ export class GocExecutionGraphRecorder {
     }
   }
 }
-

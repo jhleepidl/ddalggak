@@ -15,6 +15,9 @@ function normalizePendingApproval(raw) {
   const previewLines = Array.isArray(row.preview_lines)
     ? row.preview_lines.map((entry) => String(entry || "").trim()).filter(Boolean).slice(0, 12)
     : [];
+  const actionsSummary = Array.isArray(row.actions_summary)
+    ? row.actions_summary.map((entry) => String(entry || "").trim()).filter(Boolean).slice(0, 12)
+    : [];
   return {
     ...row,
     id: String(row.id || "").trim(),
@@ -26,6 +29,9 @@ function normalizePendingApproval(raw) {
     force_mode: String(row.force_mode || "").trim().toLowerCase() === "work" ? "work" : "normal",
     gate_type: String(row.gate_type || "").trim() || undefined,
     mode_choice_required: row.mode_choice_required === true,
+    preview_reason: String(row.preview_reason || row.reason || "").trim() || undefined,
+    actions_summary: actionsSummary,
+    cancel_impact: String(row.cancel_impact || "").trim() || undefined,
     preview_lines: previewLines,
   };
 }
@@ -115,6 +121,16 @@ function normalizeSession(chatId, raw = {}) {
     : (Number.isFinite(Number(dashboardRaw?.messageId))
       ? Number(dashboardRaw.messageId)
       : null);
+  const currentTurnAckMessageId = Number.isFinite(Number(row.current_turn_ack_message_id))
+    ? Number(row.current_turn_ack_message_id)
+    : (Number.isFinite(Number(row.currentTurnAckMessageId))
+      ? Number(row.currentTurnAckMessageId)
+      : null);
+  const currentTurnPlanMessageId = Number.isFinite(Number(row.current_turn_plan_message_id))
+    ? Number(row.current_turn_plan_message_id)
+    : (Number.isFinite(Number(row.currentTurnPlanMessageId))
+      ? Number(row.currentTurnPlanMessageId)
+      : null);
   return {
     chat_id: String(chatId || row.chat_id || "").trim(),
     jobId: String(row.jobId || "").trim(),
@@ -129,6 +145,8 @@ function normalizeSession(chatId, raw = {}) {
     pending_user_messages: pendingUserMessages,
     interrupt,
     dashboard: dashboardMessageId ? { message_id: dashboardMessageId } : null,
+    current_turn_ack_message_id: currentTurnAckMessageId,
+    current_turn_plan_message_id: currentTurnPlanMessageId,
     agent_status: normalizeAgentStatusMap(row.agent_status),
     last_route: row.last_route && typeof row.last_route === "object" ? row.last_route : null,
     public_search_cache: normalizePublicSearchCache(row.public_search_cache),
