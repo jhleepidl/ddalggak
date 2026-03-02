@@ -547,6 +547,20 @@ function buildRouterPrompt(message, context = {}) {
     : "(none)";
   const jobConfigText = clip(JSON.stringify(jobConfig, null, 2), 3200);
   const contextSummary = clip(String(row.contextSummary || ""), 4500) || "(none)";
+  const progressSummary = clip(String(row.progressSummary || ""), 3200) || "(none)";
+  const originalUserMessage = String(row.originalUserMessage || "").trim();
+  const autopilotTurn = Number.isFinite(Number(row.autopilotTurn))
+    ? Math.max(1, Math.floor(Number(row.autopilotTurn)))
+    : 1;
+  const suggestedActionsText = (() => {
+    const rows = Array.isArray(row.suggestedActions) ? row.suggestedActions : [];
+    if (rows.length === 0) return "(none)";
+    try {
+      return clip(JSON.stringify(rows.slice(0, 8), null, 2), 2800);
+    } catch {
+      return "(none)";
+    }
+  })();
 
   return [
     "너는 Telegram /chat supervisor_router다.",
@@ -554,6 +568,11 @@ function buildRouterPrompt(message, context = {}) {
     "출력 스키마(JSON only):",
     "{",
     "  \"reason\": \"...\",",
+    "  \"done\": false,",
+    "  \"await_user\": false,",
+    "  \"deliverables\": [\"...\"],",
+    "  \"completed_deliverables\": [\"...\"],",
+    "  \"followup_hint\": \"optional\",",
     "  \"actions\": [",
     "    {\"type\":\"run_agent\",\"agent_id\":\"...\",\"goal\":\"...\",\"inputs\":{},\"lens\":{\"mode\":\"shared_only|unfold_query|add_nodes|remove_nodes\",\"query\":\"optional\",\"add_node_ids\":[\"...\"],\"remove_node_ids\":[\"...\"],\"budget_tokens\":1200,\"closure_edge_types\":[\"...\"],\"closure_direction\":\"both|forward|backward\",\"max_closure_nodes\":180},\"risk\":\"L0|L1|L2|L3\"},",
     "    {\"type\":\"propose_agent\",\"agent_id\":\"...\",\"name\":\"...\",\"description\":\"...\",\"provider\":\"gemini|codex|chatgpt\",\"model\":\"...\",\"prompt\":\"...\",\"meta\":{},\"risk\":\"L2|L3\"},",
@@ -584,6 +603,9 @@ function buildRouterPrompt(message, context = {}) {
     "- 컨텍스트가 부족하면 need_more_detail 후 run_agent를 배치한다.",
     "- run_agent/spawn_agents(자식 포함)에는 lens를 명시한다. 특별한 근거가 없으면 lens.mode=shared_only.",
     "- 특정 자료를 중심으로 실행해야 하면 lens.mode=unfold_query로 query를 넣고 budget_tokens(기본 800~1500)를 지정한다.",
+    "- 복합 요구(예: 주제 제안 + 코드/ipynb + 과제 생성)는 actions에 모두 반영한다.",
+    "- 일부만 끝났으면 done=false를 유지한다.",
+    "- 사용자 입력이 반드시 필요한 경우에만 await_user=true.",
     "- public agent 검색 요청은 search_public_agents를 사용한다.",
     "- 설치 요청은 먼저 search_public_agents로 후보를 좁히고, 1개로 좁혀지면 install_agent_blueprint를 사용한다.",
     "- publish_agent는 admin 승인/검토가 필요함을 reason 또는 summarize 힌트에 명시한다.",
@@ -601,9 +623,16 @@ function buildRouterPrompt(message, context = {}) {
       : "- 사용자가 명시적으로 요청하지 않은 한 chatgpt agent를 선택하지 마라.",
     "- 에이전트 추가/초대/생성 요청은 propose_agent를 사용한다.",
     "- 파일 변경이 필요한 실행은 risk를 L3로 올린다.",
+    "- user_message에 코드/노트북/ipynb/실습 키워드가 있으면 coder step(run_agent 또는 spawn child)을 반드시 포함한다.",
+    "- 주제 제안만 하고 끝내지 말고, 요구된 산출물까지 plan에 포함한다.",
+    "",
+    "few-shot 예시:",
+    "user: \"주제 3개 제안하고 ipynb 코드 뼈대와 과제 5개 만들어줘\"",
+    "assistant(JSON): {\"reason\":\"복합 산출물\",\"done\":false,\"await_user\":false,\"deliverables\":[\"주제 제안\",\"ipynb 코드\",\"과제\"],\"completed_deliverables\":[],\"followup_hint\":\"연구 결과 후 코드와 과제 생성\",\"actions\":[{\"type\":\"run_agent\",\"agent_id\":\"researcher\",\"goal\":\"주제 3개 제안\"},{\"type\":\"run_agent\",\"agent_id\":\"coder\",\"goal\":\"ipynb 코드 뼈대 작성\"},{\"type\":\"run_agent\",\"agent_id\":\"reviewer\",\"goal\":\"과제 5개 생성 및 품질 점검\"},{\"type\":\"summarize\",\"hint\":\"결과 취합\"}],\"final_response_style\":\"concise\"}",
     "",
     `current_job_id=${String(row.currentJobId || "").trim() || "(none)"}`,
     `current_context_set_id=${String(row.currentContextSetId || "").trim() || "(none)"}`,
+    `autopilot_turn=${autopilotTurn}`,
     `locale=${String(row.locale || "ko-KR")}`,
     row.routerPolicy ? `router_policy=${String(row.routerPolicy)}` : "",
     "",
@@ -619,6 +648,15 @@ function buildRouterPrompt(message, context = {}) {
     "current_context_summary:",
     contextSummary,
     "",
+    "original_user_message:",
+    originalUserMessage || "(none)",
+    "",
+    "autopilot_progress_summary:",
+    progressSummary,
+    "",
+    "agent_suggested_actions_candidates:",
+    suggestedActionsText,
+    "",
     "user_message:",
     String(message || ""),
   ].filter(Boolean).join("\n");
@@ -630,12 +668,20 @@ export async function routeWithSupervisor(message, {
   jobConfig = {},
   currentJobId = "",
   currentContextSetId = "",
+  progressSummary = "",
+  suggestedActions = [],
+  originalUserMessage = "",
+  autopilotTurn = 1,
   workspaceRoot = process.cwd(),
   cwd = process.cwd(),
   signal = null,
   locale = "ko-KR",
   routerPolicy = "",
   contextSummary = "",
+  onGeminiRetry = null,
+  onGeminiModelSwitch = null,
+  geminiConcurrencyKey = "",
+  geminiModel = "",
 } = {}) {
   const msg = String(message || "").trim();
   const allowChatGPTPlanner = isExplicitChatGptPlannerRequest(msg);
@@ -650,6 +696,10 @@ export async function routeWithSupervisor(message, {
     jobConfig,
     currentJobId,
     currentContextSetId,
+    progressSummary,
+    suggestedActions,
+    originalUserMessage,
+    autopilotTurn,
     locale,
     routerPolicy,
     allowChatGPTPlanner,
@@ -662,6 +712,10 @@ export async function routeWithSupervisor(message, {
       cwd: path.resolve(cwd || workspaceRoot || process.cwd()),
       prompt,
       signal,
+      concurrencyKey: geminiConcurrencyKey || "",
+      model: geminiModel || "",
+      onRetry: onGeminiRetry,
+      onModelSwitch: onGeminiModelSwitch,
     });
     if (!r?.ok) {
       if (signal?.aborted) {
@@ -679,7 +733,11 @@ export async function routeWithSupervisor(message, {
         ? Math.floor(Number(jobConfig.budget.max_actions))
         : 4,
     });
-    if (!Array.isArray(normalized.actions) || normalized.actions.length === 0) return fallback;
+    if ((!Array.isArray(normalized.actions) || normalized.actions.length === 0)
+      && !normalized.done
+      && !normalized.await_user) {
+      return fallback;
+    }
 
     const providerById = new Map(
       (Array.isArray(agents) ? agents : []).map((agent) => [
@@ -694,7 +752,7 @@ export async function routeWithSupervisor(message, {
       const provider = providerById.get(String(action.agent_id || "").trim().toLowerCase());
       return provider !== "chatgpt";
     });
-    if (filtered.length === 0) return fallback;
+    if (filtered.length === 0 && !normalized.done && !normalized.await_user) return fallback;
     const hardened = filtered.map((action) => {
       if (action.type !== "run_agent") return action;
       const provider = providerById.get(String(action.agent_id || "").trim().toLowerCase());
@@ -707,6 +765,11 @@ export async function routeWithSupervisor(message, {
       reason: normalized.reason || "supervisor route",
       actions: hardened,
       final_response_style: normalized.final_response_style,
+      done: normalized.done === true,
+      await_user: normalized.await_user === true,
+      deliverables: Array.isArray(normalized.deliverables) ? normalized.deliverables : [],
+      completed_deliverables: Array.isArray(normalized.completed_deliverables) ? normalized.completed_deliverables : [],
+      followup_hint: String(normalized.followup_hint || "").trim() || undefined,
     };
   } catch (e) {
     if (signal?.aborted) throw e;

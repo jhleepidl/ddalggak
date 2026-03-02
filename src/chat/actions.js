@@ -26,6 +26,24 @@ function normalizeNodeIds(raw) {
   return [];
 }
 
+function normalizeStringArray(raw, { max = 16 } = {}) {
+  const list = Array.isArray(raw)
+    ? raw
+    : (typeof raw === "string" ? raw.split("\n") : []);
+  const out = [];
+  const seen = new Set();
+  for (const entry of list) {
+    const text = String(entry || "").trim();
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+    if (out.length >= Math.max(1, Math.floor(max))) break;
+  }
+  return out;
+}
+
 function normalizeLensMode(rawMode = "", fallback = "shared_only") {
   const mode = String(rawMode || "").trim().toLowerCase();
   if (["shared_only", "unfold_query", "add_nodes", "remove_nodes"].includes(mode)) return mode;
@@ -352,10 +370,23 @@ export function normalizeActionPlan(rawPlan = {}, { maxActions = 4 } = {}) {
     normalized.push(parsed);
   }
   const finalStyle = String(plan.final_response_style || "").trim().toLowerCase();
+  const done = plan.done === true;
+  const awaitUser = plan.await_user === true || plan.awaitUser === true;
+  const deliverables = normalizeStringArray(plan.deliverables, { max: 24 });
+  const completedDeliverables = normalizeStringArray(
+    plan.completed_deliverables ?? plan.completedDeliverables,
+    { max: 24 }
+  );
+  const followupHint = String((plan.followup_hint ?? plan.followupHint) || "").trim();
   return {
     reason: String(plan.reason || "").trim() || "supervisor decision",
     actions: normalized,
     final_response_style: finalStyle === "detailed" ? "detailed" : "concise",
+    done,
+    await_user: awaitUser,
+    deliverables,
+    completed_deliverables: completedDeliverables,
+    followup_hint: followupHint || undefined,
   };
 }
 
