@@ -108,6 +108,12 @@ function isGraphResourceNode(entity) {
   return false;
 }
 
+function normalizePayloadObject(raw) {
+  if (raw && typeof raw === "object") return asObject(raw);
+  if (typeof raw === "string") return asObject(parseJsonMaybe(raw));
+  return {};
+}
+
 function parseBooleanLike(value, fallback = false) {
   if (typeof value === "boolean") return value;
   const key = String(value ?? "").trim().toLowerCase();
@@ -269,12 +275,7 @@ export class GocClient {
   normalizeResource(entity) {
     const row = asObject(entity);
     const payloadRaw = pick(row, ["payload_json", "payloadJson", "payload"]);
-    let payload = {};
-    if (payloadRaw && typeof payloadRaw === "object") {
-      payload = asObject(payloadRaw);
-    } else if (typeof payloadRaw === "string") {
-      payload = asObject(parseJsonMaybe(payloadRaw));
-    }
+    const payload = normalizePayloadObject(payloadRaw);
     return {
       id: pickId(row),
       name: String(pick(row, ["name", "title"]) || ""),
@@ -289,6 +290,58 @@ export class GocClient {
       contextSetId: String(
         pick(row, ["context_set_id", "contextSetId", "ctx_id", "ctxId"])
         || pick(payload, ["context_set_id", "contextSetId", "ctx_id", "ctxId"])
+        || ""
+      ).trim(),
+      createdAt: String(pick(row, ["created_at", "createdAt", "ts", "timestamp"]) || ""),
+      payload,
+      raw: row,
+    };
+  }
+
+  normalizeNode(entity) {
+    const row = asObject(entity);
+    const payloadRaw = pick(row, ["payload_json", "payloadJson", "payload"]);
+    const payload = normalizePayloadObject(payloadRaw);
+    return {
+      id: pickId(row),
+      name: String(pick(row, ["name", "title"]) || ""),
+      summary: String(pick(row, ["summary", "text", "content"]) || ""),
+      type: String(
+        pick(row, ["type", "node_type", "nodeType", "kind", "label"])
+        || pick(payload, ["type", "node_type", "nodeType", "kind"])
+        || ""
+      ).trim(),
+      contextSetId: String(
+        pick(row, ["context_set_id", "contextSetId", "ctx_id", "ctxId"])
+        || pick(payload, ["context_set_id", "contextSetId", "ctx_id", "ctxId"])
+        || ""
+      ).trim(),
+      payload,
+      raw: row,
+    };
+  }
+
+  normalizeMessage(entity) {
+    const row = asObject(entity);
+    const payload = normalizePayloadObject(pick(row, ["payload_json", "payloadJson", "payload", "meta_json", "metaJson", "meta"]));
+    const roleRaw = String(
+      pick(row, ["role", "author_role", "authorRole"])
+      || pick(payload, ["role"])
+      || ""
+    ).trim().toLowerCase();
+    const role = ["user", "assistant", "system", "tool"].includes(roleRaw) ? roleRaw : "user";
+    const text = String(
+      pick(row, ["text", "content", "raw_text", "rawText", "summary"])
+      || pick(payload, ["text", "content"])
+      || ""
+    );
+    return {
+      id: pickId(row),
+      role,
+      text,
+      replyTo: String(
+        pick(row, ["reply_to", "replyTo", "reply_to_message_id", "replyToMessageId"])
+        || pick(payload, ["reply_to", "replyTo"])
         || ""
       ).trim(),
       createdAt: String(pick(row, ["created_at", "createdAt", "ts", "timestamp"]) || ""),
@@ -466,6 +519,90 @@ export class GocClient {
     const resource = this.normalizeResource(entity);
     if (!resource.id) throw new Error("GoC createResource returned no id");
     return resource;
+  }
+
+  async createNode(threadId, body = {}) {
+    const tid = String(threadId || "").trim();
+    if (!tid) throw new Error("createNode requires threadId");
+    const payload = asObject(body);
+
+    const data = await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: "/api/nodes", body: { thread_id: tid, ...payload } },
+        { path: "/nodes", body: { thread_id: tid, ...payload } },
+        { path: "/v1/nodes", body: { thread_id: tid, ...payload } },
+        { path: `/api/threads/${encodeURIComponent(tid)}/nodes`, body: payload },
+        { path: `/threads/${encodeURIComponent(tid)}/nodes`, body: payload },
+      ],
+    });
+    const entity = normalizeEntity(data, ["node", "data", "resource"]);
+    const node = this.normalizeNode(entity);
+    if (!node.id) throw new Error("GoC createNode returned no id");
+    return node;
+  }
+
+  async addMessage(threadId, body = {}) {
+    const tid = String(threadId || "").trim();
+    if (!tid) throw new Error("addMessage requires threadId");
+    const payload = asObject(body);
+    const roleRaw = String(payload.role || "").trim().toLowerCase();
+    const role = ["user", "assistant", "system", "tool"].includes(roleRaw) ? roleRaw : "user";
+    const text = String(payload.text || payload.content || "").trim();
+    if (!text) throw new Error("addMessage requires text");
+    const replyTo = String(payload.reply_to || payload.replyTo || "").trim();
+    const metaRaw = payload.meta_json && typeof payload.meta_json === "object"
+      ? payload.meta_json
+      : (payload.metaJson && typeof payload.metaJson === "object" ? payload.metaJson : null);
+    const meta = metaRaw && typeof metaRaw === "object" ? metaRaw : undefined;
+
+    const data = await this._requestAny({
+      method: "POST",
+      attempts: [
+        {
+          path: `/api/threads/${encodeURIComponent(tid)}/messages`,
+          body: {
+            role,
+            text,
+            reply_to: replyTo || undefined,
+            meta_json: meta,
+          },
+        },
+        {
+          path: `/threads/${encodeURIComponent(tid)}/messages`,
+          body: {
+            role,
+            text,
+            reply_to: replyTo || undefined,
+            meta_json: meta,
+          },
+        },
+        {
+          path: "/api/messages",
+          body: {
+            thread_id: tid,
+            role,
+            text,
+            reply_to: replyTo || undefined,
+            meta_json: meta,
+          },
+        },
+        {
+          path: "/messages",
+          body: {
+            thread_id: tid,
+            role,
+            text,
+            reply_to: replyTo || undefined,
+            meta_json: meta,
+          },
+        },
+      ],
+    });
+    const entity = normalizeEntity(data, ["message", "data", "node"]);
+    const message = this.normalizeMessage(entity);
+    if (!message.id) throw new Error("GoC addMessage returned no id");
+    return message;
   }
 
   async listResources(threadId, options = {}) {
@@ -673,7 +810,7 @@ export class GocClient {
       ],
     });
     const entity = normalizeEntity(data, ["node", "resource", "data"]);
-    const normalized = this.normalizeResource(entity);
+    const normalized = this.normalizeNode(entity);
     return normalized?.id ? normalized : { id: nid, raw: data };
   }
 

@@ -54,6 +54,27 @@ function normalizePublicSearchCache(raw) {
   return out;
 }
 
+function normalizeAgentStatusMap(raw) {
+  const row = raw && typeof raw === "object" ? raw : {};
+  const out = {};
+  for (const [agentIdRaw, statusRaw] of Object.entries(row)) {
+    const agentId = String(agentIdRaw || "").trim().toLowerCase();
+    if (!agentId) continue;
+    const status = statusRaw && typeof statusRaw === "object" ? statusRaw : {};
+    const state = String(status.state || "").trim().toLowerCase();
+    const normalizedState = ["queued", "running", "done", "error"].includes(state)
+      ? state
+      : "queued";
+    out[agentId] = {
+      state: normalizedState,
+      goal: String(status.goal || "").trim(),
+      started_at: String(status.started_at || status.startedAt || "").trim() || undefined,
+      ended_at: String(status.ended_at || status.endedAt || "").trim() || undefined,
+    };
+  }
+  return out;
+}
+
 function normalizeSession(chatId, raw = {}) {
   const row = asObject(raw);
   const budgetRaw = asObject(row.budget);
@@ -108,6 +129,7 @@ function normalizeSession(chatId, raw = {}) {
     pending_user_messages: pendingUserMessages,
     interrupt,
     dashboard: dashboardMessageId ? { message_id: dashboardMessageId } : null,
+    agent_status: normalizeAgentStatusMap(row.agent_status),
     last_route: row.last_route && typeof row.last_route === "object" ? row.last_route : null,
     public_search_cache: normalizePublicSearchCache(row.public_search_cache),
     updated_at: String(row.updated_at || nowIso()),

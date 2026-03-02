@@ -36,6 +36,7 @@ import { routeWithSupervisor } from "./src/chat/supervisor_router.js";
 import { executeSupervisorActions, isMutatingAction } from "./src/chat/executor.js";
 import { expandDetailContext } from "./src/chat/unfold.js";
 import { ChatRunManager } from "./src/chat/run_manager.js";
+import { GocExecutionGraphRecorder } from "./src/chat/goc_execution_graph.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) { console.error("Missing TELEGRAM_BOT_TOKEN"); process.exit(1); }
@@ -71,6 +72,9 @@ const MAX_PARALLEL_PER_RUN = Number.isFinite(Number(process.env.MAX_PARALLEL_PER
 const INTERRUPT_DEBOUNCE_MS = Number.isFinite(Number(process.env.INTERRUPT_DEBOUNCE_MS))
   ? Math.max(0, Math.floor(Number(process.env.INTERRUPT_DEBOUNCE_MS)))
   : 500;
+const DASHBOARD_EDIT_THROTTLE_MS = Number.isFinite(Number(process.env.DASHBOARD_EDIT_THROTTLE_MS))
+  ? Math.max(200, Math.floor(Number(process.env.DASHBOARD_EDIT_THROTTLE_MS)))
+  : 600;
 const LEGACY_AGENT_MAP = {
   gemini: "researcher",
   codex: "coder",
@@ -453,6 +457,7 @@ async function appendChatMessageToGoc(jobId, {
   kind = "chat_message",
   chatId = "",
   userId = "",
+  replyTo = "",
 } = {}) {
   const cleanJobId = String(jobId || "").trim();
   const cleanText = String(text || "").trim();
@@ -465,23 +470,16 @@ async function appendChatMessageToGoc(jobId, {
       jobDir: runDir(cleanJobId),
       title: `job:${cleanJobId}`,
     });
-    const nowIso = new Date().toISOString();
-    return await client.createResource(map.threadId, {
-      name: `message:${role}@${nowIso}`,
-      summary: clip(cleanText, 3200),
-      text_mode: "plain",
-      raw_text: `${cleanText}\n`,
-      resource_kind: "message",
-      uri: `ddalggak://jobs/${cleanJobId}/messages/${role}`,
-      context_set_id: map.ctxSharedId,
-      auto_activate: true,
-      payload_json: {
-        role: String(role || "").trim().toLowerCase() || "user",
+    return await client.addMessage(map.threadId, {
+      role: String(role || "").trim().toLowerCase() || "user",
+      text: cleanText,
+      reply_to: String(replyTo || "").trim() || undefined,
+      meta_json: {
         kind: String(kind || "chat_message").trim().toLowerCase(),
-        text: cleanText,
+        job_id: cleanJobId,
         chat_id: String(chatId || "").trim() || undefined,
         user_id: String(userId || "").trim() || undefined,
-        ts: nowIso,
+        ts: new Date().toISOString(),
       },
     });
   } catch (e) {
@@ -918,6 +916,7 @@ const queue = [];
 const jobAbortControllers = new Map(); // jobId -> AbortController
 const activeJobByChat = new Map(); // chatId -> jobId
 const lastChatJobByChat = new Map(); // chatId -> last /chat jobId
+const dashboardEditStateByChat = new Map(); // chatId -> { lastEditAtMs, pending, timer, flushing }
 
 function makeCancelledError(jobId) {
   const e = new Error(`Cancelled job ${jobId}`);
@@ -1446,6 +1445,12 @@ function normalizeForceMode(raw) {
   return String(raw || "").trim().toLowerCase() === "work" ? "work" : "normal";
 }
 
+function isWorkLikeMessage(message) {
+  const text = String(message || "").toLowerCase();
+  if (!text) return false;
+  return /만들어|작성|구현|조사|정리|설계|개발|수정|분석|리팩터|코드|work|task|implement|research|design|plan/i.test(text);
+}
+
 function isReadOnlyControlAction(action) {
   const type = String(action?.type || "").trim().toLowerCase();
   return READ_ONLY_CONTROL_ACTION_TYPES.has(type);
@@ -1459,6 +1464,325 @@ function pickRuntimeDefaultAgentId(agents = []) {
   if (nonChatgpt?.id) return String(nonChatgpt.id).trim().toLowerCase();
   const first = rows.find((row) => String(row?.id || "").trim());
   return first?.id ? String(first.id).trim().toLowerCase() : "";
+}
+
+function getActionGoal(action) {
+  if (!action || typeof action !== "object") return "";
+  return String(action.goal || action.prompt || action.task || "").trim();
+}
+
+function buildPlanPreviewLines(actions = []) {
+  const rows = Array.isArray(actions) ? actions : [];
+  const lines = [];
+  for (const action of rows) {
+    const type = String(action?.type || "").trim().toLowerCase();
+    if (type === "run_agent") {
+      const agentId = String(action.agent_id || action.agent || "").trim().toLowerCase() || "unknown";
+      const goal = clip(getActionGoal(action) || "(goal 없음)", 220);
+      lines.push(`- @${agentId}: ${goal}`);
+      continue;
+    }
+    if (type === "spawn_agents") {
+      const children = Array.isArray(action.agents) ? action.agents : [];
+      if (children.length === 0) {
+        lines.push(`- (system) ${chatActionLabel(action)}`);
+        continue;
+      }
+      for (const child of children) {
+        const childId = String(child?.agent_id || child?.agent || "").trim().toLowerCase() || "unknown";
+        const goal = clip(String(child?.goal || child?.prompt || child?.task || "(goal 없음)"), 220);
+        lines.push(`- @${childId}: ${goal}`);
+      }
+      continue;
+    }
+    lines.push(`- (system) ${chatActionLabel(action)}`);
+  }
+  if (lines.length === 0) lines.push("- (system) no actions");
+  return lines;
+}
+
+function buildQueuedAgentStatusFromActions(actions = []) {
+  const rows = Array.isArray(actions) ? actions : [];
+  const out = {};
+  for (const action of rows) {
+    const type = String(action?.type || "").trim().toLowerCase();
+    if (type === "run_agent") {
+      const agentId = String(action.agent_id || action.agent || "").trim().toLowerCase();
+      if (!agentId || out[agentId]) continue;
+      out[agentId] = {
+        state: "queued",
+        goal: getActionGoal(action),
+      };
+      continue;
+    }
+    if (type !== "spawn_agents") continue;
+    const children = Array.isArray(action.agents) ? action.agents : [];
+    for (const child of children) {
+      const agentId = String(child?.agent_id || child?.agent || "").trim().toLowerCase();
+      if (!agentId || out[agentId]) continue;
+      out[agentId] = {
+        state: "queued",
+        goal: String(child?.goal || child?.prompt || child?.task || "").trim(),
+      };
+    }
+  }
+  return out;
+}
+
+function buildAgentStatusLines(agentStatusMap = {}) {
+  const map = agentStatusMap && typeof agentStatusMap === "object" ? agentStatusMap : {};
+  const entries = Object.entries(map);
+  if (entries.length === 0) return ["- (agent 없음)"];
+  const stateEmoji = {
+    queued: "⏳",
+    running: "🏃",
+    done: "✅",
+    error: "❌",
+  };
+  return entries
+    .map(([agentIdRaw, rowRaw]) => {
+      const agentId = String(agentIdRaw || "").trim().toLowerCase();
+      if (!agentId) return "";
+      const row = rowRaw && typeof rowRaw === "object" ? rowRaw : {};
+      const state = String(row.state || "").trim().toLowerCase();
+      const normalizedState = ["queued", "running", "done", "error"].includes(state)
+        ? state
+        : "queued";
+      const emoji = stateEmoji[normalizedState] || "⏳";
+      return `- @${agentId} ${emoji} ${normalizedState}`;
+    })
+    .filter(Boolean);
+}
+
+function buildRoutedDashboardText({ actions = [], agentStatus = {} } = {}) {
+  const planLines = buildPlanPreviewLines(actions);
+  const statusLines = buildAgentStatusLines(agentStatus);
+  return [
+    "🧭 분담(아래) + 상태판(아래)",
+    "🧭 분담",
+    ...planLines,
+    "",
+    "📡 상태",
+    ...statusLines,
+  ].join("\n");
+}
+
+function parseTelegramErrorDescription(error) {
+  return String(error?.response?.body?.description || error?.message || error || "").toLowerCase();
+}
+
+function dashboardEditState(chatId) {
+  const key = String(chatId || "");
+  if (!dashboardEditStateByChat.has(key)) {
+    dashboardEditStateByChat.set(key, {
+      lastEditAtMs: 0,
+      pending: null,
+      timer: null,
+      flushing: false,
+    });
+  }
+  return dashboardEditStateByChat.get(key);
+}
+
+async function applyDashboardUpdateNow(bot, chatId, text, { replyToMessageId = null } = {}) {
+  const session = chatSessionStore.get(chatId);
+  const existingMessageId = Number(session?.dashboard?.message_id || 0);
+  if (existingMessageId > 0) {
+    try {
+      await bot.editMessageText(text, {
+        chat_id: chatId,
+        message_id: existingMessageId,
+      });
+      return existingMessageId;
+    } catch (e) {
+      const desc = parseTelegramErrorDescription(e);
+      if (desc.includes("message is not modified")) return existingMessageId;
+    }
+  }
+
+  const sent = await bot.sendMessage(
+    chatId,
+    text,
+    Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
+      ? { reply_to_message_id: Number(replyToMessageId) }
+      : undefined
+  );
+  const messageId = Number(sent?.message_id || 0);
+  if (messageId > 0) {
+    chatSessionStore.upsert(chatId, {
+      dashboard: {
+        message_id: messageId,
+      },
+    });
+  }
+  return messageId;
+}
+
+async function flushDashboardUpdate(bot, chatId) {
+  const state = dashboardEditState(chatId);
+  if (state.flushing || !state.pending) return;
+  if (state.timer) {
+    clearTimeout(state.timer);
+    state.timer = null;
+  }
+  state.flushing = true;
+  const payload = state.pending;
+  state.pending = null;
+  try {
+    await applyDashboardUpdateNow(bot, chatId, payload.text, {
+      replyToMessageId: payload.replyToMessageId,
+    });
+    state.lastEditAtMs = Date.now();
+  } catch (e) {
+    console.error(`[dashboard] update failed: chat=${chatId} error=${String(e?.message ?? e)}`);
+  } finally {
+    state.flushing = false;
+    if (state.pending) {
+      const elapsed = Date.now() - state.lastEditAtMs;
+      const wait = Math.max(50, DASHBOARD_EDIT_THROTTLE_MS - elapsed);
+      state.timer = setTimeout(() => {
+        state.timer = null;
+        void flushDashboardUpdate(bot, chatId);
+      }, wait);
+    }
+  }
+}
+
+async function upsertDashboardMessage(
+  bot,
+  chatId,
+  text,
+  { replyToMessageId = null, throttle = true } = {}
+) {
+  const state = dashboardEditState(chatId);
+  if (!throttle) {
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    state.pending = null;
+    try {
+      await applyDashboardUpdateNow(bot, chatId, text, { replyToMessageId });
+      state.lastEditAtMs = Date.now();
+    } catch (e) {
+      console.error(`[dashboard] immediate update failed: chat=${chatId} error=${String(e?.message ?? e)}`);
+    }
+    return;
+  }
+
+  state.pending = {
+    text,
+    replyToMessageId,
+  };
+
+  if (state.flushing) return;
+  const elapsed = Date.now() - state.lastEditAtMs;
+  if (elapsed >= DASHBOARD_EDIT_THROTTLE_MS && !state.timer) {
+    await flushDashboardUpdate(bot, chatId);
+    return;
+  }
+  if (!state.timer) {
+    const wait = Math.max(50, DASHBOARD_EDIT_THROTTLE_MS - elapsed);
+    state.timer = setTimeout(() => {
+      state.timer = null;
+      void flushDashboardUpdate(bot, chatId);
+    }, wait);
+  }
+}
+
+async function showRoutingDashboard(bot, chatId, { replyToMessageId = null, throttle = true } = {}) {
+  await upsertDashboardMessage(bot, chatId, "✅ 알겠어. 라우팅 중…", {
+    replyToMessageId,
+    throttle,
+  });
+}
+
+async function showRoutedDashboard(bot, chatId, { throttle = true } = {}) {
+  const session = chatSessionStore.get(chatId);
+  const lastRoute = session?.last_route && typeof session.last_route === "object"
+    ? session.last_route
+    : null;
+  const actions = Array.isArray(lastRoute?.actions) ? lastRoute.actions : [];
+  const agentStatus = session?.agent_status && typeof session.agent_status === "object"
+    ? session.agent_status
+    : {};
+  await upsertDashboardMessage(
+    bot,
+    chatId,
+    buildRoutedDashboardText({
+      actions,
+      agentStatus,
+    }),
+    { throttle }
+  );
+}
+
+function updateAgentStatus(chatId, agentId, patch = {}) {
+  const cleanAgentId = String(agentId || "").trim().toLowerCase();
+  if (!cleanAgentId) return;
+  chatSessionStore.upsert(chatId, (session) => {
+    const currentMap = session?.agent_status && typeof session.agent_status === "object"
+      ? session.agent_status
+      : {};
+    const previous = currentMap[cleanAgentId] && typeof currentMap[cleanAgentId] === "object"
+      ? currentMap[cleanAgentId]
+      : {};
+    const nextRow = {
+      ...previous,
+      ...patch,
+    };
+    if (!nextRow.goal && previous.goal) nextRow.goal = previous.goal;
+    return {
+      ...session,
+      agent_status: {
+        ...currentMap,
+        [cleanAgentId]: nextRow,
+      },
+    };
+  });
+}
+
+function toolInputPreviewFromAction(action, detailContext = "") {
+  const type = String(action?.type || "").trim().toLowerCase();
+  const lines = [
+    `type=${type || "unknown"}`,
+  ];
+  if (action?.agent_id) lines.push(`agent_id=${String(action.agent_id).trim().toLowerCase()}`);
+  if (action?.goal) lines.push(`goal=${clip(String(action.goal), 400)}`);
+  if (type === "spawn_agents") {
+    const children = Array.isArray(action?.agents) ? action.agents : [];
+    if (children.length > 0) {
+      lines.push(`children=${children.map((row) => `@${String(row?.agent_id || "").trim().toLowerCase()}`).filter(Boolean).join(", ")}`);
+    }
+  }
+  if (type === "need_more_detail") {
+    lines.push(`context_set_id=${String(action?.context_set_id || "").trim() || "(shared)"}`);
+  }
+  const detail = String(detailContext || "").trim();
+  if (detail) lines.push(`detail_context=${clip(detail, 220)}`);
+  return lines.join("\n");
+}
+
+function outputPreviewFromResult(result) {
+  if (typeof result === "string") return clip(result, 1800);
+  if (result == null) return "";
+  if (typeof result === "number" || typeof result === "boolean") return String(result);
+  if (Array.isArray(result)) return clip(JSON.stringify(result), 1800);
+  const row = result && typeof result === "object" ? result : {};
+  const direct = String(
+    row.output
+    || row.text
+    || row.summary
+    || row.link
+    || row.message
+    || ""
+  ).trim();
+  if (direct) return clip(direct, 1800);
+  try {
+    return clip(JSON.stringify(row), 1800);
+  } catch {
+    return clip(String(row), 1800);
+  }
 }
 
 function sanitizeSupervisorRoutePlan(
@@ -1482,22 +1806,32 @@ function sanitizeSupervisorRoutePlan(
   let actions = filtered;
   let reason = String(routePlan?.reason || "supervisor route").trim() || "supervisor route";
   if (actions.length === 0) {
-    const fallbackAgent = pickRuntimeDefaultAgentId(agents) || findDefaultChatAgentId();
-    if (fallbackAgent) {
+    if (isWorkLikeMessage(message)) {
       actions = [{
         type: "run_agent",
-        agent_id: fallbackAgent,
-        goal: String(message || "").trim() || "현재 우선순위 작업을 진행해줘.",
+        agent_id: "planner",
+        goal: `사용자 요청을 계획하고 필요한 agent 작업을 제안/수행: ${String(message || "").trim()}`,
         risk: "L1",
       }];
-      reason = `${reason}; filtered_to_work_fallback`;
+      reason = `${reason}; empty_actions_work_like_planner_fallback`;
     } else {
-      actions = [{
-        type: "summarize",
-        hint: "작업 실행 가능한 agent가 없어 summarize로 종료",
-        risk: "L0",
-      }];
-      reason = `${reason}; filtered_to_summary_fallback`;
+      const fallbackAgent = pickRuntimeDefaultAgentId(agents) || findDefaultChatAgentId();
+      if (fallbackAgent) {
+        actions = [{
+          type: "run_agent",
+          agent_id: fallbackAgent,
+          goal: String(message || "").trim() || "현재 우선순위 작업을 진행해줘.",
+          risk: "L1",
+        }];
+        reason = `${reason}; filtered_to_work_fallback`;
+      } else {
+        actions = [{
+          type: "summarize",
+          hint: "작업 실행 가능한 agent가 없어 summarize로 종료",
+          risk: "L0",
+        }];
+        reason = `${reason}; filtered_to_summary_fallback`;
+      }
     }
   }
   return {
@@ -1608,8 +1942,9 @@ function sanitizeChatRoutePlan(routePlan, message) {
     if (!allowChatGPTPlanner && provider === "chatgpt") {
       removedChatGpt += 1;
       continue;
+    } else {
+      filtered.push({ ...action, agent: agentId || action.agent });
     }
-    filtered.push({ ...action, agent: agentId || action.agent });
   }
 
   if (filtered.length > 0) {
@@ -2578,29 +2913,155 @@ function buildSupervisorExecutionCallbacks({
   runtime,
   controller,
   verbose,
+  onAgentStatusChanged = null,
+  executionGraph = null,
 }) {
-  const runSingleAgent = async ({ agentId, goal, detailContext = "" }) => {
+  const runSingleAgent = async ({ agentId, goal, detailContext = "", stepNodeId = "" }) => {
+    const cleanAgentId = String(agentId || "").trim().toLowerCase();
+    const cleanGoal = String(goal || "").trim();
+    if (cleanAgentId) {
+      updateAgentStatus(chatId, cleanAgentId, {
+        state: "running",
+        goal: cleanGoal,
+        started_at: new Date().toISOString(),
+        ended_at: undefined,
+      });
+      if (typeof onAgentStatusChanged === "function") {
+        await onAgentStatusChanged({ chatId, agentId: cleanAgentId, state: "running", throttle: true });
+      }
+    }
+
     const detail = String(detailContext || "").trim();
     const promptSegments = [
-      String(goal || "").trim(),
+      cleanGoal,
       runtime.contextSummary ? `[JOB COMPILED CONTEXT]\n${clip(runtime.contextSummary, 9000)}` : "",
       detail ? `[DETAIL CONTEXT]\n${detail}` : "",
       runtime.globalSummary ? `[GLOBAL MEMORY]\n${clip(runtime.globalSummary, 5000)}` : "",
     ].filter(Boolean);
     const finalPrompt = promptSegments.join("\n\n");
-    return await enqueue(
-      () => executeAgentRun(
-        bot,
-        chatId,
-        jobId,
-        { type: "agent_run", agent: String(agentId || "").trim().toLowerCase(), prompt: finalPrompt },
-        { signal: controller.signal, notify: verbose }
-      ),
-      { jobId, signal: controller.signal, label: `chat_v2_run_${String(agentId || "agent")}` }
-    );
+    try {
+      const result = await enqueue(
+        () => executeAgentRun(
+          bot,
+          chatId,
+          jobId,
+          { type: "agent_run", agent: cleanAgentId, prompt: finalPrompt },
+          { signal: controller.signal, notify: verbose }
+        ),
+        { jobId, signal: controller.signal, label: `chat_v2_run_${String(cleanAgentId || "agent")}` }
+      );
+      if (cleanAgentId) {
+        updateAgentStatus(chatId, cleanAgentId, {
+          state: "done",
+          goal: cleanGoal,
+          ended_at: new Date().toISOString(),
+        });
+        if (typeof onAgentStatusChanged === "function") {
+          await onAgentStatusChanged({ chatId, agentId: cleanAgentId, state: "done", throttle: true });
+        }
+      }
+      if (executionGraph && cleanAgentId && stepNodeId && String(result?.output || "").trim()) {
+        await executionGraph.attachArtifact(String(stepNodeId || "").trim(), {
+          name: `artifact:${cleanAgentId}@${new Date().toISOString()}`,
+          summary: clip(`@${cleanAgentId} output`, 220),
+          text: String(result.output || ""),
+          uri: `ddalggak://jobs/${jobId}/agents/${cleanAgentId}/output`,
+          payload: {
+            kind: "agent_output",
+            agent_id: cleanAgentId,
+            provider: String(result?.provider || "").trim().toLowerCase() || undefined,
+          },
+        });
+      }
+      return result;
+    } catch (e) {
+      if (cleanAgentId) {
+        updateAgentStatus(chatId, cleanAgentId, {
+          state: "error",
+          goal: cleanGoal,
+          ended_at: new Date().toISOString(),
+        });
+        if (typeof onAgentStatusChanged === "function") {
+          await onAgentStatusChanged({ chatId, agentId: cleanAgentId, state: "error", throttle: true });
+        }
+      }
+      throw e;
+    }
   };
 
-  const runSpawnAgents = async ({ action, detailContext }) => {
+  const runActionWithGraph = async ({
+    action,
+    detailContext = "",
+    toolName = "",
+    work,
+    onSuccess = null,
+    onError = null,
+  }) => {
+    const stepNodeId = executionGraph ? executionGraph.getStepNodeId(action) : "";
+    const cleanToolName = String(toolName || action?.type || "action").trim().toLowerCase() || "action";
+    const inputPreview = toolInputPreviewFromAction(action, detailContext);
+    if (executionGraph && stepNodeId) {
+      await executionGraph.markStepRunning(action);
+    }
+    const toolCall = executionGraph
+      ? await executionGraph.startToolCall(stepNodeId, {
+        toolName: cleanToolName,
+        inputPreview,
+        status: "running",
+      })
+      : null;
+    const toolCallNodeId = String(toolCall?.id || "").trim();
+
+    try {
+      const result = await work({ stepNodeId });
+      const outputPreview = outputPreviewFromResult(result);
+      if (executionGraph && stepNodeId) {
+        await executionGraph.finishToolCall(toolCallNodeId, {
+          status: "done",
+          outputPreview,
+        });
+        await executionGraph.recordToolResult({
+          stepNodeId,
+          toolCallNodeId,
+          toolName: cleanToolName,
+          outputPreview,
+          status: "done",
+        });
+        await executionGraph.markStepDone(action, {
+          output: outputPreview,
+        });
+      }
+      if (typeof onSuccess === "function") {
+        await onSuccess({ result, stepNodeId, outputPreview });
+      }
+      return result;
+    } catch (e) {
+      const errText = String(e?.message ?? e);
+      if (executionGraph && stepNodeId) {
+        await executionGraph.finishToolCall(toolCallNodeId, {
+          status: "error",
+          error: errText,
+        });
+        await executionGraph.recordToolResult({
+          stepNodeId,
+          toolCallNodeId,
+          toolName: cleanToolName,
+          outputPreview: errText,
+          status: "error",
+          error: errText,
+        });
+        await executionGraph.markStepError(action, e, {
+          output: errText,
+        });
+      }
+      if (typeof onError === "function") {
+        await onError({ error: e, stepNodeId });
+      }
+      throw e;
+    }
+  };
+
+  const runSpawnAgents = async ({ action, detailContext, parentStepNodeId = "" }) => {
     const children = Array.isArray(action?.agents) ? action.agents : [];
     if (children.length === 0) {
       return {
@@ -2616,6 +3077,15 @@ function buildSupervisorExecutionCallbacks({
     const parentText = String(action?.summary || "").trim()
       || `병렬 실행 시작: ${children.map((row) => `@${String(row?.agent_id || "").trim().toLowerCase()}`).join(", ")}`;
     const parent = await bot.sendMessage(chatId, `🔀 ${parentText}`);
+    const childSteps = executionGraph
+      ? await executionGraph.createSpawnChildSteps({
+        parentAction: action,
+        children,
+      })
+      : [];
+    const childStepByIndex = new Map(
+      childSteps.map((row) => [Number(row.index), row])
+    );
 
     const childResults = [];
     let cursor = 0;
@@ -2627,31 +3097,82 @@ function buildSupervisorExecutionCallbacks({
         const agentId = String(child?.agent_id || "").trim().toLowerCase();
         const goal = String(child?.goal || "").trim();
         if (!agentId || !goal) continue;
+        const childStep = childStepByIndex.get(idx);
+        const childStepNodeId = String(childStep?.node_id || "").trim();
+        if (executionGraph && childStepNodeId) {
+          await executionGraph.markStepNodeRunning(childStepNodeId);
+        }
+        const childToolCall = executionGraph
+          ? await executionGraph.startToolCall(childStepNodeId, {
+            toolName: "run_agent",
+            inputPreview: clip(`@${agentId} ${goal}`, 900),
+            status: "running",
+          })
+          : null;
+        const childToolCallNodeId = String(childToolCall?.id || "").trim();
         try {
           const result = await runSingleAgent({
             agentId,
             goal,
             detailContext,
+            stepNodeId: childStepNodeId,
           });
           const text = `✅ @${agentId} 완료\n${clip(String(result?.output || ""), 3200)}`;
           await bot.sendMessage(chatId, text, {
             reply_to_message_id: parent.message_id,
           });
+          if (executionGraph && childStepNodeId) {
+            const preview = outputPreviewFromResult(result);
+            await executionGraph.finishToolCall(childToolCallNodeId, {
+              status: "done",
+              outputPreview: preview,
+            });
+            await executionGraph.recordToolResult({
+              stepNodeId: childStepNodeId,
+              toolCallNodeId: childToolCallNodeId,
+              toolName: "run_agent",
+              outputPreview: preview,
+              status: "done",
+            });
+            await executionGraph.markStepNodeDone(childStepNodeId, {
+              output: preview,
+            });
+          }
           childResults.push({
             agent_id: agentId,
             status: "ok",
             output: String(result?.output || ""),
             provider: String(result?.provider || ""),
+            step_node_id: childStepNodeId || undefined,
           });
         } catch (e) {
           const errText = `❌ @${agentId} 실패\n${clip(String(e?.message ?? e), 1000)}`;
           await bot.sendMessage(chatId, errText, {
             reply_to_message_id: parent.message_id,
           });
+          if (executionGraph && childStepNodeId) {
+            const preview = String(e?.message ?? e);
+            await executionGraph.finishToolCall(childToolCallNodeId, {
+              status: "error",
+              error: preview,
+            });
+            await executionGraph.recordToolResult({
+              stepNodeId: childStepNodeId,
+              toolCallNodeId: childToolCallNodeId,
+              toolName: "run_agent",
+              outputPreview: preview,
+              status: "error",
+              error: preview,
+            });
+            await executionGraph.markStepNodeError(childStepNodeId, e, {
+              output: preview,
+            });
+          }
           childResults.push({
             agent_id: agentId,
             status: "error",
             error: String(e?.message ?? e),
+            step_node_id: childStepNodeId || undefined,
           });
           if (isCancelledError(e)) throw e;
         }
@@ -2666,6 +3187,27 @@ function buildSupervisorExecutionCallbacks({
 
     const okCount = childResults.filter((row) => row.status === "ok").length;
     const errorCount = childResults.filter((row) => row.status === "error").length;
+    if (executionGraph && parentStepNodeId) {
+      const join = await executionGraph.createJoinStep({
+        parentAction: action,
+        childStepNodeIds: childResults.map((row) => String(row?.step_node_id || "").trim()).filter(Boolean),
+        agentId: "router",
+        goal: "병렬 실행 결과를 결합",
+        summary: `spawn join ok=${okCount}, error=${errorCount}`,
+      });
+      const joinNodeId = String(join?.node_id || "").trim();
+      if (joinNodeId) {
+        await executionGraph.markStepNodeRunning(joinNodeId, {
+          mode: "spawn_join",
+        });
+        await executionGraph.markStepNodeDone(joinNodeId, {
+          output: `ok=${okCount}, error=${errorCount}`,
+          extra: {
+            mode: "spawn_join",
+          },
+        });
+      }
+    }
     return {
       summary: `병렬 실행 완료: ok=${okCount}, error=${errorCount}`,
       children: childResults,
@@ -2674,293 +3216,396 @@ function buildSupervisorExecutionCallbacks({
 
   return {
     runAgent: async ({ action, detailContext }) => {
-      return await runSingleAgent({
-        agentId: String(action.agent_id || "").trim().toLowerCase(),
-        goal: String(action.goal || "").trim(),
+      return await runActionWithGraph({
+        action,
         detailContext,
+        toolName: "run_agent",
+        work: async ({ stepNodeId }) => {
+          return await runSingleAgent({
+            agentId: String(action.agent_id || "").trim().toLowerCase(),
+            goal: String(action.goal || "").trim(),
+            detailContext,
+            stepNodeId,
+          });
+        },
       });
     },
     spawnAgents: async ({ action, detailContext }) => {
-      return await runSpawnAgents({ action, detailContext });
+      return await runActionWithGraph({
+        action,
+        detailContext,
+        toolName: "spawn_agents",
+        work: async ({ stepNodeId }) => {
+          return await runSpawnAgents({
+            action,
+            detailContext,
+            parentStepNodeId: stepNodeId,
+          });
+        },
+      });
     },
     proposeAgent: async ({ action }) => {
-      return await createAgentDraftProposal(bot, chatId, userId, jobId, action);
+      return await runActionWithGraph({
+        action,
+        toolName: "propose_agent",
+        work: async () => {
+          return await createAgentDraftProposal(bot, chatId, userId, jobId, action);
+        },
+      });
     },
     createAgent: async ({ action }) => {
-      if (memoryModeWithFallback() !== "goc") {
-        throw new Error("create_agent requires MEMORY_MODE=goc");
-      }
-      const profile = action?.agent && typeof action.agent === "object" ? action.agent : {};
-      const created = await createAgentProfile(requireGocClient(), {
-        baseDir: jobs.baseDir,
-        profile,
-        format: action?.format || "json",
-        actor: `telegram:${userId}`,
+      return await runActionWithGraph({
+        action,
+        toolName: "create_agent",
+        work: async () => {
+          if (memoryModeWithFallback() !== "goc") {
+            throw new Error("create_agent requires MEMORY_MODE=goc");
+          }
+          const profile = action?.agent && typeof action.agent === "object" ? action.agent : {};
+          const created = await createAgentProfile(requireGocClient(), {
+            baseDir: jobs.baseDir,
+            profile,
+            format: action?.format || "json",
+            actor: `telegram:${userId}`,
+          });
+          await refreshAgentRegistry({ includeCompiled: true });
+          const createdId = String(profile.id || created?.created?.id || "").trim();
+          return {
+            agent_id: createdId,
+            text: createdId
+              ? `✅ agent 생성 완료: @${createdId}`
+              : "✅ agent 생성 완료",
+          };
+        },
       });
-      await refreshAgentRegistry({ includeCompiled: true });
-      const createdId = String(profile.id || created?.created?.id || "").trim();
-      return {
-        agent_id: createdId,
-        text: createdId
-          ? `✅ agent 생성 완료: @${createdId}`
-          : "✅ agent 생성 완료",
-      };
     },
     updateAgent: async ({ action }) => {
-      if (memoryModeWithFallback() !== "goc") {
-        throw new Error("update_agent requires MEMORY_MODE=goc");
-      }
-      const targetAgentId = String(action?.agentId || "").trim().toLowerCase();
-      const updated = await updateAgentProfile(requireGocClient(), {
-        baseDir: jobs.baseDir,
-        agentId: targetAgentId,
-        patch: action?.patch || {},
-        format: action?.format || "json",
-        actor: `telegram:${userId}`,
+      return await runActionWithGraph({
+        action,
+        toolName: "update_agent",
+        work: async () => {
+          if (memoryModeWithFallback() !== "goc") {
+            throw new Error("update_agent requires MEMORY_MODE=goc");
+          }
+          const targetAgentId = String(action?.agentId || "").trim().toLowerCase();
+          const updated = await updateAgentProfile(requireGocClient(), {
+            baseDir: jobs.baseDir,
+            agentId: targetAgentId,
+            patch: action?.patch || {},
+            format: action?.format || "json",
+            actor: `telegram:${userId}`,
+          });
+          await refreshAgentRegistry({ includeCompiled: true });
+          return {
+            agent_id: targetAgentId || String(updated?.created?.id || "").trim(),
+            text: targetAgentId
+              ? `✅ agent 수정 완료: @${targetAgentId}`
+              : "✅ agent 수정 완료",
+          };
+        },
       });
-      await refreshAgentRegistry({ includeCompiled: true });
-      return {
-        agent_id: targetAgentId || String(updated?.created?.id || "").trim(),
-        text: targetAgentId
-          ? `✅ agent 수정 완료: @${targetAgentId}`
-          : "✅ agent 수정 완료",
-      };
     },
     openContext: async ({ action }) => {
-      const target = action.scope === "global" ? "global" : jobId;
-      const info = await buildContextInfo(target, { chatId });
-      return {
-        scope: info.scope,
-        link: info.link,
-        text: info.lines.join("\n"),
-      };
+      return await runActionWithGraph({
+        action,
+        toolName: "open_context",
+        work: async () => {
+          const target = action.scope === "global" ? "global" : jobId;
+          const info = await buildContextInfo(target, { chatId });
+          return {
+            scope: info.scope,
+            link: info.link,
+            text: info.lines.join("\n"),
+          };
+        },
+      });
     },
     needMoreDetail: async ({ action }) => {
-      if (!runtime.map?.ctxSharedId || memoryModeWithFallback() !== "goc") {
-        throw new Error("need_more_detail requires MEMORY_MODE=goc");
-      }
-      const contextSetId = String(action.context_set_id || runtime.map.ctxSharedId).trim() || runtime.map.ctxSharedId;
-      return await expandDetailContext({
-        client: requireGocClient(),
-        contextSetId,
-        nodeIds: action.node_ids || [],
-        depth: action.depth || 1,
-        maxChars: action.max_chars || 7000,
+      return await runActionWithGraph({
+        action,
+        toolName: "need_more_detail",
+        work: async () => {
+          if (!runtime.map?.ctxSharedId || memoryModeWithFallback() !== "goc") {
+            throw new Error("need_more_detail requires MEMORY_MODE=goc");
+          }
+          const contextSetId = String(action.context_set_id || runtime.map.ctxSharedId).trim() || runtime.map.ctxSharedId;
+          return await expandDetailContext({
+            client: requireGocClient(),
+            contextSetId,
+            nodeIds: action.node_ids || [],
+            depth: action.depth || 1,
+            maxChars: action.max_chars || 7000,
+          });
+        },
       });
     },
-    getStatus: async () => {
-      return buildChatStatusCard(chatId, runtime);
+    getStatus: async ({ action }) => {
+      return await runActionWithGraph({
+        action,
+        toolName: "get_status",
+        work: async () => {
+          return buildChatStatusCard(chatId, runtime);
+        },
+      });
     },
     interrupt: async ({ action }) => {
-      const mode = String(action?.mode || "").trim().toLowerCase() === "cancel" ? "cancel" : "replan";
-      requestChatInterrupt(chatId, {
-        mode,
-        reason: String(action?.note || "").trim(),
+      return await runActionWithGraph({
+        action,
+        toolName: "interrupt",
+        work: async () => {
+          const mode = String(action?.mode || "").trim().toLowerCase() === "cancel" ? "cancel" : "replan";
+          requestChatInterrupt(chatId, {
+            mode,
+            reason: String(action?.note || "").trim(),
+          });
+          if (mode === "cancel") {
+            chatSessionStore.upsert(chatId, {
+              pending_user_messages: [],
+              pending_approval: null,
+              state: "idle",
+            });
+          }
+          return {
+            mode,
+            text: mode === "cancel"
+              ? "⛔️ 현재 실행을 중단했어요. 다음 지시를 주세요."
+              : "🔄 현재 실행을 중단하고 새 지시로 재계획할게요.",
+          };
+        },
       });
-      if (mode === "cancel") {
-        chatSessionStore.upsert(chatId, {
-          pending_user_messages: [],
-          pending_approval: null,
-          state: "idle",
-        });
-      }
-      return {
-        mode,
-        text: mode === "cancel"
-          ? "⛔️ 현재 실행을 중단했어요. 다음 지시를 주세요."
-          : "🔄 현재 실행을 중단하고 새 지시로 재계획할게요.",
-      };
     },
-    summarize: async ({ results }) => {
-      const okCount = results.filter((row) => row.status === "ok").length;
-      const errorCount = results.filter((row) => row.status === "error").length;
-      return { text: `실행 완료: ok=${okCount}, error=${errorCount}` };
+    summarize: async ({ action, results }) => {
+      return await runActionWithGraph({
+        action,
+        toolName: "summarize",
+        work: async () => {
+          const okCount = results.filter((row) => row.status === "ok").length;
+          const errorCount = results.filter((row) => row.status === "error").length;
+          return { text: `실행 완료: ok=${okCount}, error=${errorCount}` };
+        },
+      });
     },
     searchPublicAgents: async ({ action }) => {
-      if (memoryModeWithFallback() !== "goc") {
-        throw new Error("search_public_agents requires MEMORY_MODE=goc");
-      }
-      const client = requireGocClient();
-      const allBlueprints = await listPublicBlueprints(client);
-      const filtered = filterPublicBlueprintCandidates(
-        allBlueprints,
-        action.query || "",
-        action.limit || 5
-      );
-      chatSessionStore.upsert(chatId, {
-        public_search_cache: filtered.map((row) => ({
-          blueprint_id: row.blueprint_id,
-          public_node_id: row.public_node_id,
-          agent_id: row.agent_id,
-          title: row.title,
-          tags: row.tags,
-          updated_at: new Date().toISOString(),
-        })),
+      return await runActionWithGraph({
+        action,
+        toolName: "search_public_agents",
+        work: async () => {
+          if (memoryModeWithFallback() !== "goc") {
+            throw new Error("search_public_agents requires MEMORY_MODE=goc");
+          }
+          const client = requireGocClient();
+          const allBlueprints = await listPublicBlueprints(client);
+          const filtered = filterPublicBlueprintCandidates(
+            allBlueprints,
+            action.query || "",
+            action.limit || 5
+          );
+          chatSessionStore.upsert(chatId, {
+            public_search_cache: filtered.map((row) => ({
+              blueprint_id: row.blueprint_id,
+              public_node_id: row.public_node_id,
+              agent_id: row.agent_id,
+              title: row.title,
+              tags: row.tags,
+              updated_at: new Date().toISOString(),
+            })),
+          });
+          return { items: filtered, total: allBlueprints.length };
+        },
       });
-      return { items: filtered, total: allBlueprints.length };
     },
     installAgentBlueprint: async ({ action }) => {
-      if (memoryModeWithFallback() !== "goc") {
-        throw new Error("install_agent_blueprint requires MEMORY_MODE=goc");
-      }
-      if (!runtime.agentsSlot?.threadId || !runtime.agentsSlot?.ctxId) {
-        throw new Error("agents thread/context is not ready");
-      }
-      const client = requireGocClient();
-      const allBlueprints = await listPublicBlueprints(client);
-      const byNode = new Map(allBlueprints.map((row) => [String(row.public_node_id || "").trim(), row]));
-      const byBlueprintId = new Map(allBlueprints.map((row) => [String(row.blueprint_id || "").trim(), row]));
-      const byAgentId = new Map(
-        allBlueprints
-          .map((row) => [String(row.agent_id || "").trim().toLowerCase(), row])
-          .filter((entry) => entry[0])
-      );
+      return await runActionWithGraph({
+        action,
+        toolName: "install_agent_blueprint",
+        work: async () => {
+          if (memoryModeWithFallback() !== "goc") {
+            throw new Error("install_agent_blueprint requires MEMORY_MODE=goc");
+          }
+          if (!runtime.agentsSlot?.threadId || !runtime.agentsSlot?.ctxId) {
+            throw new Error("agents thread/context is not ready");
+          }
+          const client = requireGocClient();
+          const allBlueprints = await listPublicBlueprints(client);
+          const byNode = new Map(allBlueprints.map((row) => [String(row.public_node_id || "").trim(), row]));
+          const byBlueprintId = new Map(allBlueprints.map((row) => [String(row.blueprint_id || "").trim(), row]));
+          const byAgentId = new Map(
+            allBlueprints
+              .map((row) => [String(row.agent_id || "").trim().toLowerCase(), row])
+              .filter((entry) => entry[0])
+          );
 
-      let selected = null;
-      const requestedNode = String(action.public_node_id || "").trim();
-      const requestedBlueprint = String(action.blueprint_id || "").trim();
-      const override = String(action.agent_id_override || "").trim().toLowerCase();
-      if (requestedNode && byNode.has(requestedNode)) selected = byNode.get(requestedNode);
-      if (!selected && requestedBlueprint && byBlueprintId.has(requestedBlueprint)) selected = byBlueprintId.get(requestedBlueprint);
-      if (!selected && override && byAgentId.has(override)) selected = byAgentId.get(override);
-      if (!selected) {
-        const session = chatSessionStore.get(chatId);
-        const cached = resolveInstallCandidateFromSession(session, action);
-        if (cached?.public_node_id && byNode.has(cached.public_node_id)) {
-          selected = byNode.get(cached.public_node_id);
-        } else if (cached?.blueprint_id && byBlueprintId.has(cached.blueprint_id)) {
-          selected = byBlueprintId.get(cached.blueprint_id);
-        } else if (cached?.agent_id && byAgentId.has(cached.agent_id)) {
-          selected = byAgentId.get(cached.agent_id);
-        }
-      }
-      if (!selected && allBlueprints.length === 1) selected = allBlueprints[0];
-      if (!selected) {
-        throw new Error("설치할 blueprint를 특정하지 못했습니다. 먼저 public agent 검색 후 후보를 지정하세요.");
-      }
+          let selected = null;
+          const requestedNode = String(action.public_node_id || "").trim();
+          const requestedBlueprint = String(action.blueprint_id || "").trim();
+          const override = String(action.agent_id_override || "").trim().toLowerCase();
+          if (requestedNode && byNode.has(requestedNode)) selected = byNode.get(requestedNode);
+          if (!selected && requestedBlueprint && byBlueprintId.has(requestedBlueprint)) selected = byBlueprintId.get(requestedBlueprint);
+          if (!selected && override && byAgentId.has(override)) selected = byAgentId.get(override);
+          if (!selected) {
+            const session = chatSessionStore.get(chatId);
+            const cached = resolveInstallCandidateFromSession(session, action);
+            if (cached?.public_node_id && byNode.has(cached.public_node_id)) {
+              selected = byNode.get(cached.public_node_id);
+            } else if (cached?.blueprint_id && byBlueprintId.has(cached.blueprint_id)) {
+              selected = byBlueprintId.get(cached.blueprint_id);
+            } else if (cached?.agent_id && byAgentId.has(cached.agent_id)) {
+              selected = byAgentId.get(cached.agent_id);
+            }
+          }
+          if (!selected && allBlueprints.length === 1) selected = allBlueprints[0];
+          if (!selected) {
+            throw new Error("설치할 blueprint를 특정하지 못했습니다. 먼저 public agent 검색 후 후보를 지정하세요.");
+          }
 
-      const installed = await installBlueprint(client, selected.resource || selected, {
-        agentsThreadId: runtime.agentsSlot.threadId,
-        ctxId: runtime.agentsSlot.ctxId,
-        agentIdOverride: override || "",
+          const installed = await installBlueprint(client, selected.resource || selected, {
+            agentsThreadId: runtime.agentsSlot.threadId,
+            ctxId: runtime.agentsSlot.ctxId,
+            agentIdOverride: override || "",
+          });
+          await refreshAgentRegistry({ includeCompiled: true });
+          tracking.append(jobId, "decisions.md", [
+            "## /chat install_agent_blueprint",
+            `- blueprint_id: ${installed.blueprint_id || selected.blueprint_id || "unknown"}`,
+            `- public_node_id: ${installed.public_node_id || selected.public_node_id || "unknown"}`,
+            `- installed_agent_id: ${installed.agent_id || "unknown"}`,
+            `- created_node: ${installed.created?.id || "unknown"}`,
+          ].join("\n"));
+          return {
+            ...installed,
+            node_id: installed?.created?.id || "",
+          };
+        },
       });
-      await refreshAgentRegistry({ includeCompiled: true });
-      tracking.append(jobId, "decisions.md", [
-        "## /chat install_agent_blueprint",
-        `- blueprint_id: ${installed.blueprint_id || selected.blueprint_id || "unknown"}`,
-        `- public_node_id: ${installed.public_node_id || selected.public_node_id || "unknown"}`,
-        `- installed_agent_id: ${installed.agent_id || "unknown"}`,
-        `- created_node: ${installed.created?.id || "unknown"}`,
-      ].join("\n"));
-      return {
-        ...installed,
-        node_id: installed?.created?.id || "",
-      };
     },
     publishAgent: async ({ action }) => {
-      if (memoryModeWithFallback() !== "goc") {
-        throw new Error("publish_agent requires MEMORY_MODE=goc");
-      }
-      if (!runtime.agentsSlot?.threadId || !runtime.agentsSlot?.ctxId) {
-        throw new Error("agents thread/context is not ready");
-      }
-      const client = requireGocClient();
-      const targetNode = await findLatestAgentProfileNodeForPublish(
-        client,
-        runtime.agentsSlot,
-        {
-          agentNodeId: action.agent_node_id || "",
-          agentId: action.agent_id || "",
-        }
-      );
-      if (!targetNode?.id) {
-        throw new Error("publish 대상 agent_profile node를 찾지 못했습니다.");
-      }
-      const request = await client.createPublishRequest(String(targetNode.id));
-      tracking.append(jobId, "decisions.md", [
-        "## /chat publish_agent",
-        `- source_node_id: ${String(targetNode.id)}`,
-        `- request_id: ${request.request_id || "unknown"}`,
-        "- note: admin approval required",
-      ].join("\n"));
-      return request;
+      return await runActionWithGraph({
+        action,
+        toolName: "publish_agent",
+        work: async () => {
+          if (memoryModeWithFallback() !== "goc") {
+            throw new Error("publish_agent requires MEMORY_MODE=goc");
+          }
+          if (!runtime.agentsSlot?.threadId || !runtime.agentsSlot?.ctxId) {
+            throw new Error("agents thread/context is not ready");
+          }
+          const client = requireGocClient();
+          const targetNode = await findLatestAgentProfileNodeForPublish(
+            client,
+            runtime.agentsSlot,
+            {
+              agentNodeId: action.agent_node_id || "",
+              agentId: action.agent_id || "",
+            }
+          );
+          if (!targetNode?.id) {
+            throw new Error("publish 대상 agent_profile node를 찾지 못했습니다.");
+          }
+          const request = await client.createPublishRequest(String(targetNode.id));
+          tracking.append(jobId, "decisions.md", [
+            "## /chat publish_agent",
+            `- source_node_id: ${String(targetNode.id)}`,
+            `- request_id: ${request.request_id || "unknown"}`,
+            "- note: admin approval required",
+          ].join("\n"));
+          return request;
+        },
+      });
     },
     listAgents: async ({ action }) => {
-      const enabled = normalizeCatalogIds(runtime.agentSelection?.enabled_ids || runtime.agents || []);
-      const disabled = action?.include_disabled === false
-        ? []
-        : normalizeCatalogIds(runtime.agentSelection?.disabled_ids || []);
-      const lines = ["현재 job agent 상태"];
-      lines.push(enabled.length > 0
-        ? `- enabled: ${enabled.map((id) => `@${id}`).join(", ")}`
-        : "- enabled: (none)");
-      if (action?.include_disabled !== false) {
-        lines.push(disabled.length > 0
-          ? `- disabled: ${disabled.map((id) => `@${id}`).join(", ")}`
-          : "- disabled: (none)");
-      }
-      return { text: lines.join("\n") };
+      return await runActionWithGraph({
+        action,
+        toolName: "list_agents",
+        work: async () => {
+          const enabled = normalizeCatalogIds(runtime.agentSelection?.enabled_ids || runtime.agents || []);
+          const disabled = action?.include_disabled === false
+            ? []
+            : normalizeCatalogIds(runtime.agentSelection?.disabled_ids || []);
+          const lines = ["현재 job agent 상태"];
+          lines.push(enabled.length > 0
+            ? `- enabled: ${enabled.map((id) => `@${id}`).join(", ")}`
+            : "- enabled: (none)");
+          if (action?.include_disabled !== false) {
+            lines.push(disabled.length > 0
+              ? `- disabled: ${disabled.map((id) => `@${id}`).join(", ")}`
+              : "- disabled: (none)");
+          }
+          return { text: lines.join("\n") };
+        },
+      });
     },
     listTools: async ({ action }) => {
-      const enabled = normalizeCatalogIds(runtime.toolSelection?.enabled_ids || runtime.tools || []);
-      const disabled = action?.include_disabled === false
-        ? []
-        : normalizeCatalogIds(runtime.toolSelection?.disabled_ids || []);
-      const lines = ["현재 job tool 상태"];
-      lines.push(enabled.length > 0
-        ? `- enabled: ${enabled.join(", ")}`
-        : "- enabled: (none)");
-      if (action?.include_disabled !== false) {
-        lines.push(disabled.length > 0
-          ? `- disabled: ${disabled.join(", ")}`
-          : "- disabled: (none)");
-      }
-      return { text: lines.join("\n") };
-    },
-    updateJobConfigSelection: async ({ op, kind, id }) => {
-      if (memoryModeWithFallback() !== "goc") {
-        throw new Error("selection update requires MEMORY_MODE=goc");
-      }
-      const updated = await updateJobConfigSelection(requireGocClient(), {
-        jobId,
-        op,
-        kind,
-        id,
-        actor: `telegram:${userId}`,
-        agentsCatalog: runtime.agentsCatalog || runtime.agents || [],
-        toolsCatalog: runtime.toolsCatalog || runtime.tools || [],
+      return await runActionWithGraph({
+        action,
+        toolName: "list_tools",
+        work: async () => {
+          const enabled = normalizeCatalogIds(runtime.toolSelection?.enabled_ids || runtime.tools || []);
+          const disabled = action?.include_disabled === false
+            ? []
+            : normalizeCatalogIds(runtime.toolSelection?.disabled_ids || []);
+          const lines = ["현재 job tool 상태"];
+          lines.push(enabled.length > 0
+            ? `- enabled: ${enabled.join(", ")}`
+            : "- enabled: (none)");
+          if (action?.include_disabled !== false) {
+            lines.push(disabled.length > 0
+              ? `- disabled: ${disabled.join(", ")}`
+              : "- disabled: (none)");
+          }
+          return { text: lines.join("\n") };
+        },
       });
-      const normalized = normalizeSupervisorJobConfig(
-        updated.config || {},
-        {
-          agentsCatalog: runtime.agentsCatalog || runtime.agents || [],
-          toolsCatalog: runtime.toolsCatalog || runtime.tools || [],
-        }
-      );
-      const enabledAgentSet = new Set(
-        (Array.isArray(normalized.enabledAgentIds) ? normalized.enabledAgentIds : [])
-          .map((entry) => String(entry || "").trim().toLowerCase())
-          .filter(Boolean)
-      );
-      const enabledToolSet = new Set(
-        (Array.isArray(normalized.enabledToolIds) ? normalized.enabledToolIds : [])
-          .map((entry) => String(entry || "").trim().toLowerCase())
-          .filter(Boolean)
-      );
-      runtime.jobConfig = normalized.configNormalized;
-      runtime.enabledAgentIds = normalized.enabledAgentIds;
-      runtime.enabledToolIds = normalized.enabledToolIds;
-      runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
-        .filter((agent) => enabledAgentSet.has(String(agent?.id || "").trim().toLowerCase()));
-      runtime.tools = (Array.isArray(runtime.toolsCatalog) ? runtime.toolsCatalog : [])
-        .filter((tool) => enabledToolSet.has(String(tool?.id || "").trim().toLowerCase()));
-      runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
-      runtime.toolSelection = summarizeSelectionState({ catalog: runtime.toolsCatalog || [], enabled: runtime.tools });
-      return {
-        ...updated,
-        enabled_agent_ids: runtime.enabledAgentIds,
-        enabled_tool_ids: runtime.enabledToolIds,
-      };
+    },
+    updateJobConfigSelection: async ({ action, op, kind, id }) => {
+      return await runActionWithGraph({
+        action,
+        toolName: action?.type || "update_job_config_selection",
+        work: async () => {
+          if (memoryModeWithFallback() !== "goc") {
+            throw new Error("selection update requires MEMORY_MODE=goc");
+          }
+          const updated = await updateJobConfigSelection(requireGocClient(), {
+            jobId,
+            op,
+            kind,
+            id,
+            actor: `telegram:${userId}`,
+            agentsCatalog: runtime.agentsCatalog || runtime.agents || [],
+            toolsCatalog: runtime.toolsCatalog || runtime.tools || [],
+          });
+          const normalized = normalizeSupervisorJobConfig(
+            updated.config || {},
+            {
+              agentsCatalog: runtime.agentsCatalog || runtime.agents || [],
+              toolsCatalog: runtime.toolsCatalog || runtime.tools || [],
+            }
+          );
+          const enabledAgentSet = new Set(
+            (Array.isArray(normalized.enabledAgentIds) ? normalized.enabledAgentIds : [])
+              .map((entry) => String(entry || "").trim().toLowerCase())
+              .filter(Boolean)
+          );
+          const enabledToolSet = new Set(
+            (Array.isArray(normalized.enabledToolIds) ? normalized.enabledToolIds : [])
+              .map((entry) => String(entry || "").trim().toLowerCase())
+              .filter(Boolean)
+          );
+          runtime.jobConfig = normalized.configNormalized;
+          runtime.enabledAgentIds = normalized.enabledAgentIds;
+          runtime.enabledToolIds = normalized.enabledToolIds;
+          runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
+            .filter((agent) => enabledAgentSet.has(String(agent?.id || "").trim().toLowerCase()));
+          runtime.tools = (Array.isArray(runtime.toolsCatalog) ? runtime.toolsCatalog : [])
+            .filter((tool) => enabledToolSet.has(String(tool?.id || "").trim().toLowerCase()));
+          runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
+          runtime.toolSelection = summarizeSelectionState({ catalog: runtime.toolsCatalog || [], enabled: runtime.tools });
+          return {
+            ...updated,
+            enabled_agent_ids: runtime.enabledAgentIds,
+            enabled_tool_ids: runtime.enabledToolIds,
+          };
+        },
+      });
     },
   };
 }
@@ -3002,6 +3647,7 @@ async function runSupervisorChat(
     state: "routing",
     pending_approval: null,
     interrupt: null,
+    agent_status: {},
   });
 
   if (!createdNewJob) {
@@ -3012,7 +3658,7 @@ async function runSupervisorChat(
       telegram_message_id: telegramMessageId || undefined,
     });
   }
-  await appendChatMessageToGoc(currentJobId, {
+  const userMessageGoc = await appendChatMessageToGoc(currentJobId, {
     role: "user",
     text: message,
     kind: inputKind || "chat_message",
@@ -3022,11 +3668,34 @@ async function runSupervisorChat(
 
   const controller = resetJobAbortController(currentJobId);
   activeJobByChat.set(chatKey, currentJobId);
+  let executionGraph = null;
 
   try {
     const runtime = await loadSupervisorRuntime(currentJobId, {
       chatMeta: chatInfo,
     });
+    executionGraph = (
+      memoryModeWithFallback() === "goc"
+      && runtime?.map?.threadId
+      && runtime?.map?.ctxSharedId
+    )
+      ? new GocExecutionGraphRecorder({
+        client: requireGocClient(),
+        threadId: runtime.map.threadId,
+        contextSetId: runtime.map.ctxSharedId,
+        runId: `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
+        chatId: String(chatId || ""),
+        jobId: String(currentJobId || ""),
+        logger: (line) => jobs.log(currentJobId, line),
+      })
+      : null;
+    if (executionGraph) {
+      await executionGraph.startRun({
+        userMessageNodeId: String(userMessageGoc?.id || "").trim(),
+        userText: message,
+      });
+    }
+    await showRoutingDashboard(bot, chatId, { throttle: false });
     const rawRoutePlan = await routeWithSupervisor(message, {
       agents: runtime.agents,
       tools: runtime.tools,
@@ -3046,15 +3715,21 @@ async function runSupervisorChat(
       allowReadOnlyControl: false,
       forceMode: cleanForceMode,
     });
+    if (executionGraph) {
+      await executionGraph.queueMainSteps(Array.isArray(routePlan.actions) ? routePlan.actions : []);
+    }
+    const queuedAgentStatus = buildQueuedAgentStatusFromActions(routePlan.actions);
 
     chatSessionStore.upsert(chatId, {
       state: "executing",
+      agent_status: queuedAgentStatus,
       last_route: {
         reason: routePlan.reason,
         actions: Array.isArray(routePlan.actions) ? routePlan.actions : [],
         final_response_style: routePlan.final_response_style || runtime.jobConfig?.final_response_style || "concise",
       },
     });
+    await showRoutedDashboard(bot, chatId, { throttle: false });
 
     if (verbose) {
       await bot.sendMessage(chatId, [
@@ -3083,8 +3758,13 @@ async function runSupervisorChat(
         runtime,
         controller,
         verbose,
+        onAgentStatusChanged: async ({ throttle = true } = {}) => {
+          await showRoutedDashboard(bot, chatId, { throttle });
+        },
+        executionGraph,
       }),
     });
+    await showRoutedDashboard(bot, chatId, { throttle: false });
 
     tracking.append(currentJobId, "decisions.md", [
       "## /chat supervisor routing",
@@ -3116,6 +3796,12 @@ async function runSupervisorChat(
         `- reason: ${execution.pendingApproval.reason}`,
         `- action: ${chatActionLabel(execution.pendingApproval.action)}`,
       ].join("\n"));
+      if (executionGraph) {
+        await executionGraph.finishRun({
+          status: "await_user",
+          summary: execution.pendingApproval.reason || "approval required",
+        });
+      }
     }
 
     const contextOutputs = (Array.isArray(execution.outputs) ? execution.outputs : [])
@@ -3156,7 +3842,14 @@ async function runSupervisorChat(
       kind: execution.pendingApproval ? "chat_reply_pending_approval" : "chat_reply",
       chatId,
       userId,
+      replyTo: String(userMessageGoc?.id || "").trim(),
     });
+    if (executionGraph && !execution.pendingApproval) {
+      await executionGraph.finishRun({
+        status: "done",
+        summary: clip(replyText, 900),
+      });
+    }
     if (execution.pendingApproval?.id) {
       const prompt = pendingPrompt || buildPendingApprovalPrompt(execution.pendingApproval);
       await bot.sendMessage(
@@ -3170,6 +3863,43 @@ async function runSupervisorChat(
       );
     }
     return { routePlan, execution, jobId: currentJobId };
+  } catch (e) {
+    if (executionGraph) {
+      try {
+        await executionGraph.finishRun({
+          status: "error",
+          error: String(e?.message ?? e),
+          summary: "supervisor run failed",
+        });
+      } catch {}
+    } else if (memoryModeWithFallback() === "goc") {
+      try {
+        const runtime = await loadSupervisorRuntime(currentJobId, {
+          chatMeta: chatInfo,
+        });
+        if (runtime?.map?.threadId && runtime?.map?.ctxSharedId) {
+          executionGraph = new GocExecutionGraphRecorder({
+            client: requireGocClient(),
+            threadId: runtime.map.threadId,
+            contextSetId: runtime.map.ctxSharedId,
+            runId: `run_err_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+            chatId: String(chatId || ""),
+            jobId: String(currentJobId || ""),
+            logger: (line) => jobs.log(currentJobId, line),
+          });
+          await executionGraph.startRun({
+            userMessageNodeId: String(userMessageGoc?.id || "").trim(),
+            userText: message,
+          });
+          await executionGraph.finishRun({
+            status: "error",
+            error: String(e?.message ?? e),
+            summary: "supervisor run failed",
+          });
+        }
+      } catch {}
+    }
+    throw e;
   } finally {
     if (activeJobByChat.get(chatKey) === currentJobId) activeJobByChat.delete(chatKey);
     jobAbortControllers.delete(currentJobId);
@@ -3695,10 +4425,11 @@ const chatRunManager = new ChatRunManager({
     return requestChatInterrupt(chatId, { mode, reason });
   },
   onAck: async ({ chatId, mode }) => {
-    const text = mode === "cancel"
-      ? "⛔️ 중단했어요. 다음 지시를 주세요."
-      : "🔄 변경 사항을 반영하기 위해 현재 실행을 중단하고 재계획할게요.";
-    await bot.sendMessage(chatId, text);
+    if (mode === "cancel") {
+      await upsertDashboardMessage(bot, chatId, "⛔️ 중단했어요. 다음 지시를 주세요.", { throttle: false });
+      return;
+    }
+    await showRoutingDashboard(bot, chatId, { throttle: false });
   },
   onRunError: async ({ chatId, error }) => {
     if (isCancelledError(error)) return;
@@ -3883,15 +4614,38 @@ bot.on("callback_query", async (q) => {
       const runtime = await loadSupervisorRuntime(pendingJobId, {
         chatMeta: { chat_id: String(chatId || "") },
       });
+      const resumeExecutionGraph = (
+        memoryModeWithFallback() === "goc"
+        && runtime?.map?.threadId
+        && runtime?.map?.ctxSharedId
+      )
+        ? new GocExecutionGraphRecorder({
+          client: requireGocClient(),
+          threadId: runtime.map.threadId,
+          contextSetId: runtime.map.ctxSharedId,
+          runId: `run_resume_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+          chatId: String(chatId || ""),
+          jobId: String(pendingJobId || ""),
+          logger: (line) => jobs.log(pendingJobId, line),
+        })
+        : null;
       const controller = resetJobAbortController(pendingJobId);
       const chatKey = String(chatId);
       activeJobByChat.set(chatKey, pendingJobId);
       rememberLastChatJob(chatId, pendingJobId);
+      const resumedAgentStatus = buildQueuedAgentStatusFromActions(resumedActions);
       chatSessionStore.upsert(chatId, {
         jobId: pendingJobId,
         state: "executing",
         pending_approval: null,
+        agent_status: resumedAgentStatus,
+        last_route: {
+          reason: `resume_after_approval:${approvalId}`,
+          actions: resumedActions,
+          final_response_style: runtime.jobConfig?.final_response_style || "concise",
+        },
       });
+      await showRoutedDashboard(bot, chatId, { throttle: false });
 
       try {
         const resumePlan = {
@@ -3899,6 +4653,12 @@ bot.on("callback_query", async (q) => {
           actions: resumedActions,
           final_response_style: runtime.jobConfig?.final_response_style || "concise",
         };
+        if (resumeExecutionGraph) {
+          await resumeExecutionGraph.startRun({
+            userText: String(pending.original_user_text || "승인된 액션 재개"),
+          });
+          await resumeExecutionGraph.queueMainSteps(resumedActions);
+        }
         const resumedExecution = await executeSupervisorActions({
           chatId,
           userId,
@@ -3918,8 +4678,13 @@ bot.on("callback_query", async (q) => {
             runtime,
             controller,
             verbose: CHAT_VERBOSE,
+            onAgentStatusChanged: async ({ throttle = true } = {}) => {
+              await showRoutedDashboard(bot, chatId, { throttle });
+            },
+            executionGraph: resumeExecutionGraph,
           }),
         });
+        await showRoutedDashboard(bot, chatId, { throttle: false });
 
         const prevDone = pending.already_done && typeof pending.already_done === "object"
           ? pending.already_done
@@ -3954,6 +4719,12 @@ bot.on("callback_query", async (q) => {
         ].join("\n"));
 
         if (resumedExecution.pendingApproval?.id) {
+          if (resumeExecutionGraph) {
+            await resumeExecutionGraph.finishRun({
+              status: "await_user",
+              summary: resumedExecution.pendingApproval.reason || "approval required",
+            });
+          }
           chatSessionStore.upsert(chatId, {
             jobId: pendingJobId,
             state: "awaiting_approval",
@@ -3980,12 +4751,27 @@ bot.on("callback_query", async (q) => {
             }
           );
         } else {
+          if (resumeExecutionGraph) {
+            await resumeExecutionGraph.finishRun({
+              status: "done",
+              summary: clip(replyText, 900),
+            });
+          }
           chatSessionStore.upsert(chatId, {
             jobId: pendingJobId,
             state: "idle",
             pending_approval: null,
           });
         }
+      } catch (e) {
+        if (resumeExecutionGraph) {
+          await resumeExecutionGraph.finishRun({
+            status: "error",
+            error: String(e?.message ?? e),
+            summary: "approval resume failed",
+          });
+        }
+        throw e;
       } finally {
         if (activeJobByChat.get(chatKey) === pendingJobId) activeJobByChat.delete(chatKey);
         jobAbortControllers.delete(pendingJobId);
@@ -4189,6 +4975,10 @@ bot.on("message", async (msg) => {
       });
       return;
     }
+    await showRoutingDashboard(bot, chatId, {
+      replyToMessageId: msg.message_id,
+      throttle: false,
+    });
     await chatRunManager.handleIncoming({
       chatId,
       userId,
@@ -4408,6 +5198,10 @@ bot.on("message", async (msg) => {
 
     try {
       if (!parsed.debug) {
+        await showRoutingDashboard(bot, chatId, {
+          replyToMessageId: msg.message_id,
+          throttle: false,
+        });
         await chatRunManager.handleIncoming({
           chatId,
           userId,
@@ -4422,6 +5216,10 @@ bot.on("message", async (msg) => {
         });
         return;
       }
+      await showRoutingDashboard(bot, chatId, {
+        replyToMessageId: msg.message_id,
+        throttle: false,
+      });
       await runSupervisorChat(bot, chatId, userId, message, {
         debug: parsed.debug,
         chatInfo: {
