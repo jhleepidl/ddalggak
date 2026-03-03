@@ -338,7 +338,8 @@ function isTelegramWebAppHttpsError(error) {
 function buildGocUiLink({ threadId, ctxId, token = "", base = "", withToken = null }) {
   const resolvedBase = String(base || resolveGocUiBase() || "").trim().replace(/\/+$/, "");
   if (!resolvedBase) throw new Error("Missing GOC_UI_BASE (or GOC_UI_PUBLIC_BASE)");
-  const query = `${resolvedBase}?thread=${encodeURIComponent(String(threadId || ""))}&ctx=${encodeURIComponent(String(ctxId || ""))}`;
+  const baseForQuery = resolvedBase.endsWith("/") ? resolvedBase : `${resolvedBase}/`;
+  const query = `${baseForQuery}?thread=${encodeURIComponent(String(threadId || ""))}&ctx=${encodeURIComponent(String(ctxId || ""))}`;
   const useToken = typeof withToken === "boolean"
     ? withToken
     : (GOC_UI_LINK_MODE === "bearer_token");
@@ -4207,7 +4208,9 @@ async function createAgentDraftProposal(bot, chatId, userId, jobId, action) {
       `provider/model=${providerModel}`,
       `prompt_preview=${promptPreview}`,
       `draft_node=${draftNodeId || "unknown"}`,
-      "승인하면 agent_profile이 registry에 추가되고, 현재 job participants에 반영됩니다.",
+      jobId
+        ? `승인하면 agent_profile이 registry에 추가되고, job_id=${String(jobId).trim()} participants에 반영됩니다.`
+        : "승인하면 agent_profile이 registry에 추가됩니다. (job_id 미확인 시 participants 반영 생략)",
     ].join("\n"),
     {
       reply_markup: {
@@ -4229,7 +4232,6 @@ async function findLatestDraftByAgentId(client, agentId) {
   const slot = await ensureAgentsThread(client, { baseDir: jobs.baseDir });
   const resources = await client.listResources(slot.threadId, {
     resourceKind: "agent_profile_draft",
-    contextSetId: slot.ctxId,
   });
   const ordered = sortResourcesByCreatedAt(resources);
 
@@ -4253,16 +4255,50 @@ async function findDraftByNodeId(client, draftNodeId) {
   const key = String(draftNodeId || "").trim();
   if (!key) return null;
   const slot = await ensureAgentsThread(client, { baseDir: jobs.baseDir });
-  const resources = await client.listResources(slot.threadId, {
-    resourceKind: "agent_profile_draft",
-    contextSetId: slot.ctxId,
-  });
-  const row = (Array.isArray(resources) ? resources : [])
-    .find((entry) => String(entry?.id || "").trim() === key);
-  if (!row) return null;
-  const payload = row?.payload && typeof row.payload === "object" ? row.payload : {};
-  const draft = parseStructuredFromResource(row, "agent_profile_draft") || parseStructuredFromResource(row, "agent_profile");
-  return { slot, resource: row, payload, draft };
+  let node = null;
+  try {
+    node = await client.getNode(key);
+  } catch (e) {
+    return {
+      slot,
+      resource: null,
+      payload: {},
+      draft: null,
+      lookupError: `getNode failed: ${String(e?.message ?? e)}`,
+    };
+  }
+  const row = typeof client.normalizeResource === "function"
+    ? client.normalizeResource(node)
+    : (node && typeof node === "object" ? node : {});
+  const resource = row && typeof row === "object"
+    ? {
+      ...row,
+      id: String(row.id || key).trim(),
+    }
+    : { id: key };
+  const payload = resource?.payload && typeof resource.payload === "object" ? resource.payload : {};
+  const fallbackKind = payload?.agent_profile_draft && typeof payload.agent_profile_draft === "object"
+    ? "agent_profile_draft"
+    : "";
+  const kind = String(
+    resource.resourceKind
+    || node?.resource_kind
+    || node?.resourceKind
+    || node?.payload?.resource_kind
+    || node?.payload?.resourceKind
+    || fallbackKind
+  ).trim().toLowerCase();
+  if (kind !== "agent_profile_draft") {
+    return {
+      slot,
+      resource: null,
+      payload: {},
+      draft: null,
+      lookupError: `node kind mismatch: ${kind || "unknown"}`,
+    };
+  }
+  const draft = parseStructuredFromResource(resource, "agent_profile_draft") || parseStructuredFromResource(resource, "agent_profile");
+  return { slot, resource, payload, draft };
 }
 
 async function appendParticipantToJobConfig(client, { jobId, agentId, actor = "" }) {
@@ -7633,12 +7669,16 @@ bot.on("callback_query", async (q) => {
         ? await findDraftByNodeId(client, draftNodeId)
         : await findLatestDraftByAgentId(client, legacyAgentId);
       if (!found?.resource) {
-        await bot.answerCallbackQuery(q.id, { text: "draft 없음" });
+        await bot.answerCallbackQuery(q.id, { text: "draft lookup failed" });
+        const slotDebug = found?.slot
+          ? `\nslot_thread=${String(found.slot.threadId || "")}\nslot_ctx=${String(found.slot.ctxId || "")}`
+          : "";
+        const reasonDebug = found?.lookupError ? `\nreason=${String(found.lookupError || "")}` : "";
         await bot.sendMessage(
           chatId,
           draftNodeId
-            ? `draft를 찾지 못했습니다. draft_node=${draftNodeId}`
-            : `draft를 찾지 못했습니다. agent_id=${legacyAgentId}`
+            ? `draft lookup failed (nodeId exists?)\ndraft_node=${draftNodeId}${reasonDebug}${slotDebug}`
+            : `draft lookup failed (agent_id)\nagent_id=${legacyAgentId}${reasonDebug}${slotDebug}`
         );
         return;
       }
@@ -7678,12 +7718,40 @@ bot.on("callback_query", async (q) => {
       const agentId = String(draftProfile.id || "").trim().toLowerCase();
       const providerModel = `${String(draftProfile.provider || "gemini").trim() || "gemini"}/${String(draftProfile.model || draftProfile.provider || "gemini").trim() || "gemini"}`;
       const namePreview = clip(String(draftProfile.name || agentId), 120);
+      const descriptionPreview = clip(
+        String(draftProfile.description || "")
+          .split(/\r?\n/)
+          .map((line) => String(line || "").trim())
+          .filter(Boolean)
+          .slice(0, 2)
+          .join(" / "),
+        220
+      ) || "(none)";
+      const promptPreview = clip(
+        String(draftProfile.prompt || "")
+          .split(/\r?\n/)
+          .map((line) => String(line || "").trim())
+          .filter(Boolean)
+          .join(" "),
+        360
+      ) || "(none)";
       const draftJobId = String(found.payload?.job_id || resolveCurrentJobIdForChat(chatId) || "").trim();
       const draftNode = String(found.resource?.id || draftNodeId || "").trim() || "unknown";
+      const approvalEffect = draftJobId
+        ? `승인하면 registry에 agent_profile 생성 + job_id=${draftJobId} participants에 추가됩니다.`
+        : "승인하면 registry에 agent_profile 생성됩니다. (job_id 미확인: participants 반영 생략)";
 
       if (isApprove) {
         await bot.answerCallbackQuery(q.id, { text: `approve ${agentId}` });
-        await bot.sendMessage(chatId, `✅ 승인 반영 중… (agent_id=${agentId}, name=${namePreview}, provider/model=${providerModel})`);
+        await bot.sendMessage(chatId, [
+          "✅ 승인 반영 중…",
+          `agent_id=${agentId}`,
+          `name=${namePreview}`,
+          `provider/model=${providerModel}`,
+          `description=${descriptionPreview}`,
+          `prompt_preview=${promptPreview}`,
+          approvalEffect,
+        ].join("\n"));
         const created = await createAgentProfile(client, {
           baseDir: jobs.baseDir,
           profile: draftProfile,
@@ -7727,8 +7795,11 @@ bot.on("callback_query", async (q) => {
           `agent_id=${agentId}`,
           `name=${namePreview}`,
           `provider/model=${providerModel}`,
+          `description=${descriptionPreview}`,
+          `prompt_preview=${promptPreview}`,
           `draft_node=${draftNode}`,
           `agent_profile_node=${created?.created?.id || "unknown"}`,
+          approvalEffect,
           draftJobId
             ? `job_id=${draftJobId} participants 반영=${participantsApplied ? "yes" : "failed"}`
             : "job_id 정보를 찾지 못해 participants 반영은 생략",
