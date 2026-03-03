@@ -146,6 +146,30 @@ export class ChatRunManager {
     });
   }
 
+  clearInterruptState(chatId, {
+    clearPending = true,
+    clearApproval = false,
+    state = "",
+    jobId = "",
+  } = {}) {
+    const slot = this._slot(chatId);
+    slot.nextInputKind = null;
+    slot.nextForceMode = "normal";
+    const cleanState = String(state || "").trim();
+    const cleanJobId = String(jobId || "").trim();
+    this.sessionStore.upsert(chatId, (session) => {
+      const next = {
+        ...session,
+        interrupt: null,
+      };
+      if (clearPending) next.pending_user_messages = [];
+      if (clearApproval) next.pending_approval = null;
+      if (cleanState) next.state = cleanState;
+      if (cleanJobId) next.jobId = cleanJobId;
+      return next;
+    });
+  }
+
   async _ack(chatId, mode, reason) {
     if (typeof this.onAck !== "function") return;
     const slot = this._slot(chatId);

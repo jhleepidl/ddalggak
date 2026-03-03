@@ -235,6 +235,8 @@ export async function executeSupervisorActions({
       if (interruptBefore.mode === "cancel") {
         throw makeCancelledError(interruptBefore.reason || `interrupt(cancel) before ${label}`);
       }
+      blockedIndex = i;
+      remainingActions = actions.slice(i);
       interruptedByReplan = true;
       results.push({
         label: "interrupt",
@@ -708,6 +710,8 @@ export async function executeSupervisorActions({
         });
         results.push({ label, status: "ok", note: `mode=${mode}` });
         usedActions += 1;
+        blockedIndex = i;
+        remainingActions = actions.slice(i + 1);
         interruptedByReplan = true;
         break;
       }
@@ -748,6 +752,8 @@ export async function executeSupervisorActions({
       if (interruptAfter.mode === "cancel") {
         throw makeCancelledError(interruptAfter.reason || `interrupt(cancel) after ${label}`);
       }
+      blockedIndex = i;
+      remainingActions = actions.slice(i + 1);
       interruptedByReplan = true;
       results.push({
         label: "interrupt",

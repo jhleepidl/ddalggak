@@ -4308,12 +4308,7 @@ async function appendParticipantToJobConfig(client, { jobId, agentId, actor = ""
     title: `job:${jobId}`,
   });
 
-  const resources = await listActiveResourcesByKind(client, {
-    threadId: map.threadId,
-    ctxId: map.ctxSharedId,
-    resourceKind: "job_config",
-  });
-  const latest = resources[resources.length - 1] || null;
+  const latest = await listLatestResourceByKind(client, map.threadId, "job_config");
   const currentRaw = latest ? parseStructuredFromResource(latest, "job_config") : {};
   const normalizedCurrent = normalizeSupervisorJobConfig(
     currentRaw || { job_id: String(jobId || "").trim() },
@@ -4406,12 +4401,7 @@ async function updateJobConfigSelection(client, {
     jobDir: runDir(cleanJobId),
     title: `job:${cleanJobId}`,
   });
-  const resources = await listActiveResourcesByKind(client, {
-    threadId: map.threadId,
-    ctxId: map.ctxSharedId,
-    resourceKind: "job_config",
-  });
-  const latest = resources[resources.length - 1] || null;
+  const latest = await listLatestResourceByKind(client, map.threadId, "job_config");
   const currentRaw = latest ? parseStructuredFromResource(latest, "job_config") : null;
   const normalized = normalizeSupervisorJobConfig(
     currentRaw || { job_id: cleanJobId },
@@ -7387,10 +7377,20 @@ bot.on("callback_query", async (q) => {
       const resumeUserText = String(pending.original_user_text || "승인된 액션 재개");
       let resumeFinalAssistantText = "";
       const resumedAgentStatus = buildQueuedAgentStatusFromActions(resumedActions);
+      if (chatRunManager && typeof chatRunManager.clearInterruptState === "function") {
+        chatRunManager.clearInterruptState(chatId, {
+          jobId: pendingJobId,
+          clearPending: true,
+          clearApproval: true,
+          state: "executing",
+        });
+      }
       chatSessionStore.upsert(chatId, {
         jobId: pendingJobId,
         state: "executing",
         pending_approval: null,
+        interrupt: null,
+        pending_user_messages: [],
         agent_status: resumedAgentStatus,
         last_route: {
           reason: `resume_after_approval:${approvalId}`,
@@ -7506,6 +7506,25 @@ bot.on("callback_query", async (q) => {
             ...(Array.isArray(resumedExecution.outputs) ? resumedExecution.outputs : []),
           ],
         };
+        const resumeResultRows = Array.isArray(resumedExecution.results)
+          ? resumedExecution.results
+          : [];
+        const resumeRemainingActions = Array.isArray(resumedExecution.remaining_actions)
+          ? resumedExecution.remaining_actions
+          : [];
+        const interruptedDuringResume = resumeResultRows.some((row) => {
+          const label = String(row?.label || "").trim().toLowerCase();
+          const status = String(row?.status || "").trim().toLowerCase();
+          const note = String(row?.note || "").trim().toLowerCase();
+          return label === "interrupt" || (status === "skip" && note.includes("replan requested"));
+        }) || (!resumedExecution.pendingApproval && resumeRemainingActions.length > 0);
+        if (interruptedDuringResume && resumeExecutionGraph && typeof resumeExecutionGraph.markStepSkipped === "function") {
+          for (const action of resumeRemainingActions) {
+            await resumeExecutionGraph.markStepSkipped(action, {
+              reason: "interrupted_by_replan",
+            });
+          }
+        }
         const summaryPlan = session.last_route && typeof session.last_route === "object"
           ? session.last_route
           : resumePlan;
@@ -7521,13 +7540,14 @@ bot.on("callback_query", async (q) => {
           `- approval_id: ${approvalId}`,
           `- resumed_actions: ${resumedActions.map((row) => chatActionLabel(row)).join(" -> ")}`,
           `- pending_after_resume: ${resumedExecution.pendingApproval ? "yes" : "no"}`,
+          `- interrupted_during_resume: ${interruptedDuringResume ? "yes" : "no"}`,
           `- approved_by: telegram:${userId}`,
         ].join("\n"));
         await bot.sendMessage(
           chatId,
           resumedExecution.pendingApproval
             ? "✅ 승인 적용 완료 (추가 승인 필요)"
-            : "✅ 승인 적용 완료",
+            : (interruptedDuringResume ? "⚠️ 승인 적용 중 중단됨" : "✅ 승인 적용 완료"),
           Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
             ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
             : undefined
@@ -7567,6 +7587,34 @@ bot.on("callback_query", async (q) => {
                 inline_keyboard: prompt.keyboard,
               },
             }
+          );
+        } else if (interruptedDuringResume) {
+          if (resumeExecutionGraph) {
+            await resumeExecutionGraph.finishRun({
+              status: "await_user",
+              summary: "interrupted during resume",
+            });
+          }
+          if (chatRunManager && typeof chatRunManager.clearInterruptState === "function") {
+            chatRunManager.clearInterruptState(chatId, {
+              jobId: pendingJobId,
+              clearPending: true,
+              clearApproval: false,
+              state: "idle",
+            });
+          }
+          chatSessionStore.upsert(chatId, {
+            jobId: pendingJobId,
+            state: "idle",
+            pending_approval: null,
+            interrupt: null,
+          });
+          await bot.sendMessage(
+            chatId,
+            "⚠️ 실행 중 새 지시/중단 요청이 감지되어 남은 작업을 멈췄어요. 계속 진행하려면 다시 /chat으로 지시해주세요.",
+            Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
+              ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
+              : undefined
           );
         } else {
           if (resumeExecutionGraph) {

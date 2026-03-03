@@ -296,6 +296,19 @@ export class GocExecutionGraphRecorder {
     });
   }
 
+  async markStepSkipped(action, { reason = "", extra = {} } = {}) {
+    const nodeId = this.getStepNodeId(action);
+    if (!nodeId) return;
+    await this._updateNodePayload(nodeId, {
+      status: "skipped",
+      ended_at: nowIso(),
+      skip_reason: clipPreview(reason, 1200) || undefined,
+      ...asObject(extra),
+    }, {
+      summary: clipPreview(reason || "skipped", 220),
+    });
+  }
+
   async markStepError(action, error, { output = "", extra = {} } = {}) {
     const nodeId = this.getStepNodeId(action);
     if (!nodeId) return;
