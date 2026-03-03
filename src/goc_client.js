@@ -202,6 +202,65 @@ function normalizeCompiledExplainPayload(data) {
   };
 }
 
+function normalizeStringList(raw) {
+  if (Array.isArray(raw)) {
+    return raw
+      .map((row) => String(row || "").trim())
+      .filter(Boolean);
+  }
+  if (typeof raw === "string") {
+    return raw
+      .split(",")
+      .map((row) => row.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function normalizeCompiledMeta(data, normalized = null) {
+  const payload = normalized || normalizeCompiledExplainPayload(data);
+  const row = asObject(data);
+  const nested = normalizeEntity(row, ["compiled", "result", "data"]);
+  const src = Object.keys(nested).length > 0 ? nested : row;
+  const explain = asObject(payload?.explain);
+  const meta = asObject(
+    pick(src, ["meta", "meta_json", "metaJson", "stats", "usage"])
+    || pick(explain, ["meta", "stats", "usage"])
+  );
+  const tokenEstimateRaw = Number(
+    pick(src, ["token_estimate", "tokenEstimate", "estimated_tokens", "estimatedTokens", "tokens"])
+    || pick(meta, ["token_estimate", "tokenEstimate", "estimated_tokens", "estimatedTokens", "tokens"])
+    || pick(explain, ["token_estimate", "tokenEstimate", "estimated_tokens", "estimatedTokens", "tokens"])
+  );
+  const tokenEstimate = Number.isFinite(tokenEstimateRaw)
+    ? Math.max(0, Math.floor(tokenEstimateRaw))
+    : null;
+
+  const contextVersion = String(
+    pick(src, ["context_version", "contextVersion", "version", "rev", "etag"])
+    || pick(meta, ["context_version", "contextVersion", "version", "rev", "etag"])
+    || ""
+  ).trim();
+  const activeNodeIds = normalizeNodeIdList(
+    pick(src, ["active_node_ids", "activeNodeIds", "node_ids", "nodeIds"])
+    || pick(meta, ["active_node_ids", "activeNodeIds", "node_ids", "nodeIds"])
+    || pick(explain, ["active_node_ids", "activeNodeIds", "node_ids", "nodeIds"])
+    || payload?.active_node_ids
+  );
+  const typeBreakdownRaw = pick(src, ["node_type_breakdown", "type_breakdown", "active_type_breakdown"])
+    || pick(meta, ["node_type_breakdown", "type_breakdown", "active_type_breakdown"])
+    || pick(explain, ["node_type_breakdown", "type_breakdown", "active_type_breakdown"]);
+  const typeBreakdown = typeBreakdownRaw && typeof typeBreakdownRaw === "object"
+    ? asObject(typeBreakdownRaw)
+    : {};
+  return {
+    token_estimate: tokenEstimate,
+    active_node_ids: activeNodeIds,
+    context_version: contextVersion,
+    node_type_breakdown: typeBreakdown,
+  };
+}
+
 export class GocClient {
   constructor({ apiBase, serviceKey } = {}) {
     const base = String(apiBase || process.env.GOC_API_BASE || "").trim();
@@ -556,6 +615,36 @@ export class GocClient {
       };
     }
     return contextSet;
+  }
+
+  async rebuildContextSetActive(contextSetId, policy = {}) {
+    const ctxId = String(contextSetId || "").trim();
+    if (!ctxId) throw new Error("rebuildContextSetActive requires contextSetId");
+    const body = {
+      ...asObject(policy),
+      context_set_id: ctxId,
+    };
+    const data = await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/context_sets/${encodeURIComponent(ctxId)}/rebuild_active`, body },
+        { path: `/api/context_sets/${encodeURIComponent(ctxId)}:rebuild_active`, body },
+        { path: `/context_sets/${encodeURIComponent(ctxId)}/rebuild_active`, body },
+        { path: "/api/context_sets/rebuild_active", body },
+        { path: "/context_sets/rebuild_active", body },
+      ],
+    });
+    const entity = normalizeEntity(data, ["context_set", "contextSet", "result", "data"]);
+    const ctx = this.normalizeContextSet(entity);
+    const meta = normalizeCompiledMeta(data);
+    return {
+      ok: true,
+      context_set_id: ctx.id || ctxId,
+      active_node_ids: meta.active_node_ids.length > 0 ? meta.active_node_ids : ctx.activeNodeIds,
+      context_version: meta.context_version || ctx.version || "",
+      node_type_breakdown: meta.node_type_breakdown,
+      raw: data,
+    };
   }
 
   async cloneContextSet(baseContextSetId, name = "", meta = null) {
@@ -1003,22 +1092,43 @@ export class GocClient {
   async getCompiledContext(contextSetId, options = {}) {
     const ctxId = String(contextSetId || "").trim();
     if (!ctxId) throw new Error("getCompiledContext requires contextSetId");
+    const payload = await this.getCompiledContextWithMeta(ctxId, options);
+    return String(payload?.text || "");
+  }
+
+  async getCompiledContextWithMeta(contextSetId, options = {}) {
+    const ctxId = String(contextSetId || "").trim();
+    if (!ctxId) throw new Error("getCompiledContextWithMeta requires contextSetId");
     const includeExplain = parseBooleanLike(
       options?.includeExplain ?? options?.include_explain,
       false
     );
+    const includeMeta = parseBooleanLike(
+      options?.includeMeta ?? options?.include_meta,
+      false
+    );
+    const maxChars = Number.isFinite(Number(options?.max_chars ?? options?.maxChars))
+      ? Math.max(500, Math.min(120000, Math.floor(Number(options.max_chars ?? options.maxChars))))
+      : undefined;
+    const excludeTypes = normalizeStringList(options?.exclude_types ?? options?.excludeTypes);
+    const excludeResourceKinds = normalizeStringList(options?.exclude_resource_kinds ?? options?.excludeResourceKinds);
+
+    const query = {
+      include_explain: includeExplain ? true : undefined,
+      include_meta: includeMeta ? 1 : undefined,
+      max_chars: maxChars || undefined,
+      exclude_types: excludeTypes.length > 0 ? excludeTypes.join(",") : undefined,
+      exclude_resource_kinds: excludeResourceKinds.length > 0 ? excludeResourceKinds.join(",") : undefined,
+    };
 
     const attempts = [
-      {
-        path: `/api/context_sets/${encodeURIComponent(ctxId)}/compiled`,
-        query: includeExplain ? { include_explain: true } : undefined,
-      },
-      { path: "/api/compiled_context", query: { context_set_id: ctxId, include_explain: includeExplain ? true : undefined } },
-      { path: "/api/compiled", query: { context_set_id: ctxId, include_explain: includeExplain ? true : undefined } },
+      { path: `/api/context_sets/${encodeURIComponent(ctxId)}/compiled`, query },
+      { path: "/api/compiled_context", query: { context_set_id: ctxId, ...query } },
+      { path: "/api/compiled", query: { context_set_id: ctxId, ...query } },
       // Keep legacy non-/api routes as the last resort to avoid UI fallback HTML.
-      { path: `/context_sets/${encodeURIComponent(ctxId)}/compiled`, query: includeExplain ? { include_explain: true } : undefined },
-      { path: "/compiled_context", query: { context_set_id: ctxId, include_explain: includeExplain ? true : undefined } },
-      { path: "/compiled", query: { context_set_id: ctxId, include_explain: includeExplain ? true : undefined } },
+      { path: `/context_sets/${encodeURIComponent(ctxId)}/compiled`, query },
+      { path: "/compiled_context", query: { context_set_id: ctxId, ...query } },
+      { path: "/compiled", query: { context_set_id: ctxId, ...query } },
     ];
 
     const errors = [];
@@ -1030,7 +1140,16 @@ export class GocClient {
           query: attempt.query,
         });
         const normalized = normalizeCompiledExplainPayload(data);
-        return normalized.compiled_text;
+        const meta = normalizeCompiledMeta(data, normalized);
+        return {
+          text: normalized.compiled_text,
+          explain: normalized.explain,
+          active_node_ids: meta.active_node_ids.length > 0 ? meta.active_node_ids : normalized.active_node_ids,
+          token_estimate: meta.token_estimate,
+          context_version: meta.context_version,
+          node_type_breakdown: meta.node_type_breakdown,
+          raw: data,
+        };
       } catch (e) {
         errors.push(e);
         if (!isRetryableStatus(e?.status)) break;
@@ -1038,7 +1157,7 @@ export class GocClient {
     }
 
     if (errors.length) throw errors[errors.length - 1];
-    throw new Error("GoC getCompiledContext failed: no attempts");
+    throw new Error("GoC getCompiledContextWithMeta failed: no attempts");
   }
 
   async getCompiledContextExplain(contextSetId) {

@@ -38,6 +38,7 @@ import { normalizeActionPlan } from "./src/chat/actions.js";
 import { expandDetailContext } from "./src/chat/unfold.js";
 import { ChatRunManager } from "./src/chat/run_manager.js";
 import { GocExecutionGraphRecorder } from "./src/chat/goc_execution_graph.js";
+import { makeContextEngine } from "./src/context_engine/index.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) { console.error("Missing TELEGRAM_BOT_TOKEN"); process.exit(1); }
@@ -3765,6 +3766,7 @@ function buildSupervisorExecutionCallbacks({
   verbose,
   onAgentStatusChanged = null,
   executionGraph = null,
+  contextEngine = null,
 }) {
   const sharedContextSetId = String(runtime?.map?.ctxSharedId || "").trim();
   const threadId = String(runtime?.map?.threadId || "").trim();
@@ -3772,6 +3774,7 @@ function buildSupervisorExecutionCallbacks({
   const sharedContextMeta = runtime?.contextMeta && typeof runtime.contextMeta === "object"
     ? runtime.contextMeta
     : null;
+  const hasContextEngine = !!(contextEngine && typeof contextEngine.prepareStepContext === "function");
   let threadNodeMapCache = null;
 
   function estimateTokens(text) {
@@ -4053,10 +4056,117 @@ function buildSupervisorExecutionCallbacks({
     goal = "",
     lens = null,
     detailContext = "",
+    stepNodeId = "",
   } = {}) {
     const cleanAgentId = String(agentId || "").trim().toLowerCase();
     const cleanGoal = String(goal || "").trim();
     const cleanDetail = String(detailContext || "").trim();
+    const cleanStepNodeId = String(stepNodeId || "").trim();
+    if (hasContextEngine) {
+      const prepared = await contextEngine.prepareStepContext({
+        jobId,
+        chatId: String(chatId || ""),
+        threadId,
+        agentId: cleanAgentId,
+        goal: cleanGoal,
+        userMessageText: cleanGoal,
+        stepKind: "agent",
+        budgetTokens: Number.isFinite(Number(lens?.budget_tokens))
+          ? Number(lens.budget_tokens)
+          : undefined,
+        lensSpec: lens && typeof lens === "object" ? lens : null,
+        detailContext: cleanDetail,
+        runMeta: {
+          runId: String(executionGraph?.runId || "").trim(),
+          stepId: cleanStepNodeId || undefined,
+          stepNodeId: cleanStepNodeId || undefined,
+          threadId,
+          sharedContextSetId,
+          jobConfig: runtime?.jobConfig && typeof runtime.jobConfig === "object"
+            ? runtime.jobConfig
+            : undefined,
+        },
+      });
+      const contextText = String(prepared?.contextText || "").trim();
+      const meta = prepared?.meta && typeof prepared.meta === "object"
+        ? prepared.meta
+        : {};
+      const contextInfo = {
+        mode: String(meta.mode || "").trim() || undefined,
+        budgetTokens: Number.isFinite(Number(meta.budgetTokens))
+          ? Math.floor(Number(meta.budgetTokens))
+          : undefined,
+        token_estimate: Number.isFinite(Number(meta.estimatedTokens))
+          ? Math.floor(Number(meta.estimatedTokens))
+          : undefined,
+        compiled_tokens_estimate: Number.isFinite(Number(meta.estimatedTokens))
+          ? Math.floor(Number(meta.estimatedTokens))
+          : undefined,
+        compiled_chars: Number.isFinite(Number(meta.compiledChars))
+          ? Math.floor(Number(meta.compiledChars))
+          : String(contextText).length,
+        context_set_id: String(meta.sharedContextSetId || sharedContextSetId || "").trim() || undefined,
+        context_version: String(meta.contextVersion || sharedContextMeta?.version || "").trim() || undefined,
+        context_active_node_ids: Array.isArray(meta.contextActiveNodeIds) && meta.contextActiveNodeIds.length > 0
+          ? meta.contextActiveNodeIds
+          : undefined,
+        shared_context_set_id: String(meta.sharedContextSetId || sharedContextSetId || "").trim() || undefined,
+        lens_context_set_id: String(meta.lensContextSetId || meta.sharedContextSetId || sharedContextSetId || "").trim() || undefined,
+        lens_spec: meta.lensSpec && typeof meta.lensSpec === "object"
+          ? meta.lensSpec
+          : (lens && typeof lens === "object" ? lens : undefined),
+        lens_added_ids_count: Number.isFinite(Number(meta.lensAddedCount))
+          ? Math.max(0, Math.floor(Number(meta.lensAddedCount)))
+          : 0,
+        lens_removed_ids_count: Number.isFinite(Number(meta.lensRemovedCount))
+          ? Math.max(0, Math.floor(Number(meta.lensRemovedCount)))
+          : 0,
+        activeNodeIdsCount: Number.isFinite(Number(meta.activeNodeIdsCount))
+          ? Math.max(0, Math.floor(Number(meta.activeNodeIdsCount)))
+          : undefined,
+        node_type_breakdown: meta.typeBreakdown && typeof meta.typeBreakdown === "object"
+          ? meta.typeBreakdown
+          : undefined,
+        active_type_breakdown: meta.typeBreakdown && typeof meta.typeBreakdown === "object"
+          ? meta.typeBreakdown
+          : undefined,
+        local_recent_turns_count: Number.isFinite(Number(meta.localRecentTurnsCount))
+          ? Math.max(0, Math.floor(Number(meta.localRecentTurnsCount)))
+          : undefined,
+        local_summary_chars: Number.isFinite(Number(meta.localSummaryChars))
+          ? Math.max(0, Math.floor(Number(meta.localSummaryChars)))
+          : undefined,
+        local_pinned_count: Number.isFinite(Number(meta.localPinnedCount))
+          ? Math.max(0, Math.floor(Number(meta.localPinnedCount)))
+          : undefined,
+      };
+      await contextEngine.recordMeta({
+        jobId,
+        chatId: String(chatId || ""),
+        agentId: cleanAgentId,
+        goal: cleanGoal,
+        userMessageText: cleanGoal,
+        stepKind: "agent",
+        runMeta: {
+          runId: String(executionGraph?.runId || "").trim(),
+          stepId: cleanStepNodeId || undefined,
+          stepNodeId: cleanStepNodeId || undefined,
+          threadId,
+          sharedContextSetId,
+        },
+        meta,
+      }).catch(() => {});
+      const finalPrompt = [
+        cleanGoal,
+        contextText ? `[CONTEXT]\n${clip(contextText, 12000)}` : "",
+        cleanDetail ? `[DETAIL CONTEXT]\n${cleanDetail}` : "",
+        runtime.globalSummary ? `[GLOBAL MEMORY]\n${clip(runtime.globalSummary, 5000)}` : "",
+      ].filter(Boolean).join("\n\n");
+      return {
+        final_prompt: finalPrompt,
+        context_info: contextInfo,
+      };
+    }
     const lensSpec = resolveEffectiveLensSpec(lens, {
       agentId: cleanAgentId,
       goal: cleanGoal,
@@ -4261,6 +4371,7 @@ function buildSupervisorExecutionCallbacks({
         goal: cleanGoal,
         lens: null,
         detailContext,
+        stepNodeId,
       });
     const nextActionsInstruction = [
       "[OUTPUT CONTRACT]",
@@ -4381,6 +4492,7 @@ function buildSupervisorExecutionCallbacks({
         goal: getActionGoal(action),
         lens: action?.lens && typeof action.lens === "object" ? action.lens : null,
         detailContext,
+        stepNodeId,
       })
       : {
         final_prompt: "",
@@ -4513,6 +4625,7 @@ function buildSupervisorExecutionCallbacks({
             ? child.lens
             : (action?.lens && typeof action.lens === "object" ? action.lens : null),
           detailContext,
+          stepNodeId: childStepNodeId,
         });
         if (executionGraph && childStepNodeId) {
           await executionGraph.markStepNodeRunning(childStepNodeId, {
@@ -5085,6 +5198,7 @@ async function runSupervisorChat(
   activeJobByChat.set(chatKey, currentJobId);
   let executionGraph = null;
   let runtime = null;
+  let contextEngine = null;
   let refreshedSharedContextOnFinish = false;
   const sessionAtStart = chatSessionStore.get(chatId);
   let currentTurnAckMessageId = Number(sessionAtStart?.current_turn_ack_message_id || 0);
@@ -5098,32 +5212,25 @@ async function runSupervisorChat(
     runtime = await loadSupervisorRuntime(currentJobId, {
       chatMeta: chatInfo,
     });
-    if (memoryModeWithFallback() === "goc" && runtime?.map?.ctxSharedId) {
-      const refreshedAtStart = await refreshSharedContextForRuntime(runtime, {
-        jobId: currentJobId,
-        reason: "run_start",
-      }).catch(() => null);
-      if (!refreshedAtStart?.ok) {
-        try {
-          const meta = await requireGocClient().getContextSet(runtime.map.ctxSharedId);
-          runtime.contextMeta = {
-            context_set_id: runtime.map.ctxSharedId,
-            version: String(meta?.version || "").trim(),
-            active_node_ids: Array.isArray(meta?.activeNodeIds)
-              ? meta.activeNodeIds.map((row) => String(row || "").trim()).filter(Boolean)
-              : [],
-          };
-        } catch {
-          runtime.contextMeta = {
-            context_set_id: runtime.map.ctxSharedId,
-            version: "",
-            active_node_ids: [],
-          };
-        }
-      }
-    } else {
-      runtime.contextMeta = null;
+    contextEngine = makeContextEngine({
+      memoryMode: memoryModeWithFallback(),
+      jobs,
+      gocClient: memoryModeWithFallback() === "goc" ? requireGocClient() : null,
+      runtime,
+      logger: (line) => jobs.log(currentJobId, line),
+    });
+    if (typeof contextEngine.setRuntime === "function") {
+      contextEngine.setRuntime(runtime);
     }
+    await contextEngine.onRunStart({
+      jobId: currentJobId,
+      chatId: String(chatId || ""),
+      threadId: String(runtime?.map?.threadId || "").trim(),
+      runMeta: {
+        threadId: String(runtime?.map?.threadId || "").trim(),
+        sharedContextSetId: String(runtime?.map?.ctxSharedId || "").trim(),
+      },
+    }).catch(() => null);
     executionGraph = (
       memoryModeWithFallback() === "goc"
       && runtime?.map?.threadId
@@ -5158,6 +5265,7 @@ async function runSupervisorChat(
       runtime,
       controller,
       verbose,
+      contextEngine,
       onAgentStatusChanged: async ({ agentId = "", state = "", goal = "", error = "" } = {}) => {
         await sendAgentStatusTransitionMessage(bot, chatId, {
           agentId,
