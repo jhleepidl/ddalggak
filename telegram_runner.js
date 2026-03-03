@@ -2543,9 +2543,12 @@ async function sendGeminiModelSwitchMessage(
   );
 }
 
-function buildGeminiGiveUpNoticeText({ agentId = "" } = {}) {
+function buildGeminiGiveUpNoticeText({ reason = "", agentId = "" } = {}) {
   const suffix = String(agentId || "").trim().toLowerCase();
-  const base = "❌ Gemini 혼잡이 지속돼요. 잠시 후 재시도하거나 모델/도구를 바꿀게요.";
+  const cleanReason = String(reason || "").trim().toLowerCase();
+  const base = cleanReason === "model_not_found"
+    ? "❌ Gemini 모델을 찾을 수 없어요(모델명/권한 문제).\nworkspace 설정(.gemini/settings.json)의 model.name을 제거하거나,\nGEMINI_WORKSPACE_MODEL/GEMINI_MODEL_PRIMARY를 사용 가능한 모델로 설정하세요.\n(gemini CLI에서 /model로 확인 가능)"
+    : "❌ Gemini 혼잡이 지속돼요. 잠시 후 재시도하거나 모델/도구를 바꿀게요.";
   return suffix ? `${base} (@${suffix})` : base;
 }
 
@@ -2553,6 +2556,7 @@ async function sendGeminiGiveUpMessage(
   bot,
   chatId,
   {
+    reason = "",
     agentId = "",
     replyToMessageId = null,
   } = {}
@@ -2563,7 +2567,7 @@ async function sendGeminiGiveUpMessage(
     : (Number.isFinite(Number(fallbackReply)) && Number(fallbackReply) > 0 ? Number(fallbackReply) : null);
   await bot.sendMessage(
     chatId,
-    buildGeminiGiveUpNoticeText({ agentId }),
+    buildGeminiGiveUpNoticeText({ reason, agentId }),
     replyId ? { reply_to_message_id: replyId } : undefined
   );
 }
@@ -5097,8 +5101,9 @@ function buildSupervisorExecutionCallbacks({
                 replyToMessageId: getCurrentTurnReplyMessageId(chatId),
               });
             },
-            onGeminiGiveUp: async () => {
+            onGeminiGiveUp: async ({ reason = "" } = {}) => {
               await sendGeminiGiveUpMessage(bot, chatId, {
+                reason,
                 agentId: cleanAgentId,
                 replyToMessageId: getCurrentTurnReplyMessageId(chatId),
               });
@@ -6067,8 +6072,9 @@ async function runSupervisorChat(
             replyToMessageId: getCurrentTurnReplyMessageId(chatId),
           });
         },
-        onGeminiGiveUp: async () => {
+        onGeminiGiveUp: async ({ reason = "" } = {}) => {
           await sendGeminiGiveUpMessage(bot, chatId, {
+            reason,
             replyToMessageId: getCurrentTurnReplyMessageId(chatId),
           });
         },

@@ -8,10 +8,14 @@ const MODEL_CAPACITY_EXHAUSTED_RE = /MODEL_CAPACITY_EXHAUSTED/i;
 const NO_CAPACITY_RE = /No capacity available for model/i;
 const RESOURCE_EXHAUSTED_RE = /RESOURCE_EXHAUSTED/i;
 const STATUS_429_RE = /\b429\b|status[^0-9]{0,20}429|code[^0-9]{0,20}429/i;
+const STATUS_404_RE = /\b404\b|status[^0-9]{0,20}404|code[^0-9]{0,20}404/i;
 const QUOTA_EXCEEDED_RE = /quota[_\s-]*exceeded|quota\b.*(exceed|exhaust|limit)|billing.*(limit|quota)/i;
+const REQUESTED_ENTITY_NOT_FOUND_RE = /Requested entity was not found/i;
+const MODEL_NOT_FOUND_RE = /ModelNotFoundError/i;
+const GEMINI_25_MODEL_RE = /\bgemini-2\.5(?:-[a-z0-9._-]+)?\b/i;
 const MODEL_FLAG_UNSUPPORTED_RE = /(unknown|unrecognized|unexpected)\s+(option|argument|flag)[^-\n\r]*--model|unknown flag:\s*--model/i;
 const DEFAULT_GEMINI_MODEL_PRIMARY = "gemini-3-flash-preview";
-const DEFAULT_GEMINI_MODEL_FALLBACKS = "auto,gemini-2.5-flash,gemini-2.5-pro";
+const DEFAULT_GEMINI_MODEL_FALLBACKS = "auto";
 const DEFAULT_CAPACITY_MAX_RETRIES = 8;
 const DEFAULT_CAPACITY_SWITCH_AFTER = 2;
 const DEFAULT_BACKOFF_BASE_MS = 1000;
@@ -21,7 +25,6 @@ const DEFAULT_MAX_CONCURRENT_GEMINI = 1;
 const DEFAULT_GEMINI_MIN_INTERVAL_MS = 2000;
 const DEFAULT_GEMINI_RETRY_TIMEBOX_MS = 180000;
 const DEFAULT_GEMINI_CAPACITY_COOLDOWN_MS = 60000;
-const DEFAULT_GEMINI_WORKSPACE_MODEL = "gemini-2.5-flash";
 const DEFAULT_GEMINI_SETTINGS_OVERWRITE = "merge";
 const DEFAULT_GEMINI_DEBUG_LOG = "gemini_debug.log";
 
@@ -59,9 +62,6 @@ function normalizeOverwritePolicy(raw) {
 
 function defaultGeminiWorkspaceSettings() {
   return {
-    model: {
-      name: String(process.env.GEMINI_MODEL_PRIMARY || DEFAULT_GEMINI_WORKSPACE_MODEL).trim() || DEFAULT_GEMINI_WORKSPACE_MODEL,
-    },
     general: {
       plan: {
         modelRouting: false,
@@ -75,6 +75,70 @@ function defaultGeminiWorkspaceSettings() {
       discoveryMaxDirs: 20,
       loadMemoryFromIncludeDirectories: false,
     },
+  };
+}
+
+function sanitizeWorkspaceModelSettings(raw = {}, { workspaceModelOverride = "" } = {}) {
+  const row = asObject(raw);
+  const model = asObject(row.model);
+  const currentName = String(model.name || "").trim();
+  const overrideRaw = String(workspaceModelOverride ?? "").trim();
+  const overrideMode = !overrideRaw
+    ? "none"
+    : (overrideRaw.toLowerCase() === "auto" ? "auto" : "fixed");
+  const overrideName = overrideMode === "fixed" ? overrideRaw : "";
+
+  if (overrideMode === "fixed") {
+    const next = {
+      ...row,
+      model: {
+        ...model,
+        name: overrideName,
+      },
+    };
+    const changed = currentName !== overrideName;
+    return {
+      settings: next,
+      changed,
+      logLine: changed
+        ? `[gemini] workspace settings sanitized: model.name ${currentName || "(none)"} -> ${overrideName}`
+        : "",
+    };
+  }
+
+  if (overrideMode === "auto") {
+    if (!row.model) {
+      return {
+        settings: row,
+        changed: false,
+        logLine: "",
+      };
+    }
+    const next = { ...row };
+    delete next.model;
+    return {
+      settings: next,
+      changed: true,
+      logLine: currentName
+        ? `[gemini] workspace settings sanitized: removed model.name=${currentName} (GEMINI_WORKSPACE_MODEL=auto)`
+        : "[gemini] workspace settings sanitized: removed model section (GEMINI_WORKSPACE_MODEL=auto)",
+    };
+  }
+
+  if (currentName && GEMINI_25_MODEL_RE.test(currentName)) {
+    const next = { ...row };
+    delete next.model;
+    return {
+      settings: next,
+      changed: true,
+      logLine: `[gemini] workspace settings sanitized: removed model.name=${currentName}`,
+    };
+  }
+
+  return {
+    settings: row,
+    changed: false,
+    logLine: "",
   };
 }
 
@@ -127,6 +191,7 @@ export function ensureGeminiWorkspaceConfig(workspacePath, { overwritePolicy = "
   fs.mkdirSync(geminiDir, { recursive: true });
   const settingsPath = path.join(geminiDir, "settings.json");
   const policy = normalizeOverwritePolicy(overwritePolicy || process.env.GEMINI_SETTINGS_OVERWRITE);
+  const workspaceModelOverride = process.env.GEMINI_WORKSPACE_MODEL;
   const defaults = enforceWorkspaceContextSettings(defaultGeminiWorkspaceSettings());
 
   const existingRaw = fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath, "utf8") : "";
@@ -139,6 +204,9 @@ export function ensureGeminiWorkspaceConfig(workspacePath, { overwritePolicy = "
   } else if (existing && policy === "always") {
     next = defaults;
   }
+  const sanitized = sanitizeWorkspaceModelSettings(next, { workspaceModelOverride });
+  next = enforceWorkspaceContextSettings(sanitized.settings);
+  if (sanitized.changed && sanitized.logLine) appendGeminiDebugLog(sanitized.logLine);
 
   const serialized = `${JSON.stringify(next, null, 2)}\n`;
   if (existingRaw !== serialized) {
@@ -287,6 +355,11 @@ function classifyGeminiError(result = {}) {
     || MODEL_CAPACITY_EXHAUSTED_RE.test(text)
     || (RESOURCE_EXHAUSTED_RE.test(text) && STATUS_429_RE.test(text));
   if (isCapacityExhausted) return "capacity_exhausted";
+
+  const isModelNotFound = REQUESTED_ENTITY_NOT_FOUND_RE.test(text)
+    || MODEL_NOT_FOUND_RE.test(text)
+    || STATUS_404_RE.test(text);
+  if (isModelNotFound) return "model_not_found";
 
   if (QUOTA_EXCEEDED_RE.test(text)) return "quota_exceeded";
   return "unknown_error";
@@ -608,12 +681,21 @@ export async function runGeminiPrompt({
   const switchAfter = getCapacitySwitchAfter();
   const retryTimeboxMs = getGeminiRetryTimeboxMs();
   const circuitCooldownMs = getGeminiCapacityCooldownMs();
+  const unavailableModels = new Set();
 
   let modelIndex = 0;
   let retryCount = 0;
   let consecutiveCapacityErrors = 0;
   const notes = [];
   const startedAtMs = Date.now();
+  const pickNextAvailableModelIndex = (startIndex) => {
+    for (let i = Math.max(0, Number(startIndex) + 1); i < modelCandidates.length; i += 1) {
+      const modelName = modelCandidates[i];
+      const key = normalizeModelName(modelName).toLowerCase();
+      if (!unavailableModels.has(key)) return i;
+    }
+    return -1;
+  };
 
   while (true) {
     if (signal?.aborted) {
@@ -683,6 +765,31 @@ export async function runGeminiPrompt({
     }
 
     const errorType = classifyGeminiError(result);
+    if (errorType === "model_not_found") {
+      geminiCapacityCircuit.consecutiveCapacityFailures = 0;
+      const currentKey = normalizeModelName(currentModelName).toLowerCase();
+      if (currentKey) unavailableModels.add(currentKey);
+      const nextModelIndex = pickNextAvailableModelIndex(modelIndex);
+      if (nextModelIndex >= 0) {
+        const toModel = modelCandidates[nextModelIndex] || "auto";
+        notes.push(`[gemini] model_not_found -> model switch: ${displayModelName(currentModelName)} -> ${displayModelName(toModel)}`);
+        modelIndex = nextModelIndex;
+        continue;
+      }
+      notes.push(`[gemini] model_not_found and no more candidates: ${displayModelName(currentModelName)}`);
+      await safeHook(onGiveUp, {
+        reason: "model_not_found",
+        retryCount,
+        model: displayModelName(currentModelName),
+      });
+      return withGeminiMeta(result, {
+        modelName: currentModelName,
+        errorType,
+        retryCount,
+        notes,
+      });
+    }
+
     if (errorType !== "capacity_exhausted") {
       geminiCapacityCircuit.consecutiveCapacityFailures = 0;
       return withGeminiMeta(result, {
