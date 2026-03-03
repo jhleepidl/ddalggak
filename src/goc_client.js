@@ -261,6 +261,126 @@ function normalizeCompiledMeta(data, normalized = null) {
   };
 }
 
+function normalizeConversation(entity, fallbackThreadId = "") {
+  const row = asObject(entity);
+  const threadId = String(
+    pick(row, ["thread_id", "threadId"])
+    || pick(row.thread, ["id", "thread_id", "threadId"])
+    || fallbackThreadId
+    || ""
+  ).trim();
+  const id = String(
+    pick(row, ["id", "conversation_id", "conversationId"])
+    || (threadId ? `thread:${threadId}` : "")
+  ).trim();
+  return {
+    id,
+    thread_id: threadId,
+    title: String(pick(row, ["title", "name"]) || ""),
+    created_at: String(pick(row, ["created_at", "createdAt", "ts", "timestamp"]) || ""),
+    updated_at: String(pick(row, ["updated_at", "updatedAt", "ts", "timestamp"]) || ""),
+    raw: row,
+  };
+}
+
+function normalizeConversationAgent(entity, fallbackThreadId = "") {
+  const row = asObject(entity);
+  const payload = normalizePayloadObject(pick(row, ["payload_json", "payloadJson", "payload", "meta_json", "metaJson", "meta"]));
+  const threadId = String(
+    pick(row, ["thread_id", "threadId"])
+    || pick(payload, ["thread_id", "threadId"])
+    || fallbackThreadId
+    || ""
+  ).trim();
+  const agentId = String(
+    pick(row, ["agent_id", "agentId", "id"])
+    || pick(payload, ["agent_id", "agentId", "id"])
+    || ""
+  ).trim().toLowerCase();
+  const enabled = parseBooleanLike(
+    pick(row, ["enabled", "is_enabled", "isEnabled", "active"])
+    ?? pick(payload, ["enabled", "is_enabled", "isEnabled", "active"]),
+    true
+  );
+  const orderRaw = Number(
+    pick(row, ["order", "sort_order", "sortOrder", "position"])
+    ?? pick(payload, ["order", "sort_order", "sortOrder", "position"])
+  );
+  const overrides = asObject(
+    pick(row, ["overrides"])
+    || pick(payload, ["overrides"])
+  );
+  return {
+    id: String(pick(row, ["id", "membership_id", "membershipId"]) || `${threadId}:${agentId}`).trim(),
+    thread_id: threadId,
+    agent_id: agentId,
+    enabled,
+    order: Number.isFinite(orderRaw) ? Math.floor(orderRaw) : null,
+    overrides,
+    created_at: String(pick(row, ["created_at", "createdAt", "ts", "timestamp"]) || ""),
+    updated_at: String(pick(row, ["updated_at", "updatedAt", "ts", "timestamp"]) || ""),
+    raw: row,
+  };
+}
+
+function normalizeCatalogAgent(entity) {
+  const row = asObject(entity);
+  const payload = normalizePayloadObject(pick(row, ["payload_json", "payloadJson", "payload", "meta_json", "metaJson", "meta"]));
+  const id = String(
+    pick(row, ["id", "agent_id", "agentId"])
+    || pick(payload, ["id", "agent_id", "agentId"])
+    || ""
+  ).trim().toLowerCase();
+  const provider = String(
+    pick(row, ["provider"])
+    || pick(payload, ["provider"])
+    || "gemini"
+  ).trim().toLowerCase();
+  const model = String(
+    pick(row, ["model"])
+    || pick(payload, ["model"])
+    || provider
+    || "gemini"
+  ).trim();
+  return {
+    id,
+    name: String(
+      pick(row, ["name", "title"])
+      || pick(payload, ["name", "title"])
+      || id
+    ).trim(),
+    description: String(
+      pick(row, ["description"])
+      || pick(payload, ["description"])
+      || ""
+    ).trim(),
+    provider: provider || "gemini",
+    model: model || provider || "gemini",
+    prompt: String(
+      pick(row, ["prompt", "system_prompt", "systemPrompt", "base_prompt", "basePrompt"])
+      || pick(payload, ["prompt", "system_prompt", "systemPrompt", "base_prompt", "basePrompt"])
+      || ""
+    ).trim(),
+    tools: normalizeStringList(
+      pick(row, ["tools", "tool_ids", "toolIds"])
+      || pick(payload, ["tools", "tool_ids", "toolIds"])
+    ),
+    scope: String(
+      pick(row, ["scope", "visibility"])
+      || pick(payload, ["scope", "visibility"])
+      || ""
+    ).trim().toLowerCase(),
+    published: parseBooleanLike(
+      pick(row, ["published", "is_published", "isPublished", "public"])
+      ?? pick(payload, ["published", "is_published", "isPublished", "public"]),
+      false
+    ),
+    created_at: String(pick(row, ["created_at", "createdAt", "ts", "timestamp"]) || ""),
+    updated_at: String(pick(row, ["updated_at", "updatedAt", "ts", "timestamp"]) || ""),
+    raw: row,
+  };
+}
+
 export class GocClient {
   constructor({ apiBase, serviceKey } = {}) {
     const base = String(apiBase || process.env.GOC_API_BASE || "").trim();
@@ -1272,6 +1392,280 @@ export class GocClient {
       node_ids: ids,
       raw: data,
     };
+  }
+
+  async upsertUserFromTelegram(input = {}) {
+    const row = asObject(input);
+    const telegramId = String(
+      row.telegram_user_id
+      || row.telegramUserId
+      || row.user_id
+      || row.userId
+      || ""
+    ).trim();
+    const initData = String(row.init_data || row.initData || "").trim();
+    if (!telegramId && !initData) {
+      throw new Error("upsertUserFromTelegram requires telegram user id or initData");
+    }
+    const body = {
+      telegram_user_id: telegramId || undefined,
+      telegramUserId: telegramId || undefined,
+      init_data: initData || undefined,
+      initData: initData || undefined,
+      username: String(row.username || "").trim() || undefined,
+      first_name: String(row.first_name || row.firstName || "").trim() || undefined,
+      last_name: String(row.last_name || row.lastName || "").trim() || undefined,
+    };
+    const data = await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: "/api/users/telegram/upsert", body },
+        { path: "/api/telegram/users/upsert", body },
+        { path: "/api/users:upsert_telegram", body },
+        { path: "/users/telegram/upsert", body },
+      ],
+    });
+    const entity = normalizeEntity(data, ["user", "telegram_user", "data"]);
+    return {
+      id: String(pick(entity, ["id", "user_id", "userId"]) || "").trim(),
+      telegram_user_id: String(
+        pick(entity, ["telegram_user_id", "telegramUserId", "user_id", "userId"])
+        || telegramId
+      ).trim(),
+      raw: data,
+    };
+  }
+
+  async ensureConversation(threadId) {
+    const tid = String(threadId || "").trim();
+    if (!tid) throw new Error("ensureConversation requires threadId");
+    const body = {
+      thread_id: tid,
+      threadId: tid,
+    };
+    const data = await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(tid)}/conversation/ensure`, body: {} },
+        { path: `/threads/${encodeURIComponent(tid)}/conversation/ensure`, body: {} },
+        { path: `/api/threads/${encodeURIComponent(tid)}/conversation`, body: {} },
+        { path: "/api/conversations/ensure", body },
+        { path: "/api/conversations", body },
+        { path: "/conversations/ensure", body },
+        { path: "/conversations", body },
+      ],
+    });
+    return normalizeConversation(normalizeEntity(data, ["conversation", "data"]), tid);
+  }
+
+  async listConversationAgents(threadId) {
+    const tid = String(threadId || "").trim();
+    if (!tid) throw new Error("listConversationAgents requires threadId");
+    const data = await this._requestAny({
+      method: "GET",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents` },
+        { path: `/threads/${encodeURIComponent(tid)}/conversation/agents` },
+        { path: `/api/conversations/${encodeURIComponent(tid)}/agents` },
+        { path: "/api/conversation_agents", query: { thread_id: tid } },
+        { path: "/api/conversation-agents", query: { thread_id: tid } },
+        { path: "/conversation_agents", query: { thread_id: tid } },
+      ],
+    });
+    return normalizeArrayResponse(data)
+      .map((row) => normalizeConversationAgent(row, tid))
+      .filter((row) => row.agent_id);
+  }
+
+  async addConversationAgent(threadId, agentId, enabled = true) {
+    const tid = String(threadId || "").trim();
+    const aid = String(agentId || "").trim().toLowerCase();
+    if (!tid || !aid) throw new Error("addConversationAgent requires threadId and agentId");
+    const body = {
+      thread_id: tid,
+      threadId: tid,
+      agent_id: aid,
+      agentId: aid,
+      enabled: enabled !== false,
+    };
+    const data = await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents`, body: { agent_id: aid, enabled: enabled !== false } },
+        { path: `/threads/${encodeURIComponent(tid)}/conversation/agents`, body: { agent_id: aid, enabled: enabled !== false } },
+        { path: `/api/conversations/${encodeURIComponent(tid)}/agents`, body: { agent_id: aid, enabled: enabled !== false } },
+        { path: "/api/conversation_agents", body },
+        { path: "/api/conversation-agents", body },
+        { path: "/conversation_agents", body },
+      ],
+    });
+    return normalizeConversationAgent(normalizeEntity(data, ["conversation_agent", "membership", "data"]), tid);
+  }
+
+  async patchConversationAgent(threadId, agentId, patch = {}) {
+    const tid = String(threadId || "").trim();
+    const aid = String(agentId || "").trim().toLowerCase();
+    if (!tid || !aid) throw new Error("patchConversationAgent requires threadId and agentId");
+    const row = asObject(patch);
+    const body = {
+      thread_id: tid,
+      threadId: tid,
+      agent_id: aid,
+      agentId: aid,
+      enabled: typeof row.enabled === "boolean" ? row.enabled : undefined,
+      order: Number.isFinite(Number(row.order)) ? Math.floor(Number(row.order)) : undefined,
+      overrides: row.overrides && typeof row.overrides === "object" ? row.overrides : undefined,
+    };
+    const data = await this._requestAny({
+      method: "PATCH",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}`, body },
+        { path: `/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}`, body },
+        { path: `/api/conversations/${encodeURIComponent(tid)}/agents/${encodeURIComponent(aid)}`, body },
+        { path: "/api/conversation_agents", body },
+        { path: "/api/conversation-agents", body },
+      ],
+    });
+    return normalizeConversationAgent(normalizeEntity(data, ["conversation_agent", "membership", "data"]), tid);
+  }
+
+  async removeConversationAgent(threadId, agentId) {
+    const tid = String(threadId || "").trim();
+    const aid = String(agentId || "").trim().toLowerCase();
+    if (!tid || !aid) throw new Error("removeConversationAgent requires threadId and agentId");
+    const body = {
+      thread_id: tid,
+      threadId: tid,
+      agent_id: aid,
+      agentId: aid,
+    };
+    await this._requestAny({
+      method: "DELETE",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}` },
+        { path: `/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}` },
+        { path: `/api/conversations/${encodeURIComponent(tid)}/agents/${encodeURIComponent(aid)}` },
+        { path: "/api/conversation_agents", body },
+        { path: "/api/conversation-agents", body },
+        { path: "/conversation_agents", body },
+      ],
+    });
+    return { ok: true, thread_id: tid, agent_id: aid };
+  }
+
+  async listAgents(scope = "") {
+    const cleanScope = String(scope || "").trim().toLowerCase();
+    const data = await this._requestAny({
+      method: "GET",
+      attempts: [
+        { path: "/api/agents", query: { scope: cleanScope || undefined } },
+        { path: "/agents", query: { scope: cleanScope || undefined } },
+        { path: "/v1/agents", query: { scope: cleanScope || undefined } },
+      ],
+    });
+    return normalizeArrayResponse(data)
+      .map((row) => normalizeCatalogAgent(row))
+      .filter((row) => row.id);
+  }
+
+  async createAgent(def = {}) {
+    const row = asObject(def);
+    const body = {
+      id: String(row.id || row.agent_id || row.agentId || "").trim().toLowerCase() || undefined,
+      agent_id: String(row.id || row.agent_id || row.agentId || "").trim().toLowerCase() || undefined,
+      name: String(row.name || row.title || "").trim() || undefined,
+      description: String(row.description || "").trim() || undefined,
+      provider: String(row.provider || "gemini").trim().toLowerCase() || "gemini",
+      model: String(row.model || row.provider || "gemini").trim() || "gemini",
+      prompt: String(row.prompt || row.system_prompt || row.systemPrompt || "").trim() || undefined,
+      tools: Array.isArray(row.tools) ? row.tools.map((t) => String(t || "").trim()).filter(Boolean) : undefined,
+      scope: String(row.scope || "").trim().toLowerCase() || undefined,
+      meta: row.meta && typeof row.meta === "object" ? row.meta : undefined,
+    };
+    const data = await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: "/api/agents", body },
+        { path: "/agents", body },
+        { path: "/v1/agents", body },
+      ],
+    });
+    const parsed = normalizeCatalogAgent(normalizeEntity(data, ["agent", "data"]));
+    if (!parsed.id) throw new Error("createAgent returned no id");
+    return parsed;
+  }
+
+  async patchAgent(agentId, def = {}) {
+    const aid = String(agentId || "").trim().toLowerCase();
+    if (!aid) throw new Error("patchAgent requires agentId");
+    const row = asObject(def);
+    const body = {
+      ...row,
+      id: aid,
+      agent_id: aid,
+    };
+    const data = await this._requestAny({
+      method: "PATCH",
+      attempts: [
+        { path: `/api/agents/${encodeURIComponent(aid)}`, body },
+        { path: `/agents/${encodeURIComponent(aid)}`, body },
+        { path: `/v1/agents/${encodeURIComponent(aid)}`, body },
+      ],
+    });
+    const parsed = normalizeCatalogAgent(normalizeEntity(data, ["agent", "data"]));
+    if (!parsed.id) return { ...parsed, id: aid, raw: data };
+    return parsed;
+  }
+
+  async forkAgent(agentId) {
+    const aid = String(agentId || "").trim().toLowerCase();
+    if (!aid) throw new Error("forkAgent requires agentId");
+    const data = await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/agents/${encodeURIComponent(aid)}/fork`, body: {} },
+        { path: `/agents/${encodeURIComponent(aid)}/fork`, body: {} },
+        { path: `/v1/agents/${encodeURIComponent(aid)}/fork`, body: {} },
+        { path: "/api/agents/fork", body: { agent_id: aid } },
+      ],
+    });
+    const parsed = normalizeCatalogAgent(normalizeEntity(data, ["agent", "data", "result"]));
+    if (!parsed.id) throw new Error("forkAgent returned no id");
+    return parsed;
+  }
+
+  async publishAgent(agentId, published = true) {
+    const aid = String(agentId || "").trim().toLowerCase();
+    if (!aid) throw new Error("publishAgent requires agentId");
+    const isPublished = published !== false;
+    let data = null;
+    try {
+      data = await this._requestAny({
+        method: "POST",
+        attempts: [
+          { path: `/api/agents/${encodeURIComponent(aid)}/${isPublished ? "publish" : "unpublish"}`, body: {} },
+          { path: `/agents/${encodeURIComponent(aid)}/${isPublished ? "publish" : "unpublish"}`, body: {} },
+          { path: `/v1/agents/${encodeURIComponent(aid)}/${isPublished ? "publish" : "unpublish"}`, body: {} },
+        ],
+      });
+    } catch {
+      data = await this._requestAny({
+        method: "PATCH",
+        attempts: [
+          { path: `/api/agents/${encodeURIComponent(aid)}`, body: { published: isPublished } },
+          { path: `/agents/${encodeURIComponent(aid)}`, body: { published: isPublished } },
+          { path: `/v1/agents/${encodeURIComponent(aid)}`, body: { published: isPublished } },
+        ],
+      });
+    }
+    const parsed = normalizeCatalogAgent(normalizeEntity(data, ["agent", "data", "result"]));
+    return parsed.id
+      ? parsed
+      : { id: aid, published: isPublished, raw: data };
+  }
+
+  async unpublishAgent(agentId) {
+    return await this.publishAgent(agentId, false);
   }
 
   async createPublishRequest(sourceNodeId) {

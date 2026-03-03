@@ -328,6 +328,8 @@ function fallbackPlan(message, { agents = [], tools = [], jobConfig = {} } = {})
     .filter((id) => availableAgentSet.has(id) && !disabledAgents.has(id));
   const wantsDisable = isDisableSelectionRequest(msg);
   const wantsEnable = isEnableSelectionRequest(msg);
+  const wantsConversationAdd = /(추가|add|invite|초대)/i.test(msg) && /(대화|conversation|participant|멤버|member|팀)/i.test(msg);
+  const wantsConversationRemove = /(제거|remove|삭제|exclude|빼)/i.test(msg) && /(대화|conversation|participant|멤버|member|팀)/i.test(msg);
 
   if (!msg) {
     return {
@@ -421,6 +423,22 @@ function fallbackPlan(message, { agents = [], tools = [], jobConfig = {} } = {})
     };
   }
 
+  if (requestedAgent && wantsConversationAdd) {
+    return {
+      reason: "add agent to conversation fallback",
+      actions: [{ type: "add_agent_to_conversation", agent_id: requestedAgent, enabled: true, risk: "L2" }],
+      final_response_style: "concise",
+    };
+  }
+
+  if (requestedAgent && wantsConversationRemove) {
+    return {
+      reason: "remove agent from conversation fallback",
+      actions: [{ type: "remove_agent_from_conversation", agent_id: requestedAgent, risk: "L2" }],
+      final_response_style: "concise",
+    };
+  }
+
   if (requestedTool && wantsDisable) {
     return {
       reason: "disable tool fallback",
@@ -440,15 +458,20 @@ function fallbackPlan(message, { agents = [], tools = [], jobConfig = {} } = {})
   if (isAgentProposalRequest(msg)) {
     const requestedId = parseRequestedAgentId(msg) || `agent_${Date.now().toString(36)}`;
     return {
-      reason: "agent proposal fallback",
+      reason: "agent definition create fallback",
       actions: [{
-        type: "propose_agent",
-        agent_id: requestedId,
-        name: requestedId,
-        description: "proposed from /chat",
-        provider: "gemini",
-        model: "gemini",
-        prompt: msg,
+        type: "create_agent_definition",
+        agent_spec: {
+          id: requestedId,
+          name: requestedId,
+          description: "created from /chat fallback",
+          provider: "gemini",
+          model: "gemini",
+          prompt: msg,
+          tools: [],
+          meta: {},
+        },
+        add_to_conversation: true,
         risk: "L2",
       }],
       final_response_style: "concise",
@@ -532,6 +555,9 @@ function fallbackPlan(message, { agents = [], tools = [], jobConfig = {} } = {})
 function buildRouterPrompt(message, context = {}) {
   const row = asObject(context);
   const agents = Array.isArray(row.agents) ? row.agents : [];
+  const enabledAgentIds = Array.isArray(row.enabledAgentIds)
+    ? row.enabledAgentIds.map((id) => String(id || "").trim().toLowerCase()).filter(Boolean)
+    : agents.map((agent) => String(agent?.id || "").trim().toLowerCase()).filter(Boolean);
   const tools = Array.isArray(row.tools) ? row.tools : [];
   const jobConfig = asObject(row.jobConfig);
   const allowChatGPTPlanner = !!row.allowChatGPTPlanner;
@@ -579,6 +605,10 @@ function buildRouterPrompt(message, context = {}) {
     "    {\"type\":\"need_more_detail\",\"context_set_id\":\"...\",\"node_ids\":[\"...\"],\"depth\":1,\"max_chars\":7000},",
     "    {\"type\":\"search_public_agents\",\"query\":\"...\",\"limit\":5},",
     "    {\"type\":\"install_agent_blueprint\",\"blueprint_id\":\"optional\",\"public_node_id\":\"optional\",\"agent_id_override\":\"optional\"},",
+    "    {\"type\":\"add_agent_to_conversation\",\"agent_id\":\"...\",\"enabled\":true},",
+    "    {\"type\":\"remove_agent_from_conversation\",\"agent_id\":\"...\"},",
+    "    {\"type\":\"create_agent_definition\",\"agent_spec\":{\"id\":\"optional\",\"name\":\"...\",\"description\":\"...\",\"provider\":\"gemini|codex|chatgpt\",\"model\":\"...\",\"prompt\":\"...\",\"tools\":[\"...\"],\"meta\":{}},\"add_to_conversation\":true},",
+    "    {\"type\":\"fork_agent\",\"agent_id\":\"...\"},",
     "    {\"type\":\"publish_agent\",\"agent_node_id\":\"optional\",\"agent_id\":\"optional\"},",
     "    {\"type\":\"disable_agent\",\"agent_id\":\"...\"},",
     "    {\"type\":\"enable_agent\",\"agent_id\":\"...\"},",
@@ -599,6 +629,7 @@ function buildRouterPrompt(message, context = {}) {
     "",
     "핵심 규칙:",
     "- action은 필요한 최소만 선택한다 (최대 4개).",
+    "- run_agent/spawn_agents에서 agent_id는 enabled_agents_for_this_conversation 목록 안에서만 선택한다.",
     "- 일반 요청은 run_agent 1개로 우선 처리한다.",
     "- 컨텍스트가 부족하면 need_more_detail 후 run_agent를 배치한다.",
     "- run_agent/spawn_agents(자식 포함)에는 lens를 명시한다. 특별한 근거가 없으면 lens.mode=shared_only.",
@@ -608,6 +639,9 @@ function buildRouterPrompt(message, context = {}) {
     "- 사용자 입력이 반드시 필요한 경우에만 await_user=true.",
     "- public agent 검색 요청은 search_public_agents를 사용한다.",
     "- 설치 요청은 먼저 search_public_agents로 후보를 좁히고, 1개로 좁혀지면 install_agent_blueprint를 사용한다.",
+    "- 대화에서 agent를 추가/제거 요청하면 add_agent_to_conversation/remove_agent_from_conversation을 사용한다.",
+    "- 새 agent를 정의/생성 요청하면 create_agent_definition을 사용한다. 필요 시 add_to_conversation=true를 설정한다.",
+    "- 기존 agent 변형/복제 요청이면 fork_agent를 사용한다.",
     "- publish_agent는 admin 승인/검토가 필요함을 reason 또는 summarize 힌트에 명시한다.",
     "- agent/tool 제외 요청은 disable_agent/disable_tool을 사용한다.",
     "- agent/tool 재포함 요청은 enable_agent/enable_tool을 사용한다.",
@@ -642,6 +676,9 @@ function buildRouterPrompt(message, context = {}) {
     "registered_agents:",
     agentText,
     "",
+    "enabled_agents_for_this_conversation:",
+    enabledAgentIds.length > 0 ? enabledAgentIds.map((id) => `- @${id}`).join("\n") : "(none)",
+    "",
     "tool_specs:",
     toolText,
     "",
@@ -664,6 +701,7 @@ function buildRouterPrompt(message, context = {}) {
 
 export async function routeWithSupervisor(message, {
   agents = [],
+  enabledAgentIds = [],
   tools = [],
   jobConfig = {},
   currentJobId = "",
@@ -693,6 +731,7 @@ export async function routeWithSupervisor(message, {
 
   const prompt = buildRouterPrompt(msg, {
     agents,
+    enabledAgentIds,
     tools,
     jobConfig,
     currentJobId,

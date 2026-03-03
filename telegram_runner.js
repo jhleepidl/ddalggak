@@ -2164,6 +2164,10 @@ function chatActionLabel(action) {
   if (type === "search_public_agents") return `search_public_agents:${action.query || ""}`;
   if (type === "install_agent_blueprint") return `install_agent_blueprint:${action.blueprint_id || action.public_node_id || ""}`;
   if (type === "publish_agent") return `publish_agent:${action.agent_id || action.agent_node_id || ""}`;
+  if (type === "add_agent_to_conversation") return `add_agent_to_conversation:${action.agent_id || "unknown"}`;
+  if (type === "remove_agent_from_conversation") return `remove_agent_from_conversation:${action.agent_id || "unknown"}`;
+  if (type === "create_agent_definition") return `create_agent_definition:${action.agent_spec?.id || action.agent_spec?.name || action.agent_id || "unknown"}`;
+  if (type === "fork_agent") return `fork_agent:${action.agent_id || "unknown"}`;
   if (type === "disable_agent") return `disable_agent:${action.agent_id || "unknown"}`;
   if (type === "enable_agent") return `enable_agent:${action.agent_id || "unknown"}`;
   if (type === "disable_tool") return `disable_tool:${action.tool_id || "unknown"}`;
@@ -2862,25 +2866,95 @@ function sanitizeSupervisorRoutePlan(
   );
   const followupHint = String((routePlan?.followup_hint ?? routePlan?.followupHint) || "").trim();
   const sourceActions = Array.isArray(routePlan?.actions) ? routePlan.actions : [];
-  const filtered = sourceActions.filter((action) => {
-    if (!action || typeof action !== "object") return false;
-    if (!allowReadOnlyControl && isReadOnlyControlAction(action)) return false;
-    if (cleanForceMode === "work" && isMutatingAction(action)) return false;
-    return true;
-  });
+  const enabledAgentSet = new Set(
+    (Array.isArray(agents) ? agents : [])
+      .map((row) => String(row?.id || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const normalizeActionAgentId = (rawAction = {}) => String(
+    rawAction?.agent_id
+    || rawAction?.agentId
+    || rawAction?.agent
+    || ""
+  ).trim().toLowerCase();
+  const filtered = [];
+  let droppedDisabledAgentActions = 0;
+
+  for (const action of sourceActions) {
+    if (!action || typeof action !== "object") continue;
+    if (!allowReadOnlyControl && isReadOnlyControlAction(action)) continue;
+    if (cleanForceMode === "work" && isMutatingAction(action)) continue;
+
+    const type = String(action.type || "").trim().toLowerCase();
+    if (type === "run_agent") {
+      const targetAgentId = normalizeActionAgentId(action);
+      if (!targetAgentId || !enabledAgentSet.has(targetAgentId)) {
+        droppedDisabledAgentActions += 1;
+        continue;
+      }
+      filtered.push({
+        ...action,
+        agent_id: targetAgentId,
+      });
+      continue;
+    }
+
+    if (type === "spawn_agents") {
+      const children = Array.isArray(action.agents) ? action.agents : [];
+      const nextChildren = [];
+      for (const child of children) {
+        const childAgentId = normalizeActionAgentId(child);
+        const childGoal = String(child?.goal || child?.prompt || child?.task || "").trim();
+        if (!childAgentId || !childGoal) continue;
+        if (!enabledAgentSet.has(childAgentId)) {
+          droppedDisabledAgentActions += 1;
+          continue;
+        }
+        nextChildren.push({
+          ...child,
+          agent_id: childAgentId,
+        });
+        if (nextChildren.length >= 8) break;
+      }
+      if (nextChildren.length === 0) continue;
+      filtered.push({
+        ...action,
+        agents: nextChildren,
+      });
+      continue;
+    }
+
+    filtered.push(action);
+  }
 
   let actions = filtered;
   let reason = String(routePlan?.reason || "supervisor route").trim() || "supervisor route";
+  if (droppedDisabledAgentActions > 0) {
+    reason = `${reason}; filtered_disabled_agents=${droppedDisabledAgentActions}`;
+  }
   if (actions.length === 0) {
     if (!done && !awaitUser && isWorkLikeMessage(message)) {
-      actions = [{
-        type: "run_agent",
-        agent_id: "planner",
-        goal: `사용자 요청을 계획하고 필요한 agent 작업을 제안/수행: ${String(message || "").trim()}`,
-        risk: "L1",
-      }];
-      reason = `${reason}; empty_actions_work_like_planner_fallback`;
-      done = false;
+      const plannerAvailable = enabledAgentSet.has("planner");
+      const fallbackAgent = plannerAvailable
+        ? "planner"
+        : (pickRuntimeDefaultAgentId(agents) || findDefaultChatAgentId());
+      if (fallbackAgent) {
+        actions = [{
+          type: "run_agent",
+          agent_id: fallbackAgent,
+          goal: `사용자 요청을 계획하고 필요한 agent 작업을 제안/수행: ${String(message || "").trim()}`,
+          risk: "L1",
+        }];
+        reason = `${reason}; empty_actions_work_like_planner_fallback`;
+        done = false;
+      } else {
+        actions = [{
+          type: "summarize",
+          hint: "작업 실행 가능한 enabled agent가 없어 summarize로 종료",
+          risk: "L0",
+        }];
+        reason = `${reason}; no_enabled_agents_summary_fallback`;
+      }
     } else if (!done && !awaitUser) {
       const fallbackAgent = pickRuntimeDefaultAgentId(agents) || findDefaultChatAgentId();
       if (fallbackAgent) {
@@ -2895,7 +2969,7 @@ function sanitizeSupervisorRoutePlan(
       } else {
         actions = [{
           type: "summarize",
-          hint: "작업 실행 가능한 agent가 없어 summarize로 종료",
+          hint: "작업 실행 가능한 enabled agent가 없어 summarize로 종료",
           risk: "L0",
         }];
         reason = `${reason}; filtered_to_summary_fallback`;
@@ -3973,6 +4047,8 @@ async function loadSupervisorRuntime(
       map: null,
       agentsSlot: null,
       toolsSlot: null,
+      conversation: null,
+      conversationAgents: [],
       jobConfig: fallbackNormalized.configNormalized,
       jobConfigDebugSummary: summarizeJobConfigDebug(fallbackNormalized.configNormalized),
       jobConfigNodeId: "",
@@ -4000,6 +4076,18 @@ async function loadSupervisorRuntime(
   });
   const agentsSlot = await ensureAgentsThread(client, { baseDir: jobs.baseDir });
   const toolsSlot = await ensureToolsThread(client, { baseDir: jobs.baseDir });
+  const conversation = typeof client.ensureConversation === "function"
+    ? await client.ensureConversation(map.threadId).catch(() => ({
+      id: "",
+      thread_id: String(map.threadId || "").trim(),
+    }))
+    : {
+      id: "",
+      thread_id: String(map.threadId || "").trim(),
+    };
+  let conversationAgents = (typeof client.listConversationAgents === "function")
+    ? await client.listConversationAgents(map.threadId).catch(() => [])
+    : [];
 
   const latestJobNode = await listLatestResourceByKind(client, map.threadId, "job_config");
   const rawJobConfig = latestJobNode ? parseStructuredFromResource(latestJobNode, "job_config") : null;
@@ -4017,11 +4105,26 @@ async function loadSupervisorRuntime(
     rawJobConfig || { job_id: String(jobId || "").trim() },
     { agentsCatalog: reg.agents, toolsCatalog }
   );
-  const enabledAgentSet = new Set(
-    (Array.isArray(normalized.enabledAgentIds) ? normalized.enabledAgentIds : [])
+
+  if (conversationAgents.length === 0 && typeof client.addConversationAgent === "function") {
+    const seedAgentIds = (Array.isArray(normalized.enabledAgentIds) ? normalized.enabledAgentIds : [])
       .map((id) => String(id || "").trim().toLowerCase())
       .filter(Boolean)
-  );
+      .slice(0, 16);
+    for (const agentId of seedAgentIds) {
+      await client.addConversationAgent(map.threadId, agentId, true).catch(() => {});
+    }
+    if (seedAgentIds.length > 0 && typeof client.listConversationAgents === "function") {
+      conversationAgents = await client.listConversationAgents(map.threadId).catch(() => conversationAgents);
+    }
+  }
+  const enabledConversationAgentIds = Array.from(new Set(
+    (Array.isArray(conversationAgents) ? conversationAgents : [])
+      .filter((row) => row?.enabled !== false)
+      .map((row) => String(row?.agent_id || "").trim().toLowerCase())
+      .filter(Boolean)
+  ));
+  const enabledAgentSet = new Set(enabledConversationAgentIds);
   const enabledToolSet = new Set(
     (Array.isArray(normalized.enabledToolIds) ? normalized.enabledToolIds : [])
       .map((id) => String(id || "").trim().toLowerCase())
@@ -4075,7 +4178,9 @@ async function loadSupervisorRuntime(
     jobConfigNodeId: String(latestJobNode?.id || "").trim(),
     agentsCatalog: reg.agents,
     toolsCatalog,
-    enabledAgentIds: normalized.enabledAgentIds,
+    conversation,
+    conversationAgents: Array.isArray(conversationAgents) ? conversationAgents : [],
+    enabledAgentIds: enabledConversationAgentIds,
     enabledToolIds: normalized.enabledToolIds,
     agentSelection: summarizeSelectionState({ catalog: reg.agents, enabled: enabledAgents }),
     toolSelection: summarizeSelectionState({ catalog: toolsCatalog, enabled: enabledTools }),
@@ -4307,75 +4412,35 @@ async function appendParticipantToJobConfig(client, { jobId, agentId, actor = ""
     jobDir: runDir(jobId),
     title: `job:${jobId}`,
   });
-
-  const latest = await listLatestResourceByKind(client, map.threadId, "job_config");
-  const currentRaw = latest ? parseStructuredFromResource(latest, "job_config") : {};
-  const normalizedCurrent = normalizeSupervisorJobConfig(
-    currentRaw || { job_id: String(jobId || "").trim() },
-    { agentsCatalog: [{ id: String(agentId || "").trim().toLowerCase() }], toolsCatalog: [] }
-  );
-  const current = normalizedCurrent.configNormalized;
-  const uniq = (list = []) => {
-    const out = [];
-    const seen = new Set();
-    for (const entry of Array.isArray(list) ? list : []) {
-      const value = String(entry || "").trim().toLowerCase();
-      if (!value || seen.has(value)) continue;
-      seen.add(value);
-      out.push(value);
-    }
-    return out;
-  };
   const cleanAgentId = String(agentId || "").trim().toLowerCase();
-  const participants = Array.from(new Set([
-    ...(Array.isArray(current.participants) ? current.participants : []),
-    cleanAgentId,
-  ].filter(Boolean)));
-  const currentAgentSet = current.agent_set && typeof current.agent_set === "object"
-    ? current.agent_set
-    : { mode: "all_enabled", selected: [], disabled: [] };
-  const nextAgentSet = {
-    mode: String(currentAgentSet.mode || "").trim().toLowerCase() === "selected" ? "selected" : "all_enabled",
-    selected: uniq(currentAgentSet.selected),
-    disabled: uniq((Array.isArray(currentAgentSet.disabled) ? currentAgentSet.disabled : []).filter((id) => id !== cleanAgentId)),
-  };
-  if (nextAgentSet.mode === "selected" && cleanAgentId) {
-    nextAgentSet.selected = uniq([...nextAgentSet.selected, cleanAgentId]);
-  }
-  const nextConfig = {
-    ...current,
-    version: Math.max(2, Number(current.version || 2) || 2),
-    schema_version: Math.max(2, Number(current.schema_version || current.schemaVersion || 2) || 2),
-    participants,
-    agent_set: nextAgentSet,
-    updated_at: new Date().toISOString(),
-  };
+  if (!cleanAgentId) throw new Error("appendParticipantToJobConfig requires agentId");
 
-  const created = await client.createResource(map.threadId, {
-    name: `job_config@${new Date().toISOString()}`,
-    summary: `job_config update (${agentId})`,
-    text_mode: "plain",
-    raw_text: `${JSON.stringify(nextConfig, null, 2)}\n`,
-    resource_kind: "job_config",
-    uri: `ddalggak://jobs/${jobId}/job_config`,
-    context_set_id: map.ctxSharedId,
-    auto_activate: false,
-    attach_to: latest?.id || undefined,
-    payload_json: {
-      op: "approve_agent",
-      job_id: jobId,
-      agent_id: agentId,
-      approved_by: actor || undefined,
-      ts: new Date().toISOString(),
-      job_config: nextConfig,
-    },
-  });
-  if (latest?.id && created?.id && latest.id !== created.id) {
-    try {
-      await client.createEdge(map.threadId, latest.id, created.id, "NEXT_PART");
-    } catch {}
+  if (typeof client.ensureConversation === "function" && typeof client.addConversationAgent === "function") {
+    await client.ensureConversation(map.threadId).catch(() => null);
+    await client.addConversationAgent(map.threadId, cleanAgentId, true);
+    const conversationAgents = typeof client.listConversationAgents === "function"
+      ? await client.listConversationAgents(map.threadId).catch(() => [])
+      : [];
+    const enabledAgentIds = Array.from(new Set(
+      (Array.isArray(conversationAgents) ? conversationAgents : [])
+        .filter((row) => row?.enabled !== false)
+        .map((row) => String(row?.agent_id || "").trim().toLowerCase())
+        .filter(Boolean)
+    ));
+    return {
+      map,
+      created: {
+        id: `${String(map.threadId || "").trim()}:${cleanAgentId}`,
+      },
+      config: null,
+      source: "conversation_agents",
+      actor,
+      enabledAgentIds,
+      conversationAgents,
+    };
   }
-  return { map, created, config: nextConfig };
+
+  return { map, created: null, config: null, source: "none" };
 }
 
 async function updateJobConfigSelection(client, {
@@ -4401,6 +4466,59 @@ async function updateJobConfigSelection(client, {
     jobDir: runDir(cleanJobId),
     title: `job:${cleanJobId}`,
   });
+
+  if (
+    cleanKind === "agent"
+    && typeof client.ensureConversation === "function"
+    && typeof client.listConversationAgents === "function"
+  ) {
+    await client.ensureConversation(map.threadId).catch(() => null);
+    if (cleanOp === "disable") {
+      if (typeof client.patchConversationAgent === "function") {
+        await client.patchConversationAgent(map.threadId, cleanId, { enabled: false }).catch(async () => {
+          if (typeof client.addConversationAgent === "function") {
+            await client.addConversationAgent(map.threadId, cleanId, false);
+          } else {
+            throw new Error("conversation agent disable is not supported by API");
+          }
+        });
+      } else if (typeof client.addConversationAgent === "function") {
+        await client.addConversationAgent(map.threadId, cleanId, false);
+      } else {
+        throw new Error("conversation agent disable is not supported by API");
+      }
+    } else if (typeof client.patchConversationAgent === "function") {
+      await client.patchConversationAgent(map.threadId, cleanId, { enabled: true }).catch(async () => {
+        if (typeof client.addConversationAgent === "function") {
+          await client.addConversationAgent(map.threadId, cleanId, true);
+        } else {
+          throw new Error("conversation agent enable is not supported by API");
+        }
+      });
+    } else if (typeof client.addConversationAgent === "function") {
+      await client.addConversationAgent(map.threadId, cleanId, true);
+    } else {
+      throw new Error("conversation agent enable is not supported by API");
+    }
+    const conversationAgents = await client.listConversationAgents(map.threadId).catch(() => []);
+    const enabledAgentIds = Array.from(new Set(
+      (Array.isArray(conversationAgents) ? conversationAgents : [])
+        .filter((row) => row?.enabled !== false)
+        .map((row) => String(row?.agent_id || "").trim().toLowerCase())
+        .filter(Boolean)
+    ));
+    return {
+      map,
+      config: null,
+      source: "conversation_agents",
+      conversationAgents,
+      enabledAgentIds,
+      op: cleanOp,
+      kind: cleanKind,
+      id: cleanId,
+    };
+  }
+
   const latest = await listLatestResourceByKind(client, map.threadId, "job_config");
   const currentRaw = latest ? parseStructuredFromResource(latest, "job_config") : null;
   const normalized = normalizeSupervisorJobConfig(
@@ -5599,6 +5717,141 @@ function buildSupervisorExecutionCallbacks({
         },
       });
     },
+    createAgentDefinition: async ({ action }) => {
+      return await runActionWithGraph({
+        action,
+        toolName: "create_agent_definition",
+        work: async () => {
+          if (memoryModeWithFallback() !== "goc") {
+            throw new Error("create_agent_definition requires MEMORY_MODE=goc");
+          }
+          const client = requireGocClient();
+          if (typeof client.createAgent !== "function") {
+            throw new Error("GoC createAgent API unavailable");
+          }
+          const spec = action?.agent_spec && typeof action.agent_spec === "object"
+            ? action.agent_spec
+            : {};
+          const created = await client.createAgent(spec);
+          const createdId = String(created?.id || spec.id || "").trim().toLowerCase();
+          let addedToConversation = false;
+          if (action?.add_to_conversation === true && runtime?.map?.threadId && createdId) {
+            await client.ensureConversation(runtime.map.threadId).catch(() => null);
+            await client.addConversationAgent(runtime.map.threadId, createdId, action?.enabled !== false);
+            addedToConversation = true;
+          }
+          await refreshAgentRegistry({ includeCompiled: true });
+          return {
+            id: createdId,
+            agent_id: createdId,
+            added_to_conversation: addedToConversation,
+            text: createdId
+              ? `✅ agent definition 생성 완료: @${createdId}${addedToConversation ? "\nconversation에도 추가됨" : ""}`
+              : "✅ agent definition 생성 완료",
+          };
+        },
+      });
+    },
+    forkAgent: async ({ action }) => {
+      return await runActionWithGraph({
+        action,
+        toolName: "fork_agent",
+        work: async () => {
+          if (memoryModeWithFallback() !== "goc") {
+            throw new Error("fork_agent requires MEMORY_MODE=goc");
+          }
+          const client = requireGocClient();
+          if (typeof client.forkAgent !== "function") {
+            throw new Error("GoC forkAgent API unavailable");
+          }
+          const sourceId = String(action?.agent_id || "").trim().toLowerCase();
+          if (!sourceId) throw new Error("fork_agent requires agent_id");
+          const forked = await client.forkAgent(sourceId);
+          const forkedId = String(forked?.id || "").trim().toLowerCase();
+          await refreshAgentRegistry({ includeCompiled: true });
+          return {
+            id: forkedId,
+            agent_id: forkedId,
+            source_agent_id: sourceId,
+            text: forkedId
+              ? `✅ agent fork 완료: @${sourceId} -> @${forkedId}`
+              : `✅ agent fork 요청 완료: @${sourceId}`,
+          };
+        },
+      });
+    },
+    addAgentToConversation: async ({ action }) => {
+      return await runActionWithGraph({
+        action,
+        toolName: "add_agent_to_conversation",
+        work: async () => {
+          if (memoryModeWithFallback() !== "goc") {
+            throw new Error("add_agent_to_conversation requires MEMORY_MODE=goc");
+          }
+          const threadId = String(runtime?.map?.threadId || "").trim();
+          if (!threadId) throw new Error("conversation thread is not ready");
+          const client = requireGocClient();
+          const agentId = String(action?.agent_id || "").trim().toLowerCase();
+          if (!agentId) throw new Error("add_agent_to_conversation requires agent_id");
+          await client.ensureConversation(threadId).catch(() => null);
+          await client.addConversationAgent(threadId, agentId, action?.enabled !== false);
+          const convRows = await client.listConversationAgents(threadId).catch(() => []);
+          const enabled = Array.from(new Set(
+            convRows
+              .filter((row) => row?.enabled !== false)
+              .map((row) => String(row?.agent_id || "").trim().toLowerCase())
+              .filter(Boolean)
+          ));
+          runtime.conversationAgents = convRows;
+          runtime.enabledAgentIds = enabled;
+          runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
+            .filter((agent) => enabled.includes(String(agent?.id || "").trim().toLowerCase()));
+          runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
+          return {
+            agent_id: agentId,
+            enabled_agents: enabled,
+            source: "conversation_agents",
+            text: `✅ conversation에 @${agentId} 추가 완료`,
+          };
+        },
+      });
+    },
+    removeAgentFromConversation: async ({ action }) => {
+      return await runActionWithGraph({
+        action,
+        toolName: "remove_agent_from_conversation",
+        work: async () => {
+          if (memoryModeWithFallback() !== "goc") {
+            throw new Error("remove_agent_from_conversation requires MEMORY_MODE=goc");
+          }
+          const threadId = String(runtime?.map?.threadId || "").trim();
+          if (!threadId) throw new Error("conversation thread is not ready");
+          const client = requireGocClient();
+          const agentId = String(action?.agent_id || "").trim().toLowerCase();
+          if (!agentId) throw new Error("remove_agent_from_conversation requires agent_id");
+          await client.ensureConversation(threadId).catch(() => null);
+          await client.removeConversationAgent(threadId, agentId);
+          const convRows = await client.listConversationAgents(threadId).catch(() => []);
+          const enabled = Array.from(new Set(
+            convRows
+              .filter((row) => row?.enabled !== false)
+              .map((row) => String(row?.agent_id || "").trim().toLowerCase())
+              .filter(Boolean)
+          ));
+          runtime.conversationAgents = convRows;
+          runtime.enabledAgentIds = enabled;
+          runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
+            .filter((agent) => enabled.includes(String(agent?.id || "").trim().toLowerCase()));
+          runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
+          return {
+            agent_id: agentId,
+            enabled_agents: enabled,
+            source: "conversation_agents",
+            text: `🛑 conversation에서 @${agentId} 제거 완료`,
+          };
+        },
+      });
+    },
     openContext: async ({ action }) => {
       return await runActionWithGraph({
         action,
@@ -5784,6 +6037,21 @@ function buildSupervisorExecutionCallbacks({
             throw new Error("agents thread/context is not ready");
           }
           const client = requireGocClient();
+          const targetAgentId = String(action.agent_id || "").trim().toLowerCase();
+          if (targetAgentId && typeof client.publishAgent === "function") {
+            const published = await client.publishAgent(targetAgentId, true);
+            tracking.append(jobId, "decisions.md", [
+              "## /chat publish_agent",
+              `- agent_id: ${targetAgentId}`,
+              `- published: ${published?.published === true ? "true" : "requested"}`,
+              `- note: GoC agents catalog publish`,
+            ].join("\n"));
+            return {
+              request_id: String(published?.id || targetAgentId),
+              source_node_id: "",
+              agent_id: targetAgentId,
+            };
+          }
           const targetNode = await findLatestAgentProfileNodeForPublish(
             client,
             runtime.agentsSlot,
@@ -5811,11 +6079,14 @@ function buildSupervisorExecutionCallbacks({
         action,
         toolName: "list_agents",
         work: async () => {
-          const enabled = normalizeCatalogIds(runtime.agentSelection?.enabled_ids || runtime.agents || []);
+          const convRows = Array.isArray(runtime?.conversationAgents) ? runtime.conversationAgents : [];
+          const enabled = normalizeCatalogIds(runtime?.enabledAgentIds || []);
+          const members = normalizeCatalogIds(convRows.map((row) => row?.agent_id));
           const disabled = action?.include_disabled === false
             ? []
-            : normalizeCatalogIds(runtime.agentSelection?.disabled_ids || []);
-          const lines = ["현재 job agent 상태"];
+            : members.filter((id) => !enabled.includes(id));
+          const lines = ["현재 conversation agent 상태"];
+          lines.push(`- thread_id: ${String(runtime?.map?.threadId || "").trim() || "(none)"}`);
           lines.push(enabled.length > 0
             ? `- enabled: ${enabled.map((id) => `@${id}`).join(", ")}`
             : "- enabled: (none)");
@@ -5867,32 +6138,43 @@ function buildSupervisorExecutionCallbacks({
             agentsCatalog: runtime.agentsCatalog || runtime.agents || [],
             toolsCatalog: runtime.toolsCatalog || runtime.tools || [],
           });
-          const normalized = normalizeSupervisorJobConfig(
-            updated.config || {},
-            {
-              agentsCatalog: runtime.agentsCatalog || runtime.agents || [],
-              toolsCatalog: runtime.toolsCatalog || runtime.tools || [],
-            }
-          );
-          const enabledAgentSet = new Set(
-            (Array.isArray(normalized.enabledAgentIds) ? normalized.enabledAgentIds : [])
-              .map((entry) => String(entry || "").trim().toLowerCase())
-              .filter(Boolean)
-          );
-          const enabledToolSet = new Set(
-            (Array.isArray(normalized.enabledToolIds) ? normalized.enabledToolIds : [])
-              .map((entry) => String(entry || "").trim().toLowerCase())
-              .filter(Boolean)
-          );
-          runtime.jobConfig = normalized.configNormalized;
-          runtime.enabledAgentIds = normalized.enabledAgentIds;
-          runtime.enabledToolIds = normalized.enabledToolIds;
-          runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
-            .filter((agent) => enabledAgentSet.has(String(agent?.id || "").trim().toLowerCase()));
-          runtime.tools = (Array.isArray(runtime.toolsCatalog) ? runtime.toolsCatalog : [])
-            .filter((tool) => enabledToolSet.has(String(tool?.id || "").trim().toLowerCase()));
-          runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
-          runtime.toolSelection = summarizeSelectionState({ catalog: runtime.toolsCatalog || [], enabled: runtime.tools });
+          if (String(updated?.source || "").trim().toLowerCase() === "conversation_agents") {
+            const enabled = Array.isArray(updated?.enabledAgentIds)
+              ? updated.enabledAgentIds.map((entry) => String(entry || "").trim().toLowerCase()).filter(Boolean)
+              : [];
+            runtime.conversationAgents = Array.isArray(updated?.conversationAgents) ? updated.conversationAgents : [];
+            runtime.enabledAgentIds = enabled;
+            runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
+              .filter((agent) => enabled.includes(String(agent?.id || "").trim().toLowerCase()));
+            runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
+          } else {
+            const normalized = normalizeSupervisorJobConfig(
+              updated.config || {},
+              {
+                agentsCatalog: runtime.agentsCatalog || runtime.agents || [],
+                toolsCatalog: runtime.toolsCatalog || runtime.tools || [],
+              }
+            );
+            const enabledAgentSet = new Set(
+              (Array.isArray(normalized.enabledAgentIds) ? normalized.enabledAgentIds : [])
+                .map((entry) => String(entry || "").trim().toLowerCase())
+                .filter(Boolean)
+            );
+            const enabledToolSet = new Set(
+              (Array.isArray(normalized.enabledToolIds) ? normalized.enabledToolIds : [])
+                .map((entry) => String(entry || "").trim().toLowerCase())
+                .filter(Boolean)
+            );
+            runtime.jobConfig = normalized.configNormalized;
+            runtime.enabledAgentIds = normalized.enabledAgentIds;
+            runtime.enabledToolIds = normalized.enabledToolIds;
+            runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
+              .filter((agent) => enabledAgentSet.has(String(agent?.id || "").trim().toLowerCase()));
+            runtime.tools = (Array.isArray(runtime.toolsCatalog) ? runtime.toolsCatalog : [])
+              .filter((tool) => enabledToolSet.has(String(tool?.id || "").trim().toLowerCase()));
+            runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
+            runtime.toolSelection = summarizeSelectionState({ catalog: runtime.toolsCatalog || [], enabled: runtime.tools });
+          }
           return {
             ...updated,
             enabled_agent_ids: runtime.enabledAgentIds,
@@ -6121,6 +6403,7 @@ async function runSupervisorChat(
       });
       const rawRoutePlan = await routeWithSupervisor(lastUserText, {
         agents: runtime.agents,
+        enabledAgentIds: runtime.enabledAgentIds,
         tools: runtime.tools,
         jobConfig: runtime.jobConfig,
         currentJobId,
@@ -6990,9 +7273,100 @@ async function sendChatStatus(bot, chatId) {
   await sendLong(bot, chatId, card.text);
 }
 
-async function sendAgentOrToolListQuick(bot, chatId, kind = "agent") {
+async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "") {
   const cleanKind = String(kind || "").trim().toLowerCase() === "tool" ? "tool" : "agent";
+  const tokens = String(rawArgs || "").trim().split(/\s+/).filter(Boolean);
+  const sub = String(tokens[0] || "").trim().toLowerCase();
+  const targetAgentId = String(tokens[1] || "").trim().toLowerCase();
   const currentJobId = String(resolveCurrentJobIdForChat(chatId) || "").trim();
+
+  if (cleanKind === "agent" && memoryModeWithFallback() === "goc" && sub === "registry") {
+    try {
+      const client = requireGocClient();
+      const rows = await client.listAgents("mine").catch(() => client.listAgents("all"));
+      const lines = [
+        "GoC Agent Registry",
+        ...((Array.isArray(rows) ? rows : []).slice(0, 50).map((row) => {
+          const id = String(row?.id || "").trim().toLowerCase();
+          const provider = String(row?.provider || "gemini").trim().toLowerCase();
+          const model = String(row?.model || provider || "gemini").trim();
+          const published = row?.published === true ? "published" : "private";
+          return `- @${id || "unknown"} (${provider}/${model}, ${published})`;
+        })),
+      ];
+      if ((Array.isArray(rows) ? rows : []).length === 0) lines.push("- (none)");
+      await sendLong(bot, chatId, lines.join("\n"));
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ registry 조회 실패: ${String(e?.message ?? e)}`);
+    }
+    return;
+  }
+
+  if (
+    cleanKind === "agent"
+    && memoryModeWithFallback() === "goc"
+    && ["add", "remove", "enable", "disable"].includes(sub)
+  ) {
+    if (!targetAgentId) {
+      await bot.sendMessage(chatId, "Usage: /agents add|remove|enable|disable <agent_id>");
+      return;
+    }
+    if (!currentJobId) {
+      await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어 conversation agent를 변경할 수 없습니다.");
+      return;
+    }
+    try {
+      const runtime = await loadSupervisorRuntime(currentJobId, {
+        chatMeta: { chat_id: String(chatId || "") },
+        includeContext: false,
+        includeGlobal: false,
+      });
+      const threadId = String(runtime?.map?.threadId || "").trim();
+      if (!threadId) throw new Error("threadId not ready");
+      const client = requireGocClient();
+      await client.ensureConversation(threadId).catch(() => null);
+      if (sub === "add") {
+        await client.addConversationAgent(threadId, targetAgentId, true);
+      } else if (sub === "remove") {
+        await client.removeConversationAgent(threadId, targetAgentId);
+      } else if (sub === "enable") {
+        await client.patchConversationAgent(threadId, targetAgentId, { enabled: true }).catch(async () => {
+          await client.addConversationAgent(threadId, targetAgentId, true);
+        });
+      } else if (sub === "disable") {
+        await client.patchConversationAgent(threadId, targetAgentId, { enabled: false });
+      }
+      const updated = await client.listConversationAgents(threadId).catch(() => []);
+      const allAgentIds = Array.from(new Set(
+        updated.map((row) => String(row?.agent_id || "").trim().toLowerCase()).filter(Boolean)
+      ));
+      const enabled = Array.from(new Set(
+        updated
+          .filter((row) => row?.enabled !== false)
+          .map((row) => String(row?.agent_id || "").trim().toLowerCase())
+          .filter(Boolean)
+      ));
+      const disabled = allAgentIds.filter((id) => !enabled.includes(id));
+      const verb = sub === "add"
+        ? "추가"
+        : (sub === "remove" ? "제거" : (sub === "enable" ? "활성화" : "비활성화"));
+      await sendLong(bot, chatId, [
+        `✅ conversation agent ${verb} 완료`,
+        `- job_id: ${currentJobId}`,
+        `- agent_id: @${targetAgentId}`,
+        enabled.length > 0
+          ? `- enabled: ${enabled.slice(0, 20).map((id) => `@${id}`).join(", ")}`
+          : "- enabled: (none)",
+        disabled.length > 0
+          ? `- disabled: ${disabled.slice(0, 20).map((id) => `@${id}`).join(", ")}`
+          : "- disabled: (none)",
+      ].join("\n"));
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ /agents ${sub} 실패: ${String(e?.message ?? e)}`);
+    }
+    return;
+  }
+
   if (!currentJobId) {
     if (cleanKind === "agent") {
       const reg = await refreshAgentRegistry({ includeCompiled: true });
@@ -7034,18 +7408,23 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent") {
   }
 
   if (cleanKind === "agent") {
-    const enabled = runtime?.agentSelection?.enabled_ids || runtime?.enabledAgentIds || [];
-    const disabled = runtime?.agentSelection?.disabled_ids || [];
+    const convRows = Array.isArray(runtime?.conversationAgents) ? runtime.conversationAgents : [];
+    const enabled = runtime?.enabledAgentIds || [];
+    const members = Array.from(new Set(
+      convRows.map((row) => String(row?.agent_id || "").trim().toLowerCase()).filter(Boolean)
+    ));
+    const disabled = members.filter((id) => !enabled.includes(id));
     const lines = [
-      "현재 job agent 목록",
+      "현재 conversation agent 목록",
       `- job_id: ${currentJobId}`,
+      `- thread_id: ${String(runtime?.map?.threadId || "").trim() || "(none)"}`,
       enabled.length > 0
-        ? `- enabled: ${enabled.slice(0, 10).map((id) => `@${id}`).join(", ")}`
+        ? `- enabled: ${enabled.slice(0, 20).map((id) => `@${id}`).join(", ")}`
         : "- enabled: (none)",
       disabled.length > 0
-        ? `- disabled: ${disabled.slice(0, 10).map((id) => `@${id}`).join(", ")}`
+        ? `- disabled: ${disabled.slice(0, 20).map((id) => `@${id}`).join(", ")}`
         : "- disabled: (none)",
-      "정밀 편집은 GoC UI에서 할 수 있습니다.",
+      "명령: /agents registry | /agents add <id> | /agents remove <id> | /agents enable <id> | /agents disable <id>",
     ];
     await sendTextWithOptionalGocButton(bot, chatId, lines.join("\n"), {
       miniAppLink: info?.miniAppLink || info?.link || "",
@@ -8018,10 +8397,10 @@ bot.on("message", async (msg) => {
   if (cmd === "/help") {
     const sub = String(args || "").trim().toLowerCase();
     if (sub === "advanced") {
-      await bot.sendMessage(chatId, "Commands:\n- plain text: 기본 /chat(supervisor) 처리\n- /whoami\n- /running\n- /status\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
+      await bot.sendMessage(chatId, "Commands:\n- plain text: 기본 /chat(supervisor) 처리\n- /whoami\n- /running\n- /status\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents [registry|add <id>|remove <id>|enable <id>|disable <id>]\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
       return;
     }
-    await bot.sendMessage(chatId, "Commands:\n- plain text: 대화/작업 지시\n- /context [global]\n- /agents\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /status\n- /stop [jobId]\n- /running\n- /whoami\n- /help advanced");
+    await bot.sendMessage(chatId, "Commands:\n- plain text: 대화/작업 지시\n- /context [global]\n- /agents [registry|add <id>|remove <id>|enable <id>|disable <id>]\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /status\n- /stop [jobId]\n- /running\n- /whoami\n- /help advanced");
     return;
   }
 
@@ -8180,7 +8559,7 @@ bot.on("message", async (msg) => {
   }
 
   if (cmd === "/agents") {
-    await sendAgentOrToolListQuick(bot, chatId, "agent");
+    await sendAgentOrToolListQuick(bot, chatId, "agent", args);
     return;
   }
 

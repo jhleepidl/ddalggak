@@ -489,9 +489,31 @@ export async function installBlueprint(client, blueprintNode, { agentsThreadId, 
 export async function loadAgentsFromGoc({ client, baseDir, includeCompiled = true } = {}) {
   if (!client) throw new Error("loadAgentsFromGoc requires client");
   const fallback = loadAgents();
-  const slot = await ensureAgentsThread(client, { baseDir });
+  const slot = await ensureAgentsThread(client, { baseDir }).catch(() => ({ threadId: "", ctxId: "" }));
 
-  const resources = await client.listResources(slot.threadId, { resourceKind: "agent_profile" });
+  if (typeof client.listAgents === "function") {
+    try {
+      const apiRows = await client.listAgents("all");
+      const normalizedApiRows = dedupeByIdKeepLast(
+        (Array.isArray(apiRows) ? apiRows : [])
+          .map((row) => normalizeAgent(row))
+          .filter(Boolean)
+      );
+      if (normalizedApiRows.length > 0) {
+        return buildRegistry(normalizedApiRows, {
+          source: "goc_agents_api",
+          threadId: slot.threadId,
+          ctxId: slot.ctxId,
+          compiledText: "",
+          resources: [],
+        });
+      }
+    } catch {}
+  }
+
+  const resources = slot.threadId
+    ? await client.listResources(slot.threadId, { resourceKind: "agent_profile" })
+    : [];
   const parsedFromNodes = [];
   const publicOriginByAgentId = new Map();
   for (const resource of sortByCreatedAt(resources)) {
@@ -560,6 +582,32 @@ async function findLatestAgentNode(client, threadId, agentId) {
 async function upsertAgentProfile(client, { baseDir, profile, format = "json", op = "create", actor = "" }) {
   const agent = normalizeAgent(profile);
   if (!agent) throw new Error("invalid agent profile (id is required)");
+
+  if (typeof client.createAgent === "function" && typeof client.patchAgent === "function") {
+    try {
+      const updated = op === "update"
+        ? await client.patchAgent(agent.id, {
+          ...agent,
+          updated_by: String(actor || "").trim() || undefined,
+          format: String(format || "json").trim().toLowerCase() === "yaml" ? "yaml" : "json",
+        })
+        : await client.createAgent({
+          ...agent,
+          updated_by: String(actor || "").trim() || undefined,
+          format: String(format || "json").trim().toLowerCase() === "yaml" ? "yaml" : "json",
+        });
+      const normalizedUpdated = normalizeAgent(updated) || agent;
+      return {
+        created: {
+          id: String(updated?.id || normalizedUpdated.id || "").trim(),
+          raw: updated,
+        },
+        threadId: "",
+        ctxId: "",
+        agent: normalizedUpdated,
+      };
+    } catch {}
+  }
 
   const slot = await ensureAgentsThread(client, { baseDir });
   const nowIso = new Date().toISOString();

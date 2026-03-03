@@ -12,7 +12,11 @@ function asObject(v) {
 const MUTATING_ACTION_TYPES = new Set([
   "propose_agent",
   "create_agent",
+  "create_agent_definition",
   "update_agent",
+  "fork_agent",
+  "add_agent_to_conversation",
+  "remove_agent_from_conversation",
   "enable_agent",
   "disable_agent",
   "enable_tool",
@@ -53,8 +57,12 @@ function approvalReasonCategory(action = {}, fallbackReason = "") {
   const type = String(action?.type || "").trim().toLowerCase();
   if ([
     "create_agent",
+    "create_agent_definition",
     "update_agent",
+    "fork_agent",
     "propose_agent",
+    "add_agent_to_conversation",
+    "remove_agent_from_conversation",
     "enable_agent",
     "disable_agent",
     "enable_tool",
@@ -79,6 +87,10 @@ function actionLabel(action) {
   if (type === "search_public_agents") return `search_public_agents:${action.query || ""}`;
   if (type === "install_agent_blueprint") return `install_agent_blueprint:${action.blueprint_id || action.public_node_id || ""}`;
   if (type === "publish_agent") return `publish_agent:${action.agent_id || action.agent_node_id || ""}`;
+  if (type === "add_agent_to_conversation") return `add_agent_to_conversation:${action.agent_id || "unknown"}`;
+  if (type === "remove_agent_from_conversation") return `remove_agent_from_conversation:${action.agent_id || "unknown"}`;
+  if (type === "create_agent_definition") return `create_agent_definition:${action.agent_spec?.id || action.agent_spec?.name || action.agent_id || "unknown"}`;
+  if (type === "fork_agent") return `fork_agent:${action.agent_id || "unknown"}`;
   if (type === "disable_agent") return `disable_agent:${action.agent_id || "unknown"}`;
   if (type === "enable_agent") return `enable_agent:${action.agent_id || "unknown"}`;
   if (type === "disable_tool") return `disable_tool:${action.tool_id || "unknown"}`;
@@ -433,6 +445,72 @@ export async function executeSupervisorActions({
         continue;
       }
 
+      if (action.type === "create_agent_definition") {
+        if (typeof callbacks.createAgentDefinition !== "function") {
+          throw new Error("createAgentDefinition callback is missing");
+        }
+        const created = await callbacks.createAgentDefinition({
+          action,
+          jobId,
+          chatId,
+          userId,
+        });
+        const createdAgentId = String(
+          created?.agent_id
+          || created?.id
+          || action?.agent_spec?.id
+          || ""
+        ).trim().toLowerCase();
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "create_agent_definition",
+          output: String(created?.text || created?.message || "").trim()
+            || `agent definition 생성 완료: @${createdAgentId || "unknown"}`,
+          agent_id: createdAgentId,
+          created_node_id: String(created?.created_node_id || created?.node_id || "").trim() || undefined,
+          added_to_conversation: created?.added_to_conversation === true,
+          jobId: String(jobId || ""),
+        });
+        results.push({
+          label,
+          status: "ok",
+          note: createdAgentId ? `@${createdAgentId}` : "created",
+        });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "fork_agent") {
+        if (typeof callbacks.forkAgent !== "function") {
+          throw new Error("forkAgent callback is missing");
+        }
+        const forked = await callbacks.forkAgent({
+          action,
+          jobId,
+          chatId,
+          userId,
+        });
+        const nextId = String(
+          forked?.agent_id
+          || forked?.id
+          || ""
+        ).trim().toLowerCase();
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "fork_agent",
+          output: String(forked?.text || forked?.message || "").trim()
+            || (nextId ? `agent fork 완료: @${nextId}` : "agent fork 완료"),
+          agent_id: nextId || undefined,
+          source_agent_id: String(action.agent_id || "").trim().toLowerCase() || undefined,
+          jobId: String(jobId || ""),
+        });
+        results.push({ label, status: "ok", note: nextId || "forked" });
+        usedActions += 1;
+        continue;
+      }
+
       if (action.type === "search_public_agents") {
         if (typeof callbacks.searchPublicAgents !== "function") {
           throw new Error("searchPublicAgents callback is missing");
@@ -532,6 +610,60 @@ export async function executeSupervisorActions({
         continue;
       }
 
+      if (action.type === "add_agent_to_conversation") {
+        if (typeof callbacks.addAgentToConversation !== "function") {
+          throw new Error("addAgentToConversation callback is missing");
+        }
+        const changed = await callbacks.addAgentToConversation({
+          action,
+          jobId,
+          chatId,
+          userId,
+        });
+        const targetAgentId = String(action.agent_id || changed?.agent_id || "").trim().toLowerCase();
+        const enabledAgents = Array.isArray(changed?.enabled_agents) ? changed.enabled_agents : [];
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "conversation_agent_add",
+          output: String(changed?.text || "").trim()
+            || `✅ conversation agent 추가: @${targetAgentId || "unknown"}${enabledAgents.length > 0 ? `\nenabled=${enabledAgents.map((id) => `@${id}`).join(", ")}` : ""}`,
+          agent_id: targetAgentId || undefined,
+          enabled_agents: enabledAgents,
+          jobId: String(jobId || ""),
+        });
+        results.push({ label, status: "ok", note: targetAgentId ? `@${targetAgentId}` : "added" });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "remove_agent_from_conversation") {
+        if (typeof callbacks.removeAgentFromConversation !== "function") {
+          throw new Error("removeAgentFromConversation callback is missing");
+        }
+        const changed = await callbacks.removeAgentFromConversation({
+          action,
+          jobId,
+          chatId,
+          userId,
+        });
+        const targetAgentId = String(action.agent_id || changed?.agent_id || "").trim().toLowerCase();
+        const enabledAgents = Array.isArray(changed?.enabled_agents) ? changed.enabled_agents : [];
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "conversation_agent_remove",
+          output: String(changed?.text || "").trim()
+            || `🛑 conversation agent 제거: @${targetAgentId || "unknown"}${enabledAgents.length > 0 ? `\nenabled=${enabledAgents.map((id) => `@${id}`).join(", ")}` : ""}`,
+          agent_id: targetAgentId || undefined,
+          enabled_agents: enabledAgents,
+          jobId: String(jobId || ""),
+        });
+        results.push({ label, status: "ok", note: targetAgentId ? `@${targetAgentId}` : "removed" });
+        usedActions += 1;
+        continue;
+      }
+
       if (action.type === "open_context") {
         if (typeof callbacks.openContext !== "function") {
           throw new Error("openContext callback is missing");
@@ -590,14 +722,17 @@ export async function executeSupervisorActions({
         });
         results.push({ label, status: "ok", note: line.replace(/^[✅🚫]\s*/, "") });
         usedActions += 1;
-        if (i < actions.length - 1) {
+        const immediateApply = kind === "agent"
+          && String(updated?.source || "").trim().toLowerCase() === "conversation_agents";
+        if (!immediateApply && i < actions.length - 1) {
           results.push({
             label: "selection_update",
             status: "skip",
             note: "job_config updated; apply on next /chat",
           });
         }
-        break;
+        if (!immediateApply) break;
+        continue;
       }
 
       if (action.type === "list_agents") {

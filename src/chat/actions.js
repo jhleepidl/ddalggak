@@ -209,6 +209,75 @@ function normalizeToggleAgent(raw, enabled = true) {
   };
 }
 
+function normalizeAddAgentToConversation(raw) {
+  const row = asObject(raw);
+  const agentId = String(row.agent_id || row.agentId || row.agent || row.id || "").trim().toLowerCase();
+  if (!agentId) return null;
+  return {
+    type: "add_agent_to_conversation",
+    agent_id: agentId,
+    enabled: row.enabled !== false,
+    risk: normalizeRisk(row.risk, "L2"),
+  };
+}
+
+function normalizeRemoveAgentFromConversation(raw) {
+  const row = asObject(raw);
+  const agentId = String(row.agent_id || row.agentId || row.agent || row.id || "").trim().toLowerCase();
+  if (!agentId) return null;
+  return {
+    type: "remove_agent_from_conversation",
+    agent_id: agentId,
+    risk: normalizeRisk(row.risk, "L2"),
+  };
+}
+
+function normalizeCreateAgentDefinition(raw) {
+  const row = asObject(raw);
+  const spec = asObject(row.agent_spec || row.agentSpec || row.agent || row.profile || {});
+  const candidateId = String(
+    row.agent_id
+    || row.agentId
+    || spec.id
+    || spec.agent_id
+    || ""
+  ).trim().toLowerCase();
+  const provider = String(spec.provider || row.provider || "gemini").trim().toLowerCase() || "gemini";
+  const model = String(spec.model || row.model || provider || "gemini").trim() || provider || "gemini";
+  const name = String(spec.name || row.name || candidateId || "").trim();
+  const prompt = String(spec.prompt || row.prompt || row.goal || "").trim();
+  if (!name && !prompt && !candidateId) return null;
+  return {
+    type: "create_agent_definition",
+    agent_spec: {
+      id: candidateId || undefined,
+      name: name || candidateId || undefined,
+      description: String(spec.description || row.description || "").trim(),
+      provider,
+      model,
+      prompt,
+      tools: normalizeStringArray(spec.tools || row.tools || [], { max: 24 }),
+      meta: spec.meta && typeof spec.meta === "object"
+        ? spec.meta
+        : (row.meta && typeof row.meta === "object" ? row.meta : {}),
+    },
+    add_to_conversation: row.add_to_conversation === true || row.addToConversation === true,
+    enabled: row.enabled !== false,
+    risk: normalizeRisk(row.risk, "L2"),
+  };
+}
+
+function normalizeForkAgent(raw) {
+  const row = asObject(raw);
+  const agentId = String(row.agent_id || row.agentId || row.agent || row.id || "").trim().toLowerCase();
+  if (!agentId) return null;
+  return {
+    type: "fork_agent",
+    agent_id: agentId,
+    risk: normalizeRisk(row.risk, "L2"),
+  };
+}
+
 function normalizeToggleTool(raw, enabled = true) {
   const row = asObject(raw);
   const toolId = String(row.tool_id || row.toolId || row.tool || row.id || row.name || "").trim().toLowerCase();
@@ -346,6 +415,10 @@ export function normalizeAction(raw) {
   if (type === "search_public_agents" || type === "find_public_agents") return normalizeSearchPublicAgents(row);
   if (type === "install_agent_blueprint" || type === "install_public_agent") return normalizeInstallAgentBlueprint(row);
   if (type === "publish_agent" || type === "request_publish_agent") return normalizePublishAgent(row);
+  if (type === "add_agent_to_conversation" || type === "add_agent") return normalizeAddAgentToConversation(row);
+  if (type === "remove_agent_from_conversation" || type === "remove_agent") return normalizeRemoveAgentFromConversation(row);
+  if (type === "create_agent_definition") return normalizeCreateAgentDefinition(row);
+  if (type === "fork_agent") return normalizeForkAgent(row);
   if (type === "disable_agent") return normalizeToggleAgent(row, false);
   if (type === "enable_agent") return normalizeToggleAgent(row, true);
   if (type === "disable_tool") return normalizeToggleTool(row, false);
@@ -400,6 +473,10 @@ export function defaultAllowlist() {
     "search_public_agents",
     "install_agent_blueprint",
     "publish_agent",
+    "add_agent_to_conversation",
+    "remove_agent_from_conversation",
+    "create_agent_definition",
+    "fork_agent",
     "disable_agent",
     "enable_agent",
     "disable_tool",
