@@ -469,57 +469,57 @@ export async function runGeminiPrompt({
   const retryTimeboxMs = getGeminiRetryTimeboxMs();
   const circuitCooldownMs = getGeminiCapacityCooldownMs();
 
-  return await withGeminiGlobalLimiter(async () => {
-    let modelIndex = 0;
-    let retryCount = 0;
-    let consecutiveCapacityErrors = 0;
-    const notes = [];
-    const startedAtMs = Date.now();
+  let modelIndex = 0;
+  let retryCount = 0;
+  let consecutiveCapacityErrors = 0;
+  const notes = [];
+  const startedAtMs = Date.now();
 
-    while (true) {
-      if (signal?.aborted) {
-        return withGeminiMeta(makeAbortedResult(), {
-          modelName: modelCandidates[modelIndex] || "auto",
-          errorType: "aborted",
-          retryCount,
-          notes,
-        });
-      }
+  while (true) {
+    if (signal?.aborted) {
+      return withGeminiMeta(makeAbortedResult(), {
+        modelName: modelCandidates[modelIndex] || "auto",
+        errorType: "aborted",
+        retryCount,
+        notes,
+      });
+    }
 
-      const nowMs = Date.now();
-      if (Number(geminiCapacityCircuit.openUntilMs || 0) > 0 && Number(geminiCapacityCircuit.openUntilMs || 0) <= nowMs) {
-        geminiCapacityCircuit.openUntilMs = 0;
-        geminiCapacityCircuit.consecutiveCapacityFailures = 0;
-      }
-      if (Number(geminiCapacityCircuit.openUntilMs || 0) > nowMs) {
-        const remainingMs = Math.max(0, Math.floor(Number(geminiCapacityCircuit.openUntilMs || 0) - nowMs));
-        const circuitMsg = `[gemini] capacity circuit open; retry after ${remainingMs}ms`;
-        await safeHook(onGiveUp, {
-          reason: "capacity_circuit_open",
-          retryCount,
-          maxRetries,
-          remainingMs,
-        });
-        return withGeminiMeta(makeFailureResult(circuitMsg), {
-          modelName: modelCandidates[modelIndex] || "auto",
-          errorType: "capacity_exhausted",
-          retryCount,
-          notes: [...notes, circuitMsg],
-        });
-      }
+    const nowMs = Date.now();
+    if (Number(geminiCapacityCircuit.openUntilMs || 0) > 0 && Number(geminiCapacityCircuit.openUntilMs || 0) <= nowMs) {
+      geminiCapacityCircuit.openUntilMs = 0;
+      geminiCapacityCircuit.consecutiveCapacityFailures = 0;
+    }
+    if (Number(geminiCapacityCircuit.openUntilMs || 0) > nowMs) {
+      const remainingMs = Math.max(0, Math.floor(Number(geminiCapacityCircuit.openUntilMs || 0) - nowMs));
+      const circuitMsg = `[gemini] capacity circuit open; retry after ${remainingMs}ms`;
+      await safeHook(onGiveUp, {
+        reason: "capacity_circuit_open",
+        retryCount,
+        maxRetries,
+        remainingMs,
+      });
+      return withGeminiMeta(makeFailureResult(circuitMsg), {
+        modelName: modelCandidates[modelIndex] || "auto",
+        errorType: "capacity_exhausted",
+        retryCount,
+        notes: [...notes, circuitMsg],
+      });
+    }
 
-      const intervalReady = await waitForGeminiMinInterval(signal);
-      if (!intervalReady) {
-        return withGeminiMeta(makeAbortedResult(), {
-          modelName: modelCandidates[modelIndex] || "auto",
-          errorType: "aborted",
-          retryCount,
-          notes,
-        });
-      }
+    const intervalReady = await waitForGeminiMinInterval(signal);
+    if (!intervalReady) {
+      return withGeminiMeta(makeAbortedResult(), {
+        modelName: modelCandidates[modelIndex] || "auto",
+        errorType: "aborted",
+        retryCount,
+        notes,
+      });
+    }
 
-      const currentModelName = modelCandidates[modelIndex] || "auto";
-      const result = await invokeGeminiWithPlanFallback({
+    const currentModelName = modelCandidates[modelIndex] || "auto";
+    const result = await withGeminiGlobalLimiter(async () => {
+      return await invokeGeminiWithPlanFallback({
         promptText,
         requestedMode,
         commandCwd,
@@ -527,137 +527,136 @@ export async function runGeminiPrompt({
         signal,
         modelName: currentModelName,
       });
-      geminiGlobalLimiter.lastCallAtMs = Date.now();
-      if (result.ok) {
-        geminiCapacityCircuit.consecutiveCapacityFailures = 0;
-        geminiCapacityCircuit.openUntilMs = 0;
-        return withGeminiMeta(result, {
-          modelName: currentModelName,
-          retryCount,
-          notes,
-        });
-      }
+    });
+    if (result.ok) {
+      geminiCapacityCircuit.consecutiveCapacityFailures = 0;
+      geminiCapacityCircuit.openUntilMs = 0;
+      return withGeminiMeta(result, {
+        modelName: currentModelName,
+        retryCount,
+        notes,
+      });
+    }
 
-      const errorType = classifyGeminiError(result);
-      if (errorType !== "capacity_exhausted") {
-        geminiCapacityCircuit.consecutiveCapacityFailures = 0;
-        return withGeminiMeta(result, {
-          modelName: currentModelName,
-          errorType,
-          retryCount,
-          notes,
-        });
-      }
+    const errorType = classifyGeminiError(result);
+    if (errorType !== "capacity_exhausted") {
+      geminiCapacityCircuit.consecutiveCapacityFailures = 0;
+      return withGeminiMeta(result, {
+        modelName: currentModelName,
+        errorType,
+        retryCount,
+        notes,
+      });
+    }
 
-      geminiCapacityCircuit.consecutiveCapacityFailures = Math.max(
-        0,
-        Number(geminiCapacityCircuit.consecutiveCapacityFailures || 0)
-      ) + 1;
-      if (geminiCapacityCircuit.consecutiveCapacityFailures >= 3) {
-        geminiCapacityCircuit.openUntilMs = Date.now() + circuitCooldownMs;
-        const circuitMsg = `[gemini] capacity circuit opened for ${circuitCooldownMs}ms`;
-        notes.push(circuitMsg);
-        await safeHook(onGiveUp, {
-          reason: "capacity_circuit_opened",
-          retryCount,
-          maxRetries,
-          cooldownMs: circuitCooldownMs,
-        });
-        return withGeminiMeta(result, {
-          modelName: currentModelName,
-          errorType,
-          retryCount,
-          notes,
-        });
-      }
-
-      if (retryCount >= maxRetries) {
-        notes.push(`[gemini] capacity retries exhausted: ${retryCount}/${maxRetries}`);
-        await safeHook(onGiveUp, {
-          reason: "max_retries",
-          retryCount,
-          maxRetries,
-        });
-        return withGeminiMeta(result, {
-          modelName: currentModelName,
-          errorType,
-          retryCount,
-          notes,
-        });
-      }
-
-      const elapsedMs = Date.now() - startedAtMs;
-      if (elapsedMs >= retryTimeboxMs) {
-        const timeboxMsg = `[gemini] retry timebox exceeded: ${elapsedMs}/${retryTimeboxMs}ms`;
-        notes.push(timeboxMsg);
-        await safeHook(onGiveUp, {
-          reason: "timebox_exceeded",
-          retryCount,
-          maxRetries,
-          elapsedMs,
-          retryTimeboxMs,
-        });
-        return withGeminiMeta(result, {
-          modelName: currentModelName,
-          errorType,
-          retryCount,
-          notes,
-        });
-      }
-
-      consecutiveCapacityErrors += 1;
-      if (consecutiveCapacityErrors >= switchAfter && modelIndex < (modelCandidates.length - 1)) {
-        const fromModel = currentModelName;
-        modelIndex += 1;
-        consecutiveCapacityErrors = 0;
-        const toModel = modelCandidates[modelIndex] || "auto";
-        notes.push(`[gemini] capacity_exhausted -> model switch: ${displayModelName(fromModel)} -> ${displayModelName(toModel)}`);
-        await safeHook(onModelSwitch, {
-          fromModel: displayModelName(fromModel),
-          toModel: displayModelName(toModel),
-          retryCount: retryCount + 1,
-          maxRetries,
-          errorType,
-        });
-      }
-
-      retryCount += 1;
-      const delayMsRaw = capacityBackoffDelayMs(retryCount);
-      const remainingTimeboxMs = Math.max(0, retryTimeboxMs - (Date.now() - startedAtMs));
-      const delayMs = Math.min(delayMsRaw, remainingTimeboxMs);
-      await safeHook(onRetry, {
+    geminiCapacityCircuit.consecutiveCapacityFailures = Math.max(
+      0,
+      Number(geminiCapacityCircuit.consecutiveCapacityFailures || 0)
+    ) + 1;
+    if (geminiCapacityCircuit.consecutiveCapacityFailures >= 3) {
+      geminiCapacityCircuit.openUntilMs = Date.now() + circuitCooldownMs;
+      const circuitMsg = `[gemini] capacity circuit opened for ${circuitCooldownMs}ms`;
+      notes.push(circuitMsg);
+      await safeHook(onGiveUp, {
+        reason: "capacity_circuit_opened",
         retryCount,
         maxRetries,
-        errorType,
-        delayMs,
-        model: displayModelName(modelCandidates[modelIndex] || "auto"),
+        cooldownMs: circuitCooldownMs,
       });
-      if (delayMs <= 0) {
-        const timeboxMsg = `[gemini] retry timebox exhausted before wait: ${Date.now() - startedAtMs}/${retryTimeboxMs}ms`;
-        notes.push(timeboxMsg);
-        await safeHook(onGiveUp, {
-          reason: "timebox_exceeded",
-          retryCount,
-          maxRetries,
-          elapsedMs: Date.now() - startedAtMs,
-          retryTimeboxMs,
-        });
-        return withGeminiMeta(result, {
-          modelName: currentModelName,
-          errorType,
-          retryCount,
-          notes,
-        });
-      }
-      const waited = await waitWithAbort(delayMs, signal);
-      if (!waited) {
-        return withGeminiMeta(makeAbortedResult(), {
-          modelName: modelCandidates[modelIndex] || "auto",
-          errorType: "aborted",
-          retryCount,
-          notes,
-        });
-      }
+      return withGeminiMeta(result, {
+        modelName: currentModelName,
+        errorType,
+        retryCount,
+        notes,
+      });
     }
-  });
+
+    if (retryCount >= maxRetries) {
+      notes.push(`[gemini] capacity retries exhausted: ${retryCount}/${maxRetries}`);
+      await safeHook(onGiveUp, {
+        reason: "max_retries",
+        retryCount,
+        maxRetries,
+      });
+      return withGeminiMeta(result, {
+        modelName: currentModelName,
+        errorType,
+        retryCount,
+        notes,
+      });
+    }
+
+    const elapsedMs = Date.now() - startedAtMs;
+    if (elapsedMs >= retryTimeboxMs) {
+      const timeboxMsg = `[gemini] retry timebox exceeded: ${elapsedMs}/${retryTimeboxMs}ms`;
+      notes.push(timeboxMsg);
+      await safeHook(onGiveUp, {
+        reason: "timebox_exceeded",
+        retryCount,
+        maxRetries,
+        elapsedMs,
+        retryTimeboxMs,
+      });
+      return withGeminiMeta(result, {
+        modelName: currentModelName,
+        errorType,
+        retryCount,
+        notes,
+      });
+    }
+
+    consecutiveCapacityErrors += 1;
+    if (consecutiveCapacityErrors >= switchAfter && modelIndex < (modelCandidates.length - 1)) {
+      const fromModel = currentModelName;
+      modelIndex += 1;
+      consecutiveCapacityErrors = 0;
+      const toModel = modelCandidates[modelIndex] || "auto";
+      notes.push(`[gemini] capacity_exhausted -> model switch: ${displayModelName(fromModel)} -> ${displayModelName(toModel)}`);
+      await safeHook(onModelSwitch, {
+        fromModel: displayModelName(fromModel),
+        toModel: displayModelName(toModel),
+        retryCount: retryCount + 1,
+        maxRetries,
+        errorType,
+      });
+    }
+
+    retryCount += 1;
+    const delayMsRaw = capacityBackoffDelayMs(retryCount);
+    const remainingTimeboxMs = Math.max(0, retryTimeboxMs - (Date.now() - startedAtMs));
+    const delayMs = Math.min(delayMsRaw, remainingTimeboxMs);
+    await safeHook(onRetry, {
+      retryCount,
+      maxRetries,
+      errorType,
+      delayMs,
+      model: displayModelName(modelCandidates[modelIndex] || "auto"),
+    });
+    if (delayMs <= 0) {
+      const timeboxMsg = `[gemini] retry timebox exhausted before wait: ${Date.now() - startedAtMs}/${retryTimeboxMs}ms`;
+      notes.push(timeboxMsg);
+      await safeHook(onGiveUp, {
+        reason: "timebox_exceeded",
+        retryCount,
+        maxRetries,
+        elapsedMs: Date.now() - startedAtMs,
+        retryTimeboxMs,
+      });
+      return withGeminiMeta(result, {
+        modelName: currentModelName,
+        errorType,
+        retryCount,
+        notes,
+      });
+    }
+    const waited = await waitWithAbort(delayMs, signal);
+    if (!waited) {
+      return withGeminiMeta(makeAbortedResult(), {
+        modelName: modelCandidates[modelIndex] || "auto",
+        errorType: "aborted",
+        retryCount,
+        notes,
+      });
+    }
+  }
 }

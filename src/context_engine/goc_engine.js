@@ -287,39 +287,45 @@ export class GocContextEngine extends ContextEngineBase {
     return map;
   }
 
-  async rebuildSharedContext(input = {}) {
+  async rebuildSharedContext(input = {}, { compile = false } = {}) {
     if (!this.client) return null;
     const shared = this._resolveSharedRef(input);
     if (!shared.sharedContextSetId) return null;
     const policy = normalizePolicy(this.runtime?.jobConfig || {});
     const result = await this.client.rebuildContextSetActive(shared.sharedContextSetId, policy).catch(() => null);
     const ctx = await this.client.getContextSet(shared.sharedContextSetId).catch(() => null);
-    const compiled = await this._compileWithBudget(shared.sharedContextSetId, 1300, { includeMeta: true });
-
-    let breakdown = asObject(result?.type_breakdown || result?.node_type_breakdown || compiled.typeBreakdown);
-    if (Object.keys(breakdown).length === 0 && shared.threadId && compiled.activeNodeIds.length > 0) {
-      const nodeMap = await this._loadNodeMap(shared.threadId, shared.sharedContextSetId);
-      breakdown = summarizeTypeBreakdown(compiled.activeNodeIds, nodeMap);
-    }
+    const compiled = compile
+      ? await this._compileWithBudget(shared.sharedContextSetId, 1300, { includeMeta: true })
+      : null;
 
     const contextVersion = String(
       ctx?.version
-      || compiled?.contextVersion
+      || (compiled ? compiled.contextVersion : "")
       || result?.context_version
       || ""
     ).trim();
     const activeNodeIds = uniqIds(
       ctx?.activeNodeIds
       || result?.active_node_ids
-      || compiled?.activeNodeIds
+      || (compiled ? compiled.activeNodeIds : [])
       || []
     );
+    let breakdown = asObject(result?.type_breakdown || result?.node_type_breakdown);
+    if (Object.keys(breakdown).length === 0 && compile) {
+      breakdown = asObject(compiled?.typeBreakdown || {});
+    }
+    if (Object.keys(breakdown).length === 0 && shared.threadId && activeNodeIds.length > 0) {
+      const nodeMap = await this._loadNodeMap(shared.threadId, shared.sharedContextSetId);
+      breakdown = summarizeTypeBreakdown(activeNodeIds, nodeMap);
+    }
     this.log(
-      `[context-engine:goc] rebuild_active shared=${shared.sharedContextSetId} active=${activeNodeIds.length} version=${contextVersion || "unknown"}`
+      `[context-engine:goc] rebuild_active shared=${shared.sharedContextSetId} active=${activeNodeIds.length} version=${contextVersion || "unknown"} compile=${compile ? "yes" : "no"}`
     );
 
     if (this.runtime && typeof this.runtime === "object") {
-      this.runtime.contextSummary = compiled.text || this.runtime.contextSummary || "";
+      if (compile) {
+        this.runtime.contextSummary = compiled?.text || this.runtime.contextSummary || "";
+      }
       this.runtime.contextMeta = {
         context_set_id: shared.sharedContextSetId,
         version: contextVersion,
@@ -332,18 +338,18 @@ export class GocContextEngine extends ContextEngineBase {
       contextVersion,
       activeNodeIds,
       typeBreakdown: breakdown,
-      compiledText: compiled.text || "",
-      tokenEstimate: compiled.tokenEstimate || 0,
-      compiledChars: compiled.compiledChars || 0,
+      compiledText: compile ? (compiled?.text || "") : "",
+      tokenEstimate: compile ? Number(compiled?.tokenEstimate || 0) : 0,
+      compiledChars: compile ? Number(compiled?.compiledChars || 0) : 0,
     };
   }
 
   async onRunStart(input = {}) {
-    return await this.rebuildSharedContext(input);
+    return await this.rebuildSharedContext(input, { compile: false });
   }
 
   async onRunEnd(input = {}) {
-    return await this.rebuildSharedContext(input);
+    return await this.rebuildSharedContext(input, { compile: false });
   }
 
   async prepareRouterContext(input = {}) {

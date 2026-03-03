@@ -3346,7 +3346,6 @@ async function loadSupervisorRuntime(
   try {
     const artifacts = await client.listResources(map.threadId, {
       resourceKind: "artifact",
-      contextSetId: map.ctxSharedId,
     });
     recentArtifactNodeIds = sortResourcesByCreatedAt(artifacts)
       .slice(-5)
