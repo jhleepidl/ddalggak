@@ -4,7 +4,6 @@ import path from "node:path";
 import process from "node:process";
 import TelegramBot from "node-telegram-bot-api";
 
-import { Workspace } from "./src/workspace.js";
 import { Jobs } from "./src/jobs.js";
 import { Tracking } from "./src/tracking.js";
 import { Approvals } from "./src/approvals.js";
@@ -45,8 +44,7 @@ if (!TOKEN) { console.error("Missing TELEGRAM_BOT_TOKEN"); process.exit(1); }
 
 const FENCE = "```";
 
-const workspace = new Workspace();
-const jobs = new Jobs(workspace);
+const jobs = new Jobs();
 const tracking = new Tracking(jobs);
 const approvals = new Approvals(jobs);
 
@@ -59,7 +57,7 @@ const TELEGRAM_FORCE_IPV4 = String(process.env.TELEGRAM_FORCE_IPV4 ?? "true").to
 const TELEGRAM_POLLING_INTERVAL_MS = Number(process.env.TELEGRAM_POLLING_INTERVAL_MS ?? 1000);
 const TELEGRAM_POLLING_TIMEOUT_SEC = Number(process.env.TELEGRAM_POLLING_TIMEOUT_SEC ?? 15);
 const TELEGRAM_SINGLE_INSTANCE_LOCK = String(process.env.TELEGRAM_SINGLE_INSTANCE_LOCK ?? "true").toLowerCase() !== "false";
-const LOCK_FILE = process.env.TELEGRAM_LOCK_FILE || path.join(workspace.root, ".orchestrator", "telegram_runner.lock");
+const LOCK_FILE = process.env.TELEGRAM_LOCK_FILE || path.join(jobs.baseDir, ".locks", "telegram_runner.lock");
 const MEMORY_MODE = String(process.env.MEMORY_MODE || "local").trim().toLowerCase() === "goc" ? "goc" : "local";
 const GOC_UI_TOKEN_TTL_SEC = Number(process.env.GOC_UI_TOKEN_TTL_SEC ?? 21600);
 const GOC_UI_BROWSER_TOKEN_TTL_SEC = Number.isFinite(Number(process.env.GOC_UI_BROWSER_TOKEN_TTL_SEC))
@@ -198,6 +196,24 @@ const gocFallbackByJob = new Map();
 
 function runDir(jobId) {
   return jobs.jobDir(jobId);
+}
+
+function runWorkspaceDir(jobId) {
+  return jobs.workspaceDir(jobId);
+}
+
+function resolveWorkspacePath(jobId, userPath = ".", { asDirectory = false } = {}) {
+  return jobs.ensureWorkspacePath(jobId, userPath, { asDirectory });
+}
+
+function sanitizeWorkspaceFileName(rawName = "", { fallback = "file" } = {}) {
+  const src = String(rawName || "").trim();
+  const base = src ? path.basename(src) : fallback;
+  const safe = base
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/^_+/, "")
+    .slice(0, 120);
+  return safe || fallback;
 }
 
 function runSharedDir(jobId) {
@@ -519,6 +535,260 @@ async function appendChatMessageToGoc(jobId, {
     jobs.log(cleanJobId, `GoC message append skipped: ${String(e?.message ?? e)}`);
     return null;
   }
+}
+
+async function appendWorkspaceUploadArtifactToGoc(jobId, {
+  fileName = "",
+  fileSize = 0,
+  localPath = "",
+  telegramFileId = "",
+  telegramMessageId = null,
+  chatId = "",
+  userId = "",
+} = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  const cleanPath = String(localPath || "").trim();
+  if (!cleanJobId || !cleanPath) return null;
+  if (memoryModeWithFallback() !== "goc") return null;
+  try {
+    const client = requireGocClient();
+    const map = await ensureJobThread(client, {
+      jobId: cleanJobId,
+      jobDir: runDir(cleanJobId),
+      title: `job:${cleanJobId}`,
+    });
+    const relPath = path.relative(runWorkspaceDir(cleanJobId), cleanPath);
+    const safeRelPath = relPath && !relPath.startsWith("..") ? relPath : path.basename(cleanPath);
+    return await client.createResource(map.threadId, {
+      name: `upload:${String(fileName || "file").slice(0, 80)}@${new Date().toISOString()}`,
+      summary: `telegram upload ${fileName || path.basename(cleanPath)}`,
+      text_mode: "plain",
+      raw_text: [
+        "telegram upload",
+        `job_id: ${cleanJobId}`,
+        `filename: ${fileName || path.basename(cleanPath)}`,
+        `size: ${Number(fileSize || 0)}`,
+        `local_path: ${cleanPath}`,
+      ].join("\n") + "\n",
+      resource_kind: "artifact",
+      uri: `ddalggak://jobs/${cleanJobId}/workspace/${safeRelPath}`,
+      context_set_id: map.ctxSharedId,
+      auto_activate: false,
+      payload_json: {
+        kind: "telegram_upload",
+        job_id: cleanJobId,
+        file_name: fileName || path.basename(cleanPath),
+        file_size: Number(fileSize || 0),
+        local_path: cleanPath,
+        local_workspace_path: safeRelPath,
+        telegram_file_id: String(telegramFileId || "").trim() || undefined,
+        telegram_message_id: Number.isFinite(Number(telegramMessageId)) ? Number(telegramMessageId) : undefined,
+        chat_id: String(chatId || "").trim() || undefined,
+        user_id: String(userId || "").trim() || undefined,
+        ts: new Date().toISOString(),
+      },
+    });
+  } catch (e) {
+    jobs.log(cleanJobId, `GoC upload artifact append skipped: ${String(e?.message ?? e)}`);
+    return null;
+  }
+}
+
+async function handleTelegramDocumentUpload(bot, msg, { chatId, userId } = {}) {
+  const document = msg?.document && typeof msg.document === "object" ? msg.document : null;
+  if (!document?.file_id) return null;
+
+  const filename = sanitizeWorkspaceFileName(document.file_name || `telegram_${document.file_unique_id || "file"}`, {
+    fallback: "upload.bin",
+  });
+  let jobId = resolveCurrentJobIdForChat(chatId);
+  let createdJob = false;
+  if (!jobId) {
+    const seed = await createJob(`uploaded file: ${filename}`, {
+      ownerUserId: userId,
+      ownerChatId: chatId,
+    });
+    jobId = String(seed.jobId || "").trim();
+    createdJob = true;
+    rememberLastChatJob(chatId, jobId);
+    chatSessionStore.upsert(chatId, {
+      jobId,
+      state: "idle",
+    });
+  }
+  if (!jobId) throw new Error("Failed to resolve jobId for document upload");
+
+  const uploadsDir = resolveWorkspacePath(jobId, "uploads", { asDirectory: true });
+  const downloadedPath = await bot.downloadFile(String(document.file_id), uploadsDir);
+  const stamp = Date.now().toString(36);
+  const messageId = Number.isFinite(Number(msg?.message_id)) ? Number(msg.message_id) : 0;
+  const finalName = sanitizeWorkspaceFileName(`${stamp}_${messageId}_${filename}`, {
+    fallback: `upload_${stamp}.bin`,
+  });
+  const finalPath = resolveWorkspacePath(jobId, path.join("uploads", finalName));
+  if (path.resolve(downloadedPath) !== path.resolve(finalPath)) {
+    fs.renameSync(downloadedPath, finalPath);
+  }
+
+  const manifestPath = resolveWorkspacePath(jobId, "uploads/manifest.jsonl");
+  const workspaceRelPath = path.relative(runWorkspaceDir(jobId), finalPath);
+  const record = {
+    ts: new Date().toISOString(),
+    kind: "telegram_document_upload",
+    job_id: jobId,
+    chat_id: String(chatId || ""),
+    user_id: String(userId || ""),
+    message_id: messageId,
+    file_id: String(document.file_id || ""),
+    file_unique_id: String(document.file_unique_id || ""),
+    filename,
+    size: Number(document.file_size || 0),
+    local_path: finalPath,
+    workspace_path: workspaceRelPath,
+  };
+  fs.appendFileSync(manifestPath, `${JSON.stringify(record)}\n`, "utf8");
+
+  jobs.appendConversation(jobId, "user", `uploaded file: ${filename}`, {
+    kind: "upload_document",
+    telegram_message_id: messageId || undefined,
+    local_path: finalPath,
+  });
+  tracking.append(jobId, "progress.md", [
+    "## upload",
+    `- filename: ${filename}`,
+    `- size: ${Number(document.file_size || 0)}`,
+    `- workspace_path: ${workspaceRelPath}`,
+    `- file_id: ${String(document.file_id || "")}`,
+  ].join("\n"));
+  await appendWorkspaceUploadArtifactToGoc(jobId, {
+    fileName: filename,
+    fileSize: Number(document.file_size || 0),
+    localPath: finalPath,
+    telegramFileId: String(document.file_id || ""),
+    telegramMessageId: messageId,
+    chatId,
+    userId,
+  }).catch(() => null);
+
+  await bot.sendMessage(
+    chatId,
+    [
+      "📎 파일 업로드 저장 완료",
+      `job_id=${jobId}`,
+      `workspace=${runWorkspaceDir(jobId)}`,
+      `path=${workspaceRelPath}`,
+      createdJob ? "note=새 job 생성됨" : "",
+    ].filter(Boolean).join("\n"),
+    Number.isFinite(Number(msg?.message_id))
+      ? { reply_to_message_id: Number(msg.message_id) }
+      : undefined
+  );
+  return {
+    jobId,
+    finalPath,
+    workspacePath: workspaceRelPath,
+    createdJob,
+  };
+}
+
+function listWorkspaceFilesRecursive(rootDir) {
+  const out = [];
+  const stack = [String(rootDir || "")];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    if (!dir) continue;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const name = String(entry?.name || "").trim();
+      if (!name || name === "." || name === "..") continue;
+      if (name.startsWith(".telegram_")) continue;
+      const abs = path.join(dir, name);
+      if (entry.isDirectory()) {
+        stack.push(abs);
+        continue;
+      }
+      if (entry.isFile()) out.push(abs);
+    }
+  }
+  return out;
+}
+
+async function deliverWorkspaceOutputs(bot, chatId, jobId, { replyToMessageId = null, maxFiles = 4 } = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  if (!cleanJobId) return;
+  const outputsDir = resolveWorkspacePath(cleanJobId, "outputs", { asDirectory: true });
+  const sentIndexPath = resolveWorkspacePath(cleanJobId, "outputs/.telegram_sent.json");
+  let sent = {};
+  try {
+    sent = JSON.parse(fs.readFileSync(sentIndexPath, "utf8"));
+  } catch {
+    sent = {};
+  }
+
+  const workspaceRoot = runWorkspaceDir(cleanJobId);
+  const candidates = listWorkspaceFilesRecursive(outputsDir)
+    .map((abs) => {
+      let stat = null;
+      try {
+        stat = fs.statSync(abs);
+      } catch {
+        stat = null;
+      }
+      if (!stat || !stat.isFile()) return null;
+      const rel = path.relative(workspaceRoot, abs);
+      const key = `${rel}:${stat.size}:${stat.mtimeMs}`;
+      return {
+        abs,
+        rel,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        key,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => Number(a.mtimeMs || 0) - Number(b.mtimeMs || 0));
+
+  const limit = Number.isFinite(Number(maxFiles))
+    ? Math.max(1, Math.min(10, Math.floor(Number(maxFiles))))
+    : 4;
+  let sentCount = 0;
+  for (const file of candidates) {
+    if (sentCount >= limit) break;
+    if (sent[file.key]) continue;
+    if (Number(file.size || 0) <= 0) continue;
+    if (Number(file.size || 0) > 50 * 1024 * 1024) {
+      await bot.sendMessage(
+        chatId,
+        `📦 output 생성됨(50MB 초과로 전송 생략)\njob_id=${cleanJobId}\npath=${file.rel}\nsize=${file.size}`,
+        Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
+          ? { reply_to_message_id: Number(replyToMessageId) }
+          : undefined
+      );
+      sent[file.key] = { ts: new Date().toISOString(), path: file.rel, skipped: "too_large" };
+      sentCount += 1;
+      continue;
+    }
+    await bot.sendDocument(
+      chatId,
+      file.abs,
+      {
+        caption: `📦 output file\njob_id=${cleanJobId}\npath=${file.rel}`,
+        reply_to_message_id: Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
+          ? Number(replyToMessageId)
+          : undefined,
+      }
+    );
+    sent[file.key] = { ts: new Date().toISOString(), path: file.rel, sent: true };
+    sentCount += 1;
+  }
+  try {
+    fs.writeFileSync(sentIndexPath, `${JSON.stringify(sent, null, 2)}\n`, "utf8");
+  } catch {}
 }
 
 function convoToText(convo) {
@@ -1077,13 +1347,14 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const preferredModel = String(opts.model || "").trim();
   const roleMemo = memory.getAgentRole("gemini");
   const ctx = await loadContextDocs(jobId, ["research.md"]);
+  const workspacePath = runWorkspaceDir(jobId);
   const prompt = [
     ctx,
     "",
     "역할 메모리:",
     roleMemo,
     "",
-    `run dir: ${runDir(jobId)}`,
+    `run workspace: ${workspacePath}`,
     `tracking docs dir: ${runSharedDir(jobId)}`,
     "",
     "제약:",
@@ -1104,12 +1375,13 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     ].join("\n"),
   ].join("\n");
   const r = await runGeminiPrompt({
-    workspaceRoot: workspace.root,
-    cwd: runDir(jobId),
+    workspaceRoot: workspacePath,
+    cwd: workspacePath,
     prompt,
     signal,
     model: preferredModel || "",
     concurrencyKey,
+    jobId,
     onRetry: opts.onGeminiRetry,
     onModelSwitch: opts.onGeminiModelSwitch,
     onGiveUp: opts.onGeminiGiveUp,
@@ -1125,6 +1397,7 @@ async function codexImplement(jobId, instruction, signal = null) {
   const roleMemo = memory.getAgentRole("codex");
   const ctx = await loadContextDocs(jobId, ["plan.md", "research.md"], 6000);
   const trackDocs = TRACK_DOC_NAMES.map(n => `- ${path.join(runSharedDir(jobId), n)}`).join("\n");
+  const workspacePath = runWorkspaceDir(jobId);
   const prompt = [
     ctx,
     "",
@@ -1134,8 +1407,8 @@ async function codexImplement(jobId, instruction, signal = null) {
     "너는 코드 수정 에이전트다.",
     "규칙:",
     "- 네트워크 접근 금지.",
-    `- CODEX_WORKSPACE_ROOT(코드 작업 영역) 내부 파일만 수정: ${workspace.root}`,
-    `- 현재 run dir: ${runDir(jobId)}`,
+    `- CODEX_WORKSPACE_ROOT(코드 작업 영역) 내부 파일만 수정: ${workspacePath}`,
+    `- 현재 run workspace: ${workspacePath}`,
     "- 아래 트래킹 문서는 run/shared에서만 관리하고, CODEX_WORKSPACE_ROOT 루트에 동명 파일을 만들지 말 것:",
     trackDocs,
     "- 테스트 실행은 하지 말고, 필요한 테스트를 제안만.",
@@ -1145,7 +1418,13 @@ async function codexImplement(jobId, instruction, signal = null) {
     instruction,
     "",
   ].join("\n");
-  const r = await runCodexExec({ workspaceRoot: workspace.root, cwd: runDir(jobId), prompt, signal });
+  const r = await runCodexExec({
+    workspaceRoot: workspacePath,
+    cwd: workspacePath,
+    prompt,
+    signal,
+    jobId,
+  });
   const out = (r.stdout || r.stderr || "");
   tracking.append(jobId, "progress.md", `## Codex output\n\n${out}\n`);
   jobs.appendConversation(jobId, "codex", out, { kind: "implementation" });
@@ -1154,8 +1433,14 @@ async function codexImplement(jobId, instruction, signal = null) {
 }
 
 async function gitSummary(jobId, signal = null) {
-  const status = await runCommand("git", ["status", "--porcelain=v1"], { cwd: workspace.root, abortSignal: signal });
-  const diff = await runCommand("git", ["diff"], { cwd: workspace.root, timeoutMs: 120000, abortSignal: signal });
+  const commandCwd = runWorkspaceDir(jobId);
+  const status = await runCommand("git", ["status", "--porcelain=v1"], { cwd: commandCwd, abortSignal: signal });
+  if (!status.ok && /not a git repository/i.test(String(status.stderr || ""))) {
+    const note = `workspace is not a git repository: ${commandCwd}`;
+    tracking.append(jobId, "progress.md", `## git status\n\n${note}\n`);
+    return { status: "", diff: "", note };
+  }
+  const diff = await runCommand("git", ["diff"], { cwd: commandCwd, timeoutMs: 120000, abortSignal: signal });
   ensureCommandOk("git status", status);
   ensureCommandOk("git diff", diff);
 
@@ -1245,11 +1530,12 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
   try {
     const r = await enqueue(
       () => runGeminiPrompt({
-        workspaceRoot: workspace.root,
-        cwd: runDir(jobId),
+        workspaceRoot: runWorkspaceDir(jobId),
+        cwd: runWorkspaceDir(jobId),
         prompt,
         signal,
         concurrencyKey: `job:${String(jobId || "").trim()}`,
+        jobId,
       }),
       { jobId, signal, label: "agent_router" }
     );
@@ -1324,11 +1610,12 @@ async function reflectAutoSuggest(jobId, trigger, question, signal = null) {
   try {
     const r = await enqueue(
       () => runGeminiPrompt({
-        workspaceRoot: workspace.root,
-        cwd: runDir(jobId),
+        workspaceRoot: runWorkspaceDir(jobId),
+        cwd: runWorkspaceDir(jobId),
         prompt,
         signal,
         concurrencyKey: `job:${String(jobId || "").trim()}`,
+        jobId,
       }),
       { jobId, signal, label: "auto_reflection" }
     );
@@ -2552,11 +2839,11 @@ async function synthesizeChatReply(message, routePlan, execution = {}) {
 
   const jobId = String(execution.currentJobId || "").trim();
   const cwd = (() => {
-    if (!jobId) return workspace.root;
+    if (!jobId) return process.cwd();
     try {
-      return runDir(jobId);
+      return runWorkspaceDir(jobId);
     } catch {
-      return workspace.root;
+      return process.cwd();
     }
   })();
 
@@ -2586,10 +2873,11 @@ async function synthesizeChatReply(message, routePlan, execution = {}) {
   try {
     const r = await enqueue(
       () => runGeminiPrompt({
-        workspaceRoot: workspace.root,
+        workspaceRoot: cwd,
         cwd,
         prompt,
         concurrencyKey: `job:${String(jobId || "").trim()}`,
+        jobId,
       }),
       { jobId, label: "chat_synthesize" }
     );
@@ -5362,8 +5650,8 @@ async function runSupervisorChat(
         suggestedActions,
         originalUserMessage: message,
         autopilotTurn: turn,
-        workspaceRoot: workspace.root,
-        cwd: runDir(currentJobId),
+        workspaceRoot: runWorkspaceDir(currentJobId),
+        cwd: runWorkspaceDir(currentJobId),
         signal: controller.signal,
         locale: "ko-KR",
         routerPolicy: memory.getRouterPrompt(),
@@ -5870,7 +6158,7 @@ async function executeChatActions(bot, chatId, userId, message, routePlan, { ver
           const job = await createJob(message || prompt, { ownerUserId: userId, ownerChatId: chatId });
           targetJobId = String(job.jobId);
           currentJobId = targetJobId;
-          if (verbose) await bot.sendMessage(chatId, `✅ /chat job created: ${targetJobId}\nrun_dir: ${runDir(targetJobId)}`);
+          if (verbose) await bot.sendMessage(chatId, `✅ /chat job created: ${targetJobId}\nworkspace: ${runWorkspaceDir(targetJobId)}`);
         } else {
           runDir(targetJobId);
         }
@@ -5974,6 +6262,10 @@ async function executeAgentRun(
 
   if (provider === "codex") {
     const output = await codexImplement(jobId, combinedInstruction, signal);
+    await deliverWorkspaceOutputs(bot, chatId, jobId, {
+      replyToMessageId: getCurrentTurnReplyMessageId(chatId),
+      maxFiles: 4,
+    }).catch(() => null);
     const fallback = gocFallbackByJob.get(String(jobId));
     if (fallback) {
       if (notify) {
@@ -5999,6 +6291,10 @@ async function executeAgentRun(
       onGeminiModelSwitch,
       onGeminiGiveUp,
     });
+    await deliverWorkspaceOutputs(bot, chatId, jobId, {
+      replyToMessageId: getCurrentTurnReplyMessageId(chatId),
+      maxFiles: 4,
+    }).catch(() => null);
     const fallback = gocFallbackByJob.get(String(jobId));
     if (fallback) {
       if (notify) {
@@ -6952,8 +7248,13 @@ bot.on("callback_query", async (q) => {
 
     if (rec.status === "approved" && rec.payload?.action === "git_commit") {
       const msg2 = rec.payload.message ?? "commit";
-      const add = await runCommand("git", ["add", "-A"], { cwd: workspace.root });
-      const commit = await runCommand("git", ["commit", "-m", msg2], { cwd: workspace.root });
+      const commitCwd = runWorkspaceDir(jobId);
+      const add = await runCommand("git", ["add", "-A"], { cwd: commitCwd });
+      if (!add.ok && /not a git repository/i.test(String(add.stderr || ""))) {
+        await sendLong(bot, chatId, `⚠️ commit skipped: workspace is not a git repo\ncwd=${commitCwd}`);
+        return;
+      }
+      const commit = await runCommand("git", ["commit", "-m", msg2], { cwd: commitCwd });
       tracking.append(jobId, "progress.md", `## git commit\n\n${FENCE}\n${add.stdout || add.stderr}\n${commit.stdout || commit.stderr}\n${FENCE}\n`);
       await sendLong(bot, chatId, `✅ 커밋 완료\n${clip(commit.stdout || commit.stderr, 3500)}`);
       await suggestNextPrompt(bot, chatId, jobId, "커밋 이후 다음 단계(테스트/PR/배포 등)를 결정해줘.", "commit");
@@ -6977,7 +7278,21 @@ bot.on("message", async (msg) => {
   if (!chatId || !userId) return;
   if (!isAllowedChat(chatId) || !isAllowedUser(userId)) return;
 
-  const text = (msg.text || "").trim();
+  if (msg.document?.file_id) {
+    try {
+      await handleTelegramDocumentUpload(bot, msg, { chatId, userId });
+    } catch (e) {
+      await bot.sendMessage(
+        chatId,
+        `❌ 파일 업로드 저장 실패: ${clip(String(e?.message ?? e), 220)}`,
+        Number.isFinite(Number(msg?.message_id))
+          ? { reply_to_message_id: Number(msg.message_id) }
+          : undefined
+      );
+    }
+  }
+
+  const text = String(msg.text || msg.caption || "").trim();
   if (!text) return;
 
   // Paste mode capture (non-command)
@@ -7296,7 +7611,7 @@ bot.on("message", async (msg) => {
       const controller = resetJobAbortController(jobId);
       const chatKey = String(chatId);
       activeJobByChat.set(chatKey, jobId);
-      await bot.sendMessage(chatId, `✅ Job created: ${job.jobId}\ngoal: ${goal}\nrun_dir: ${runDir(jobId)}\n복잡하면: /gptprompt ${job.jobId} <질문>`);
+      await bot.sendMessage(chatId, `✅ Job created: ${job.jobId}\ngoal: ${goal}\nworkspace: ${runWorkspaceDir(jobId)}\n복잡하면: /gptprompt ${job.jobId} <질문>`);
 
       try {
         const route = await decideRunRoute(jobId, {
@@ -7340,7 +7655,7 @@ bot.on("message", async (msg) => {
     const controller = resetJobAbortController(jobKey);
     const chatKey = String(chatId);
     activeJobByChat.set(chatKey, jobKey);
-    await bot.sendMessage(chatId, `▶️ Continue job ${jobId}\nrun_dir: ${runDir(jobKey)}`);
+    await bot.sendMessage(chatId, `▶️ Continue job ${jobId}\nworkspace: ${runWorkspaceDir(jobKey)}`);
 
     let instruction = "run/shared의 plan.md와 research.md를 반영해 CODEX_WORKSPACE_ROOT 코드 변경을 진행해라.";
     try {
@@ -7427,7 +7742,7 @@ process.on("SIGINT", () => { void shutdown(0); });
 process.on("SIGTERM", () => { void shutdown(0); });
 
 console.log("Telegram orchestrator v2.1 started (polling).");
-console.log(`Codex workspace root: ${workspace.root}`);
+console.log(`Job workspace root: ${jobs.runsDir}/<jobId>/workspace`);
 console.log(`Runs dir: ${jobs.runsDir}`);
 console.log(`Memory mode: ${MEMORY_MODE} (effective=${memoryModeWithFallback()})`);
 try {

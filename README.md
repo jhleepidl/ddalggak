@@ -50,14 +50,15 @@ cp .env.example .env
 ```
 
 `.env` 최소 설정:
-- `CODEX_WORKSPACE_ROOT=/path/to/your/repo`  (Codex가 코드 수정할 워크스페이스)
-- `RUNS_DIR=/path/to/your/repo/.orchestrator`
+- `RUNS_DIR=runs`  (선택: 다른 루트로 바꾸고 싶을 때만 지정)
 - `TELEGRAM_BOT_TOKEN=...`
 - `MEMORY_MODE=local|goc`
 
 참고:
-- `WORKSPACE_ROOT`도 하위호환으로 동작하지만, 혼동 방지를 위해 `CODEX_WORKSPACE_ROOT` 사용 권장
-- `plan.md / research.md / progress.md / decisions.md`는 `RUNS_DIR/runs/<jobId>/shared/`에서만 관리
+- job workspace는 자동 생성되며 규칙은 `RUNS_DIR/<jobId>/workspace`
+- Gemini/Codex/파일 업로드는 job workspace 하위만 사용
+- `plan.md / research.md / progress.md / decisions.md`는 `RUNS_DIR/<jobId>/shared/`에서 관리
+- CWD가 repo 루트로 잡히면 컨텍스트 스캔이 커질 수 있으므로 job workspace CWD를 유지하는 것이 권장됨
 - 에이전트 레지스트리 파일을 쓰려면 `agents.json.sample`을 복사해서 `agents.json`을 만들고 `AGENTS_REGISTRY_PATH`로 지정
 
 GoC 모드(`MEMORY_MODE=goc`) 추가 설정:
@@ -176,6 +177,11 @@ sudo systemctl status telegram-orchestrator
 ## D. 트래킹 파일 구조
 
 각 jobId 폴더:
+- `workspace/`
+- `workspace/uploads/`
+- `workspace/outputs/`
+- `workspace/tmp/`
+- `workspace/.gemini/settings.json`
 - `shared/research.md`
 - `shared/plan.md`
 - `shared/progress.md`

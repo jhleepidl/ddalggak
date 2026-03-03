@@ -1,15 +1,26 @@
+import fs from "node:fs";
+import path from "node:path";
 import { runCommand } from "./proc.js";
 
-export async function runCodexExec({ workspaceRoot, prompt, signal, cwd }) {
+function appendCodexDebugLog(line = "") {
+  const file = path.resolve(process.env.CODEX_DEBUG_LOG || "codex_debug.log");
+  try {
+    fs.appendFileSync(file, `[${new Date().toISOString()}] ${String(line || "")}\n`, "utf8");
+  } catch {}
+}
+
+export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId = "" }) {
   // Requires Codex CLI logged in on the server
   const sandboxMode = process.env.CODEX_SANDBOX_MODE || "workspace-write";
   const approvalPolicy = process.env.CODEX_APPROVAL_POLICY || "never";
   const timeoutMs = 45 * 60 * 1000;
-  const commandCwd = cwd || workspaceRoot;
+  const workspacePath = path.resolve(String(workspaceRoot || cwd || process.cwd()).trim() || process.cwd());
+  const commandCwd = path.resolve(String(cwd || workspacePath).trim() || workspacePath);
+  appendCodexDebugLog(`[codex] job=${String(jobId || "").trim() || "-"} cwd=${commandCwd} workspace=${workspacePath}`);
 
   // Keep Codex workspace explicit (-C), while process CWD can be the run directory.
   // Feed prompt via stdin ("-") so prompt text is never parsed as CLI args.
-  const modernArgs = ["exec", "-C", workspaceRoot, "--sandbox", sandboxMode, "-c", `approval_policy=${approvalPolicy}`, "-"];
+  const modernArgs = ["exec", "-C", workspacePath, "--sandbox", sandboxMode, "-c", `approval_policy=${approvalPolicy}`, "-"];
   const modern = await runCommand("codex", modernArgs, { cwd: commandCwd, timeoutMs, input: prompt, abortSignal: signal });
   if (modern.ok) return modern;
 
@@ -22,7 +33,7 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd }) {
   ].some((needle) => (modern.stderr || "").toLowerCase().includes(needle.toLowerCase()));
   if (!optionCompatibilityError) return modern;
 
-  const legacyArgs = ["exec", "-C", workspaceRoot, "--sandbox", sandboxMode, "--ask-for-approval", approvalPolicy, "-"];
+  const legacyArgs = ["exec", "-C", workspacePath, "--sandbox", sandboxMode, "--ask-for-approval", approvalPolicy, "-"];
   const legacy = await runCommand("codex", legacyArgs, { cwd: commandCwd, timeoutMs, input: prompt, abortSignal: signal });
   if (legacy.ok) return legacy;
 

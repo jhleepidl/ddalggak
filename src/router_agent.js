@@ -335,6 +335,7 @@ export async function route(message, context = {}) {
       cwd: path.resolve(cwd),
       prompt,
       signal: context.signal || null,
+      jobId: String(context.currentJobId || context.jobId || "").trim(),
     });
     if (!r?.ok) return fallback;
 

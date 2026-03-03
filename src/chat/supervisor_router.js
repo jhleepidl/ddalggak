@@ -714,6 +714,7 @@ export async function routeWithSupervisor(message, {
       prompt,
       signal,
       concurrencyKey: geminiConcurrencyKey || "",
+      jobId: String(currentJobId || "").trim(),
       model: geminiModel || "",
       onRetry: onGeminiRetry,
       onModelSwitch: onGeminiModelSwitch,

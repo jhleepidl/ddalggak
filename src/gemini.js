@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { runCommand } from "./proc.js";
 
 const VALID_APPROVAL_MODES = new Set(["default", "auto_edit", "yolo", "plan"]);
@@ -19,6 +21,9 @@ const DEFAULT_MAX_CONCURRENT_GEMINI = 1;
 const DEFAULT_GEMINI_MIN_INTERVAL_MS = 2000;
 const DEFAULT_GEMINI_RETRY_TIMEBOX_MS = 180000;
 const DEFAULT_GEMINI_CAPACITY_COOLDOWN_MS = 60000;
+const DEFAULT_GEMINI_WORKSPACE_MODEL = "gemini-2.5-flash";
+const DEFAULT_GEMINI_SETTINGS_OVERWRITE = "merge";
+const DEFAULT_GEMINI_DEBUG_LOG = "gemini_debug.log";
 
 let planModeAvailability = null;
 let modelFlagAvailability = null;
@@ -31,6 +36,120 @@ const geminiCapacityCircuit = {
   consecutiveCapacityFailures: 0,
   openUntilMs: 0,
 };
+
+function asObject(value) {
+  return value && typeof value === "object" ? value : {};
+}
+
+function parseJsonMaybe(rawText = "") {
+  const raw = String(rawText || "").trim();
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeOverwritePolicy(raw) {
+  const key = String(raw || "").trim().toLowerCase();
+  if (key === "never" || key === "always" || key === "merge") return key;
+  return DEFAULT_GEMINI_SETTINGS_OVERWRITE;
+}
+
+function defaultGeminiWorkspaceSettings() {
+  return {
+    model: {
+      name: String(process.env.GEMINI_MODEL_PRIMARY || DEFAULT_GEMINI_WORKSPACE_MODEL).trim() || DEFAULT_GEMINI_WORKSPACE_MODEL,
+    },
+    general: {
+      plan: {
+        modelRouting: false,
+      },
+    },
+    output: {
+      format: "json",
+    },
+    context: {
+      includeDirectoryTree: false,
+      discoveryMaxDirs: 20,
+      loadMemoryFromIncludeDirectories: false,
+    },
+  };
+}
+
+function mergeObjectsPreferExisting(baseValue, userValue) {
+  if (Array.isArray(baseValue)) {
+    return Array.isArray(userValue) ? [...userValue] : [...baseValue];
+  }
+  if (baseValue && typeof baseValue === "object") {
+    const base = asObject(baseValue);
+    const user = asObject(userValue);
+    const out = { ...base };
+    for (const [key, value] of Object.entries(user)) {
+      if (key in base) out[key] = mergeObjectsPreferExisting(base[key], value);
+      else out[key] = value;
+    }
+    return out;
+  }
+  return typeof userValue === "undefined" ? baseValue : userValue;
+}
+
+function enforceWorkspaceContextSettings(raw = {}) {
+  const row = asObject(raw);
+  const context = asObject(row.context);
+  const discoveryMaxDirs = Number(context.discoveryMaxDirs);
+  const nextDiscoveryMaxDirs = Number.isFinite(discoveryMaxDirs)
+    ? Math.max(1, Math.min(20, Math.floor(discoveryMaxDirs)))
+    : 20;
+  return {
+    ...row,
+    context: {
+      ...context,
+      includeDirectoryTree: false,
+      discoveryMaxDirs: nextDiscoveryMaxDirs,
+      loadMemoryFromIncludeDirectories: false,
+    },
+  };
+}
+
+function appendGeminiDebugLog(line = "") {
+  const file = path.resolve(process.env.GEMINI_DEBUG_LOG || DEFAULT_GEMINI_DEBUG_LOG);
+  try {
+    fs.appendFileSync(file, `[${new Date().toISOString()}] ${String(line || "")}\n`, "utf8");
+  } catch {}
+}
+
+export function ensureGeminiWorkspaceConfig(workspacePath, { overwritePolicy = "" } = {}) {
+  const workspaceDir = path.resolve(String(workspacePath || process.cwd()));
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const geminiDir = path.join(workspaceDir, ".gemini");
+  fs.mkdirSync(geminiDir, { recursive: true });
+  const settingsPath = path.join(geminiDir, "settings.json");
+  const policy = normalizeOverwritePolicy(overwritePolicy || process.env.GEMINI_SETTINGS_OVERWRITE);
+  const defaults = enforceWorkspaceContextSettings(defaultGeminiWorkspaceSettings());
+
+  const existingRaw = fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath, "utf8") : "";
+  const existing = parseJsonMaybe(existingRaw);
+  let next = defaults;
+  if (existing && policy === "never") {
+    next = enforceWorkspaceContextSettings(existing);
+  } else if (existing && policy === "merge") {
+    next = enforceWorkspaceContextSettings(mergeObjectsPreferExisting(defaults, existing));
+  } else if (existing && policy === "always") {
+    next = defaults;
+  }
+
+  const serialized = `${JSON.stringify(next, null, 2)}\n`;
+  if (existingRaw !== serialized) {
+    fs.writeFileSync(settingsPath, serialized, "utf8");
+  }
+  return {
+    workspaceDir,
+    settingsPath,
+    policy,
+  };
+}
 
 function resolveApprovalMode() {
   const raw = String(process.env.GEMINI_APPROVAL_MODE || "default").trim();
@@ -259,8 +378,13 @@ async function runGeminiOnce({
   signal,
   model,
   includeModelArg,
+  extraEnv = {},
 }) {
-  const modelEnv = model ? { GEMINI_MODEL: model } : {};
+  const modelEnv = {
+    ...(model ? { GEMINI_MODEL: model } : {}),
+    GEMINI_DISABLE_DIRTREE: String(process.env.GEMINI_DISABLE_DIRTREE || "1").trim() || "1",
+    ...asObject(extraEnv),
+  };
   const stdinArgs = buildGeminiArgs({
     promptText,
     approvalMode,
@@ -298,7 +422,7 @@ async function runGeminiOnce({
   };
 }
 
-async function invokeGemini({ promptText, approvalMode, commandCwd, timeoutMs, signal, modelName }) {
+async function invokeGemini({ promptText, approvalMode, commandCwd, timeoutMs, signal, modelName, extraEnv = {} }) {
   const model = modelEnvValue(modelName);
   const canUseModelArg = !!model && modelFlagAvailability !== false;
   const firstRun = await runGeminiOnce({
@@ -309,6 +433,7 @@ async function invokeGemini({ promptText, approvalMode, commandCwd, timeoutMs, s
     signal,
     model,
     includeModelArg: canUseModelArg,
+    extraEnv,
   });
   if (firstRun.ok) {
     if (canUseModelArg && model) modelFlagAvailability = true;
@@ -325,6 +450,7 @@ async function invokeGemini({ promptText, approvalMode, commandCwd, timeoutMs, s
       signal,
       model,
       includeModelArg: false,
+      extraEnv,
     });
     return {
       ...retryNoFlag,
@@ -346,6 +472,7 @@ async function invokeGeminiWithPlanFallback({
   timeoutMs,
   signal,
   modelName,
+  extraEnv = {},
 }) {
   const firstMode = requestedMode === "plan" && planModeAvailability === false ? "default" : requestedMode;
   const first = await invokeGemini({
@@ -355,6 +482,7 @@ async function invokeGeminiWithPlanFallback({
     timeoutMs,
     signal,
     modelName,
+    extraEnv,
   });
   if (first.ok) {
     if (firstMode === "plan") planModeAvailability = true;
@@ -370,6 +498,7 @@ async function invokeGeminiWithPlanFallback({
       timeoutMs,
       signal,
       modelName,
+      extraEnv,
     });
     return {
       ...retry,
@@ -448,6 +577,7 @@ export async function runGeminiPrompt({
   cwd,
   model = "",
   concurrencyKey = "",
+  jobId = "",
   onRetry = null,
   onModelSwitch = null,
   onGiveUp = null,
@@ -460,7 +590,17 @@ export async function runGeminiPrompt({
   }
 
   const timeoutMs = 30 * 60 * 1000;
-  const commandCwd = cwd || workspaceRoot;
+  const commandCwd = path.resolve(String(cwd || workspaceRoot || process.cwd()).trim() || process.cwd());
+  const workspacePath = commandCwd;
+  ensureGeminiWorkspaceConfig(workspacePath);
+  const cleanJobId = String(jobId || "").trim() || (
+    String(concurrencyKey || "").startsWith("job:")
+      ? String(concurrencyKey || "").slice(4).trim()
+      : ""
+  );
+  const baseEnv = {
+    GEMINI_WORKSPACE_PATH: workspacePath,
+  };
   void concurrencyKey;
   const requestedMode = resolveApprovalMode();
   const modelCandidates = buildModelCandidates(model);
@@ -518,6 +658,9 @@ export async function runGeminiPrompt({
     }
 
     const currentModelName = modelCandidates[modelIndex] || "auto";
+    appendGeminiDebugLog(
+      `[gemini] job=${cleanJobId || "-"} cwd=${workspacePath} model=${displayModelName(currentModelName)} retry=${retryCount}`
+    );
     const result = await withGeminiGlobalLimiter(async () => {
       return await invokeGeminiWithPlanFallback({
         promptText,
@@ -526,6 +669,7 @@ export async function runGeminiPrompt({
         timeoutMs,
         signal,
         modelName: currentModelName,
+        extraEnv: baseEnv,
       });
     });
     if (result.ok) {
