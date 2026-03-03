@@ -153,20 +153,30 @@ sudo systemctl status telegram-orchestrator
 - `/whoami` → chat_id/user_id 확인
 - `/help` → 명령 목록
 
-### 5) GoC 명령
+### 5) 파일 업로드/다운로드
+- Telegram 첨부(document/photo/video/audio/voice)는 `workspace/uploads/`에 저장
+- 표준 Bot API 한계:
+  - 다운로드: 기본 20MB (`TELEGRAM_UPLOAD_MAX_MB`, `TELEGRAM_DOWNLOAD_MAX_BYTES`)
+  - 전송(sendDocument): 50MB
+- 업로드 확장자 제한: `TELEGRAM_UPLOAD_ALLOWED_EXTS` (비우면 전체 허용)
+- `/files [uploads|outputs|all] [limit]` : workspace 파일 목록 조회
+- `/outputs [send]` : outputs 목록 조회 또는 즉시 전송
+- `/sendfile <relative_path>` : `uploads/` 또는 `outputs/` 파일 1개 전송
+
+### 6) GoC 명령
 - `/agents` : 현재 agent registry 목록 출력
 - `/context <jobId|global>` : GoC UI 링크 반환 (`jobId` 생략 시 현재 job 사용)
 - `GOC_UI_LINK_MODE=telegram_auth`면 기본적으로 `#token` 없는 링크를 제공 (Telegram SSO)
 - `GOC_UI_LINK_MODE=bearer_token`일 때만 UI 토큰을 민팅해 링크에 포함
 
-### 6) Multi-Agent 메모리 커스터마이즈
+### 7) Multi-Agent 메모리 커스터마이즈
 - `/memory show` : 전체 요약(반성 프롬프트 + 라우터 프롬프트 + 에이전트 역할)
 - `/memory agents` : Gemini/Codex/ChatGPT 역할 메모리 확인
 - `/memory routing <자연어>` : 라우팅 기준 프롬프트 수정
 - `/memory role <gemini|codex|chatgpt> <자연어>` : 에이전트별 역할 수정
 - `/memory md` : 원문 markdown 확인
 
-### 7) MEMORY_MODE 동작
+### 8) MEMORY_MODE 동작
 - `local`: 기존 local 메모리 동작 유지
 - `goc`: 로컬 md는 계속 기록하되, 프롬프트 컨텍스트는 GoC `compiled_text`를 우선 사용
 - `goc` 모드에서 에이전트 호출 직전마다 `compiled_text`를 매번 새로 가져오므로, UI 편집/활성 토글/삭제가 다음 스텝부터 반영됨

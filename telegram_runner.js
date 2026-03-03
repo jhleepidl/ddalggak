@@ -1,4 +1,5 @@
 import "dotenv/config";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -56,8 +57,34 @@ const TELEGRAM_REQUIRE_MENTION_IN_GROUP = String(process.env.TELEGRAM_REQUIRE_ME
 const TELEGRAM_FORCE_IPV4 = String(process.env.TELEGRAM_FORCE_IPV4 ?? "true").toLowerCase() !== "false";
 const TELEGRAM_POLLING_INTERVAL_MS = Number(process.env.TELEGRAM_POLLING_INTERVAL_MS ?? 1000);
 const TELEGRAM_POLLING_TIMEOUT_SEC = Number(process.env.TELEGRAM_POLLING_TIMEOUT_SEC ?? 15);
+const BYTES_PER_MB = 1024 * 1024;
+const TELEGRAM_UPLOAD_MAX_MB = Number.isFinite(Number(process.env.TELEGRAM_UPLOAD_MAX_MB))
+  ? Math.max(1, Math.floor(Number(process.env.TELEGRAM_UPLOAD_MAX_MB)))
+  : 20;
+const TELEGRAM_UPLOAD_MAX_BYTES = TELEGRAM_UPLOAD_MAX_MB * BYTES_PER_MB;
+const TELEGRAM_DOWNLOAD_MAX_BYTES = Number.isFinite(Number(process.env.TELEGRAM_DOWNLOAD_MAX_BYTES))
+  ? Math.max(1, Math.floor(Number(process.env.TELEGRAM_DOWNLOAD_MAX_BYTES)))
+  : (20 * BYTES_PER_MB);
+const TELEGRAM_EFFECTIVE_DOWNLOAD_MAX_BYTES = Math.min(TELEGRAM_UPLOAD_MAX_BYTES, TELEGRAM_DOWNLOAD_MAX_BYTES);
+const TELEGRAM_SEND_MAX_BYTES = 50 * BYTES_PER_MB;
+const TELEGRAM_UPLOAD_ALLOWED_EXTS = String(
+  process.env.TELEGRAM_UPLOAD_ALLOWED_EXTS
+  ?? ".txt,.md,.pdf,.csv,.json,.py,.ipynb,.jpg,.jpeg,.png,.mp4,.mp3,.ogg,.wav,.m4a"
+)
+  .split(",")
+  .map((entry) => String(entry || "").trim().toLowerCase())
+  .filter(Boolean)
+  .map((entry) => (entry.startsWith(".") ? entry : `.${entry}`));
+const TELEGRAM_UPLOAD_ALLOWED_EXT_SET = new Set(TELEGRAM_UPLOAD_ALLOWED_EXTS);
 const TELEGRAM_SINGLE_INSTANCE_LOCK = String(process.env.TELEGRAM_SINGLE_INSTANCE_LOCK ?? "true").toLowerCase() !== "false";
 const LOCK_FILE = process.env.TELEGRAM_LOCK_FILE || path.join(jobs.baseDir, ".locks", "telegram_runner.lock");
+const OUTPUT_AUTO_SEND = String(process.env.OUTPUT_AUTO_SEND ?? "true").trim().toLowerCase() !== "false";
+const OUTPUT_AUTO_SEND_MAX_FILES = Number.isFinite(Number(process.env.OUTPUT_AUTO_SEND_MAX_FILES))
+  ? Math.max(1, Math.min(20, Math.floor(Number(process.env.OUTPUT_AUTO_SEND_MAX_FILES))))
+  : 4;
+const OUTPUT_AUTO_SEND_ON = String(process.env.OUTPUT_AUTO_SEND_ON || "step").trim().toLowerCase() === "run_end"
+  ? "run_end"
+  : "step";
 const MEMORY_MODE = String(process.env.MEMORY_MODE || "local").trim().toLowerCase() === "goc" ? "goc" : "local";
 const GOC_UI_TOKEN_TTL_SEC = Number(process.env.GOC_UI_TOKEN_TTL_SEC ?? 21600);
 const GOC_UI_BROWSER_TOKEN_TTL_SEC = Number.isFinite(Number(process.env.GOC_UI_BROWSER_TOKEN_TTL_SEC))
@@ -214,6 +241,62 @@ function sanitizeWorkspaceFileName(rawName = "", { fallback = "file" } = {}) {
     .replace(/^_+/, "")
     .slice(0, 120);
   return safe || fallback;
+}
+
+function formatByteSize(bytes = 0) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n <= 0) return "0B";
+  if (n < 1024) return `${Math.floor(n)}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)}MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)}GB`;
+}
+
+function formatFileMtime(ms = 0) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return "n/a";
+  try {
+    return new Date(n).toISOString().replace("T", " ").slice(0, 19);
+  } catch {
+    return "n/a";
+  }
+}
+
+function isUploadExtAllowed(fileName = "") {
+  if (TELEGRAM_UPLOAD_ALLOWED_EXT_SET.size === 0) return true;
+  const ext = String(path.extname(String(fileName || "")).trim().toLowerCase() || "");
+  if (!ext) return false;
+  return TELEGRAM_UPLOAD_ALLOWED_EXT_SET.has(ext);
+}
+
+function uploadAllowedExtsText() {
+  if (TELEGRAM_UPLOAD_ALLOWED_EXT_SET.size === 0) return "(all)";
+  return [...TELEGRAM_UPLOAD_ALLOWED_EXT_SET].join(", ");
+}
+
+function computeFileSha256(filePath = "") {
+  const cleanPath = String(filePath || "").trim();
+  if (!cleanPath) return "";
+  const hash = crypto.createHash("sha256");
+  hash.update(fs.readFileSync(cleanPath));
+  return hash.digest("hex");
+}
+
+function resolveLiveJobIdForChat(chatId) {
+  const jobId = String(resolveCurrentJobIdForChat(chatId) || "").trim();
+  if (!jobId) return "";
+  try {
+    runDir(jobId);
+    return jobId;
+  } catch {
+    return "";
+  }
+}
+
+function parseClampedInt(raw, fallback, { min = 1, max = 100 } = {}) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
 function runSharedDir(jobId) {
@@ -541,6 +624,8 @@ async function appendWorkspaceUploadArtifactToGoc(jobId, {
   fileName = "",
   fileSize = 0,
   localPath = "",
+  uploadKind = "document",
+  sha256 = "",
   telegramFileId = "",
   telegramMessageId = null,
   chatId = "",
@@ -566,8 +651,10 @@ async function appendWorkspaceUploadArtifactToGoc(jobId, {
       raw_text: [
         "telegram upload",
         `job_id: ${cleanJobId}`,
+        `kind: ${String(uploadKind || "document")}`,
         `filename: ${fileName || path.basename(cleanPath)}`,
         `size: ${Number(fileSize || 0)}`,
+        `sha256: ${String(sha256 || "")}`,
         `local_path: ${cleanPath}`,
       ].join("\n") + "\n",
       resource_kind: "artifact",
@@ -577,8 +664,10 @@ async function appendWorkspaceUploadArtifactToGoc(jobId, {
       payload_json: {
         kind: "telegram_upload",
         job_id: cleanJobId,
+        upload_kind: String(uploadKind || "document"),
         file_name: fileName || path.basename(cleanPath),
         file_size: Number(fileSize || 0),
+        sha256: String(sha256 || "").trim() || undefined,
         local_path: cleanPath,
         local_workspace_path: safeRelPath,
         telegram_file_id: String(telegramFileId || "").trim() || undefined,
@@ -594,17 +683,163 @@ async function appendWorkspaceUploadArtifactToGoc(jobId, {
   }
 }
 
-async function handleTelegramDocumentUpload(bot, msg, { chatId, userId } = {}) {
-  const document = msg?.document && typeof msg.document === "object" ? msg.document : null;
-  if (!document?.file_id) return null;
+function extensionFromMimeType(rawMime = "", fallbackExt = ".bin") {
+  const mime = String(rawMime || "").trim().toLowerCase();
+  if (!mime) return fallbackExt;
+  if (mime.includes("jpeg")) return ".jpg";
+  if (mime.includes("png")) return ".png";
+  if (mime.includes("gif")) return ".gif";
+  if (mime.includes("webp")) return ".webp";
+  if (mime.includes("pdf")) return ".pdf";
+  if (mime.includes("json")) return ".json";
+  if (mime.includes("csv")) return ".csv";
+  if (mime.includes("markdown")) return ".md";
+  if (mime.includes("plain")) return ".txt";
+  if (mime.includes("mp4")) return ".mp4";
+  if (mime.includes("quicktime")) return ".mov";
+  if (mime.includes("mpeg")) return ".mp3";
+  if (mime.includes("ogg")) return ".ogg";
+  if (mime.includes("wav")) return ".wav";
+  return fallbackExt;
+}
 
-  const filename = sanitizeWorkspaceFileName(document.file_name || `telegram_${document.file_unique_id || "file"}`, {
-    fallback: "upload.bin",
+function resolveTelegramUploadCandidate(msg = {}) {
+  const messageId = Number.isFinite(Number(msg?.message_id)) ? Number(msg.message_id) : 0;
+  const stamp = Date.now().toString(36);
+
+  const document = msg?.document && typeof msg.document === "object" ? msg.document : null;
+  if (document?.file_id) {
+    const fallbackExt = extensionFromMimeType(document.mime_type, ".bin");
+    const fallback = `document_${stamp}_${messageId}${fallbackExt}`;
+    return {
+      kind: "document",
+      fileId: String(document.file_id || "").trim(),
+      fileUniqueId: String(document.file_unique_id || "").trim(),
+      fileSize: Number(document.file_size || 0),
+      fileName: String(document.file_name || fallback).trim(),
+    };
+  }
+
+  const photos = Array.isArray(msg?.photo) ? msg.photo.filter((row) => row?.file_id) : [];
+  if (photos.length > 0) {
+    const best = photos.reduce((acc, row) => {
+      if (!acc) return row;
+      const aSize = Number(acc?.file_size || 0);
+      const bSize = Number(row?.file_size || 0);
+      if (bSize !== aSize) return bSize > aSize ? row : acc;
+      const aPixels = Number(acc?.width || 0) * Number(acc?.height || 0);
+      const bPixels = Number(row?.width || 0) * Number(row?.height || 0);
+      return bPixels > aPixels ? row : acc;
+    }, photos[0] || null);
+    if (best?.file_id) {
+      return {
+        kind: "photo",
+        fileId: String(best.file_id || "").trim(),
+        fileUniqueId: String(best.file_unique_id || "").trim(),
+        fileSize: Number(best.file_size || 0),
+        fileName: `photo_${stamp}_${messageId}.jpg`,
+      };
+    }
+  }
+
+  const video = msg?.video && typeof msg.video === "object" ? msg.video : null;
+  if (video?.file_id) {
+    const ext = path.extname(String(video.file_name || "").trim()) || extensionFromMimeType(video.mime_type, ".mp4");
+    return {
+      kind: "video",
+      fileId: String(video.file_id || "").trim(),
+      fileUniqueId: String(video.file_unique_id || "").trim(),
+      fileSize: Number(video.file_size || 0),
+      fileName: String(video.file_name || `video_${stamp}_${messageId}${ext}`).trim(),
+    };
+  }
+
+  const audio = msg?.audio && typeof msg.audio === "object" ? msg.audio : null;
+  if (audio?.file_id) {
+    const ext = path.extname(String(audio.file_name || "").trim()) || extensionFromMimeType(audio.mime_type, ".mp3");
+    return {
+      kind: "audio",
+      fileId: String(audio.file_id || "").trim(),
+      fileUniqueId: String(audio.file_unique_id || "").trim(),
+      fileSize: Number(audio.file_size || 0),
+      fileName: String(audio.file_name || `audio_${stamp}_${messageId}${ext}`).trim(),
+    };
+  }
+
+  const voice = msg?.voice && typeof msg.voice === "object" ? msg.voice : null;
+  if (voice?.file_id) {
+    return {
+      kind: "voice",
+      fileId: String(voice.file_id || "").trim(),
+      fileUniqueId: String(voice.file_unique_id || "").trim(),
+      fileSize: Number(voice.file_size || 0),
+      fileName: `voice_${stamp}_${messageId}.ogg`,
+    };
+  }
+
+  return null;
+}
+
+function hasTelegramUploadAttachment(msg = {}) {
+  return !!resolveTelegramUploadCandidate(msg);
+}
+
+async function saveTelegramFileToWorkspace(bot, msg, {
+  chatId = "",
+  userId = "",
+  fileId = "",
+  filename = "",
+  size = 0,
+  kind = "document",
+  fileUniqueId = "",
+} = {}) {
+  const cleanFileId = String(fileId || "").trim();
+  if (!cleanFileId) return null;
+  const cleanKind = String(kind || "document").trim().toLowerCase() || "document";
+  const maxBytes = TELEGRAM_EFFECTIVE_DOWNLOAD_MAX_BYTES;
+  const cleanSize = Number(size || 0);
+  if (cleanSize > maxBytes) {
+    await bot.sendMessage(
+      chatId,
+      [
+        `❌ 파일이 20MB를 초과해 표준 Bot API로 다운로드할 수 없어요. (설정 한도: ${formatByteSize(maxBytes)})`,
+        "대안: (1) 링크로 공유 (2) 외부 스토리지 업로드 (3) 로컬 Telegram Bot API 서버 사용",
+      ].join("\n"),
+      Number.isFinite(Number(msg?.message_id))
+        ? { reply_to_message_id: Number(msg.message_id) }
+        : undefined
+    );
+    return {
+      skipped: true,
+      reason: "download_limit_exceeded",
+    };
+  }
+
+  const cleanName = sanitizeWorkspaceFileName(filename || `${cleanKind}.bin`, {
+    fallback: `${cleanKind}.bin`,
   });
-  let jobId = resolveCurrentJobIdForChat(chatId);
+  if (!isUploadExtAllowed(cleanName)) {
+    await bot.sendMessage(
+      chatId,
+      [
+        "❌ 업로드 확장자가 허용 목록에 없습니다.",
+        `- file: ${cleanName}`,
+        `- allowed: ${uploadAllowedExtsText()}`,
+      ].join("\n"),
+      Number.isFinite(Number(msg?.message_id))
+        ? { reply_to_message_id: Number(msg.message_id) }
+        : undefined
+    );
+    return {
+      skipped: true,
+      reason: "extension_not_allowed",
+    };
+  }
+
+  let jobId = resolveLiveJobIdForChat(chatId);
   let createdJob = false;
   if (!jobId) {
-    const seed = await createJob(`uploaded file: ${filename}`, {
+    const seed = await createJob(`uploaded file: ${cleanName}`, {
       ownerUserId: userId,
       ownerChatId: chatId,
     });
@@ -616,55 +851,65 @@ async function handleTelegramDocumentUpload(bot, msg, { chatId, userId } = {}) {
       state: "idle",
     });
   }
-  if (!jobId) throw new Error("Failed to resolve jobId for document upload");
+  if (!jobId) throw new Error("Failed to resolve jobId for file upload");
 
   const uploadsDir = resolveWorkspacePath(jobId, "uploads", { asDirectory: true });
-  const downloadedPath = await bot.downloadFile(String(document.file_id), uploadsDir);
+  const downloadedPath = await bot.downloadFile(cleanFileId, uploadsDir);
   const stamp = Date.now().toString(36);
   const messageId = Number.isFinite(Number(msg?.message_id)) ? Number(msg.message_id) : 0;
-  const finalName = sanitizeWorkspaceFileName(`${stamp}_${messageId}_${filename}`, {
-    fallback: `upload_${stamp}.bin`,
+  const finalName = sanitizeWorkspaceFileName(`${stamp}_${messageId}_${cleanName}`, {
+    fallback: `${cleanKind}_${stamp}.bin`,
   });
   const finalPath = resolveWorkspacePath(jobId, path.join("uploads", finalName));
   if (path.resolve(downloadedPath) !== path.resolve(finalPath)) {
     fs.renameSync(downloadedPath, finalPath);
   }
 
+  const fileStat = fs.statSync(finalPath);
+  const actualSize = Number(fileStat?.size || cleanSize || 0);
+  const sha256 = computeFileSha256(finalPath);
   const manifestPath = resolveWorkspacePath(jobId, "uploads/manifest.jsonl");
-  const workspaceRelPath = path.relative(runWorkspaceDir(jobId), finalPath);
+  const workspaceRelPath = path.relative(runWorkspaceDir(jobId), finalPath).replace(/\\/g, "/");
   const record = {
     ts: new Date().toISOString(),
-    kind: "telegram_document_upload",
+    kind: `telegram_${cleanKind}_upload`,
+    upload_kind: cleanKind,
     job_id: jobId,
     chat_id: String(chatId || ""),
     user_id: String(userId || ""),
     message_id: messageId,
-    file_id: String(document.file_id || ""),
-    file_unique_id: String(document.file_unique_id || ""),
-    filename,
-    size: Number(document.file_size || 0),
+    file_id: cleanFileId,
+    file_unique_id: String(fileUniqueId || "").trim(),
+    filename: cleanName,
+    size: actualSize,
+    sha256,
     local_path: finalPath,
     workspace_path: workspaceRelPath,
   };
   fs.appendFileSync(manifestPath, `${JSON.stringify(record)}\n`, "utf8");
 
-  jobs.appendConversation(jobId, "user", `uploaded file: ${filename}`, {
-    kind: "upload_document",
+  jobs.appendConversation(jobId, "user", `uploaded file: ${cleanName}`, {
+    kind: `upload_${cleanKind}`,
     telegram_message_id: messageId || undefined,
     local_path: finalPath,
+    sha256,
   });
   tracking.append(jobId, "progress.md", [
     "## upload",
-    `- filename: ${filename}`,
-    `- size: ${Number(document.file_size || 0)}`,
+    `- kind: ${cleanKind}`,
+    `- filename: ${cleanName}`,
+    `- size: ${actualSize}`,
+    `- sha256: ${sha256}`,
     `- workspace_path: ${workspaceRelPath}`,
-    `- file_id: ${String(document.file_id || "")}`,
+    `- file_id: ${cleanFileId}`,
   ].join("\n"));
   await appendWorkspaceUploadArtifactToGoc(jobId, {
-    fileName: filename,
-    fileSize: Number(document.file_size || 0),
+    fileName: cleanName,
+    fileSize: actualSize,
     localPath: finalPath,
-    telegramFileId: String(document.file_id || ""),
+    uploadKind: cleanKind,
+    sha256,
+    telegramFileId: cleanFileId,
     telegramMessageId: messageId,
     chatId,
     userId,
@@ -674,21 +919,40 @@ async function handleTelegramDocumentUpload(bot, msg, { chatId, userId } = {}) {
     chatId,
     [
       "📎 파일 업로드 저장 완료",
-      `job_id=${jobId}`,
-      `workspace=${runWorkspaceDir(jobId)}`,
-      `path=${workspaceRelPath}`,
-      createdJob ? "note=새 job 생성됨" : "",
+      `- kind: ${cleanKind}`,
+      `- job_id: ${jobId}`,
+      `- workspace: ${runWorkspaceDir(jobId)}`,
+      `- path: ${workspaceRelPath}`,
+      `- size: ${formatByteSize(actualSize)}`,
+      createdJob ? "- note: 새 job 생성됨" : "",
     ].filter(Boolean).join("\n"),
     Number.isFinite(Number(msg?.message_id))
       ? { reply_to_message_id: Number(msg.message_id) }
       : undefined
   );
   return {
+    skipped: false,
+    kind: cleanKind,
     jobId,
     finalPath,
-    workspacePath: workspaceRelPath,
+    relPath: workspaceRelPath,
+    sha256,
     createdJob,
   };
+}
+
+async function handleTelegramFileUpload(bot, msg, { chatId, userId } = {}) {
+  const candidate = resolveTelegramUploadCandidate(msg);
+  if (!candidate) return null;
+  return await saveTelegramFileToWorkspace(bot, msg, {
+    chatId,
+    userId,
+    fileId: candidate.fileId,
+    filename: candidate.fileName,
+    size: candidate.fileSize,
+    kind: candidate.kind,
+    fileUniqueId: candidate.fileUniqueId,
+  });
 }
 
 function listWorkspaceFilesRecursive(rootDir) {
@@ -718,10 +982,152 @@ function listWorkspaceFilesRecursive(rootDir) {
   return out;
 }
 
+function normalizeWorkspaceScope(raw = "") {
+  const scope = String(raw || "").trim().toLowerCase();
+  if (scope === "uploads" || scope === "outputs" || scope === "all") return scope;
+  return "all";
+}
+
+function collectWorkspaceFileEntries(jobId, { scope = "all" } = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  if (!cleanJobId) return [];
+  const workspaceRoot = runWorkspaceDir(cleanJobId);
+  const normalizedScope = normalizeWorkspaceScope(scope);
+  const targets = [];
+  if (normalizedScope === "all" || normalizedScope === "uploads") {
+    targets.push({ bucket: "uploads", dir: resolveWorkspacePath(cleanJobId, "uploads", { asDirectory: true }) });
+  }
+  if (normalizedScope === "all" || normalizedScope === "outputs") {
+    targets.push({ bucket: "outputs", dir: resolveWorkspacePath(cleanJobId, "outputs", { asDirectory: true }) });
+  }
+
+  const out = [];
+  for (const target of targets) {
+    const files = listWorkspaceFilesRecursive(target.dir);
+    for (const abs of files) {
+      let stat = null;
+      try {
+        stat = fs.statSync(abs);
+      } catch {
+        stat = null;
+      }
+      if (!stat || !stat.isFile()) continue;
+      const rel = path.relative(workspaceRoot, abs).replace(/\\/g, "/");
+      out.push({
+        bucket: target.bucket,
+        abs,
+        rel,
+        size: Number(stat.size || 0),
+        mtimeMs: Number(stat.mtimeMs || 0),
+      });
+    }
+  }
+  out.sort((a, b) => Number(b.mtimeMs || 0) - Number(a.mtimeMs || 0));
+  return out;
+}
+
+function formatWorkspaceFileListText(jobId, entries = [], { scope = "all", limit = 20 } = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  const normalizedScope = normalizeWorkspaceScope(scope);
+  const lines = [
+    `job_id=${cleanJobId}`,
+    `scope=${normalizedScope}`,
+    `limit=${limit}`,
+  ];
+  if (!Array.isArray(entries) || entries.length === 0) {
+    lines.push("- (no files)");
+    return lines.join("\n");
+  }
+  for (const row of entries) {
+    lines.push(`- ${row.rel} (${formatByteSize(row.size)}, mtime=${formatFileMtime(row.mtimeMs)})`);
+  }
+  return lines.join("\n");
+}
+
+function buildWorkspaceFilesPromptSection(jobId, { limitPerBucket = 5 } = {}) {
+  const limit = Number.isFinite(Number(limitPerBucket))
+    ? Math.max(1, Math.min(20, Math.floor(Number(limitPerBucket))))
+    : 5;
+  const uploads = collectWorkspaceFileEntries(jobId, { scope: "uploads" }).slice(0, limit);
+  const outputs = collectWorkspaceFileEntries(jobId, { scope: "outputs" }).slice(0, limit);
+  const render = (rows) => (
+    rows.length > 0
+      ? rows.map((row) => `- ${row.rel} (${formatByteSize(row.size)})`).join("\n")
+      : "- (none)"
+  );
+  return [
+    "workspace 파일 목록(최근):",
+    "uploads:",
+    render(uploads),
+    "outputs:",
+    render(outputs),
+    "지시:",
+    "- 필요하면 uploads/ 경로의 파일 내용을 참고해라.",
+    "- 매우 큰 파일은 목록만 참고하고 필요한 부분만 선택해 사용해라.",
+  ].join("\n");
+}
+
+async function maybeAutoSendOutputs(bot, chatId, jobId, {
+  when = "step",
+  replyToMessageId = null,
+} = {}) {
+  if (!OUTPUT_AUTO_SEND) return;
+  if (String(when || "").trim().toLowerCase() !== OUTPUT_AUTO_SEND_ON) return;
+  await deliverWorkspaceOutputs(bot, chatId, jobId, {
+    replyToMessageId,
+    maxFiles: OUTPUT_AUTO_SEND_MAX_FILES,
+  }).catch(() => null);
+}
+
+async function sendWorkspaceFileByRelativePath(bot, chatId, jobId, relativePath, { replyToMessageId = null } = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  const requested = String(relativePath || "").trim();
+  if (!cleanJobId || !requested) {
+    throw new Error("jobId and relative path are required");
+  }
+  const abs = jobs.resolveWorkspacePath(cleanJobId, requested);
+  let stat = null;
+  try {
+    stat = fs.statSync(abs);
+  } catch {
+    stat = null;
+  }
+  if (!stat || !stat.isFile()) {
+    throw new Error(`file not found: ${requested}`);
+  }
+  const workspaceRoot = runWorkspaceDir(cleanJobId);
+  const rel = path.relative(workspaceRoot, abs).replace(/\\/g, "/");
+  if (!rel || rel.startsWith("..")) {
+    throw new Error("Path outside workspace");
+  }
+  if (!(rel.startsWith("uploads/") || rel.startsWith("outputs/"))) {
+    throw new Error("only uploads/ or outputs/ paths are allowed");
+  }
+  if (Number(stat.size || 0) > TELEGRAM_SEND_MAX_BYTES) {
+    throw new Error(
+      `file is too large for sendDocument (limit=${formatByteSize(TELEGRAM_SEND_MAX_BYTES)}, size=${formatByteSize(stat.size)})`
+    );
+  }
+  await bot.sendDocument(
+    chatId,
+    abs,
+    {
+      caption: `📄 file\njob_id=${cleanJobId}\npath=${rel}`,
+      reply_to_message_id: Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
+        ? Number(replyToMessageId)
+        : undefined,
+    }
+  );
+  return {
+    abs,
+    rel,
+    size: Number(stat.size || 0),
+  };
+}
+
 async function deliverWorkspaceOutputs(bot, chatId, jobId, { replyToMessageId = null, maxFiles = 4 } = {}) {
   const cleanJobId = String(jobId || "").trim();
   if (!cleanJobId) return;
-  const outputsDir = resolveWorkspacePath(cleanJobId, "outputs", { asDirectory: true });
   const sentIndexPath = resolveWorkspacePath(cleanJobId, "outputs/.telegram_sent.json");
   let sent = {};
   try {
@@ -730,28 +1136,11 @@ async function deliverWorkspaceOutputs(bot, chatId, jobId, { replyToMessageId = 
     sent = {};
   }
 
-  const workspaceRoot = runWorkspaceDir(cleanJobId);
-  const candidates = listWorkspaceFilesRecursive(outputsDir)
-    .map((abs) => {
-      let stat = null;
-      try {
-        stat = fs.statSync(abs);
-      } catch {
-        stat = null;
-      }
-      if (!stat || !stat.isFile()) return null;
-      const rel = path.relative(workspaceRoot, abs);
-      const key = `${rel}:${stat.size}:${stat.mtimeMs}`;
-      return {
-        abs,
-        rel,
-        size: stat.size,
-        mtimeMs: stat.mtimeMs,
-        key,
-      };
-    })
-    .filter(Boolean)
-    .sort((a, b) => Number(a.mtimeMs || 0) - Number(b.mtimeMs || 0));
+  const candidates = collectWorkspaceFileEntries(cleanJobId, { scope: "outputs" })
+    .map((row) => ({
+      ...row,
+      key: `${row.rel}:${row.size}:${row.mtimeMs}`,
+    }));
 
   const limit = Number.isFinite(Number(maxFiles))
     ? Math.max(1, Math.min(10, Math.floor(Number(maxFiles))))
@@ -761,10 +1150,10 @@ async function deliverWorkspaceOutputs(bot, chatId, jobId, { replyToMessageId = 
     if (sentCount >= limit) break;
     if (sent[file.key]) continue;
     if (Number(file.size || 0) <= 0) continue;
-    if (Number(file.size || 0) > 50 * 1024 * 1024) {
+    if (Number(file.size || 0) > TELEGRAM_SEND_MAX_BYTES) {
       await bot.sendMessage(
         chatId,
-        `📦 output 생성됨(50MB 초과로 전송 생략)\njob_id=${cleanJobId}\npath=${file.rel}\nsize=${file.size}`,
+        `📦 output 생성됨(sendDocument 한도 초과로 전송 생략)\njob_id=${cleanJobId}\npath=${file.rel}\nsize=${file.size}`,
         Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
           ? { reply_to_message_id: Number(replyToMessageId) }
           : undefined
@@ -1348,6 +1737,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const roleMemo = memory.getAgentRole("gemini");
   const ctx = await loadContextDocs(jobId, ["research.md"]);
   const workspacePath = runWorkspaceDir(jobId);
+  const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 5 });
   const prompt = [
     ctx,
     "",
@@ -1357,10 +1747,13 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     `run workspace: ${workspacePath}`,
     `tracking docs dir: ${runSharedDir(jobId)}`,
     "",
+    workspaceFilesText,
+    "",
     "제약:",
     "- 코드 작성/수정/패치 제안 금지",
     "- 터미널 명령 제안 최소화",
     "- 설계/리스크/검증 관점으로만 답변",
+    "- 필요하면 uploads/ 경로의 파일 내용을 참고해라.",
     "",
     "다음 목표를 달성하기 위한 구현 단계와 리스크를 한국어로 간결하게 작성해줘.",
     "",
@@ -1398,6 +1791,7 @@ async function codexImplement(jobId, instruction, signal = null) {
   const ctx = await loadContextDocs(jobId, ["plan.md", "research.md"], 6000);
   const trackDocs = TRACK_DOC_NAMES.map(n => `- ${path.join(runSharedDir(jobId), n)}`).join("\n");
   const workspacePath = runWorkspaceDir(jobId);
+  const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 5 });
   const prompt = [
     ctx,
     "",
@@ -1409,8 +1803,11 @@ async function codexImplement(jobId, instruction, signal = null) {
     "- 네트워크 접근 금지.",
     `- CODEX_WORKSPACE_ROOT(코드 작업 영역) 내부 파일만 수정: ${workspacePath}`,
     `- 현재 run workspace: ${workspacePath}`,
+    "- 필요하면 uploads/ 경로의 파일 내용을 참고해라.",
     "- 아래 트래킹 문서는 run/shared에서만 관리하고, CODEX_WORKSPACE_ROOT 루트에 동명 파일을 만들지 말 것:",
     trackDocs,
+    "",
+    workspaceFilesText,
     "- 테스트 실행은 하지 말고, 필요한 테스트를 제안만.",
     "- 변경 요약(파일별 이유) 포함.",
     "",
@@ -6010,6 +6407,10 @@ async function runSupervisorChat(
         }
       );
     }
+    await maybeAutoSendOutputs(bot, chatId, currentJobId, {
+      when: "run_end",
+      replyToMessageId: getCurrentTurnReplyMessageId(chatId),
+    }).catch(() => null);
     return { routePlan, execution: mergedExecution, jobId: currentJobId };
   } catch (e) {
     if (executionGraph) {
@@ -6262,9 +6663,9 @@ async function executeAgentRun(
 
   if (provider === "codex") {
     const output = await codexImplement(jobId, combinedInstruction, signal);
-    await deliverWorkspaceOutputs(bot, chatId, jobId, {
+    await maybeAutoSendOutputs(bot, chatId, jobId, {
+      when: "step",
       replyToMessageId: getCurrentTurnReplyMessageId(chatId),
-      maxFiles: 4,
     }).catch(() => null);
     const fallback = gocFallbackByJob.get(String(jobId));
     if (fallback) {
@@ -6291,9 +6692,9 @@ async function executeAgentRun(
       onGeminiModelSwitch,
       onGeminiGiveUp,
     });
-    await deliverWorkspaceOutputs(bot, chatId, jobId, {
+    await maybeAutoSendOutputs(bot, chatId, jobId, {
+      when: "step",
       replyToMessageId: getCurrentTurnReplyMessageId(chatId),
-      maxFiles: 4,
     }).catch(() => null);
     const fallback = gocFallbackByJob.get(String(jobId));
     if (fallback) {
@@ -6350,6 +6751,10 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
     }
   }
 
+  await maybeAutoSendOutputs(bot, chatId, jobId, {
+    when: "run_end",
+    replyToMessageId: getCurrentTurnReplyMessageId(chatId),
+  }).catch(() => null);
   return { askedChatGPT };
 }
 
@@ -6400,6 +6805,11 @@ async function executeActions(bot, chatId, jobId, plan, signal = null, opts = {}
       );
     }
   }
+
+  await maybeAutoSendOutputs(bot, chatId, jobId, {
+    when: "run_end",
+    replyToMessageId: getCurrentTurnReplyMessageId(chatId),
+  }).catch(() => null);
 }
 
 // GPT paste/apply state per chat
@@ -7078,6 +7488,10 @@ bot.on("callback_query", async (q) => {
             pending_approval: null,
           });
         }
+        await maybeAutoSendOutputs(bot, chatId, pendingJobId, {
+          when: "run_end",
+          replyToMessageId: getCurrentTurnReplyMessageId(chatId),
+        }).catch(() => null);
       } catch (e) {
         if (resumeExecutionGraph) {
           await resumeExecutionGraph.finishRun({
@@ -7278,9 +7692,9 @@ bot.on("message", async (msg) => {
   if (!chatId || !userId) return;
   if (!isAllowedChat(chatId) || !isAllowedUser(userId)) return;
 
-  if (msg.document?.file_id) {
+  if (hasTelegramUploadAttachment(msg)) {
     try {
-      await handleTelegramDocumentUpload(bot, msg, { chatId, userId });
+      await handleTelegramFileUpload(bot, msg, { chatId, userId });
     } catch (e) {
       await bot.sendMessage(
         chatId,
@@ -7367,10 +7781,10 @@ bot.on("message", async (msg) => {
   if (cmd === "/help") {
     const sub = String(args || "").trim().toLowerCase();
     if (sub === "advanced") {
-      await bot.sendMessage(chatId, "Commands:\n- plain text: 기본 /chat(supervisor) 처리\n- /whoami\n- /running\n- /status\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents\n- /tools\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
+      await bot.sendMessage(chatId, "Commands:\n- plain text: 기본 /chat(supervisor) 처리\n- /whoami\n- /running\n- /status\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
       return;
     }
-    await bot.sendMessage(chatId, "Commands:\n- plain text: 대화/작업 지시\n- /context [global]\n- /agents\n- /tools\n- /status\n- /stop [jobId]\n- /running\n- /whoami\n- /help advanced");
+    await bot.sendMessage(chatId, "Commands:\n- plain text: 대화/작업 지시\n- /context [global]\n- /agents\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /status\n- /stop [jobId]\n- /running\n- /whoami\n- /help advanced");
     return;
   }
 
@@ -7535,6 +7949,76 @@ bot.on("message", async (msg) => {
 
   if (cmd === "/tools") {
     await sendAgentOrToolListQuick(bot, chatId, "tool");
+    return;
+  }
+
+  if (cmd === "/files") {
+    const currentJobId = resolveLiveJobIdForChat(chatId);
+    if (!currentJobId) {
+      await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어요. 먼저 /chat 또는 /run으로 job을 시작해 주세요.");
+      return;
+    }
+    const first = String(rest[0] || "").trim().toLowerCase();
+    const hasScope = first === "uploads" || first === "outputs" || first === "all";
+    const scope = hasScope ? first : "all";
+    const limit = parseClampedInt(hasScope ? rest[1] : rest[0], 20, { min: 1, max: 100 });
+    const entries = collectWorkspaceFileEntries(currentJobId, { scope }).slice(0, limit);
+    await sendLong(
+      bot,
+      chatId,
+      `📂 workspace files\n${formatWorkspaceFileListText(currentJobId, entries, { scope, limit })}`
+    );
+    return;
+  }
+
+  if (cmd === "/outputs") {
+    const currentJobId = resolveLiveJobIdForChat(chatId);
+    if (!currentJobId) {
+      await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어요. 먼저 /chat 또는 /run으로 job을 시작해 주세요.");
+      return;
+    }
+    const mode = String(rest[0] || "").trim().toLowerCase();
+    if (mode === "send") {
+      const sendLimit = parseClampedInt(rest[1], OUTPUT_AUTO_SEND_MAX_FILES, { min: 1, max: 10 });
+      await deliverWorkspaceOutputs(bot, chatId, currentJobId, {
+        replyToMessageId: msg.message_id,
+        maxFiles: sendLimit,
+      });
+      await bot.sendMessage(chatId, `✅ outputs 전송 시도 완료 (limit=${sendLimit})`);
+      return;
+    }
+    const limit = parseClampedInt(rest[0], 20, { min: 1, max: 100 });
+    const entries = collectWorkspaceFileEntries(currentJobId, { scope: "outputs" }).slice(0, limit);
+    await sendLong(
+      bot,
+      chatId,
+      `📦 outputs\n${formatWorkspaceFileListText(currentJobId, entries, { scope: "outputs", limit })}`
+    );
+    return;
+  }
+
+  if (cmd === "/sendfile") {
+    const currentJobId = resolveLiveJobIdForChat(chatId);
+    if (!currentJobId) {
+      await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어요. 먼저 /chat 또는 /run으로 job을 시작해 주세요.");
+      return;
+    }
+    const relativePath = String(args || "").trim();
+    if (!relativePath) {
+      await bot.sendMessage(chatId, "Usage: /sendfile <relative_path>");
+      return;
+    }
+    try {
+      const sent = await sendWorkspaceFileByRelativePath(bot, chatId, currentJobId, relativePath, {
+        replyToMessageId: msg.message_id,
+      });
+      await bot.sendMessage(
+        chatId,
+        `✅ 파일 전송 완료\njob_id=${currentJobId}\npath=${sent.rel}\nsize=${formatByteSize(sent.size)}`
+      );
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ /sendfile 실패: ${clip(String(e?.message ?? e), 260)}`);
+    }
     return;
   }
 
@@ -7744,6 +8228,9 @@ process.on("SIGTERM", () => { void shutdown(0); });
 console.log("Telegram orchestrator v2.1 started (polling).");
 console.log(`Job workspace root: ${jobs.runsDir}/<jobId>/workspace`);
 console.log(`Runs dir: ${jobs.runsDir}`);
+console.log(`Telegram upload/download limit: ${formatByteSize(TELEGRAM_EFFECTIVE_DOWNLOAD_MAX_BYTES)} (bot-api download)`);
+console.log(`Telegram sendDocument limit: ${formatByteSize(TELEGRAM_SEND_MAX_BYTES)}`);
+console.log(`Output auto-send: ${OUTPUT_AUTO_SEND} (on=${OUTPUT_AUTO_SEND_ON}, max=${OUTPUT_AUTO_SEND_MAX_FILES})`);
 console.log(`Memory mode: ${MEMORY_MODE} (effective=${memoryModeWithFallback()})`);
 try {
   const me = await bot.getMe();
