@@ -45,6 +45,12 @@ function clamp(value, min, max, fallback) {
   return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
+function clipTail(text = "", maxChars = 5000) {
+  const raw = String(text || "");
+  if (raw.length <= maxChars) return raw;
+  return raw.slice(raw.length - maxChars);
+}
+
 function focusHeaderFor({ stepKind = "agent", agentId = "", goal = "", lensSpec = null } = {}) {
   const cleanStepKind = String(stepKind || "").trim().toLowerCase();
   const cleanAgentId = String(agentId || "").trim().toLowerCase();
@@ -375,6 +381,55 @@ export class LocalContextEngine extends ContextEngineBase {
     return await this._prepare(input, { stepKind: "agent" });
   }
 
+  async onRunEnd(input = {}) {
+    const row = asObject(input);
+    const jobId = String(row.jobId || "").trim();
+    if (!jobId) return null;
+    this._ensureMemoryFiles(jobId);
+
+    const userText = clip(String(row.lastUserText || "").trim(), 1000);
+    const assistantText = clip(String(row.lastAssistantText || "").trim(), 1400);
+    if (!userText && !assistantText) return null;
+
+    const summaryPath = this._memoryPath(jobId, "summary.md");
+    const currentSummary = String(readFileIfExists(summaryPath) || "").trim();
+    const summaryBody = currentSummary.startsWith("# rolling summary")
+      ? currentSummary.slice("# rolling summary".length).trim()
+      : currentSummary;
+
+    const recentSection = [
+      "## recent",
+      userText ? `- user: ${userText}` : "",
+      assistantText ? `- assistant: ${assistantText}` : "",
+    ].filter(Boolean).join("\n");
+
+    const nextBody = clipTail(
+      [summaryBody, recentSection].filter(Boolean).join("\n\n").trim(),
+      4700
+    );
+    const nextSummary = clipTail(`# rolling summary\n\n${nextBody}`.trim(), 5000);
+    try {
+      fs.writeFileSync(summaryPath, `${nextSummary}\n`, "utf8");
+    } catch {}
+
+    if (userText) {
+      this.appendLocalLog(jobId, "turns.jsonl", {
+        role: "user",
+        text: userText,
+      });
+    }
+    if (assistantText) {
+      this.appendLocalLog(jobId, "turns.jsonl", {
+        role: "assistant",
+        text: assistantText,
+      });
+    }
+    return {
+      ok: true,
+      summaryChars: nextSummary.length,
+    };
+  }
+
   async recordMeta(args = {}) {
     const row = asObject(args);
     const jobId = String(row.jobId || "").trim();
@@ -399,4 +454,3 @@ export class LocalContextEngine extends ContextEngineBase {
     return await super.recordMeta(args);
   }
 }
-

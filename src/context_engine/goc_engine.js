@@ -314,6 +314,9 @@ export class GocContextEngine extends ContextEngineBase {
       || compiled?.activeNodeIds
       || []
     );
+    this.log(
+      `[context-engine:goc] rebuild_active shared=${shared.sharedContextSetId} active=${activeNodeIds.length} version=${contextVersion || "unknown"}`
+    );
 
     if (this.runtime && typeof this.runtime === "object") {
       this.runtime.contextSummary = compiled.text || this.runtime.contextSummary || "";
@@ -504,4 +507,3 @@ export class GocContextEngine extends ContextEngineBase {
     };
   }
 }
-

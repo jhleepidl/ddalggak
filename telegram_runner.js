@@ -2691,6 +2691,11 @@ async function listActiveResourcesByKind(client, { threadId, ctxId, resourceKind
   }
 }
 
+async function listLatestResourceByKind(client, threadId, resourceKind) {
+  const rows = await client.listResources(threadId, { resourceKind });
+  return sortResourcesByCreatedAt(rows).at(-1) || null;
+}
+
 function parseTimeMs(raw) {
   const t = Date.parse(String(raw || "").trim());
   return Number.isFinite(t) ? t : 0;
@@ -3306,22 +3311,17 @@ async function loadSupervisorRuntime(
   const agentsSlot = await ensureAgentsThread(client, { baseDir: jobs.baseDir });
   const toolsSlot = await ensureToolsThread(client, { baseDir: jobs.baseDir });
 
-  const jobResources = await listActiveResourcesByKind(client, {
-    threadId: map.threadId,
-    ctxId: map.ctxSharedId,
-    resourceKind: "job_config",
-  });
-  const latestJobNode = jobResources[jobResources.length - 1] || null;
+  const latestJobNode = await listLatestResourceByKind(client, map.threadId, "job_config");
   const rawJobConfig = latestJobNode ? parseStructuredFromResource(latestJobNode, "job_config") : null;
 
-  const toolRows = await listActiveResourcesByKind(client, {
-    threadId: toolsSlot.threadId,
-    ctxId: toolsSlot.ctxId,
-    resourceKind: "tool_spec",
-  });
-  const toolsCatalog = toolRows
-    .map((resource) => normalizeToolSpec(parseStructuredFromResource(resource, "tool_spec")))
-    .filter(Boolean);
+  const toolRows = await client.listResources(toolsSlot.threadId, { resourceKind: "tool_spec" });
+  const latestToolSpecById = new Map();
+  for (const resource of sortResourcesByCreatedAt(toolRows)) {
+    const normalized = normalizeToolSpec(parseStructuredFromResource(resource, "tool_spec"));
+    if (!normalized) continue;
+    latestToolSpecById.set(String(normalized.id || "").trim().toLowerCase(), normalized);
+  }
+  const toolsCatalog = [...latestToolSpecById.values()];
 
   const normalized = normalizeSupervisorJobConfig(
     rawJobConfig || { job_id: String(jobId || "").trim() },
@@ -5199,7 +5199,7 @@ async function runSupervisorChat(
   let executionGraph = null;
   let runtime = null;
   let contextEngine = null;
-  let refreshedSharedContextOnFinish = false;
+  let finalAssistantText = "";
   const sessionAtStart = chatSessionStore.get(chatId);
   let currentTurnAckMessageId = Number(sessionAtStart?.current_turn_ack_message_id || 0);
   if (!(Number.isFinite(currentTurnAckMessageId) && currentTurnAckMessageId > 0)) {
@@ -5222,15 +5222,6 @@ async function runSupervisorChat(
     if (typeof contextEngine.setRuntime === "function") {
       contextEngine.setRuntime(runtime);
     }
-    await contextEngine.onRunStart({
-      jobId: currentJobId,
-      chatId: String(chatId || ""),
-      threadId: String(runtime?.map?.threadId || "").trim(),
-      runMeta: {
-        threadId: String(runtime?.map?.threadId || "").trim(),
-        sharedContextSetId: String(runtime?.map?.ctxSharedId || "").trim(),
-      },
-    }).catch(() => null);
     executionGraph = (
       memoryModeWithFallback() === "goc"
       && runtime?.map?.threadId
@@ -5294,9 +5285,64 @@ async function runSupervisorChat(
     let suggestedActions = [];
     let mergedResults = [];
     let mergedOutputs = [];
+    const runThreadId = String(runtime?.map?.threadId || "").trim();
+    const sharedCtxId = String(runtime?.map?.ctxSharedId || "").trim();
 
     while (turn < maxTurns) {
       turn += 1;
+      const routerRunMeta = {
+        runId: String(executionGraph?.runId || "").trim() || undefined,
+        threadId: runThreadId,
+        sharedContextSetId: sharedCtxId,
+      };
+      let routerCtx = {
+        contextText: String(runtime?.contextSummary || "").trim(),
+        meta: {},
+      };
+      if (contextEngine && typeof contextEngine.prepareRouterContext === "function") {
+        if (typeof contextEngine.setRuntime === "function") {
+          contextEngine.setRuntime(runtime);
+        }
+        await contextEngine.onRunStart({
+          jobId: currentJobId,
+          chatId: String(chatId || ""),
+          threadId: runThreadId,
+          runMeta: routerRunMeta,
+        }).catch(() => null);
+        const preparedRouter = await contextEngine.prepareRouterContext({
+          jobId: currentJobId,
+          chatId: String(chatId || ""),
+          threadId: runThreadId,
+          agentId: "router",
+          stepKind: "router",
+          goal: lastUserText,
+          userMessageText: lastUserText,
+          budgetTokens: 900,
+          runMeta: routerRunMeta,
+        }).catch(() => null);
+        if (preparedRouter && typeof preparedRouter === "object") {
+          routerCtx = {
+            contextText: String(preparedRouter.contextText || "").trim(),
+            meta: preparedRouter.meta && typeof preparedRouter.meta === "object"
+              ? preparedRouter.meta
+              : {},
+          };
+        }
+        await contextEngine.recordMeta({
+          jobId: currentJobId,
+          chatId: String(chatId || ""),
+          threadId: runThreadId,
+          agentId: "router",
+          stepKind: "router",
+          goal: lastUserText,
+          userMessageText: lastUserText,
+          runMeta: routerRunMeta,
+          meta: routerCtx.meta,
+        }).catch(() => {});
+      }
+      if (routerCtx.contextText) {
+        runtime.contextSummary = routerCtx.contextText;
+      }
       const progressSummary = buildAutopilotProgressSummary({
         turn,
         maxTurns,
@@ -5312,7 +5358,7 @@ async function runSupervisorChat(
         tools: runtime.tools,
         jobConfig: runtime.jobConfig,
         currentJobId,
-        currentContextSetId: runtime.map?.ctxSharedId || "",
+        currentContextSetId: sharedCtxId,
         progressSummary,
         suggestedActions,
         originalUserMessage: message,
@@ -5322,7 +5368,7 @@ async function runSupervisorChat(
         signal: controller.signal,
         locale: "ko-KR",
         routerPolicy: memory.getRouterPrompt(),
-        contextSummary: runtime.contextSummary,
+        contextSummary: routerCtx.contextText || runtime.contextSummary,
         geminiConcurrencyKey: `job:${String(currentJobId || "").trim()}`,
         onGeminiRetry: async ({ retryCount = 0, maxRetries = 0 } = {}) => {
           await sendGeminiRetryMessage(bot, chatId, {
@@ -5637,6 +5683,7 @@ async function runSupervisorChat(
       await sendLong(bot, chatId, formatChatSummary(routePlan, mergedExecution.results));
       await bot.sendMessage(chatId, `autopilot_stop_reason=${stopReason}`);
     }
+    finalAssistantText = replyText;
     if (!isMutatingConfirm) {
       await sendLong(bot, chatId, replyText);
     }
@@ -5660,13 +5707,6 @@ async function runSupervisorChat(
           : "done",
         summary: clip(replyText, 900),
       });
-    }
-    if (memoryModeWithFallback() === "goc" && runtime?.map?.threadId && runtime?.map?.ctxSharedId) {
-      await refreshSharedContextForRuntime(runtime, {
-        jobId: currentJobId,
-        reason: "run_end",
-      }).catch(() => null);
-      refreshedSharedContextOnFinish = true;
     }
     if (mergedExecution.pendingApproval?.id) {
       const prompt = pendingPrompt || buildPendingApprovalPrompt(mergedExecution.pendingApproval);
@@ -5738,10 +5778,23 @@ async function runSupervisorChat(
     }
     throw e;
   } finally {
-    if (!refreshedSharedContextOnFinish && memoryModeWithFallback() === "goc" && runtime?.map?.threadId && runtime?.map?.ctxSharedId) {
-      await refreshSharedContextForRuntime(runtime, {
+    if (contextEngine && typeof contextEngine.onRunEnd === "function") {
+      const runThreadId = String(runtime?.map?.threadId || "").trim();
+      const sharedCtxId = String(runtime?.map?.ctxSharedId || "").trim();
+      if (typeof contextEngine.setRuntime === "function") {
+        contextEngine.setRuntime(runtime);
+      }
+      await contextEngine.onRunEnd({
         jobId: currentJobId,
-        reason: "run_finalize",
+        chatId: String(chatId || ""),
+        threadId: runThreadId,
+        lastUserText: message,
+        lastAssistantText: finalAssistantText,
+        runMeta: {
+          runId: String(executionGraph?.runId || "").trim() || undefined,
+          threadId: runThreadId,
+          sharedContextSetId: sharedCtxId,
+        },
       }).catch(() => null);
     }
     if (activeJobByChat.get(chatKey) === currentJobId) activeJobByChat.delete(chatKey);
@@ -6500,6 +6553,16 @@ bot.on("callback_query", async (q) => {
       } else {
         runtime.contextMeta = null;
       }
+      const contextEngine = makeContextEngine({
+        memoryMode: memoryModeWithFallback(),
+        jobs,
+        gocClient: memoryModeWithFallback() === "goc" ? requireGocClient() : null,
+        runtime,
+        logger: (line) => jobs.log(pendingJobId, line),
+      });
+      if (typeof contextEngine.setRuntime === "function") {
+        contextEngine.setRuntime(runtime);
+      }
       const resumeExecutionGraph = (
         memoryModeWithFallback() === "goc"
         && runtime?.map?.threadId
@@ -6521,6 +6584,10 @@ bot.on("callback_query", async (q) => {
       const chatKey = String(chatId);
       activeJobByChat.set(chatKey, pendingJobId);
       rememberLastChatJob(chatId, pendingJobId);
+      const resumeThreadId = String(runtime?.map?.threadId || "").trim();
+      const resumeSharedCtxId = String(runtime?.map?.ctxSharedId || "").trim();
+      const resumeUserText = String(pending.original_user_text || "승인된 액션 재개");
+      let resumeFinalAssistantText = "";
       const resumedAgentStatus = buildQueuedAgentStatusFromActions(resumedActions);
       chatSessionStore.upsert(chatId, {
         jobId: pendingJobId,
@@ -6539,6 +6606,49 @@ bot.on("callback_query", async (q) => {
       });
 
       try {
+        const resumeRunMeta = {
+          runId: String(resumeExecutionGraph?.runId || "").trim() || undefined,
+          threadId: resumeThreadId,
+          sharedContextSetId: resumeSharedCtxId,
+        };
+        if (contextEngine && typeof contextEngine.prepareRouterContext === "function") {
+          if (typeof contextEngine.setRuntime === "function") {
+            contextEngine.setRuntime(runtime);
+          }
+          await contextEngine.onRunStart({
+            jobId: pendingJobId,
+            chatId: String(chatId || ""),
+            threadId: resumeThreadId,
+            runMeta: resumeRunMeta,
+          }).catch(() => null);
+          const resumeRouterCtx = await contextEngine.prepareRouterContext({
+            jobId: pendingJobId,
+            chatId: String(chatId || ""),
+            threadId: resumeThreadId,
+            agentId: "router",
+            stepKind: "router",
+            goal: resumeUserText,
+            userMessageText: resumeUserText,
+            budgetTokens: 900,
+            runMeta: resumeRunMeta,
+          }).catch(() => null);
+          if (resumeRouterCtx?.contextText) {
+            runtime.contextSummary = String(resumeRouterCtx.contextText || "").trim();
+          }
+          await contextEngine.recordMeta({
+            jobId: pendingJobId,
+            chatId: String(chatId || ""),
+            threadId: resumeThreadId,
+            agentId: "router",
+            stepKind: "router",
+            goal: resumeUserText,
+            userMessageText: resumeUserText,
+            runMeta: resumeRunMeta,
+            meta: resumeRouterCtx?.meta && typeof resumeRouterCtx.meta === "object"
+              ? resumeRouterCtx.meta
+              : {},
+          }).catch(() => {});
+        }
         const resumePlan = {
           reason: `resume_after_approval:${approvalId}`,
           actions: resumedActions,
@@ -6546,7 +6656,7 @@ bot.on("callback_query", async (q) => {
         };
         if (resumeExecutionGraph) {
           await resumeExecutionGraph.startRun({
-            userText: String(pending.original_user_text || "승인된 액션 재개"),
+            userText: resumeUserText,
           });
           await resumeExecutionGraph.queueMainSteps(resumedActions);
         }
@@ -6555,7 +6665,7 @@ bot.on("callback_query", async (q) => {
           userId,
           jobId: pendingJobId,
           plan: resumePlan,
-          originalUserText: String(pending.original_user_text || "승인된 액션 재개"),
+          originalUserText: resumeUserText,
           forceMode: normalizeForceMode(pending.force_mode || "normal"),
           jobConfig: runtime.jobConfig,
           agents: runtime.agents,
@@ -6579,6 +6689,7 @@ bot.on("callback_query", async (q) => {
               });
             },
             executionGraph: resumeExecutionGraph,
+            contextEngine,
           }),
         });
 
@@ -6604,6 +6715,7 @@ bot.on("callback_query", async (q) => {
         const replyText = resumedExecution.pendingApproval
           ? `${finalReply}\n\n⚠️ 추가 승인 필요: ${resumedExecution.pendingApproval.reason}`
           : finalReply;
+        resumeFinalAssistantText = replyText;
         await sendLong(bot, chatId, replyText);
 
         tracking.append(pendingJobId, "decisions.md", [
@@ -6688,6 +6800,23 @@ bot.on("callback_query", async (q) => {
         );
         throw e;
       } finally {
+        if (contextEngine && typeof contextEngine.onRunEnd === "function") {
+          if (typeof contextEngine.setRuntime === "function") {
+            contextEngine.setRuntime(runtime);
+          }
+          await contextEngine.onRunEnd({
+            jobId: pendingJobId,
+            chatId: String(chatId || ""),
+            threadId: resumeThreadId,
+            lastUserText: resumeUserText,
+            lastAssistantText: resumeFinalAssistantText,
+            runMeta: {
+              runId: String(resumeExecutionGraph?.runId || "").trim() || undefined,
+              threadId: resumeThreadId,
+              sharedContextSetId: resumeSharedCtxId,
+            },
+          }).catch(() => null);
+        }
         if (activeJobByChat.get(chatKey) === pendingJobId) activeJobByChat.delete(chatKey);
         jobAbortControllers.delete(pendingJobId);
       }
