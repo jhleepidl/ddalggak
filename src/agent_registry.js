@@ -493,7 +493,7 @@ export async function loadAgentsFromGoc({ client, baseDir, includeCompiled = tru
 
   if (typeof client.listAgents === "function") {
     try {
-      const apiRows = await client.listAgents("all");
+      const apiRows = await client.listAgents("my");
       const normalizedApiRows = dedupeByIdKeepLast(
         (Array.isArray(apiRows) ? apiRows : [])
           .map((row) => normalizeAgent(row))

@@ -1243,6 +1243,16 @@ function requireGocClient() {
   return gocClient;
 }
 
+function setGocActingTelegramUser(telegramUserId) {
+  if (memoryModeWithFallback() !== "goc") return;
+  try {
+    const client = requireGocClient();
+    if (typeof client.setActorTelegramUserId === "function") {
+      client.setActorTelegramUserId(telegramUserId);
+    }
+  } catch {}
+}
+
 function installTrackingGocHook() {
   tracking.setAppendHook(async ({ jobId, docName, chunk }) => {
     if (memoryModeWithFallback() !== "goc") return;
@@ -3918,6 +3928,41 @@ function buildAgentProfileFromProposal(action) {
   };
 }
 
+function buildGocAgentCreateSpec(spec = {}) {
+  const row = spec && typeof spec === "object" ? spec : {};
+  const name = String(row.name || row.title || row.id || row.agent_id || "").trim();
+  const description = String(row.description || "").trim();
+  const systemPrompt = String(
+    row.system_prompt
+    || row.systemPrompt
+    || row.prompt
+    || ""
+  ).trim();
+  const instruction = String(row.instruction || "").trim();
+  const tools = Array.isArray(row.tools)
+    ? row.tools.map((entry) => String(entry || "").trim()).filter(Boolean)
+    : [];
+  const provider = String(row.provider || "").trim().toLowerCase();
+  const model = String(row.model || "").trim();
+  let modelRef = "";
+  if (provider && model && !model.includes(":")) modelRef = `${provider}:${model}`;
+  else if (model) modelRef = model;
+  else if (provider) modelRef = provider;
+  const visibilityRaw = String(row.visibility || row.scope || "").trim().toLowerCase();
+  const visibility = ["private", "public", "installed"].includes(visibilityRaw)
+    ? visibilityRaw
+    : "private";
+  return {
+    name,
+    description,
+    system_prompt: systemPrompt,
+    instruction,
+    tools,
+    model: modelRef,
+    visibility,
+  };
+}
+
 function normalizeBlueprintSearchItems(items = []) {
   return (Array.isArray(items) ? items : [])
     .map((row) => ({
@@ -4106,15 +4151,9 @@ async function loadSupervisorRuntime(
     { agentsCatalog: reg.agents, toolsCatalog }
   );
 
-  if (conversationAgents.length === 0 && typeof client.addConversationAgent === "function") {
-    const seedAgentIds = (Array.isArray(normalized.enabledAgentIds) ? normalized.enabledAgentIds : [])
-      .map((id) => String(id || "").trim().toLowerCase())
-      .filter(Boolean)
-      .slice(0, 16);
-    for (const agentId of seedAgentIds) {
-      await client.addConversationAgent(map.threadId, agentId, true).catch(() => {});
-    }
-    if (seedAgentIds.length > 0 && typeof client.listConversationAgents === "function") {
+  if (conversationAgents.length === 0 && typeof client.bootstrapDefaultAgents === "function") {
+    await client.bootstrapDefaultAgents(map.threadId, { addToConversation: true }).catch(() => null);
+    if (typeof client.listConversationAgents === "function") {
       conversationAgents = await client.listConversationAgents(map.threadId).catch(() => conversationAgents);
     }
   }
@@ -5729,11 +5768,15 @@ function buildSupervisorExecutionCallbacks({
           if (typeof client.createAgent !== "function") {
             throw new Error("GoC createAgent API unavailable");
           }
-          const spec = action?.agent_spec && typeof action.agent_spec === "object"
+          const rawSpec = action?.agent_spec && typeof action.agent_spec === "object"
             ? action.agent_spec
             : {};
+          const spec = buildGocAgentCreateSpec(rawSpec);
+          if (!spec.name) {
+            throw new Error("create_agent_definition requires agent_spec.name");
+          }
           const created = await client.createAgent(spec);
-          const createdId = String(created?.id || spec.id || "").trim().toLowerCase();
+          const createdId = String(created?.id || "").trim();
           let addedToConversation = false;
           if (action?.add_to_conversation === true && runtime?.map?.threadId && createdId) {
             await client.ensureConversation(runtime.map.threadId).catch(() => null);
@@ -5741,13 +5784,27 @@ function buildSupervisorExecutionCallbacks({
             addedToConversation = true;
           }
           await refreshAgentRegistry({ includeCompiled: true });
+          const createdName = String(created?.name || spec.name || "").trim() || "(unnamed)";
+          const createdModel = String(created?.model || spec.model || "").trim() || "n/a";
+          const createdTools = Array.isArray(created?.tools) && created.tools.length > 0
+            ? created.tools
+            : (Array.isArray(spec.tools) ? spec.tools : []);
+          const toolsText = createdTools.length > 0 ? createdTools.join(", ") : "(none)";
           return {
             id: createdId,
             agent_id: createdId,
+            name: createdName,
+            model: createdModel,
+            tools: createdTools,
             added_to_conversation: addedToConversation,
-            text: createdId
-              ? `✅ agent definition 생성 완료: @${createdId}${addedToConversation ? "\nconversation에도 추가됨" : ""}`
-              : "✅ agent definition 생성 완료",
+            text: [
+              "✅ agent definition 생성 완료",
+              `- name: ${createdName}`,
+              `- agent_id: ${createdId || "unknown"}`,
+              `- model: ${createdModel}`,
+              `- tools: ${toolsText}`,
+              `- conversation 추가: ${addedToConversation ? "yes" : "no"}`,
+            ].join("\n"),
           };
         },
       });
@@ -7280,24 +7337,36 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
   const targetAgentId = String(tokens[1] || "").trim().toLowerCase();
   const currentJobId = String(resolveCurrentJobIdForChat(chatId) || "").trim();
 
-  if (cleanKind === "agent" && memoryModeWithFallback() === "goc" && sub === "registry") {
+  if (cleanKind === "agent" && memoryModeWithFallback() === "goc" && (sub === "registry" || sub === "public")) {
     try {
       const client = requireGocClient();
-      const rows = await client.listAgents("mine").catch(() => client.listAgents("all"));
+      const scope = sub === "public" ? "public" : "my";
+      const query = String(tokens.slice(1).join(" ") || "").trim().toLowerCase();
+      const rows = await client.listAgents(scope);
+      const filteredRows = query
+        ? rows.filter((row) => {
+          const id = String(row?.id || "").trim().toLowerCase();
+          const name = String(row?.name || "").trim().toLowerCase();
+          const description = String(row?.description || "").trim().toLowerCase();
+          return id.includes(query) || name.includes(query) || description.includes(query);
+        })
+        : rows;
       const lines = [
-        "GoC Agent Registry",
-        ...((Array.isArray(rows) ? rows : []).slice(0, 50).map((row) => {
+        sub === "public" ? "GoC Public Agent Catalog" : "GoC My Agent Catalog",
+        ...((Array.isArray(filteredRows) ? filteredRows : []).slice(0, 50).map((row) => {
           const id = String(row?.id || "").trim().toLowerCase();
           const provider = String(row?.provider || "gemini").trim().toLowerCase();
           const model = String(row?.model || provider || "gemini").trim();
           const published = row?.published === true ? "published" : "private";
-          return `- @${id || "unknown"} (${provider}/${model}, ${published})`;
+          const name = String(row?.name || id || "unknown").trim();
+          return `- ${name} [${id || "unknown"}] (${provider}/${model}, ${published})`;
         })),
       ];
-      if ((Array.isArray(rows) ? rows : []).length === 0) lines.push("- (none)");
+      if (query) lines.push(`- filter: ${query}`);
+      if ((Array.isArray(filteredRows) ? filteredRows : []).length === 0) lines.push("- (none)");
       await sendLong(bot, chatId, lines.join("\n"));
     } catch (e) {
-      await bot.sendMessage(chatId, `❌ registry 조회 실패: ${String(e?.message ?? e)}`);
+      await bot.sendMessage(chatId, `❌ ${sub} 조회 실패: ${String(e?.message ?? e)}`);
     }
     return;
   }
@@ -7415,7 +7484,7 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
     ));
     const disabled = members.filter((id) => !enabled.includes(id));
     const lines = [
-      "현재 conversation agent 목록",
+      "현재 conversation membership",
       `- job_id: ${currentJobId}`,
       `- thread_id: ${String(runtime?.map?.threadId || "").trim() || "(none)"}`,
       enabled.length > 0
@@ -7424,7 +7493,7 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
       disabled.length > 0
         ? `- disabled: ${disabled.slice(0, 20).map((id) => `@${id}`).join(", ")}`
         : "- disabled: (none)",
-      "명령: /agents registry | /agents add <id> | /agents remove <id> | /agents enable <id> | /agents disable <id>",
+      "명령: /agents registry | /agents public [query] | /agents add <id> | /agents remove <id> | /agents enable <id> | /agents disable <id>",
     ];
     await sendTextWithOptionalGocButton(bot, chatId, lines.join("\n"), {
       miniAppLink: info?.miniAppLink || info?.link || "",
@@ -7587,6 +7656,7 @@ bot.on("callback_query", async (q) => {
     const chatId = msg.chat.id;
     const userId = q.from?.id;
     if (!isAllowedChat(chatId) || !isAllowedUser(userId)) return;
+    setGocActingTelegramUser(userId);
 
     const data = String(q.data || "").trim();
     if (data.startsWith("approve_action:") || data.startsWith("reject_action:") || data.startsWith("work_action:")) {
@@ -8307,6 +8377,7 @@ bot.on("message", async (msg) => {
   const userId = msg.from?.id;
   if (!chatId || !userId) return;
   if (!isAllowedChat(chatId) || !isAllowedUser(userId)) return;
+  setGocActingTelegramUser(userId);
 
   if (hasTelegramUploadAttachment(msg)) {
     try {
@@ -8397,10 +8468,10 @@ bot.on("message", async (msg) => {
   if (cmd === "/help") {
     const sub = String(args || "").trim().toLowerCase();
     if (sub === "advanced") {
-      await bot.sendMessage(chatId, "Commands:\n- plain text: 기본 /chat(supervisor) 처리\n- /whoami\n- /running\n- /status\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents [registry|add <id>|remove <id>|enable <id>|disable <id>]\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
+      await bot.sendMessage(chatId, "Commands:\n- plain text: 기본 /chat(supervisor) 처리\n- /whoami\n- /running\n- /status\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents [registry|public [query]|add <id>|remove <id>|enable <id>|disable <id>]\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
       return;
     }
-    await bot.sendMessage(chatId, "Commands:\n- plain text: 대화/작업 지시\n- /context [global]\n- /agents [registry|add <id>|remove <id>|enable <id>|disable <id>]\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /status\n- /stop [jobId]\n- /running\n- /whoami\n- /help advanced");
+    await bot.sendMessage(chatId, "Commands:\n- plain text: 대화/작업 지시\n- /context [global]\n- /agents [registry|public [query]|add <id>|remove <id>|enable <id>|disable <id>]\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /status\n- /stop [jobId]\n- /running\n- /whoami\n- /help advanced");
     return;
   }
 

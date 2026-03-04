@@ -326,6 +326,16 @@ function normalizeConversationAgent(entity, fallbackThreadId = "") {
 function normalizeCatalogAgent(entity) {
   const row = asObject(entity);
   const payload = normalizePayloadObject(pick(row, ["payload_json", "payloadJson", "payload", "meta_json", "metaJson", "meta"]));
+  const modelRaw = String(
+    pick(row, ["model", "model_name", "modelName"])
+    || pick(payload, ["model", "model_name", "modelName"])
+    || ""
+  ).trim();
+  const modelParts = modelRaw.includes(":")
+    ? [modelRaw.slice(0, modelRaw.indexOf(":")).trim(), modelRaw.slice(modelRaw.indexOf(":") + 1).trim()]
+    : ["", modelRaw];
+  const providerFromModel = modelParts[0];
+  const modelNameFromModel = modelParts[1];
   const id = String(
     pick(row, ["id", "agent_id", "agentId"])
     || pick(payload, ["id", "agent_id", "agentId"])
@@ -334,14 +344,10 @@ function normalizeCatalogAgent(entity) {
   const provider = String(
     pick(row, ["provider"])
     || pick(payload, ["provider"])
+    || providerFromModel
     || "gemini"
   ).trim().toLowerCase();
-  const model = String(
-    pick(row, ["model"])
-    || pick(payload, ["model"])
-    || provider
-    || "gemini"
-  ).trim();
+  const model = modelNameFromModel || modelRaw || provider || "gemini";
   return {
     id,
     name: String(
@@ -357,8 +363,13 @@ function normalizeCatalogAgent(entity) {
     provider: provider || "gemini",
     model: model || provider || "gemini",
     prompt: String(
-      pick(row, ["prompt", "system_prompt", "systemPrompt", "base_prompt", "basePrompt"])
-      || pick(payload, ["prompt", "system_prompt", "systemPrompt", "base_prompt", "basePrompt"])
+      pick(row, ["prompt", "system_prompt", "systemPrompt", "base_prompt", "basePrompt", "instruction"])
+      || pick(payload, ["prompt", "system_prompt", "systemPrompt", "base_prompt", "basePrompt", "instruction"])
+      || ""
+    ).trim(),
+    instruction: String(
+      pick(row, ["instruction"])
+      || pick(payload, ["instruction"])
       || ""
     ).trim(),
     tools: normalizeStringList(
@@ -368,6 +379,11 @@ function normalizeCatalogAgent(entity) {
     scope: String(
       pick(row, ["scope", "visibility"])
       || pick(payload, ["scope", "visibility"])
+      || ""
+    ).trim().toLowerCase(),
+    visibility: String(
+      pick(row, ["visibility", "scope"])
+      || pick(payload, ["visibility", "scope"])
       || ""
     ).trim().toLowerCase(),
     published: parseBooleanLike(
@@ -381,14 +397,78 @@ function normalizeCatalogAgent(entity) {
   };
 }
 
+function normalizeAgentsScope(scope = "") {
+  const key = String(scope || "").trim().toLowerCase();
+  if (["public", "published", "shared"].includes(key)) return "public";
+  if (["installed", "install"].includes(key)) return "installed";
+  return "my";
+}
+
+function buildAgentCatalogPayload(def = {}, { requireName = false, forPatch = false } = {}) {
+  const row = asObject(def);
+  const hasName = typeof row.name === "string" || typeof row.title === "string";
+  const hasDescription = typeof row.description === "string";
+  const hasPrompt = typeof row.prompt === "string" || typeof row.system_prompt === "string" || typeof row.systemPrompt === "string";
+  const hasInstruction = typeof row.instruction === "string";
+  const hasTools = Array.isArray(row.tools) || Array.isArray(row.tool_ids) || Array.isArray(row.toolIds);
+  const hasProvider = typeof row.provider === "string";
+  const hasModel = typeof row.model === "string";
+  const hasVisibility = typeof row.visibility === "string" || typeof row.scope === "string";
+  const name = String(row.name || row.title || "").trim();
+  const description = String(row.description || "").trim();
+  const systemPrompt = String(
+    row.system_prompt
+    || row.systemPrompt
+    || row.prompt
+    || ""
+  ).trim();
+  const instruction = String(row.instruction || "").trim();
+  const tools = normalizeStringList(row.tools || row.tool_ids || row.toolIds);
+  const provider = String(row.provider || "").trim().toLowerCase();
+  const model = String(row.model || "").trim();
+  let modelRef = "";
+  if (provider && model && !model.includes(":")) modelRef = `${provider}:${model}`;
+  else if (model) modelRef = model;
+  else if (provider) modelRef = provider;
+
+  const visibilityRaw = String(row.visibility || row.scope || "").trim().toLowerCase();
+  const visibility = ["public", "private", "installed"].includes(visibilityRaw)
+    ? visibilityRaw
+    : "private";
+
+  if (requireName && !name) {
+    throw new Error("createAgent requires name");
+  }
+
+  const payload = {
+    name: forPatch ? (hasName ? (name || "") : undefined) : (name || undefined),
+    description: forPatch ? (hasDescription ? description : undefined) : (description || undefined),
+    system_prompt: forPatch ? (hasPrompt ? systemPrompt : undefined) : (systemPrompt || undefined),
+    instruction: forPatch ? (hasInstruction ? instruction : undefined) : instruction,
+    tools: forPatch ? (hasTools ? tools : undefined) : tools,
+    model: forPatch ? ((hasModel || hasProvider) ? (modelRef || "") : undefined) : (modelRef || undefined),
+    visibility: forPatch ? (hasVisibility ? visibility : undefined) : visibility,
+  };
+  if (row.meta && typeof row.meta === "object") {
+    payload.meta = row.meta;
+  }
+  return payload;
+}
+
 export class GocClient {
-  constructor({ apiBase, serviceKey } = {}) {
+  constructor({ apiBase, serviceKey, actorTelegramUserId } = {}) {
     const base = String(apiBase || process.env.GOC_API_BASE || "").trim();
     const key = String(serviceKey || process.env.GOC_SERVICE_KEY || "").trim();
     if (!base) throw new Error("Missing GOC_API_BASE");
     if (!key) throw new Error("Missing GOC_SERVICE_KEY");
     this.apiBase = base.replace(/\/+$/, "");
     this.serviceKey = key;
+    this.actorTelegramUserId = String(actorTelegramUserId || "").trim();
+  }
+
+  setActorTelegramUserId(telegramUserId) {
+    this.actorTelegramUserId = String(telegramUserId || "").trim();
+    return this.actorTelegramUserId;
   }
 
   _url(pathname, query = {}) {
@@ -404,6 +484,9 @@ export class GocClient {
       Authorization: `ServiceKey ${this.serviceKey}`,
       Accept: "application/json, text/plain;q=0.9, */*;q=0.8",
     };
+    if (this.actorTelegramUserId) {
+      headers["X-Acting-Telegram-User-Id"] = this.actorTelegramUserId;
+    }
     const init = { method, headers };
     if (typeof body !== "undefined") {
       headers["Content-Type"] = "application/json";
@@ -1458,6 +1541,25 @@ export class GocClient {
     return normalizeConversation(normalizeEntity(data, ["conversation", "data"]), tid);
   }
 
+  async bootstrapDefaultAgents(threadId, { addToConversation = true } = {}) {
+    const tid = String(threadId || "").trim();
+    if (!tid) throw new Error("bootstrapDefaultAgents requires threadId");
+    const body = {
+      thread_id: tid,
+      threadId: tid,
+      add_to_conversation: addToConversation !== false,
+      addToConversation: addToConversation !== false,
+    };
+    return await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: "/api/agents/bootstrap_defaults", body },
+        { path: "/agents/bootstrap_defaults", body },
+        { path: "/api/agents/bootstrap-defaults", body },
+      ],
+    });
+  }
+
   async listConversationAgents(threadId) {
     const tid = String(threadId || "").trim();
     if (!tid) throw new Error("listConversationAgents requires threadId");
@@ -1554,13 +1656,13 @@ export class GocClient {
   }
 
   async listAgents(scope = "") {
-    const cleanScope = String(scope || "").trim().toLowerCase();
+    const cleanScope = normalizeAgentsScope(scope);
     const data = await this._requestAny({
       method: "GET",
       attempts: [
-        { path: "/api/agents", query: { scope: cleanScope || undefined } },
-        { path: "/agents", query: { scope: cleanScope || undefined } },
-        { path: "/v1/agents", query: { scope: cleanScope || undefined } },
+        { path: "/api/agents", query: { scope: cleanScope } },
+        { path: "/agents", query: { scope: cleanScope } },
+        { path: "/v1/agents", query: { scope: cleanScope } },
       ],
     });
     return normalizeArrayResponse(data)
@@ -1569,19 +1671,7 @@ export class GocClient {
   }
 
   async createAgent(def = {}) {
-    const row = asObject(def);
-    const body = {
-      id: String(row.id || row.agent_id || row.agentId || "").trim().toLowerCase() || undefined,
-      agent_id: String(row.id || row.agent_id || row.agentId || "").trim().toLowerCase() || undefined,
-      name: String(row.name || row.title || "").trim() || undefined,
-      description: String(row.description || "").trim() || undefined,
-      provider: String(row.provider || "gemini").trim().toLowerCase() || "gemini",
-      model: String(row.model || row.provider || "gemini").trim() || "gemini",
-      prompt: String(row.prompt || row.system_prompt || row.systemPrompt || "").trim() || undefined,
-      tools: Array.isArray(row.tools) ? row.tools.map((t) => String(t || "").trim()).filter(Boolean) : undefined,
-      scope: String(row.scope || "").trim().toLowerCase() || undefined,
-      meta: row.meta && typeof row.meta === "object" ? row.meta : undefined,
-    };
+    const body = buildAgentCatalogPayload(def, { requireName: true });
     const data = await this._requestAny({
       method: "POST",
       attempts: [
@@ -1598,12 +1688,7 @@ export class GocClient {
   async patchAgent(agentId, def = {}) {
     const aid = String(agentId || "").trim().toLowerCase();
     if (!aid) throw new Error("patchAgent requires agentId");
-    const row = asObject(def);
-    const body = {
-      ...row,
-      id: aid,
-      agent_id: aid,
-    };
+    const body = buildAgentCatalogPayload(def, { requireName: false, forPatch: true });
     const data = await this._requestAny({
       method: "PATCH",
       attempts: [
