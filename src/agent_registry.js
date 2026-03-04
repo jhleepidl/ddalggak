@@ -38,14 +38,26 @@ function normalizeAgent(raw) {
   const row = asObject(raw);
   const id = String(row.id || row.agent_id || row.agentId || "").trim().toLowerCase();
   if (!id) return null;
-  const provider = normalizeProvider(row.provider || row.model);
-  const model = String(row.model || row.provider || "").trim() || provider;
+  const modelRaw = String(row.model || "").trim();
+  const modelSplitIndex = modelRaw.indexOf(":");
+  const modelProvider = modelSplitIndex > 0 ? modelRaw.slice(0, modelSplitIndex).trim() : "";
+  const modelName = modelSplitIndex > 0 ? modelRaw.slice(modelSplitIndex + 1).trim() : modelRaw;
+  const provider = normalizeProvider(row.provider || modelProvider || row.model);
+  const model = String(modelName || row.model || row.provider || "").trim() || provider;
+  const systemKey = String(
+    row.system_key
+    || row.systemKey
+    || row.meta?.system_key
+    || row.meta?.systemKey
+    || ""
+  ).trim().toLowerCase();
   return {
     id,
     name: String(row.name || row.title || id).trim(),
     description: String(row.description || "").trim(),
     provider,
     model,
+    system_key: systemKey,
     prompt: String(
       row.prompt
       || row.base_prompt
@@ -292,6 +304,13 @@ function serializeAgentProfileYaml(agent) {
 
 function buildRegistry(agents, meta = {}) {
   const deduped = dedupeByIdKeepLast(agents);
+  const byId = new Map();
+  for (const row of deduped) {
+    if (!row?.id) continue;
+    byId.set(row.id, row);
+    const systemKey = String(row.system_key || row.systemKey || row.meta?.system_key || row.meta?.systemKey || "").trim().toLowerCase();
+    if (systemKey) byId.set(systemKey, row);
+  }
   return {
     path: "goc://agents",
     source: String(meta.source || "goc"),
@@ -299,7 +318,7 @@ function buildRegistry(agents, meta = {}) {
     ctxId: String(meta.ctxId || ""),
     compiledText: String(meta.compiledText || ""),
     agents: deduped,
-    byId: new Map(deduped.map((row) => [row.id, row])),
+    byId,
     resources: Array.isArray(meta.resources) ? meta.resources : [],
   };
 }
@@ -493,15 +512,24 @@ export async function loadAgentsFromGoc({ client, baseDir, includeCompiled = tru
 
   if (typeof client.listAgents === "function") {
     try {
-      const apiRows = await client.listAgents("my");
-      const normalizedApiRows = dedupeByIdKeepLast(
-        (Array.isArray(apiRows) ? apiRows : [])
-          .map((row) => normalizeAgent(row))
-          .filter(Boolean)
-      );
+      const mergedApiById = new Map();
+      const mergeScope = async (scope) => {
+        const rows = await client.listAgents(scope);
+        for (const item of (Array.isArray(rows) ? rows : [])) {
+          const normalized = normalizeAgent(item);
+          if (!normalized?.id) continue;
+          mergedApiById.set(normalized.id, normalized);
+        }
+      };
+      for (const scope of ["public", "installed", "my"]) {
+        try {
+          await mergeScope(scope);
+        } catch {}
+      }
+      const normalizedApiRows = Array.from(mergedApiById.values());
       if (normalizedApiRows.length > 0) {
         return buildRegistry(normalizedApiRows, {
-          source: "goc_agents_api",
+          source: "goc_agents_api_merged",
           threadId: slot.threadId,
           ctxId: slot.ctxId,
           compiledText: "",

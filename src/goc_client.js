@@ -286,6 +286,8 @@ function normalizeConversation(entity, fallbackThreadId = "") {
 function normalizeConversationAgent(entity, fallbackThreadId = "") {
   const row = asObject(entity);
   const payload = normalizePayloadObject(pick(row, ["payload_json", "payloadJson", "payload", "meta_json", "metaJson", "meta"]));
+  const rowAgent = asObject(row.agent);
+  const payloadAgent = asObject(payload.agent);
   const threadId = String(
     pick(row, ["thread_id", "threadId"])
     || pick(payload, ["thread_id", "threadId"])
@@ -293,8 +295,10 @@ function normalizeConversationAgent(entity, fallbackThreadId = "") {
     || ""
   ).trim();
   const agentId = String(
-    pick(row, ["agent_id", "agentId", "id"])
-    || pick(payload, ["agent_id", "agentId", "id"])
+    pick(row, ["agent_id", "agentId"])
+    || pick(rowAgent, ["id", "agent_id", "agentId"])
+    || pick(payload, ["agent_id", "agentId"])
+    || pick(payloadAgent, ["id", "agent_id", "agentId"])
     || ""
   ).trim().toLowerCase();
   const enabled = parseBooleanLike(
@@ -302,25 +306,46 @@ function normalizeConversationAgent(entity, fallbackThreadId = "") {
     ?? pick(payload, ["enabled", "is_enabled", "isEnabled", "active"]),
     true
   );
-  const orderRaw = Number(
-    pick(row, ["order", "sort_order", "sortOrder", "position"])
-    ?? pick(payload, ["order", "sort_order", "sortOrder", "position"])
+  const orderIndexRaw = Number(
+    pick(row, ["order_index", "orderIndex", "order", "sort_order", "sortOrder", "position"])
+    ?? pick(payload, ["order_index", "orderIndex", "order", "sort_order", "sortOrder", "position"])
   );
-  const overrides = asObject(
-    pick(row, ["overrides"])
-    || pick(payload, ["overrides"])
+  const overridesRaw = (
+    pick(row, ["overrides_json", "overridesJson", "overrides"])
+    ?? pick(payload, ["overrides_json", "overridesJson", "overrides"])
   );
+  const overridesJson = normalizePayloadObject(overridesRaw);
+  const orderIndex = Number.isFinite(orderIndexRaw) ? Math.floor(orderIndexRaw) : null;
   return {
     id: String(pick(row, ["id", "membership_id", "membershipId"]) || `${threadId}:${agentId}`).trim(),
     thread_id: threadId,
     agent_id: agentId,
     enabled,
-    order: Number.isFinite(orderRaw) ? Math.floor(orderRaw) : null,
-    overrides,
+    order_index: orderIndex,
+    overrides_json: overridesJson,
+    order: orderIndex,
+    overrides: overridesJson,
     created_at: String(pick(row, ["created_at", "createdAt", "ts", "timestamp"]) || ""),
     updated_at: String(pick(row, ["updated_at", "updatedAt", "ts", "timestamp"]) || ""),
     raw: row,
   };
+}
+
+function extractConversationAgentsArray(data) {
+  if (Array.isArray(data)) return data;
+  const root = asObject(data);
+  const roots = [
+    root,
+    asObject(root.data),
+    asObject(root.result),
+  ];
+  for (const row of roots) {
+    if (Array.isArray(row?.conversation?.agents)) return row.conversation.agents;
+    if (Array.isArray(row?.conversation?.items)) return row.conversation.items;
+    if (Array.isArray(row?.agents)) return row.agents;
+    if (Array.isArray(row?.items)) return row.items;
+  }
+  return normalizeArrayResponse(data);
 }
 
 function normalizeCatalogAgent(entity) {
@@ -362,6 +387,11 @@ function normalizeCatalogAgent(entity) {
     ).trim(),
     provider: provider || "gemini",
     model: model || provider || "gemini",
+    system_key: String(
+      pick(row, ["system_key", "systemKey"])
+      || pick(payload, ["system_key", "systemKey"])
+      || ""
+    ).trim().toLowerCase(),
     prompt: String(
       pick(row, ["prompt", "system_prompt", "systemPrompt", "base_prompt", "basePrompt", "instruction"])
       || pick(payload, ["prompt", "system_prompt", "systemPrompt", "base_prompt", "basePrompt", "instruction"])
@@ -432,8 +462,9 @@ function buildAgentCatalogPayload(def = {}, { requireName = false, forPatch = fa
   else if (provider) modelRef = provider;
 
   const visibilityRaw = String(row.visibility || row.scope || "").trim().toLowerCase();
-  const visibility = ["public", "private", "installed"].includes(visibilityRaw)
-    ? visibilityRaw
+  const visibilityAlias = visibilityRaw === "installed" ? "unlisted" : visibilityRaw;
+  const visibility = ["public", "private", "unlisted"].includes(visibilityAlias)
+    ? visibilityAlias
     : "private";
 
   if (requireName && !name) {
@@ -1574,7 +1605,7 @@ export class GocClient {
         { path: "/conversation_agents", query: { thread_id: tid } },
       ],
     });
-    return normalizeArrayResponse(data)
+    return extractConversationAgentsArray(data)
       .map((row) => normalizeConversationAgent(row, tid))
       .filter((row) => row.agent_id);
   }
@@ -1601,6 +1632,12 @@ export class GocClient {
         { path: "/conversation_agents", body },
       ],
     });
+    const rows = extractConversationAgentsArray(data)
+      .map((entry) => normalizeConversationAgent(entry, tid))
+      .filter((entry) => entry.agent_id);
+    if (rows.length > 0) {
+      return rows.find((entry) => entry.agent_id === aid) || rows[rows.length - 1];
+    }
     return normalizeConversationAgent(normalizeEntity(data, ["conversation_agent", "membership", "data"]), tid);
   }
 
@@ -1609,26 +1646,54 @@ export class GocClient {
     const aid = String(agentId || "").trim().toLowerCase();
     if (!tid || !aid) throw new Error("patchConversationAgent requires threadId and agentId");
     const row = asObject(patch);
-    const body = {
+    const orderIndexRaw = Number(row.order_index ?? row.orderIndex ?? row.order ?? row.position);
+    const overridesRaw = row.overrides_json ?? row.overridesJson ?? row.overrides;
+    const overridesJson = overridesRaw && typeof overridesRaw === "object"
+      ? asObject(overridesRaw)
+      : asObject(parseJsonMaybe(String(overridesRaw || "")));
+    const patchBody = {
+      enabled: typeof row.enabled === "boolean" ? row.enabled : undefined,
+      order_index: Number.isFinite(orderIndexRaw) ? Math.floor(orderIndexRaw) : undefined,
+      overrides_json: Object.keys(overridesJson).length > 0 ? overridesJson : undefined,
+    };
+    const patchBodyWithIdentity = {
       thread_id: tid,
       threadId: tid,
       agent_id: aid,
       agentId: aid,
-      enabled: typeof row.enabled === "boolean" ? row.enabled : undefined,
-      order: Number.isFinite(Number(row.order)) ? Math.floor(Number(row.order)) : undefined,
-      overrides: row.overrides && typeof row.overrides === "object" ? row.overrides : undefined,
+      ...patchBody,
     };
     const data = await this._requestAny({
       method: "PATCH",
       attempts: [
-        { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}`, body },
-        { path: `/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}`, body },
-        { path: `/api/conversations/${encodeURIComponent(tid)}/agents/${encodeURIComponent(aid)}`, body },
-        { path: "/api/conversation_agents", body },
-        { path: "/api/conversation-agents", body },
+        { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}`, body: patchBody },
+        { path: `/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}`, body: patchBody },
+        { path: `/api/conversations/${encodeURIComponent(tid)}/agents/${encodeURIComponent(aid)}`, body: patchBody },
+        { path: "/api/conversation_agents", body: patchBodyWithIdentity },
+        { path: "/api/conversation-agents", body: patchBodyWithIdentity },
       ],
     });
-    return normalizeConversationAgent(normalizeEntity(data, ["conversation_agent", "membership", "data"]), tid);
+    const rows = extractConversationAgentsArray(data)
+      .map((entry) => normalizeConversationAgent(entry, tid))
+      .filter((entry) => entry.agent_id);
+    if (rows.length > 0) {
+      return rows.find((entry) => entry.agent_id === aid) || rows[rows.length - 1];
+    }
+    const single = normalizeConversationAgent(normalizeEntity(data, ["conversation_agent", "membership", "data"]), tid);
+    if (single.agent_id) return single;
+    return {
+      id: `${tid}:${aid}`,
+      thread_id: tid,
+      agent_id: aid,
+      enabled: typeof row.enabled === "boolean" ? row.enabled : true,
+      order_index: Number.isFinite(orderIndexRaw) ? Math.floor(orderIndexRaw) : null,
+      overrides_json: Object.keys(overridesJson).length > 0 ? overridesJson : {},
+      order: Number.isFinite(orderIndexRaw) ? Math.floor(orderIndexRaw) : null,
+      overrides: Object.keys(overridesJson).length > 0 ? overridesJson : {},
+      created_at: "",
+      updated_at: "",
+      raw: data,
+    };
   }
 
   async removeConversationAgent(threadId, agentId) {
@@ -1665,7 +1730,10 @@ export class GocClient {
         { path: "/v1/agents", query: { scope: cleanScope } },
       ],
     });
-    return normalizeArrayResponse(data)
+    const rows = Array.isArray(data)
+      ? data
+      : (Array.isArray(asObject(data).agents) ? asObject(data).agents : normalizeArrayResponse(data));
+    return rows
       .map((row) => normalizeCatalogAgent(row))
       .filter((row) => row.id);
   }

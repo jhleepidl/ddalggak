@@ -8255,6 +8255,12 @@ bot.on("callback_query", async (q) => {
           format: "json",
           actor: `telegram:${userId}`,
         });
+        const createdAgentId = String(
+          created?.agent?.id
+          || created?.created?.id
+          || ""
+        ).trim().toLowerCase();
+        const effectiveAgentId = createdAgentId || agentId;
         try {
           await client.deactivateNodes(found.slot.ctxId, [found.resource.id]);
         } catch {}
@@ -8264,13 +8270,13 @@ bot.on("callback_query", async (q) => {
           try {
             await appendParticipantToJobConfig(client, {
               jobId: draftJobId,
-              agentId,
+              agentId: effectiveAgentId,
               actor: `telegram:${userId}`,
             });
             participantsApplied = true;
             tracking.append(draftJobId, "decisions.md", [
               "## /chat approve_agent",
-              `- agent_id: ${agentId}`,
+              `- agent_id: ${effectiveAgentId}`,
               `- draft_node: ${draftNode}`,
               `- activated_node: ${created?.created?.id || "unknown"}`,
               `- approved_by: telegram:${userId}`,
@@ -8279,7 +8285,7 @@ bot.on("callback_query", async (q) => {
             if (draftJobId) {
               tracking.append(draftJobId, "decisions.md", [
                 "## /chat approve_agent (participant update failed)",
-                `- agent_id: ${agentId}`,
+                `- agent_id: ${effectiveAgentId}`,
                 `- error: ${String(e?.message ?? e)}`,
               ].join("\n"));
             }
@@ -8289,7 +8295,7 @@ bot.on("callback_query", async (q) => {
         await refreshAgentRegistry({ includeCompiled: true });
         await bot.sendMessage(chatId, [
           `✅ approve_agent 완료`,
-          `agent_id=${agentId}`,
+          `agent_id=${effectiveAgentId}`,
           `name=${namePreview}`,
           `provider/model=${providerModel}`,
           `description=${descriptionPreview}`,
