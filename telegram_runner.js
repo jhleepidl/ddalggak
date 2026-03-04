@@ -3023,6 +3023,283 @@ function sanitizeSupervisorRoutePlan(
   };
 }
 
+const AGENT_DEDUPE_STOPWORDS = new Set([
+  "agent",
+  "agents",
+  "에이전트",
+  "please",
+  "the",
+  "and",
+  "with",
+  "from",
+  "that",
+  "this",
+  "for",
+  "into",
+  "about",
+  "요청",
+  "작업",
+  "해줘",
+  "해주세요",
+]);
+
+function normalizeAgentLookupKey(raw) {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9가-힣]+/g, "");
+}
+
+function tokenizeAgentDedupeText(text, { maxTokens = 120 } = {}) {
+  const tokens = String(text || "").toLowerCase().match(/[a-z0-9가-힣_]{2,}/g) || [];
+  const out = [];
+  const seen = new Set();
+  for (const token of tokens) {
+    if (!token || AGENT_DEDUPE_STOPWORDS.has(token)) continue;
+    if (seen.has(token)) continue;
+    seen.add(token);
+    out.push(token);
+    if (out.length >= Math.max(16, Math.floor(maxTokens))) break;
+  }
+  return out;
+}
+
+function extractProposalActionProfile(action = {}) {
+  const type = String(action?.type || "").trim().toLowerCase();
+  const spec = type === "create_agent_definition" && action?.agent_spec && typeof action.agent_spec === "object"
+    ? action.agent_spec
+    : {};
+  const id = String(
+    action?.agent_id
+    || action?.agentId
+    || spec?.id
+    || spec?.agent_id
+    || ""
+  ).trim().toLowerCase();
+  const name = String(action?.name || spec?.name || "").trim();
+  const description = String(action?.description || spec?.description || "").trim();
+  const prompt = String(
+    action?.prompt
+    || spec?.prompt
+    || spec?.system_prompt
+    || spec?.systemPrompt
+    || spec?.instruction
+    || ""
+  ).trim();
+  const clippedPrompt = clip(prompt, 1400);
+  const lookupKeys = [
+    normalizeAgentLookupKey(id),
+    normalizeAgentLookupKey(name),
+  ].filter(Boolean);
+  const text = [id, name, description, clippedPrompt].filter(Boolean).join("\n");
+  const tokenSet = new Set(tokenizeAgentDedupeText(text));
+  return {
+    id,
+    name,
+    description,
+    prompt,
+    lookupKeys,
+    tokenSet,
+  };
+}
+
+function buildCatalogAgentSimilarityView(agent = {}) {
+  const id = String(agent?.id || "").trim().toLowerCase();
+  if (!id) return null;
+  const systemKey = String(agent?.system_key || agent?.systemKey || "").trim().toLowerCase();
+  const name = String(agent?.name || "").trim();
+  const description = clip(String(agent?.description || "").trim(), 320);
+  const prompt = String(
+    agent?.prompt
+    || agent?.system_prompt
+    || agent?.systemPrompt
+    || agent?.instruction
+    || ""
+  ).trim();
+  const clippedPrompt = clip(prompt, 1400);
+  const lookupKeys = [
+    normalizeAgentLookupKey(id),
+    normalizeAgentLookupKey(systemKey),
+    normalizeAgentLookupKey(name),
+  ].filter(Boolean);
+  const text = [id, systemKey, name, description, clippedPrompt].filter(Boolean).join("\n");
+  const tokenSet = new Set(tokenizeAgentDedupeText(text));
+  return {
+    agent,
+    id,
+    systemKey,
+    lookupKeys,
+    tokenSet,
+  };
+}
+
+function overlapCount(setA, setB) {
+  let count = 0;
+  for (const token of setA) {
+    if (setB.has(token)) count += 1;
+  }
+  return count;
+}
+
+function findBestCatalogAgentForProposal(action, agentsCatalog = []) {
+  const rows = Array.isArray(agentsCatalog) ? agentsCatalog : [];
+  if (rows.length === 0) return null;
+  const actionView = extractProposalActionProfile(action);
+  if (actionView.lookupKeys.length === 0 && actionView.tokenSet.size === 0) return null;
+  const catalogViews = rows.map((row) => buildCatalogAgentSimilarityView(row)).filter(Boolean);
+
+  if (actionView.lookupKeys.length > 0) {
+    for (const view of catalogViews) {
+      if (actionView.lookupKeys.some((key) => view.lookupKeys.includes(key))) {
+        return {
+          agent: view.agent,
+          id: view.id,
+          reason: "exact",
+          overlap: 0,
+          ratio: 1,
+        };
+      }
+    }
+  }
+
+  if (actionView.tokenSet.size < 5) return null;
+
+  let best = null;
+  for (const view of catalogViews) {
+    if (view.tokenSet.size === 0) continue;
+    const overlap = overlapCount(actionView.tokenSet, view.tokenSet);
+    if (overlap < 5) continue;
+    const ratio = overlap / Math.max(1, Math.min(actionView.tokenSet.size, view.tokenSet.size));
+    if (ratio < 0.6) continue;
+    if (!best || ratio > best.ratio || (ratio === best.ratio && overlap > best.overlap)) {
+      best = {
+        agent: view.agent,
+        id: view.id,
+        reason: "overlap",
+        overlap,
+        ratio,
+      };
+    }
+  }
+  return best;
+}
+
+function buildConversationAgentEnabledMap(conversationAgents = []) {
+  const map = new Map();
+  const rows = Array.isArray(conversationAgents) ? conversationAgents : [];
+  for (const row of rows) {
+    const agentId = String(row?.agent_id || row?.agentId || "").trim().toLowerCase();
+    if (!agentId) continue;
+    const enabled = row?.enabled !== false;
+    if (!map.has(agentId)) {
+      map.set(agentId, enabled);
+      continue;
+    }
+    map.set(agentId, map.get(agentId) || enabled);
+  }
+  return map;
+}
+
+function getConversationMembershipActionKey(action) {
+  const type = String(action?.type || "").trim().toLowerCase();
+  if (!["add_agent_to_conversation", "enable_agent"].includes(type)) return "";
+  const agentId = String(action?.agent_id || action?.agentId || "").trim().toLowerCase();
+  if (!agentId) return "";
+  return `${type}:${agentId}`;
+}
+
+function rewritePlanToReuseAgents(routePlan, runtime = {}, { message = "" } = {}) {
+  if (!routePlan || typeof routePlan !== "object") return routePlan;
+  const sourceActions = Array.isArray(routePlan.actions) ? routePlan.actions : [];
+  if (sourceActions.length === 0) return routePlan;
+  const agentsCatalog = Array.isArray(runtime?.agentsCatalog) ? runtime.agentsCatalog : [];
+  if (agentsCatalog.length === 0) return routePlan;
+
+  const membership = buildConversationAgentEnabledMap(runtime?.conversationAgents || []);
+  const existingMembershipActionKeys = new Set(
+    sourceActions
+      .map((action) => getConversationMembershipActionKey(action))
+      .filter(Boolean)
+  );
+  const emittedReplacementKeys = new Set();
+  const rewrittenActions = [];
+  let dedupedProposals = 0;
+
+  for (const action of sourceActions) {
+    const type = String(action?.type || "").trim().toLowerCase();
+    if (!["propose_agent", "create_agent_definition"].includes(type)) {
+      rewrittenActions.push(action);
+      continue;
+    }
+
+    const match = findBestCatalogAgentForProposal(action, agentsCatalog);
+    if (!match?.id) {
+      rewrittenActions.push(action);
+      continue;
+    }
+
+    dedupedProposals += 1;
+    const matchedAgentId = String(match.id || "").trim().toLowerCase();
+    const isMember = membership.has(matchedAgentId);
+    const isEnabled = membership.get(matchedAgentId) === true;
+    if (isMember && isEnabled) {
+      continue;
+    }
+
+    const replacement = isMember
+      ? {
+        type: "enable_agent",
+        agent_id: matchedAgentId,
+        risk: "L1",
+      }
+      : {
+        type: "add_agent_to_conversation",
+        agent_id: matchedAgentId,
+        enabled: true,
+        risk: "L2",
+      };
+    const replacementKey = getConversationMembershipActionKey(replacement);
+    if (
+      replacementKey
+      && (existingMembershipActionKeys.has(replacementKey) || emittedReplacementKeys.has(replacementKey))
+    ) {
+      membership.set(matchedAgentId, true);
+      continue;
+    }
+    rewrittenActions.push(replacement);
+    if (replacementKey) {
+      emittedReplacementKeys.add(replacementKey);
+      existingMembershipActionKeys.add(replacementKey);
+    }
+    membership.set(matchedAgentId, true);
+  }
+
+  if (dedupedProposals <= 0) return routePlan;
+
+  let finalActions = rewrittenActions;
+  let reason = String(routePlan.reason || "supervisor route").trim() || "supervisor route";
+
+  if (finalActions.length === 0 && routePlan.done !== true && routePlan.await_user !== true) {
+    const fallbackAgent = pickRuntimeDefaultAgentId(runtime?.agents || []) || findDefaultChatAgentId();
+    if (fallbackAgent) {
+      finalActions = [{
+        type: "run_agent",
+        agent_id: fallbackAgent,
+        goal: `기존 agent를 재사용해 요청 처리: ${clip(String(message || "").trim(), 240)}`,
+        risk: "L1",
+      }];
+      reason = `${reason}; dedupe_fallback_run_agent`;
+    }
+  }
+
+  reason = `${reason}; deduped_proposals=${dedupedProposals}`;
+  return {
+    ...routePlan,
+    reason,
+    actions: finalActions.slice(0, 4),
+  };
+}
+
 function markMutatingActionsConfirmed(actions = []) {
   const rows = Array.isArray(actions) ? actions : [];
   return rows.map((action) => {
@@ -3914,6 +4191,28 @@ function summarizeSelectionState({ catalog = [], enabled = [] } = {}) {
   };
 }
 
+function pickBaselineConversationCatalogAgents(agentsCatalog = []) {
+  const rows = Array.isArray(agentsCatalog) ? agentsCatalog : [];
+  const requiredRoles = ["router", "planner", "researcher", "coder"];
+  const byRole = [];
+  const seen = new Set();
+  for (const role of requiredRoles) {
+    const match = rows.find((row) => {
+      const systemKey = normalizeAgentLookupKey(row?.system_key || row?.systemKey || "");
+      const id = normalizeAgentLookupKey(row?.id || "");
+      const name = normalizeAgentLookupKey(row?.name || "");
+      if (systemKey === role) return true;
+      if (id === role) return true;
+      return name.includes(role);
+    });
+    const cleanId = String(match?.id || "").trim().toLowerCase();
+    if (!cleanId || seen.has(cleanId)) continue;
+    seen.add(cleanId);
+    byRole.push(cleanId);
+  }
+  return byRole;
+}
+
 function buildAgentProfileFromProposal(action) {
   const id = String(action?.agent_id || action?.id || "").trim().toLowerCase();
   if (!id) return null;
@@ -4154,6 +4453,15 @@ async function loadSupervisorRuntime(
   if (conversationAgents.length === 0 && typeof client.bootstrapDefaultAgents === "function") {
     await client.bootstrapDefaultAgents(map.threadId, { addToConversation: true }).catch(() => null);
     if (typeof client.listConversationAgents === "function") {
+      conversationAgents = await client.listConversationAgents(map.threadId).catch(() => conversationAgents);
+    }
+  }
+  if (conversationAgents.length === 0 && typeof client.addConversationAgent === "function") {
+    const baselineAgentIds = pickBaselineConversationCatalogAgents(reg.agents || []);
+    for (const baselineAgentId of baselineAgentIds) {
+      await client.addConversationAgent(map.threadId, baselineAgentId, true).catch(() => null);
+    }
+    if (baselineAgentIds.length > 0 && typeof client.listConversationAgents === "function") {
       conversationAgents = await client.listConversationAgents(map.threadId).catch(() => conversationAgents);
     }
   }
@@ -6460,6 +6768,7 @@ async function runSupervisorChat(
       });
       const rawRoutePlan = await routeWithSupervisor(lastUserText, {
         agents: runtime.agents,
+        agentsCatalog: runtime.agentsCatalog,
         enabledAgentIds: runtime.enabledAgentIds,
         tools: runtime.tools,
         jobConfig: runtime.jobConfig,
@@ -6515,6 +6824,9 @@ async function runSupervisorChat(
           actions: suggestedActions.slice(0, 4),
         };
       }
+      routePlan = rewritePlanToReuseAgents(routePlan, runtime, {
+        message: lastUserText,
+      });
       followupHint = String(routePlan?.followup_hint || "").trim();
       deliverables = normalizeDeliverableList([
         ...deliverables,

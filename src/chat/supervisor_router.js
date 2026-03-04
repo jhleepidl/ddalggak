@@ -97,6 +97,114 @@ function normalizeStringList(raw) {
   return out;
 }
 
+const ROUTER_RELEVANCE_STOPWORDS = new Set([
+  "agent",
+  "agents",
+  "에이전트",
+  "해주세요",
+  "해줘",
+  "요청",
+  "작업",
+  "and",
+  "the",
+  "with",
+  "from",
+  "this",
+  "that",
+  "then",
+  "for",
+  "into",
+  "about",
+]);
+
+function tokenizeForRelevance(text) {
+  const matches = String(text || "").toLowerCase().match(/[a-z0-9가-힣_]{2,}/g) || [];
+  const out = [];
+  const seen = new Set();
+  for (const token of matches) {
+    if (!token || ROUTER_RELEVANCE_STOPWORDS.has(token)) continue;
+    if (seen.has(token)) continue;
+    seen.add(token);
+    out.push(token);
+    if (out.length >= 80) break;
+  }
+  return out;
+}
+
+function buildAgentCatalogText(agent) {
+  const row = asObject(agent);
+  return [
+    row.id,
+    row.system_key,
+    row.systemKey,
+    row.name,
+    clip(String(row.description || "").trim(), 320),
+    clip(String(row.prompt || "").trim(), 1400),
+    clip(String(row.system_prompt || "").trim(), 1400),
+    clip(String(row.systemPrompt || "").trim(), 1400),
+    clip(String(row.instruction || "").trim(), 800),
+  ]
+    .map((entry) => String(entry || "").trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function pickRelevantCatalogAgents(message, {
+  agentsCatalog = [],
+  enabledAgentIds = [],
+  limit = 12,
+} = {}) {
+  const rows = Array.isArray(agentsCatalog) ? agentsCatalog : [];
+  if (rows.length === 0) return [];
+  const queryLower = String(message || "").trim().toLowerCase();
+  const queryTokens = tokenizeForRelevance(message);
+  const enabledSet = new Set(
+    (Array.isArray(enabledAgentIds) ? enabledAgentIds : [])
+      .map((id) => String(id || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  const scored = rows
+    .map((agent) => {
+      const id = String(agent?.id || "").trim().toLowerCase();
+      if (!id) return null;
+      const systemKey = String(agent?.system_key || agent?.systemKey || "").trim().toLowerCase();
+      const name = String(agent?.name || "").trim().toLowerCase();
+      const candidateTokens = new Set(tokenizeForRelevance(buildAgentCatalogText(agent)));
+      let overlap = 0;
+      for (const token of queryTokens) {
+        if (candidateTokens.has(token)) overlap += 1;
+      }
+      let score = overlap;
+      if (queryLower) {
+        if (id && queryLower.includes(id)) score += 3;
+        if (systemKey && queryLower.includes(systemKey)) score += 3;
+        if (name && queryLower.includes(name)) score += 2;
+      }
+      if (enabledSet.has(id)) score += 2;
+      if (["router", "planner", "researcher", "coder"].includes(systemKey || id)) score += 1;
+      return {
+        agent,
+        id,
+        overlap,
+        score,
+        enabled: enabledSet.has(id),
+      };
+    })
+    .filter(Boolean);
+
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (b.overlap !== a.overlap) return b.overlap - a.overlap;
+    if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+    return a.id.localeCompare(b.id);
+  });
+
+  const preferred = scored.filter((row) => row.score > 0);
+  const source = preferred.length > 0 ? preferred : scored;
+  return source.slice(0, Math.max(1, Math.min(15, limit))).map((row) => row.agent);
+}
+
 function escapeRegExp(text) {
   return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -555,6 +663,7 @@ function fallbackPlan(message, { agents = [], tools = [], jobConfig = {} } = {})
 function buildRouterPrompt(message, context = {}) {
   const row = asObject(context);
   const agents = Array.isArray(row.agents) ? row.agents : [];
+  const agentsCatalog = Array.isArray(row.agentsCatalog) ? row.agentsCatalog : [];
   const enabledAgentIds = Array.isArray(row.enabledAgentIds)
     ? row.enabledAgentIds.map((id) => String(id || "").trim().toLowerCase()).filter(Boolean)
     : agents.map((agent) => String(agent?.id || "").trim().toLowerCase()).filter(Boolean);
@@ -586,6 +695,24 @@ function buildRouterPrompt(message, context = {}) {
     } catch {
       return "(none)";
     }
+  })();
+  const relevantCatalogText = (() => {
+    const rows = pickRelevantCatalogAgents(message, {
+      agentsCatalog,
+      enabledAgentIds,
+      limit: 12,
+    });
+    if (rows.length === 0) return "(none)";
+    const enabledSet = new Set(enabledAgentIds);
+    return rows.map((agent) => {
+      const id = String(agent?.id || "").trim().toLowerCase();
+      const systemKey = String(agent?.system_key || agent?.systemKey || "").trim().toLowerCase();
+      const provider = String(agent?.provider || "").trim().toLowerCase() || "gemini";
+      const model = String(agent?.model || provider).trim();
+      const name = String(agent?.name || id || "unknown").trim();
+      const desc = clip(String(agent?.description || "").trim(), 180);
+      return `- id=${id || "unknown"}, name=${name}, system_key=${systemKey || "-"}, enabled=${enabledSet.has(id) ? "yes" : "no"}, provider=${provider}, model=${model}, desc=${desc || "(none)"}`;
+    }).join("\n");
   })();
 
   return [
@@ -655,7 +782,9 @@ function buildRouterPrompt(message, context = {}) {
     allowChatGPTPlanner
       ? "- 이번 요청은 사용자가 ChatGPT 의사결정을 명시적으로 요청했다. chatgpt 사용 가능."
       : "- 사용자가 명시적으로 요청하지 않은 한 chatgpt agent를 선택하지 마라.",
-    "- 에이전트 추가/초대/생성 요청은 propose_agent를 사용한다.",
+    "- catalog에 적합한 기존 agent가 있으면 propose_agent/create_agent_definition을 쓰지 말고 add_agent_to_conversation 또는 enable_agent를 사용한다.",
+    "- propose_agent/create_agent_definition은 catalog에 없는 새로운 역량이 정말 필요할 때만 사용한다.",
+    "- add/enable을 선택했으면 가능한 같은 plan에서 run_agent까지 이어서 배치한다.",
     "- 파일 변경이 필요한 실행은 risk를 L3로 올린다.",
     "- user_message에 코드/노트북/ipynb/실습 키워드가 있으면 coder step(run_agent 또는 spawn child)을 반드시 포함한다.",
     "- 주제 제안만 하고 끝내지 말고, 요구된 산출물까지 plan에 포함한다.",
@@ -679,6 +808,9 @@ function buildRouterPrompt(message, context = {}) {
     "enabled_agents_for_this_conversation:",
     enabledAgentIds.length > 0 ? enabledAgentIds.map((id) => `- @${id}`).join("\n") : "(none)",
     "",
+    "relevant_catalog_agents:",
+    relevantCatalogText,
+    "",
     "tool_specs:",
     toolText,
     "",
@@ -701,6 +833,7 @@ function buildRouterPrompt(message, context = {}) {
 
 export async function routeWithSupervisor(message, {
   agents = [],
+  agentsCatalog = [],
   enabledAgentIds = [],
   tools = [],
   jobConfig = {},
@@ -731,6 +864,7 @@ export async function routeWithSupervisor(message, {
 
   const prompt = buildRouterPrompt(msg, {
     agents,
+    agentsCatalog,
     enabledAgentIds,
     tools,
     jobConfig,
