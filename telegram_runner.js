@@ -1253,6 +1253,27 @@ function setGocActingTelegramUser(telegramUserId) {
   } catch {}
 }
 
+function bindGocActor(telegramUserId = "") {
+  if (memoryModeWithFallback() !== "goc") return () => {};
+  try {
+    const client = requireGocClient();
+    const prev = String(client.actorTelegramUserId || "").trim();
+    const next = String(telegramUserId || "").trim();
+    if (next && typeof client.setActorTelegramUserId === "function") {
+      client.setActorTelegramUserId(next);
+    }
+    return () => {
+      try {
+        if (typeof client.setActorTelegramUserId === "function") {
+          client.setActorTelegramUserId(prev);
+        }
+      } catch {}
+    };
+  } catch {
+    return () => {};
+  }
+}
+
 function installTrackingGocHook() {
   tracking.setAppendHook(async ({ jobId, docName, chunk }) => {
     if (memoryModeWithFallback() !== "goc") return;
@@ -4370,6 +4391,7 @@ async function loadSupervisorRuntime(
     chatMeta = null,
     includeContext = true,
     includeGlobal = true,
+    telegramUserId = "",
   } = {}
 ) {
   const reg = await refreshAgentRegistry({ includeCompiled: true });
@@ -4384,160 +4406,231 @@ async function loadSupervisorRuntime(
   );
   const fallbackAgents = (Array.isArray(reg.agents) ? reg.agents : [])
     .filter((row) => fallbackAgentSet.has(String(row?.id || "").trim().toLowerCase()));
-
-  if (memoryModeWithFallback() !== "goc") {
-    return {
-      mode: "local",
-      map: null,
-      agentsSlot: null,
-      toolsSlot: null,
-      conversation: null,
-      conversationAgents: [],
-      jobConfig: fallbackNormalized.configNormalized,
-      jobConfigDebugSummary: summarizeJobConfigDebug(fallbackNormalized.configNormalized),
-      jobConfigNodeId: "",
-      agentsCatalog: reg.agents,
-      toolsCatalog: [],
-      enabledAgentIds: fallbackNormalized.enabledAgentIds,
-      enabledToolIds: fallbackNormalized.enabledToolIds,
-      agentSelection: summarizeSelectionState({ catalog: reg.agents, enabled: fallbackAgents }),
-      toolSelection: summarizeSelectionState({ catalog: [], enabled: [] }),
-      agents: fallbackAgents,
-      tools: [],
-      recentArtifactNodeIds: [],
-      sharedActiveTypeBreakdown: {},
-      contextSummary: includeContext ? loadLocalContextDocs(jobId, TRACK_DOC_NAMES, 2200) : "",
-      globalSummary: "",
-    };
-  }
-
-  const client = requireGocClient();
-  const map = await ensureJobThread(client, {
-    jobId,
-    jobDir: runDir(jobId),
-    title: `job:${jobId}`,
-    telegram: chatMeta,
-  });
-  const agentsSlot = await ensureAgentsThread(client, { baseDir: jobs.baseDir });
-  const toolsSlot = await ensureToolsThread(client, { baseDir: jobs.baseDir });
-  const conversation = typeof client.ensureConversation === "function"
-    ? await client.ensureConversation(map.threadId).catch(() => ({
-      id: "",
-      thread_id: String(map.threadId || "").trim(),
-    }))
-    : {
-      id: "",
-      thread_id: String(map.threadId || "").trim(),
-    };
-  let conversationAgents = (typeof client.listConversationAgents === "function")
-    ? await client.listConversationAgents(map.threadId).catch(() => [])
-    : [];
-
-  const latestJobNode = await listLatestResourceByKind(client, map.threadId, "job_config");
-  const rawJobConfig = latestJobNode ? parseStructuredFromResource(latestJobNode, "job_config") : null;
-
-  const toolRows = await client.listResources(toolsSlot.threadId, { resourceKind: "tool_spec" });
-  const latestToolSpecById = new Map();
-  for (const resource of sortResourcesByCreatedAt(toolRows)) {
-    const normalized = normalizeToolSpec(parseStructuredFromResource(resource, "tool_spec"));
-    if (!normalized) continue;
-    latestToolSpecById.set(String(normalized.id || "").trim().toLowerCase(), normalized);
-  }
-  const toolsCatalog = [...latestToolSpecById.values()];
-
-  const normalized = normalizeSupervisorJobConfig(
-    rawJobConfig || { job_id: String(jobId || "").trim() },
-    { agentsCatalog: reg.agents, toolsCatalog }
-  );
-
-  if (conversationAgents.length === 0 && typeof client.bootstrapDefaultAgents === "function") {
-    await client.bootstrapDefaultAgents(map.threadId, { addToConversation: true }).catch(() => null);
-    if (typeof client.listConversationAgents === "function") {
-      conversationAgents = await client.listConversationAgents(map.threadId).catch(() => conversationAgents);
-    }
-  }
-  if (conversationAgents.length === 0 && typeof client.addConversationAgent === "function") {
-    const baselineAgentIds = pickBaselineConversationCatalogAgents(reg.agents || []);
-    for (const baselineAgentId of baselineAgentIds) {
-      await client.addConversationAgent(map.threadId, baselineAgentId, true).catch(() => null);
-    }
-    if (baselineAgentIds.length > 0 && typeof client.listConversationAgents === "function") {
-      conversationAgents = await client.listConversationAgents(map.threadId).catch(() => conversationAgents);
-    }
-  }
-  const enabledConversationAgentIds = Array.from(new Set(
-    (Array.isArray(conversationAgents) ? conversationAgents : [])
-      .filter((row) => row?.enabled !== false)
-      .map((row) => String(row?.agent_id || "").trim().toLowerCase())
-      .filter(Boolean)
-  ));
-  const enabledAgentSet = new Set(enabledConversationAgentIds);
-  const enabledToolSet = new Set(
-    (Array.isArray(normalized.enabledToolIds) ? normalized.enabledToolIds : [])
-      .map((id) => String(id || "").trim().toLowerCase())
-      .filter(Boolean)
-  );
-  const enabledAgents = (Array.isArray(reg.agents) ? reg.agents : [])
-    .filter((agent) => enabledAgentSet.has(String(agent?.id || "").trim().toLowerCase()));
-  const enabledTools = toolsCatalog
-    .filter((tool) => enabledToolSet.has(String(tool?.id || "").trim().toLowerCase()));
-
-  let recentArtifactNodeIds = [];
+  const effectiveTelegramUserId = String(
+    telegramUserId
+    || chatMeta?.telegram_user_id
+    || ""
+  ).trim();
+  const restoreActor = bindGocActor(effectiveTelegramUserId);
   try {
-    const artifacts = await client.listResources(map.threadId, {
-      resourceKind: "artifact",
+    if (memoryModeWithFallback() !== "goc") {
+      return {
+        mode: "local",
+        map: null,
+        agentsSlot: null,
+        toolsSlot: null,
+        conversation: null,
+        conversationAgents: [],
+        conversationMembershipWarning: "",
+        jobConfig: fallbackNormalized.configNormalized,
+        jobConfigDebugSummary: summarizeJobConfigDebug(fallbackNormalized.configNormalized),
+        jobConfigNodeId: "",
+        agentsCatalog: reg.agents,
+        toolsCatalog: [],
+        enabledAgentIds: fallbackNormalized.enabledAgentIds,
+        enabledToolIds: fallbackNormalized.enabledToolIds,
+        agentSelection: summarizeSelectionState({ catalog: reg.agents, enabled: fallbackAgents }),
+        toolSelection: summarizeSelectionState({ catalog: [], enabled: [] }),
+        agents: fallbackAgents,
+        tools: [],
+        recentArtifactNodeIds: [],
+        sharedActiveTypeBreakdown: {},
+        contextSummary: includeContext ? loadLocalContextDocs(jobId, TRACK_DOC_NAMES, 2200) : "",
+        globalSummary: "",
+      };
+    }
+
+    const client = requireGocClient();
+    const map = await ensureJobThread(client, {
+      jobId,
+      jobDir: runDir(jobId),
+      title: `job:${jobId}`,
+      telegram: chatMeta,
     });
-    recentArtifactNodeIds = sortResourcesByCreatedAt(artifacts)
-      .slice(-5)
-      .reverse()
-      .map((row) => String(row?.id || "").trim())
-      .filter(Boolean);
-  } catch {
-    recentArtifactNodeIds = [];
-  }
+    const agentsSlot = await ensureAgentsThread(client, { baseDir: jobs.baseDir });
+    const toolsSlot = await ensureToolsThread(client, { baseDir: jobs.baseDir });
 
-  let contextSummary = "";
-  if (includeContext) {
-    try {
-      contextSummary = await client.getCompiledContext(map.ctxSharedId);
-    } catch {
-      contextSummary = loadLocalContextDocs(jobId, TRACK_DOC_NAMES, 2200);
+    const warningLines = [];
+    const pushConversationWarning = (stage, error = null) => {
+      const base = `conversation membership bootstrap failed for thread=${String(map.threadId || "").trim() || "(none)"} user=${effectiveTelegramUserId || "(none)"}`;
+      const detail = stage ? `${base}; stage=${stage}` : base;
+      const line = error
+        ? `${detail}; error=${String(error?.message ?? error)}`
+        : detail;
+      warningLines.push(line);
+      if (jobId) jobs.log(jobId, line);
+    };
+
+    let conversation = {
+      id: "",
+      thread_id: String(map.threadId || "").trim(),
+    };
+    if (typeof client.ensureConversation === "function") {
+      try {
+        const ensured = await client.ensureConversation(map.threadId);
+        if (ensured && typeof ensured === "object") {
+          conversation = {
+            id: String(ensured.id || "").trim(),
+            thread_id: String(ensured.thread_id || ensured.threadId || map.threadId || "").trim(),
+          };
+        }
+      } catch (e) {
+        pushConversationWarning("ensure_conversation", e);
+      }
+    } else {
+      pushConversationWarning("ensure_conversation_api_unavailable");
     }
-  }
 
-  let globalSummary = "";
-  if (includeGlobal) {
+    const listConversationAgentsStrict = async () => {
+      if (typeof client.listConversationAgents !== "function") {
+        throw new Error("listConversationAgents API unavailable");
+      }
+      const rows = await client.listConversationAgents(map.threadId);
+      return Array.isArray(rows) ? rows : [];
+    };
+
+    let conversationAgents = [];
     try {
-      const globalSlot = await ensureGlobalThread(client, { baseDir: jobs.baseDir, title: "global:shared" });
-      globalSummary = await client.getCompiledContext(globalSlot.ctxId);
-    } catch {
-      globalSummary = "";
+      conversationAgents = await listConversationAgentsStrict();
+    } catch (e) {
+      pushConversationWarning("list_conversation_agents_initial", e);
+      conversationAgents = [];
     }
-  }
 
-  return {
-    mode: "goc",
-    map,
-    agentsSlot,
-    toolsSlot,
-    jobConfig: normalized.configNormalized,
-    jobConfigDebugSummary: summarizeJobConfigDebug(rawJobConfig || normalized.configNormalized),
-    jobConfigNodeId: String(latestJobNode?.id || "").trim(),
-    agentsCatalog: reg.agents,
-    toolsCatalog,
-    conversation,
-    conversationAgents: Array.isArray(conversationAgents) ? conversationAgents : [],
-    enabledAgentIds: enabledConversationAgentIds,
-    enabledToolIds: normalized.enabledToolIds,
-    agentSelection: summarizeSelectionState({ catalog: reg.agents, enabled: enabledAgents }),
-    toolSelection: summarizeSelectionState({ catalog: toolsCatalog, enabled: enabledTools }),
-    agents: enabledAgents,
-    tools: enabledTools,
-    recentArtifactNodeIds,
-    sharedActiveTypeBreakdown: {},
-    contextSummary: contextSummary || "",
-    globalSummary: globalSummary || "",
-  };
+    if (conversationAgents.length === 0) {
+      if (typeof client.bootstrapDefaultAgents === "function") {
+        try {
+          await client.bootstrapDefaultAgents(map.threadId, { addToConversation: true });
+          conversationAgents = await listConversationAgentsStrict();
+        } catch (e) {
+          pushConversationWarning("bootstrap_default_agents", e);
+        }
+      } else {
+        pushConversationWarning("bootstrap_default_agents_api_unavailable");
+      }
+    }
+
+    if (conversationAgents.length === 0) {
+      const baselineAgentIds = pickBaselineConversationCatalogAgents(reg.agents || []);
+      if (baselineAgentIds.length === 0) {
+        pushConversationWarning("no_baseline_agent_ids_from_catalog");
+      } else if (typeof client.addConversationAgent !== "function") {
+        pushConversationWarning("add_conversation_agent_api_unavailable");
+      } else {
+        for (const baselineAgentId of baselineAgentIds) {
+          try {
+            await client.addConversationAgent(map.threadId, baselineAgentId, true);
+          } catch (e) {
+            pushConversationWarning(`add_baseline_agent:${baselineAgentId}`, e);
+          }
+        }
+        try {
+          conversationAgents = await listConversationAgentsStrict();
+        } catch (e) {
+          pushConversationWarning("list_conversation_agents_after_baseline_add", e);
+        }
+      }
+    }
+
+    if (conversationAgents.length === 0) {
+      pushConversationWarning("membership_still_empty_after_bootstrap");
+    }
+    const conversationMembershipWarning = warningLines.join(" | ");
+
+    const latestJobNode = await listLatestResourceByKind(client, map.threadId, "job_config");
+    const rawJobConfig = latestJobNode ? parseStructuredFromResource(latestJobNode, "job_config") : null;
+
+    const toolRows = await client.listResources(toolsSlot.threadId, { resourceKind: "tool_spec" });
+    const latestToolSpecById = new Map();
+    for (const resource of sortResourcesByCreatedAt(toolRows)) {
+      const normalized = normalizeToolSpec(parseStructuredFromResource(resource, "tool_spec"));
+      if (!normalized) continue;
+      latestToolSpecById.set(String(normalized.id || "").trim().toLowerCase(), normalized);
+    }
+    const toolsCatalog = [...latestToolSpecById.values()];
+
+    const normalized = normalizeSupervisorJobConfig(
+      rawJobConfig || { job_id: String(jobId || "").trim() },
+      { agentsCatalog: reg.agents, toolsCatalog }
+    );
+
+    const enabledConversationAgentIds = Array.from(new Set(
+      (Array.isArray(conversationAgents) ? conversationAgents : [])
+        .filter((row) => row?.enabled !== false)
+        .map((row) => String(row?.agent_id || "").trim().toLowerCase())
+        .filter(Boolean)
+    ));
+    const enabledAgentSet = new Set(enabledConversationAgentIds);
+    const enabledToolSet = new Set(
+      (Array.isArray(normalized.enabledToolIds) ? normalized.enabledToolIds : [])
+        .map((id) => String(id || "").trim().toLowerCase())
+        .filter(Boolean)
+    );
+    const enabledAgents = (Array.isArray(reg.agents) ? reg.agents : [])
+      .filter((agent) => enabledAgentSet.has(String(agent?.id || "").trim().toLowerCase()));
+    const enabledTools = toolsCatalog
+      .filter((tool) => enabledToolSet.has(String(tool?.id || "").trim().toLowerCase()));
+
+    let recentArtifactNodeIds = [];
+    try {
+      const artifacts = await client.listResources(map.threadId, {
+        resourceKind: "artifact",
+      });
+      recentArtifactNodeIds = sortResourcesByCreatedAt(artifacts)
+        .slice(-5)
+        .reverse()
+        .map((row) => String(row?.id || "").trim())
+        .filter(Boolean);
+    } catch {
+      recentArtifactNodeIds = [];
+    }
+
+    let contextSummary = "";
+    if (includeContext) {
+      try {
+        contextSummary = await client.getCompiledContext(map.ctxSharedId);
+      } catch {
+        contextSummary = loadLocalContextDocs(jobId, TRACK_DOC_NAMES, 2200);
+      }
+    }
+
+    let globalSummary = "";
+    if (includeGlobal) {
+      try {
+        const globalSlot = await ensureGlobalThread(client, { baseDir: jobs.baseDir, title: "global:shared" });
+        globalSummary = await client.getCompiledContext(globalSlot.ctxId);
+      } catch {
+        globalSummary = "";
+      }
+    }
+
+    return {
+      mode: "goc",
+      map,
+      agentsSlot,
+      toolsSlot,
+      jobConfig: normalized.configNormalized,
+      jobConfigDebugSummary: summarizeJobConfigDebug(rawJobConfig || normalized.configNormalized),
+      jobConfigNodeId: String(latestJobNode?.id || "").trim(),
+      agentsCatalog: reg.agents,
+      toolsCatalog,
+      conversation,
+      conversationAgents: Array.isArray(conversationAgents) ? conversationAgents : [],
+      conversationMembershipWarning,
+      enabledAgentIds: enabledConversationAgentIds,
+      enabledToolIds: normalized.enabledToolIds,
+      agentSelection: summarizeSelectionState({ catalog: reg.agents, enabled: enabledAgents }),
+      toolSelection: summarizeSelectionState({ catalog: toolsCatalog, enabled: enabledTools }),
+      agents: enabledAgents,
+      tools: enabledTools,
+      recentArtifactNodeIds,
+      sharedActiveTypeBreakdown: {},
+      contextSummary: contextSummary || "",
+      globalSummary: globalSummary || "",
+    };
+  } finally {
+    restoreActor();
+  }
 }
 
 function parseChatMessageWithFlags(rawArgs) {
@@ -4762,12 +4855,14 @@ async function appendParticipantToJobConfig(client, { jobId, agentId, actor = ""
   const cleanAgentId = String(agentId || "").trim().toLowerCase();
   if (!cleanAgentId) throw new Error("appendParticipantToJobConfig requires agentId");
 
-  if (typeof client.ensureConversation === "function" && typeof client.addConversationAgent === "function") {
-    await client.ensureConversation(map.threadId).catch(() => null);
+  if (
+    typeof client.ensureConversation === "function"
+    && typeof client.addConversationAgent === "function"
+    && typeof client.listConversationAgents === "function"
+  ) {
+    await client.ensureConversation(map.threadId);
     await client.addConversationAgent(map.threadId, cleanAgentId, true);
-    const conversationAgents = typeof client.listConversationAgents === "function"
-      ? await client.listConversationAgents(map.threadId).catch(() => [])
-      : [];
+    const conversationAgents = await client.listConversationAgents(map.threadId);
     const enabledAgentIds = Array.from(new Set(
       (Array.isArray(conversationAgents) ? conversationAgents : [])
         .filter((row) => row?.enabled !== false)
@@ -4814,12 +4909,11 @@ async function updateJobConfigSelection(client, {
     title: `job:${cleanJobId}`,
   });
 
-  if (
-    cleanKind === "agent"
-    && typeof client.ensureConversation === "function"
-    && typeof client.listConversationAgents === "function"
-  ) {
-    await client.ensureConversation(map.threadId).catch(() => null);
+  if (cleanKind === "agent") {
+    if (typeof client.ensureConversation !== "function" || typeof client.listConversationAgents !== "function") {
+      throw new Error("conversation agent APIs unavailable");
+    }
+    await client.ensureConversation(map.threadId);
     if (cleanOp === "disable") {
       if (typeof client.patchConversationAgent === "function") {
         await client.patchConversationAgent(map.threadId, cleanId, { enabled: false }).catch(async () => {
@@ -4847,7 +4941,7 @@ async function updateJobConfigSelection(client, {
     } else {
       throw new Error("conversation agent enable is not supported by API");
     }
-    const conversationAgents = await client.listConversationAgents(map.threadId).catch(() => []);
+    const conversationAgents = await client.listConversationAgents(map.threadId);
     const enabledAgentIds = Array.from(new Set(
       (Array.isArray(conversationAgents) ? conversationAgents : [])
         .filter((row) => row?.enabled !== false)
@@ -5000,12 +5094,22 @@ function buildSupervisorExecutionCallbacks({
 }) {
   const sharedContextSetId = String(runtime?.map?.ctxSharedId || "").trim();
   const threadId = String(runtime?.map?.threadId || "").trim();
+  const currentTelegramUserId = String(userId || "").trim();
   const lensCacheByKey = new Map();
   const sharedContextMeta = runtime?.contextMeta && typeof runtime.contextMeta === "object"
     ? runtime.contextMeta
     : null;
   const hasContextEngine = !!(contextEngine && typeof contextEngine.prepareStepContext === "function");
   let threadNodeMapCache = null;
+
+  const withBoundGocActor = async (work) => {
+    const restoreActor = bindGocActor(currentTelegramUserId);
+    try {
+      return await work();
+    } finally {
+      restoreActor();
+    }
+  };
 
   function estimateTokens(text) {
     const src = String(text || "");
@@ -6021,11 +6125,13 @@ function buildSupervisorExecutionCallbacks({
             throw new Error("create_agent requires MEMORY_MODE=goc");
           }
           const profile = action?.agent && typeof action.agent === "object" ? action.agent : {};
-          const created = await createAgentProfile(requireGocClient(), {
-            baseDir: jobs.baseDir,
-            profile,
-            format: action?.format || "json",
-            actor: `telegram:${userId}`,
+          const created = await withBoundGocActor(async () => {
+            return await createAgentProfile(requireGocClient(), {
+              baseDir: jobs.baseDir,
+              profile,
+              format: action?.format || "json",
+              actor: `telegram:${userId}`,
+            });
           });
           await refreshAgentRegistry({ includeCompiled: true });
           const createdId = String(profile.id || created?.created?.id || "").trim();
@@ -6047,12 +6153,14 @@ function buildSupervisorExecutionCallbacks({
             throw new Error("update_agent requires MEMORY_MODE=goc");
           }
           const targetAgentId = String(action?.agentId || "").trim().toLowerCase();
-          const updated = await updateAgentProfile(requireGocClient(), {
-            baseDir: jobs.baseDir,
-            agentId: targetAgentId,
-            patch: action?.patch || {},
-            format: action?.format || "json",
-            actor: `telegram:${userId}`,
+          const updated = await withBoundGocActor(async () => {
+            return await updateAgentProfile(requireGocClient(), {
+              baseDir: jobs.baseDir,
+              agentId: targetAgentId,
+              patch: action?.patch || {},
+              format: action?.format || "json",
+              actor: `telegram:${userId}`,
+            });
           });
           await refreshAgentRegistry({ includeCompiled: true });
           return {
@@ -6072,10 +6180,6 @@ function buildSupervisorExecutionCallbacks({
           if (memoryModeWithFallback() !== "goc") {
             throw new Error("create_agent_definition requires MEMORY_MODE=goc");
           }
-          const client = requireGocClient();
-          if (typeof client.createAgent !== "function") {
-            throw new Error("GoC createAgent API unavailable");
-          }
           const rawSpec = action?.agent_spec && typeof action.agent_spec === "object"
             ? action.agent_spec
             : {};
@@ -6083,13 +6187,37 @@ function buildSupervisorExecutionCallbacks({
           if (!spec.name) {
             throw new Error("create_agent_definition requires agent_spec.name");
           }
-          const created = await client.createAgent(spec);
-          const createdId = String(created?.id || "").trim();
-          let addedToConversation = false;
-          if (action?.add_to_conversation === true && runtime?.map?.threadId && createdId) {
-            await client.ensureConversation(runtime.map.threadId).catch(() => null);
-            await client.addConversationAgent(runtime.map.threadId, createdId, action?.enabled !== false);
-            addedToConversation = true;
+          const { created, createdId, addedToConversation, convRowsAfterAdd } = await withBoundGocActor(async () => {
+            const client = requireGocClient();
+            if (typeof client.createAgent !== "function") {
+              throw new Error("GoC createAgent API unavailable");
+            }
+            const created = await client.createAgent(spec);
+            const createdId = String(created?.id || "").trim();
+            let addedToConversation = false;
+            let convRowsAfterAdd = null;
+            if (action?.add_to_conversation === true && runtime?.map?.threadId && createdId) {
+              await client.ensureConversation(runtime.map.threadId);
+              await client.addConversationAgent(runtime.map.threadId, createdId, action?.enabled !== false);
+              if (typeof client.listConversationAgents === "function") {
+                convRowsAfterAdd = await client.listConversationAgents(runtime.map.threadId);
+              }
+              addedToConversation = true;
+            }
+            return { created, createdId, addedToConversation, convRowsAfterAdd };
+          });
+          if (Array.isArray(convRowsAfterAdd)) {
+            const enabled = Array.from(new Set(
+              convRowsAfterAdd
+                .filter((row) => row?.enabled !== false)
+                .map((row) => String(row?.agent_id || "").trim().toLowerCase())
+                .filter(Boolean)
+            ));
+            runtime.conversationAgents = convRowsAfterAdd;
+            runtime.enabledAgentIds = enabled;
+            runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
+              .filter((agent) => enabled.includes(String(agent?.id || "").trim().toLowerCase()));
+            runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
           }
           await refreshAgentRegistry({ includeCompiled: true });
           const createdName = String(created?.name || spec.name || "").trim() || "(unnamed)";
@@ -6125,13 +6253,15 @@ function buildSupervisorExecutionCallbacks({
           if (memoryModeWithFallback() !== "goc") {
             throw new Error("fork_agent requires MEMORY_MODE=goc");
           }
-          const client = requireGocClient();
-          if (typeof client.forkAgent !== "function") {
-            throw new Error("GoC forkAgent API unavailable");
-          }
           const sourceId = String(action?.agent_id || "").trim().toLowerCase();
           if (!sourceId) throw new Error("fork_agent requires agent_id");
-          const forked = await client.forkAgent(sourceId);
+          const forked = await withBoundGocActor(async () => {
+            const client = requireGocClient();
+            if (typeof client.forkAgent !== "function") {
+              throw new Error("GoC forkAgent API unavailable");
+            }
+            return await client.forkAgent(sourceId);
+          });
           const forkedId = String(forked?.id || "").trim().toLowerCase();
           await refreshAgentRegistry({ includeCompiled: true });
           return {
@@ -6155,12 +6285,17 @@ function buildSupervisorExecutionCallbacks({
           }
           const threadId = String(runtime?.map?.threadId || "").trim();
           if (!threadId) throw new Error("conversation thread is not ready");
-          const client = requireGocClient();
           const agentId = String(action?.agent_id || "").trim().toLowerCase();
           if (!agentId) throw new Error("add_agent_to_conversation requires agent_id");
-          await client.ensureConversation(threadId).catch(() => null);
-          await client.addConversationAgent(threadId, agentId, action?.enabled !== false);
-          const convRows = await client.listConversationAgents(threadId).catch(() => []);
+          const convRows = await withBoundGocActor(async () => {
+            const client = requireGocClient();
+            await client.ensureConversation(threadId);
+            await client.addConversationAgent(threadId, agentId, action?.enabled !== false);
+            if (typeof client.listConversationAgents !== "function") {
+              throw new Error("listConversationAgents API unavailable");
+            }
+            return await client.listConversationAgents(threadId);
+          });
           const enabled = Array.from(new Set(
             convRows
               .filter((row) => row?.enabled !== false)
@@ -6191,12 +6326,17 @@ function buildSupervisorExecutionCallbacks({
           }
           const threadId = String(runtime?.map?.threadId || "").trim();
           if (!threadId) throw new Error("conversation thread is not ready");
-          const client = requireGocClient();
           const agentId = String(action?.agent_id || "").trim().toLowerCase();
           if (!agentId) throw new Error("remove_agent_from_conversation requires agent_id");
-          await client.ensureConversation(threadId).catch(() => null);
-          await client.removeConversationAgent(threadId, agentId);
-          const convRows = await client.listConversationAgents(threadId).catch(() => []);
+          const convRows = await withBoundGocActor(async () => {
+            const client = requireGocClient();
+            await client.ensureConversation(threadId);
+            await client.removeConversationAgent(threadId, agentId);
+            if (typeof client.listConversationAgents !== "function") {
+              throw new Error("listConversationAgents API unavailable");
+            }
+            return await client.listConversationAgents(threadId);
+          });
           const enabled = Array.from(new Set(
             convRows
               .filter((row) => row?.enabled !== false)
@@ -6494,14 +6634,16 @@ function buildSupervisorExecutionCallbacks({
           if (memoryModeWithFallback() !== "goc") {
             throw new Error("selection update requires MEMORY_MODE=goc");
           }
-          const updated = await updateJobConfigSelection(requireGocClient(), {
-            jobId,
-            op,
-            kind,
-            id,
-            actor: `telegram:${userId}`,
-            agentsCatalog: runtime.agentsCatalog || runtime.agents || [],
-            toolsCatalog: runtime.toolsCatalog || runtime.tools || [],
+          const updated = await withBoundGocActor(async () => {
+            return await updateJobConfigSelection(requireGocClient(), {
+              jobId,
+              op,
+              kind,
+              id,
+              actor: `telegram:${userId}`,
+              agentsCatalog: runtime.agentsCatalog || runtime.agents || [],
+              toolsCatalog: runtime.toolsCatalog || runtime.tools || [],
+            });
           });
           if (String(updated?.source || "").trim().toLowerCase() === "conversation_agents") {
             const enabled = Array.isArray(updated?.enabledAgentIds)
@@ -6580,6 +6722,18 @@ async function runSupervisorChat(
     const job = await createJob(message, { ownerUserId: userId, ownerChatId: chatId });
     currentJobId = String(job.jobId);
     createdNewJob = true;
+    if (memoryModeWithFallback() === "goc") {
+      try {
+        await loadSupervisorRuntime(currentJobId, {
+          chatMeta: chatInfo,
+          includeContext: false,
+          includeGlobal: false,
+          telegramUserId: userId,
+        });
+      } catch (e) {
+        jobs.log(currentJobId, `conversation membership preload failed: ${String(e?.message ?? e)}`);
+      }
+    }
   }
   tracking.init(currentJobId);
   rememberLastChatJob(chatId, currentJobId);
@@ -6624,6 +6778,7 @@ async function runSupervisorChat(
   try {
     runtime = await loadSupervisorRuntime(currentJobId, {
       chatMeta: chatInfo,
+      telegramUserId: userId,
     });
     contextEngine = makeContextEngine({
       memoryMode: memoryModeWithFallback(),
@@ -7160,6 +7315,7 @@ async function runSupervisorChat(
       try {
         const runtime = await loadSupervisorRuntime(currentJobId, {
           chatMeta: chatInfo,
+          telegramUserId: userId,
         });
         if (runtime?.map?.ctxSharedId) {
           try {
@@ -7624,7 +7780,7 @@ async function sendTextWithOptionalGocButton(
   }
 }
 
-async function sendChatStatus(bot, chatId) {
+async function sendChatStatus(bot, chatId, { telegramUserId = "" } = {}) {
   const currentJobId = String(resolveCurrentJobIdForChat(chatId) || "").trim();
   let runtime = null;
   if (currentJobId) {
@@ -7633,6 +7789,7 @@ async function sendChatStatus(bot, chatId) {
         chatMeta: { chat_id: String(chatId || "") },
         includeContext: false,
         includeGlobal: false,
+        telegramUserId,
       });
     } catch {
       runtime = null;
@@ -7667,211 +7824,222 @@ function formatAgentRef(agentId, agentIndex = new Map()) {
   return `@${shortId}`;
 }
 
-async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "") {
+async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "", opts = {}) {
   const cleanKind = String(kind || "").trim().toLowerCase() === "tool" ? "tool" : "agent";
   const tokens = String(rawArgs || "").trim().split(/\s+/).filter(Boolean);
   const sub = String(tokens[0] || "").trim().toLowerCase();
   const targetAgentId = String(tokens[1] || "").trim().toLowerCase();
   const currentJobId = String(resolveCurrentJobIdForChat(chatId) || "").trim();
+  const telegramUserId = String(opts?.telegramUserId || "").trim();
+  const restoreActor = bindGocActor(telegramUserId);
 
-  if (cleanKind === "agent" && memoryModeWithFallback() === "goc" && (sub === "registry" || sub === "public")) {
-    try {
-      const client = requireGocClient();
-      const scope = sub === "public" ? "public" : "my";
-      const query = String(tokens.slice(1).join(" ") || "").trim().toLowerCase();
-      const rows = await client.listAgents(scope);
-      const filteredRows = query
-        ? rows.filter((row) => {
-          const id = String(row?.id || "").trim().toLowerCase();
-          const name = String(row?.name || "").trim().toLowerCase();
-          const description = String(row?.description || "").trim().toLowerCase();
-          return id.includes(query) || name.includes(query) || description.includes(query);
-        })
-        : rows;
-      const lines = [
-        sub === "public" ? "GoC Public Agent Catalog" : "GoC My Agent Catalog",
-        ...((Array.isArray(filteredRows) ? filteredRows : []).slice(0, 50).map((row) => {
-          const id = String(row?.id || "").trim().toLowerCase();
-          const provider = String(row?.provider || "gemini").trim().toLowerCase();
-          const model = String(row?.model || provider || "gemini").trim();
-          const published = row?.published === true ? "published" : "private";
-          const name = String(row?.name || id || "unknown").trim();
-          return `- ${name} [${id || "unknown"}] (${provider}/${model}, ${published})`;
-        })),
-      ];
-      if (query) lines.push(`- filter: ${query}`);
-      if ((Array.isArray(filteredRows) ? filteredRows : []).length === 0) lines.push("- (none)");
-      await sendLong(bot, chatId, lines.join("\n"));
-    } catch (e) {
-      await bot.sendMessage(chatId, `❌ ${sub} 조회 실패: ${String(e?.message ?? e)}`);
-    }
-    return;
-  }
-
-  if (
-    cleanKind === "agent"
-    && memoryModeWithFallback() === "goc"
-    && ["add", "remove", "enable", "disable"].includes(sub)
-  ) {
-    if (!targetAgentId) {
-      await bot.sendMessage(chatId, "Usage: /agents add|remove|enable|disable <agent_id>");
+  try {
+    if (cleanKind === "agent" && memoryModeWithFallback() === "goc" && (sub === "registry" || sub === "public")) {
+      try {
+        const client = requireGocClient();
+        const scope = sub === "public" ? "public" : "my";
+        const query = String(tokens.slice(1).join(" ") || "").trim().toLowerCase();
+        const rows = await client.listAgents(scope);
+        const filteredRows = query
+          ? rows.filter((row) => {
+            const id = String(row?.id || "").trim().toLowerCase();
+            const name = String(row?.name || "").trim().toLowerCase();
+            const description = String(row?.description || "").trim().toLowerCase();
+            return id.includes(query) || name.includes(query) || description.includes(query);
+          })
+          : rows;
+        const lines = [
+          sub === "public" ? "GoC Public Agent Catalog" : "GoC My Agent Catalog",
+          ...((Array.isArray(filteredRows) ? filteredRows : []).slice(0, 50).map((row) => {
+            const id = String(row?.id || "").trim().toLowerCase();
+            const provider = String(row?.provider || "gemini").trim().toLowerCase();
+            const model = String(row?.model || provider || "gemini").trim();
+            const published = row?.published === true ? "published" : "private";
+            const name = String(row?.name || id || "unknown").trim();
+            return `- ${name} [${id || "unknown"}] (${provider}/${model}, ${published})`;
+          })),
+        ];
+        if (query) lines.push(`- filter: ${query}`);
+        if ((Array.isArray(filteredRows) ? filteredRows : []).length === 0) lines.push("- (none)");
+        await sendLong(bot, chatId, lines.join("\n"));
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ ${sub} 조회 실패: ${String(e?.message ?? e)}`);
+      }
       return;
     }
+
+    if (
+      cleanKind === "agent"
+      && memoryModeWithFallback() === "goc"
+      && ["add", "remove", "enable", "disable"].includes(sub)
+    ) {
+      if (!targetAgentId) {
+        await bot.sendMessage(chatId, "Usage: /agents add|remove|enable|disable <agent_id>");
+        return;
+      }
+      if (!currentJobId) {
+        await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어 conversation agent를 변경할 수 없습니다.");
+        return;
+      }
+      try {
+        const runtime = await loadSupervisorRuntime(currentJobId, {
+          chatMeta: { chat_id: String(chatId || ""), telegram_user_id: telegramUserId || undefined },
+          includeContext: false,
+          includeGlobal: false,
+          telegramUserId,
+        });
+        const threadId = String(runtime?.map?.threadId || "").trim();
+        if (!threadId) throw new Error("threadId not ready");
+        const client = requireGocClient();
+        await client.ensureConversation(threadId);
+        if (sub === "add") {
+          await client.addConversationAgent(threadId, targetAgentId, true);
+        } else if (sub === "remove") {
+          await client.removeConversationAgent(threadId, targetAgentId);
+        } else if (sub === "enable") {
+          await client.patchConversationAgent(threadId, targetAgentId, { enabled: true }).catch(async () => {
+            await client.addConversationAgent(threadId, targetAgentId, true);
+          });
+        } else if (sub === "disable") {
+          await client.patchConversationAgent(threadId, targetAgentId, { enabled: false });
+        }
+        const updated = await client.listConversationAgents(threadId);
+        const allAgentIds = Array.from(new Set(
+          updated.map((row) => String(row?.agent_id || "").trim().toLowerCase()).filter(Boolean)
+        ));
+        const enabled = Array.from(new Set(
+          updated
+            .filter((row) => row?.enabled !== false)
+            .map((row) => String(row?.agent_id || "").trim().toLowerCase())
+            .filter(Boolean)
+        ));
+        const disabled = allAgentIds.filter((id) => !enabled.includes(id));
+        let agentIndex = buildAgentDisplayIndex(agentRegistry, runtime);
+        if (
+          agentIndex.size === 0
+          || [targetAgentId, ...allAgentIds].some((id) => !agentIndex.has(String(id || "").trim().toLowerCase()))
+        ) {
+          const refreshedRegistry = await refreshAgentRegistry({ includeCompiled: true });
+          agentIndex = buildAgentDisplayIndex(refreshedRegistry, runtime);
+        }
+        const verb = sub === "add"
+          ? "추가"
+          : (sub === "remove" ? "제거" : (sub === "enable" ? "활성화" : "비활성화"));
+        await sendLong(bot, chatId, [
+          `✅ conversation agent ${verb} 완료`,
+          `- job_id: ${currentJobId}`,
+          `- agent: ${formatAgentRef(targetAgentId, agentIndex)}`,
+          enabled.length > 0
+            ? `- enabled: ${enabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
+            : "- enabled: (none)",
+          disabled.length > 0
+            ? `- disabled: ${disabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
+            : "- disabled: (none)",
+        ].join("\n"));
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ /agents ${sub} 실패: ${String(e?.message ?? e)}`);
+      }
+      return;
+    }
+
     if (!currentJobId) {
-      await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어 conversation agent를 변경할 수 없습니다.");
+      if (cleanKind === "agent") {
+        const reg = await refreshAgentRegistry({ includeCompiled: true });
+        const sampleRows = (Array.isArray(reg.agents) ? reg.agents : [])
+          .filter((row) => String(row?.id || "").trim())
+          .slice(0, 10);
+        const agentIndex = buildAgentDisplayIndex(reg, null);
+        const lines = [
+          "현재 활성 job이 없습니다.",
+          sampleRows.length > 0
+            ? `등록된 agent(샘플): ${sampleRows.map((row) => formatAgentRef(row?.id, agentIndex)).join(", ")}`
+            : "등록된 agent가 없습니다.",
+          "작업 지시를 보내면 chat별 job이 생성됩니다.",
+        ];
+        await sendLong(bot, chatId, lines.join("\n"));
+        return;
+      }
+      await bot.sendMessage(chatId, "현재 활성 job이 없어 tool 목록을 확인할 수 없습니다.");
       return;
     }
+
+    let runtime = null;
     try {
-      const runtime = await loadSupervisorRuntime(currentJobId, {
-        chatMeta: { chat_id: String(chatId || "") },
+      runtime = await loadSupervisorRuntime(currentJobId, {
+        chatMeta: { chat_id: String(chatId || ""), telegram_user_id: telegramUserId || undefined },
         includeContext: false,
         includeGlobal: false,
+        telegramUserId,
       });
-      const threadId = String(runtime?.map?.threadId || "").trim();
-      if (!threadId) throw new Error("threadId not ready");
-      const client = requireGocClient();
-      await client.ensureConversation(threadId).catch(() => null);
-      if (sub === "add") {
-        await client.addConversationAgent(threadId, targetAgentId, true);
-      } else if (sub === "remove") {
-        await client.removeConversationAgent(threadId, targetAgentId);
-      } else if (sub === "enable") {
-        await client.patchConversationAgent(threadId, targetAgentId, { enabled: true }).catch(async () => {
-          await client.addConversationAgent(threadId, targetAgentId, true);
-        });
-      } else if (sub === "disable") {
-        await client.patchConversationAgent(threadId, targetAgentId, { enabled: false });
-      }
-      const updated = await client.listConversationAgents(threadId).catch(() => []);
-      const allAgentIds = Array.from(new Set(
-        updated.map((row) => String(row?.agent_id || "").trim().toLowerCase()).filter(Boolean)
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ 목록 조회 실패: ${String(e?.message ?? e)}`);
+      return;
+    }
+
+    let info = null;
+    try {
+      info = await buildContextInfo(currentJobId, { chatId });
+    } catch {
+      info = null;
+    }
+
+    if (cleanKind === "agent") {
+      const convRows = Array.isArray(runtime?.conversationAgents) ? runtime.conversationAgents : [];
+      const enabled = runtime?.enabledAgentIds || [];
+      const members = Array.from(new Set(
+        convRows.map((row) => String(row?.agent_id || "").trim().toLowerCase()).filter(Boolean)
       ));
-      const enabled = Array.from(new Set(
-        updated
-          .filter((row) => row?.enabled !== false)
-          .map((row) => String(row?.agent_id || "").trim().toLowerCase())
-          .filter(Boolean)
-      ));
-      const disabled = allAgentIds.filter((id) => !enabled.includes(id));
+      const disabled = members.filter((id) => !enabled.includes(id));
       let agentIndex = buildAgentDisplayIndex(agentRegistry, runtime);
       if (
         agentIndex.size === 0
-        || [targetAgentId, ...allAgentIds].some((id) => !agentIndex.has(String(id || "").trim().toLowerCase()))
+        || [...enabled, ...members].some((id) => !agentIndex.has(String(id || "").trim().toLowerCase()))
       ) {
         const refreshedRegistry = await refreshAgentRegistry({ includeCompiled: true });
         agentIndex = buildAgentDisplayIndex(refreshedRegistry, runtime);
       }
-      const verb = sub === "add"
-        ? "추가"
-        : (sub === "remove" ? "제거" : (sub === "enable" ? "활성화" : "비활성화"));
-      await sendLong(bot, chatId, [
-        `✅ conversation agent ${verb} 완료`,
+      const lines = [
+        "현재 conversation membership",
         `- job_id: ${currentJobId}`,
-        `- agent: ${formatAgentRef(targetAgentId, agentIndex)}`,
+        `- thread_id: ${String(runtime?.map?.threadId || "").trim() || "(none)"}`,
         enabled.length > 0
           ? `- enabled: ${enabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
           : "- enabled: (none)",
         disabled.length > 0
           ? `- disabled: ${disabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
           : "- disabled: (none)",
-      ].join("\n"));
-    } catch (e) {
-      await bot.sendMessage(chatId, `❌ /agents ${sub} 실패: ${String(e?.message ?? e)}`);
-    }
-    return;
-  }
-
-  if (!currentJobId) {
-    if (cleanKind === "agent") {
-      const reg = await refreshAgentRegistry({ includeCompiled: true });
-      const sampleRows = (Array.isArray(reg.agents) ? reg.agents : [])
-        .filter((row) => String(row?.id || "").trim())
-        .slice(0, 10);
-      const agentIndex = buildAgentDisplayIndex(reg, null);
-      const lines = [
-        "현재 활성 job이 없습니다.",
-        sampleRows.length > 0
-          ? `등록된 agent(샘플): ${sampleRows.map((row) => formatAgentRef(row?.id, agentIndex)).join(", ")}`
-          : "등록된 agent가 없습니다.",
-        "작업 지시를 보내면 chat별 job이 생성됩니다.",
-      ];
-      await sendLong(bot, chatId, lines.join("\n"));
+        runtime?.conversationMembershipWarning
+          ? `- warning: ${clip(String(runtime.conversationMembershipWarning || ""), 220)}`
+          : "",
+        "명령: /agents registry | /agents public [query] | /agents add <id> | /agents remove <id> | /agents enable <id> | /agents disable <id>",
+      ].filter(Boolean);
+      await sendTextWithOptionalGocButton(bot, chatId, lines.join("\n"), {
+        miniAppLink: info?.miniAppLink || info?.link || "",
+        browserLink: info?.browserLink || "",
+      });
       return;
     }
-    await bot.sendMessage(chatId, "현재 활성 job이 없어 tool 목록을 확인할 수 없습니다.");
-    return;
-  }
 
-  let runtime = null;
-  try {
-    runtime = await loadSupervisorRuntime(currentJobId, {
-      chatMeta: { chat_id: String(chatId || "") },
-      includeContext: false,
-      includeGlobal: false,
-    });
-  } catch (e) {
-    await bot.sendMessage(chatId, `❌ 목록 조회 실패: ${String(e?.message ?? e)}`);
-    return;
-  }
-
-  let info = null;
-  try {
-    info = await buildContextInfo(currentJobId, { chatId });
-  } catch {
-    info = null;
-  }
-
-  if (cleanKind === "agent") {
-    const convRows = Array.isArray(runtime?.conversationAgents) ? runtime.conversationAgents : [];
-    const enabled = runtime?.enabledAgentIds || [];
-    const members = Array.from(new Set(
-      convRows.map((row) => String(row?.agent_id || "").trim().toLowerCase()).filter(Boolean)
-    ));
-    const disabled = members.filter((id) => !enabled.includes(id));
-    let agentIndex = buildAgentDisplayIndex(agentRegistry, runtime);
-    if (
-      agentIndex.size === 0
-      || [...enabled, ...members].some((id) => !agentIndex.has(String(id || "").trim().toLowerCase()))
-    ) {
-      const refreshedRegistry = await refreshAgentRegistry({ includeCompiled: true });
-      agentIndex = buildAgentDisplayIndex(refreshedRegistry, runtime);
-    }
+    const enabled = runtime?.toolSelection?.enabled_ids || runtime?.enabledToolIds || [];
+    const disabled = runtime?.toolSelection?.disabled_ids || [];
     const lines = [
-      "현재 conversation membership",
+      "현재 job tool 목록",
       `- job_id: ${currentJobId}`,
-      `- thread_id: ${String(runtime?.map?.threadId || "").trim() || "(none)"}`,
       enabled.length > 0
-        ? `- enabled: ${enabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
+        ? `- enabled: ${enabled.slice(0, 10).join(", ")}`
         : "- enabled: (none)",
       disabled.length > 0
-        ? `- disabled: ${disabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
+        ? `- disabled: ${disabled.slice(0, 10).join(", ")}`
         : "- disabled: (none)",
-      "명령: /agents registry | /agents public [query] | /agents add <id> | /agents remove <id> | /agents enable <id> | /agents disable <id>",
+      "정밀 편집은 GoC UI에서 할 수 있습니다.",
     ];
     await sendTextWithOptionalGocButton(bot, chatId, lines.join("\n"), {
       miniAppLink: info?.miniAppLink || info?.link || "",
       browserLink: info?.browserLink || "",
     });
-    return;
+  } finally {
+    restoreActor();
   }
-
-  const enabled = runtime?.toolSelection?.enabled_ids || runtime?.enabledToolIds || [];
-  const disabled = runtime?.toolSelection?.disabled_ids || [];
-  const lines = [
-    "현재 job tool 목록",
-    `- job_id: ${currentJobId}`,
-    enabled.length > 0
-      ? `- enabled: ${enabled.slice(0, 10).join(", ")}`
-      : "- enabled: (none)",
-    disabled.length > 0
-      ? `- disabled: ${disabled.slice(0, 10).join(", ")}`
-      : "- disabled: (none)",
-    "정밀 편집은 GoC UI에서 할 수 있습니다.",
-  ];
-  await sendTextWithOptionalGocButton(bot, chatId, lines.join("\n"), {
-    miniAppLink: info?.miniAppLink || info?.link || "",
-    browserLink: info?.browserLink || "",
-  });
 }
 
 function extractPlainChatMessage(msg, text, botUsername = "") {
@@ -8010,9 +8178,11 @@ bot.on("callback_query", async (q) => {
     const userId = q.from?.id;
     if (!isAllowedChat(chatId) || !isAllowedUser(userId)) return;
     setGocActingTelegramUser(userId);
+    const restoreActor = bindGocActor(userId);
+    try {
 
-    const data = String(q.data || "").trim();
-    if (data.startsWith("approve_action:") || data.startsWith("reject_action:") || data.startsWith("work_action:")) {
+      const data = String(q.data || "").trim();
+      if (data.startsWith("approve_action:") || data.startsWith("reject_action:") || data.startsWith("work_action:")) {
       const isApprove = data.startsWith("approve_action:");
       const isWorkMode = data.startsWith("work_action:");
       const approvalId = String(data.split(":")[1] || "").trim();
@@ -8121,7 +8291,8 @@ bot.on("callback_query", async (q) => {
         return { ...action, approved: true, _approved: true };
       });
       const runtime = await loadSupervisorRuntime(pendingJobId, {
-        chatMeta: { chat_id: String(chatId || "") },
+        chatMeta: { chat_id: String(chatId || ""), telegram_user_id: String(userId || "") },
+        telegramUserId: userId,
       });
       if (memoryModeWithFallback() === "goc" && runtime?.map?.ctxSharedId) {
         try {
@@ -8475,7 +8646,7 @@ bot.on("callback_query", async (q) => {
       return;
     }
 
-    if (data === "open_agents_ui") {
+      if (data === "open_agents_ui") {
       try {
         const info = await openAgentsUiInfo();
         await bot.answerCallbackQuery(q.id, { text: "agents ui" });
@@ -8493,12 +8664,12 @@ bot.on("callback_query", async (q) => {
       return;
     }
 
-    if (
-      data.startsWith("approve_draft:")
-      || data.startsWith("reject_draft:")
-      || data.startsWith("approve_agent:")
-      || data.startsWith("reject_agent:")
-    ) {
+      if (
+        data.startsWith("approve_draft:")
+        || data.startsWith("reject_draft:")
+        || data.startsWith("approve_agent:")
+        || data.startsWith("reject_agent:")
+      ) {
       const isApprove = data.startsWith("approve_draft:") || data.startsWith("approve_agent:");
       const usesDraftNode = data.startsWith("approve_draft:") || data.startsWith("reject_draft:");
       const parsedId = String(data.split(":")[1] || "").trim();
@@ -8684,7 +8855,7 @@ bot.on("callback_query", async (q) => {
       return;
     }
 
-    if (data.startsWith("gptapply:")) {
+      if (data.startsWith("gptapply:")) {
       const targetJobId = String(data.slice("gptapply:".length) || "").trim() || resolveCurrentJobIdForChat(chatId);
       if (!targetJobId) {
         await bot.answerCallbackQuery(q.id, { text: "jobId를 찾지 못했습니다." });
@@ -8698,25 +8869,28 @@ bot.on("callback_query", async (q) => {
       return;
     }
 
-    const [action, jobId, token] = data.split(":");
-    if (!["approve", "deny"].includes(action) || !jobId || !token) return;
-    const decision = action === "approve" ? "approve" : "deny";
-    const rec = approvals.decide(jobId, token, decision, "via telegram button");
-    await bot.answerCallbackQuery(q.id, { text: `OK: ${rec.status}` });
-    await bot.sendMessage(chatId, `🔐 ${rec.status.toUpperCase()}: ${token}`);
+      const [action, jobId, token] = data.split(":");
+      if (!["approve", "deny"].includes(action) || !jobId || !token) return;
+      const decision = action === "approve" ? "approve" : "deny";
+      const rec = approvals.decide(jobId, token, decision, "via telegram button");
+      await bot.answerCallbackQuery(q.id, { text: `OK: ${rec.status}` });
+      await bot.sendMessage(chatId, `🔐 ${rec.status.toUpperCase()}: ${token}`);
 
-    if (rec.status === "approved" && rec.payload?.action === "git_commit") {
-      const msg2 = rec.payload.message ?? "commit";
-      const commitCwd = runWorkspaceDir(jobId);
-      const add = await runCommand("git", ["add", "-A"], { cwd: commitCwd });
-      if (!add.ok && /not a git repository/i.test(String(add.stderr || ""))) {
-        await sendLong(bot, chatId, `⚠️ commit skipped: workspace is not a git repo\ncwd=${commitCwd}`);
-        return;
+      if (rec.status === "approved" && rec.payload?.action === "git_commit") {
+        const msg2 = rec.payload.message ?? "commit";
+        const commitCwd = runWorkspaceDir(jobId);
+        const add = await runCommand("git", ["add", "-A"], { cwd: commitCwd });
+        if (!add.ok && /not a git repository/i.test(String(add.stderr || ""))) {
+          await sendLong(bot, chatId, `⚠️ commit skipped: workspace is not a git repo\ncwd=${commitCwd}`);
+          return;
+        }
+        const commit = await runCommand("git", ["commit", "-m", msg2], { cwd: commitCwd });
+        tracking.append(jobId, "progress.md", `## git commit\n\n${FENCE}\n${add.stdout || add.stderr}\n${commit.stdout || commit.stderr}\n${FENCE}\n`);
+        await sendLong(bot, chatId, `✅ 커밋 완료\n${clip(commit.stdout || commit.stderr, 3500)}`);
+        await suggestNextPrompt(bot, chatId, jobId, "커밋 이후 다음 단계(테스트/PR/배포 등)를 결정해줘.", "commit");
       }
-      const commit = await runCommand("git", ["commit", "-m", msg2], { cwd: commitCwd });
-      tracking.append(jobId, "progress.md", `## git commit\n\n${FENCE}\n${add.stdout || add.stderr}\n${commit.stdout || commit.stderr}\n${FENCE}\n`);
-      await sendLong(bot, chatId, `✅ 커밋 완료\n${clip(commit.stdout || commit.stderr, 3500)}`);
-      await suggestNextPrompt(bot, chatId, jobId, "커밋 이후 다음 단계(테스트/PR/배포 등)를 결정해줘.", "commit");
+    } finally {
+      restoreActor();
     }
   } catch (e) {
     const fallbackChatId = q?.message?.chat?.id;
@@ -8984,17 +9158,17 @@ bot.on("message", async (msg) => {
   }
 
   if (cmd === "/status") {
-    await sendChatStatus(bot, chatId);
+    await sendChatStatus(bot, chatId, { telegramUserId: userId });
     return;
   }
 
   if (cmd === "/agents") {
-    await sendAgentOrToolListQuick(bot, chatId, "agent", args);
+    await sendAgentOrToolListQuick(bot, chatId, "agent", args, { telegramUserId: userId });
     return;
   }
 
   if (cmd === "/tools") {
-    await sendAgentOrToolListQuick(bot, chatId, "tool");
+    await sendAgentOrToolListQuick(bot, chatId, "tool", "", { telegramUserId: userId });
     return;
   }
 
