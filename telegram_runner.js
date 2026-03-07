@@ -7642,6 +7642,31 @@ async function sendChatStatus(bot, chatId) {
   await sendLong(bot, chatId, card.text);
 }
 
+function buildAgentDisplayIndex(registry = null, runtime = null) {
+  const index = new Map();
+  const pushRows = (rows = []) => {
+    for (const row of (Array.isArray(rows) ? rows : [])) {
+      const id = String(row?.id || row?.agent_id || row?.agentId || "").trim().toLowerCase();
+      if (!id) continue;
+      index.set(id, row);
+    }
+  };
+  pushRows(registry?.agents || []);
+  pushRows(runtime?.agentsCatalog || []);
+  pushRows(runtime?.agents || []);
+  return index;
+}
+
+function formatAgentRef(agentId, agentIndex = new Map()) {
+  const id = String(agentId || "").trim().toLowerCase();
+  if (!id) return "@unknown";
+  const row = agentIndex.get(id) || null;
+  const name = String(row?.name || row?.title || row?.system_key || id).trim();
+  const shortId = id.slice(0, 8) || "unknown";
+  if (row && name) return `${name} [${shortId}]`;
+  return `@${shortId}`;
+}
+
 async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "") {
   const cleanKind = String(kind || "").trim().toLowerCase() === "tool" ? "tool" : "agent";
   const tokens = String(rawArgs || "").trim().split(/\s+/).filter(Boolean);
@@ -7728,18 +7753,26 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
           .filter(Boolean)
       ));
       const disabled = allAgentIds.filter((id) => !enabled.includes(id));
+      let agentIndex = buildAgentDisplayIndex(agentRegistry, runtime);
+      if (
+        agentIndex.size === 0
+        || [targetAgentId, ...allAgentIds].some((id) => !agentIndex.has(String(id || "").trim().toLowerCase()))
+      ) {
+        const refreshedRegistry = await refreshAgentRegistry({ includeCompiled: true });
+        agentIndex = buildAgentDisplayIndex(refreshedRegistry, runtime);
+      }
       const verb = sub === "add"
         ? "추가"
         : (sub === "remove" ? "제거" : (sub === "enable" ? "활성화" : "비활성화"));
       await sendLong(bot, chatId, [
         `✅ conversation agent ${verb} 완료`,
         `- job_id: ${currentJobId}`,
-        `- agent_id: @${targetAgentId}`,
+        `- agent: ${formatAgentRef(targetAgentId, agentIndex)}`,
         enabled.length > 0
-          ? `- enabled: ${enabled.slice(0, 20).map((id) => `@${id}`).join(", ")}`
+          ? `- enabled: ${enabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
           : "- enabled: (none)",
         disabled.length > 0
-          ? `- disabled: ${disabled.slice(0, 20).map((id) => `@${id}`).join(", ")}`
+          ? `- disabled: ${disabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
           : "- disabled: (none)",
       ].join("\n"));
     } catch (e) {
@@ -7751,14 +7784,14 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
   if (!currentJobId) {
     if (cleanKind === "agent") {
       const reg = await refreshAgentRegistry({ includeCompiled: true });
-      const ids = (Array.isArray(reg.agents) ? reg.agents : [])
-        .map((row) => String(row?.id || "").trim().toLowerCase())
-        .filter(Boolean)
+      const sampleRows = (Array.isArray(reg.agents) ? reg.agents : [])
+        .filter((row) => String(row?.id || "").trim())
         .slice(0, 10);
+      const agentIndex = buildAgentDisplayIndex(reg, null);
       const lines = [
         "현재 활성 job이 없습니다.",
-        ids.length > 0
-          ? `등록된 agent(샘플): ${ids.map((id) => `@${id}`).join(", ")}`
+        sampleRows.length > 0
+          ? `등록된 agent(샘플): ${sampleRows.map((row) => formatAgentRef(row?.id, agentIndex)).join(", ")}`
           : "등록된 agent가 없습니다.",
         "작업 지시를 보내면 chat별 job이 생성됩니다.",
       ];
@@ -7795,15 +7828,23 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
       convRows.map((row) => String(row?.agent_id || "").trim().toLowerCase()).filter(Boolean)
     ));
     const disabled = members.filter((id) => !enabled.includes(id));
+    let agentIndex = buildAgentDisplayIndex(agentRegistry, runtime);
+    if (
+      agentIndex.size === 0
+      || [...enabled, ...members].some((id) => !agentIndex.has(String(id || "").trim().toLowerCase()))
+    ) {
+      const refreshedRegistry = await refreshAgentRegistry({ includeCompiled: true });
+      agentIndex = buildAgentDisplayIndex(refreshedRegistry, runtime);
+    }
     const lines = [
       "현재 conversation membership",
       `- job_id: ${currentJobId}`,
       `- thread_id: ${String(runtime?.map?.threadId || "").trim() || "(none)"}`,
       enabled.length > 0
-        ? `- enabled: ${enabled.slice(0, 20).map((id) => `@${id}`).join(", ")}`
+        ? `- enabled: ${enabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
         : "- enabled: (none)",
       disabled.length > 0
-        ? `- disabled: ${disabled.slice(0, 20).map((id) => `@${id}`).join(", ")}`
+        ? `- disabled: ${disabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
         : "- disabled: (none)",
       "명령: /agents registry | /agents public [query] | /agents add <id> | /agents remove <id> | /agents enable <id> | /agents disable <id>",
     ];
