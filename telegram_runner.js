@@ -4423,18 +4423,6 @@ async function loadSupervisorRuntime(
     telegramUserId = "",
   } = {}
 ) {
-  const reg = await refreshAgentRegistry({ includeCompiled: true });
-  const fallbackNormalized = normalizeSupervisorJobConfig(
-    { job_id: String(jobId || "").trim() },
-    { agentsCatalog: reg.agents, toolsCatalog: [] }
-  );
-  const fallbackAgentSet = new Set(
-    (Array.isArray(fallbackNormalized.enabledAgentIds) ? fallbackNormalized.enabledAgentIds : [])
-      .map((id) => String(id || "").trim().toLowerCase())
-      .filter(Boolean)
-  );
-  const fallbackAgents = (Array.isArray(reg.agents) ? reg.agents : [])
-    .filter((row) => fallbackAgentSet.has(String(row?.id || "").trim().toLowerCase()));
   const effectiveTelegramUserId = String(
     telegramUserId
     || chatMeta?.telegram_user_id
@@ -4442,6 +4430,18 @@ async function loadSupervisorRuntime(
   ).trim();
   const restoreActor = bindGocActor(effectiveTelegramUserId);
   try {
+    const reg = await refreshAgentRegistry({ includeCompiled: true });
+    const fallbackNormalized = normalizeSupervisorJobConfig(
+      { job_id: String(jobId || "").trim() },
+      { agentsCatalog: reg.agents, toolsCatalog: [] }
+    );
+    const fallbackAgentSet = new Set(
+      (Array.isArray(fallbackNormalized.enabledAgentIds) ? fallbackNormalized.enabledAgentIds : [])
+        .map((id) => String(id || "").trim().toLowerCase())
+        .filter(Boolean)
+    );
+    const fallbackAgents = (Array.isArray(reg.agents) ? reg.agents : [])
+      .filter((row) => fallbackAgentSet.has(String(row?.id || "").trim().toLowerCase()));
     if (memoryModeWithFallback() !== "goc") {
       return {
         mode: "local",
@@ -8884,7 +8884,25 @@ bot.on("callback_query", async (q) => {
         } catch {}
 
         let participantsApplied = false;
+        let conversationTeamApplied = false;
         if (draftJobId) {
+          try {
+            const map = await ensureJobThread(client, {
+              jobId: draftJobId,
+              jobDir: runDir(draftJobId),
+              title: `job:${draftJobId}`,
+              telegram: { chat_id: String(chatId || "") },
+            });
+            await client.ensureConversation(map.threadId);
+            await client.addConversationAgent(map.threadId, effectiveAgentId, true);
+            conversationTeamApplied = true;
+          } catch (e) {
+            tracking.append(draftJobId, "decisions.md", [
+              "## /chat approve_agent (conversation add failed)",
+              `- agent_id: ${effectiveAgentId}`,
+              `- error: ${String(e?.message ?? e)}`,
+            ].join("\n"));
+          }
           try {
             await appendParticipantToJobConfig(client, {
               jobId: draftJobId,
@@ -8921,6 +8939,9 @@ bot.on("callback_query", async (q) => {
           `draft_node=${draftNode}`,
           `agent_profile_node=${created?.created?.id || "unknown"}`,
           approvalEffect,
+          draftJobId
+            ? `job_id=${draftJobId} conversation_team 반영=${conversationTeamApplied ? "yes" : "failed"}`
+            : "job_id 정보를 찾지 못해 conversation team 반영은 생략",
           draftJobId
             ? `job_id=${draftJobId} participants 반영=${participantsApplied ? "yes" : "failed"}`
             : "job_id 정보를 찾지 못해 participants 반영은 생략",

@@ -1556,13 +1556,15 @@ export class GocClient {
     const body = {
       thread_id: tid,
       threadId: tid,
+      bootstrap_defaults: true,
+      bootstrapDefaults: true,
     };
     const data = await this._requestAny({
       method: "POST",
       attempts: [
-        { path: `/api/threads/${encodeURIComponent(tid)}/conversation/ensure`, body: {} },
-        { path: `/threads/${encodeURIComponent(tid)}/conversation/ensure`, body: {} },
-        { path: `/api/threads/${encodeURIComponent(tid)}/conversation`, body: {} },
+        { path: `/api/threads/${encodeURIComponent(tid)}/conversation/ensure`, body },
+        { path: `/threads/${encodeURIComponent(tid)}/conversation/ensure`, body },
+        { path: `/api/threads/${encodeURIComponent(tid)}/conversation`, body },
         { path: "/api/conversations/ensure", body },
         { path: "/api/conversations", body },
         { path: "/conversations/ensure", body },
