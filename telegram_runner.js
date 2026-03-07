@@ -1259,6 +1259,24 @@ function findAgentConfig(agentId) {
   return getAgent(id, agentRegistry) || null;
 }
 
+function findAgentConfigInRuntime(agentId, runtime = null) {
+  const key = String(agentId || "").trim().toLowerCase();
+  const resolved = resolveAgentId(key);
+  const targets = new Set([key, resolved].filter(Boolean));
+  if (!targets.size) return null;
+  const rows = [
+    ...(Array.isArray(runtime?.agentsCatalog) ? runtime.agentsCatalog : []),
+    ...(Array.isArray(runtime?.agents) ? runtime.agents : []),
+  ];
+  for (const row of rows) {
+    const rowId = String(row?.id || row?.agent_id || row?.agentId || "").trim().toLowerCase();
+    const rowSystemKey = String(row?.system_key || row?.systemKey || "").trim().toLowerCase();
+    if (rowId && targets.has(rowId)) return row;
+    if (rowSystemKey && targets.has(rowSystemKey)) return row;
+  }
+  return null;
+}
+
 function memoryModeWithFallback() {
   if (MEMORY_MODE !== "goc") return "local";
   return gocReady && gocClient ? "goc" : "local";
@@ -5795,6 +5813,8 @@ function buildSupervisorExecutionCallbacks({
           jobId,
           { type: "agent_run", agent: cleanAgentId, prompt: finalPrompt },
           {
+            runtime,
+            telegramUserId: currentTelegramUserId,
             signal: controller.signal,
             notify: verbose,
             geminiConcurrencyKey: `job:${String(jobId || "").trim()}`,
@@ -7451,7 +7471,19 @@ async function runSupervisorChat(
   }
 }
 
-async function executeChatActions(bot, chatId, userId, message, routePlan, { verbose = CHAT_VERBOSE } = {}) {
+async function executeChatActions(
+  bot,
+  chatId,
+  userId,
+  message,
+  routePlan,
+  {
+    verbose = CHAT_VERBOSE,
+    runtime = null,
+    telegramUserId = "",
+  } = {}
+) {
+  const effectiveTelegramUserId = String(telegramUserId || userId || "").trim();
   const actions = Array.isArray(routePlan?.actions) ? routePlan.actions : [];
   const results = [];
   const outputs = [];
@@ -7534,7 +7566,12 @@ async function executeChatActions(bot, chatId, userId, message, routePlan, { ver
               chatId,
               targetJobId,
               { type: "agent_run", agent: agentId, prompt },
-              { signal: controller.signal, notify: verbose }
+              {
+                signal: controller.signal,
+                notify: verbose,
+                runtime,
+                telegramUserId: effectiveTelegramUserId,
+              }
             ),
             { jobId: targetJobId, signal: controller.signal, label: `chat_agent_run_${agentId}` }
           );
@@ -7570,6 +7607,8 @@ async function executeAgentRun(
   jobId,
   act,
   {
+    runtime = null,
+    telegramUserId = "",
     signal = null,
     notify = true,
     onGeminiRetry = null,
@@ -7578,103 +7617,109 @@ async function executeAgentRun(
     geminiConcurrencyKey = "",
   } = {}
 ) {
-  await refreshAgentRegistry();
-  const agentId = resolveAgentId(act.agent || "");
-  const taskPrompt = String(act.prompt || "").trim();
-  if (!agentId || !taskPrompt) throw new Error("invalid agent_run action");
+  const cleanTelegramUserId = String(telegramUserId || "").trim();
+  const restoreActor = bindGocActor(cleanTelegramUserId);
+  try {
+    const agentId = resolveAgentId(act.agent || "");
+    const taskPrompt = String(act.prompt || "").trim();
+    if (!agentId || !taskPrompt) throw new Error("invalid agent_run action");
 
-  const agent = findAgentConfig(agentId);
-  if (!agent) throw new Error(`Unknown agent: ${agentId}. Check agents registry: ${agentRegistry.path}`);
+    const agent = findAgentConfigInRuntime(agentId, runtime) || findAgentConfig(agentId);
+    if (!agent) throw new Error(`Unknown agent: ${agentId}. Check conversation runtime/catalog.`);
 
-  const provider = String(agent.provider || "gemini").trim().toLowerCase();
-  const model = String(agent.model || provider).trim() || provider;
-  const rolePrompt = String(agent.prompt || "").trim();
-  const combinedInstruction = rolePrompt
-    ? `[ROLE]\n${rolePrompt}\n\n[TASK]\n${taskPrompt}`
-    : taskPrompt;
-  const combinedGoal = rolePrompt
-    ? `[ROLE]\n${rolePrompt}\n\n[TASK]\n${taskPrompt}`
-    : taskPrompt;
-  const combinedChatQuestion = rolePrompt
-    ? `[AGENT ROLE]\n${rolePrompt}\n\n[QUESTION]\n${taskPrompt}`
-    : taskPrompt;
+    const provider = String(agent.provider || "gemini").trim().toLowerCase();
+    const model = String(agent.model || provider).trim() || provider;
+    const rolePrompt = String(agent.prompt || "").trim();
+    const combinedInstruction = rolePrompt
+      ? `[ROLE]\n${rolePrompt}\n\n[TASK]\n${taskPrompt}`
+      : taskPrompt;
+    const combinedGoal = rolePrompt
+      ? `[ROLE]\n${rolePrompt}\n\n[TASK]\n${taskPrompt}`
+      : taskPrompt;
+    const combinedChatQuestion = rolePrompt
+      ? `[AGENT ROLE]\n${rolePrompt}\n\n[QUESTION]\n${taskPrompt}`
+      : taskPrompt;
 
-  const runProvider = async (providerPrompt) => {
-    if (provider === "chatgpt") {
-      await sendChatGPTPrompt(bot, chatId, jobId, providerPrompt);
-      return `ChatGPT prompt generated by agent=${agentId}\nquestion=${providerPrompt}`;
-    }
+    const runProvider = async (providerPrompt) => {
+      if (provider === "chatgpt") {
+        await sendChatGPTPrompt(bot, chatId, jobId, providerPrompt);
+        return `ChatGPT prompt generated by agent=${agentId}\nquestion=${providerPrompt}`;
+      }
 
-    throw new Error(`Unsupported provider for agent ${agentId}: ${provider}`);
-  };
+      throw new Error(`Unsupported provider for agent ${agentId}: ${provider}`);
+    };
 
-  const appendLocalLogs = (output, mode) => {
-    const section = `## Agent ${agentId} output (${mode})`;
+    const appendLocalLogs = (output, mode) => {
+      const section = `## Agent ${agentId} output (${mode})`;
+      if (provider === "codex") {
+        tracking.append(jobId, "progress.md", `${section}\n\n${output}\n`);
+      } else {
+        tracking.append(jobId, "research.md", `${section}\n\n${output}\n`);
+      }
+      jobs.appendConversation(jobId, agentId, output, { kind: "agent_run", provider, model, mode });
+    };
+
     if (provider === "codex") {
-      tracking.append(jobId, "progress.md", `${section}\n\n${output}\n`);
-    } else {
-      tracking.append(jobId, "research.md", `${section}\n\n${output}\n`);
+      const output = await codexImplement(jobId, combinedInstruction, signal);
+      await maybeAutoSendOutputs(bot, chatId, jobId, {
+        when: "step",
+        replyToMessageId: getCurrentTurnReplyMessageId(chatId),
+      }).catch(() => null);
+      const fallback = gocFallbackByJob.get(String(jobId));
+      if (fallback) {
+        if (notify) {
+          await bot.sendMessage(chatId, `⚠️ GoC 컨텍스트 조회 실패로 local fallback 사용 중입니다.\nreason=${clip(fallback, 180)}`);
+        }
+        gocFallbackByJob.delete(String(jobId));
+      }
+      return { output, mode: memoryModeWithFallback(), agent, provider, model };
     }
-    jobs.appendConversation(jobId, agentId, output, { kind: "agent_run", provider, model, mode });
-  };
+    if (provider === "gemini") {
+      const output = await geminiResearch(jobId, combinedGoal, signal, {
+        sectionTitle: `${agentId} notes`,
+        outputGuide: [
+          "출력:",
+          "- 핵심 요약",
+          "- 구현 전 확인사항",
+          "- 리스크와 완화책",
+          "- 검증 체크리스트",
+        ].join("\n"),
+        model,
+        concurrencyKey: geminiConcurrencyKey || `job:${String(jobId || "").trim()}`,
+        onGeminiRetry,
+        onGeminiModelSwitch,
+        onGeminiGiveUp,
+      });
+      await maybeAutoSendOutputs(bot, chatId, jobId, {
+        when: "step",
+        replyToMessageId: getCurrentTurnReplyMessageId(chatId),
+      }).catch(() => null);
+      const fallback = gocFallbackByJob.get(String(jobId));
+      if (fallback) {
+        if (notify) {
+          await bot.sendMessage(chatId, `⚠️ GoC 컨텍스트 조회 실패로 local fallback 사용 중입니다.\nreason=${clip(fallback, 180)}`);
+        }
+        gocFallbackByJob.delete(String(jobId));
+      }
+      return { output, mode: memoryModeWithFallback(), agent, provider, model };
+    }
+    if (provider === "chatgpt") {
+      const output = await runProvider(combinedChatQuestion);
+      appendLocalLogs(output, memoryModeWithFallback());
+      return { output, mode: memoryModeWithFallback(), agent, provider, model };
+    }
 
-  if (provider === "codex") {
-    const output = await codexImplement(jobId, combinedInstruction, signal);
-    await maybeAutoSendOutputs(bot, chatId, jobId, {
-      when: "step",
-      replyToMessageId: getCurrentTurnReplyMessageId(chatId),
-    }).catch(() => null);
-    const fallback = gocFallbackByJob.get(String(jobId));
-    if (fallback) {
-      if (notify) {
-        await bot.sendMessage(chatId, `⚠️ GoC 컨텍스트 조회 실패로 local fallback 사용 중입니다.\nreason=${clip(fallback, 180)}`);
-      }
-      gocFallbackByJob.delete(String(jobId));
-    }
-    return { output, mode: memoryModeWithFallback(), agent, provider, model };
-  }
-  if (provider === "gemini") {
-    const output = await geminiResearch(jobId, combinedGoal, signal, {
-      sectionTitle: `${agentId} notes`,
-      outputGuide: [
-        "출력:",
-        "- 핵심 요약",
-        "- 구현 전 확인사항",
-        "- 리스크와 완화책",
-        "- 검증 체크리스트",
-      ].join("\n"),
-      model,
-      concurrencyKey: geminiConcurrencyKey || `job:${String(jobId || "").trim()}`,
-      onGeminiRetry,
-      onGeminiModelSwitch,
-      onGeminiGiveUp,
-    });
-    await maybeAutoSendOutputs(bot, chatId, jobId, {
-      when: "step",
-      replyToMessageId: getCurrentTurnReplyMessageId(chatId),
-    }).catch(() => null);
-    const fallback = gocFallbackByJob.get(String(jobId));
-    if (fallback) {
-      if (notify) {
-        await bot.sendMessage(chatId, `⚠️ GoC 컨텍스트 조회 실패로 local fallback 사용 중입니다.\nreason=${clip(fallback, 180)}`);
-      }
-      gocFallbackByJob.delete(String(jobId));
-    }
-    return { output, mode: memoryModeWithFallback(), agent, provider, model };
-  }
-  if (provider === "chatgpt") {
     const output = await runProvider(combinedChatQuestion);
     appendLocalLogs(output, memoryModeWithFallback());
     return { output, mode: memoryModeWithFallback(), agent, provider, model };
+  } finally {
+    restoreActor();
   }
-
-  const output = await runProvider(combinedChatQuestion);
-  appendLocalLogs(output, memoryModeWithFallback());
-  return { output, mode: memoryModeWithFallback(), agent, provider, model };
 }
 
 async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts = {}) {
-  void opts;
+  const runtime = opts?.runtime && typeof opts.runtime === "object" ? opts.runtime : null;
+  const telegramUserId = String(opts?.telegramUserId || "").trim();
   let askedChatGPT = false;
   const actions = Array.isArray(route?.actions) ? route.actions : [];
 
@@ -7683,11 +7728,15 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
     if (!act?.type) continue;
 
     if (act.type === "agent_run") {
-      const agentInfo = findAgentConfig(act.agent);
+      const agentInfo = findAgentConfigInRuntime(act.agent, runtime) || findAgentConfig(act.agent);
       const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
       await bot.sendMessage(chatId, `🤖 ${act.agent} 실행 중… (${provider})`);
       const result = await enqueue(
-        () => executeAgentRun(bot, chatId, jobId, act, { signal }),
+        () => executeAgentRun(bot, chatId, jobId, act, {
+          signal,
+          runtime,
+          telegramUserId,
+        }),
         { jobId, signal, label: `agent_run_${act.agent}` }
       );
       await sendLong(bot, chatId, `🤖 ${act.agent} 완료 (${result.mode})\n${clip(result.output, 3500)}`);
@@ -7716,7 +7765,8 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
 }
 
 async function executeActions(bot, chatId, jobId, plan, signal = null, opts = {}) {
-  void opts;
+  const runtime = opts?.runtime && typeof opts.runtime === "object" ? opts.runtime : null;
+  const telegramUserId = String(opts?.telegramUserId || "").trim();
   if (!plan || !Array.isArray(plan.actions)) return;
   const allowed = new Set(["track_append", "agent_run", "gemini", "codex", "git_summary", "chatgpt_prompt", "chatgpt", "commit_request"]);
 
@@ -7731,11 +7781,15 @@ async function executeActions(bot, chatId, jobId, plan, signal = null, opts = {}
     }
 
     if (act.type === "agent_run") {
-      const agentInfo = findAgentConfig(act.agent);
+      const agentInfo = findAgentConfigInRuntime(act.agent, runtime) || findAgentConfig(act.agent);
       const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
       await bot.sendMessage(chatId, `🤖 ${act.agent} 실행 중… (${provider})`);
       const r = await enqueue(
-        () => executeAgentRun(bot, chatId, jobId, act, { signal }),
+        () => executeAgentRun(bot, chatId, jobId, act, {
+          signal,
+          runtime,
+          telegramUserId,
+        }),
         { jobId, signal, label: `agent_run_${act.agent}` }
       );
       await sendLong(bot, chatId, `🤖 ${act.agent} 결과 (${r.mode})\n${clip(r.output, 3500)}`);
@@ -9059,8 +9113,23 @@ bot.on("message", async (msg) => {
       const chatKey = String(chatId);
       activeJobByChat.set(chatKey, String(jobId));
       try {
+        let runtimeForPlan = null;
+        try {
+          runtimeForPlan = await loadSupervisorRuntime(jobId, {
+            chatMeta: {
+              chat_id: String(chatId || ""),
+              telegram_user_id: String(st.userId || userId || "").trim() || undefined,
+            },
+            includeContext: false,
+            includeGlobal: false,
+            telegramUserId: String(st.userId || userId || "").trim(),
+          });
+        } catch {
+          runtimeForPlan = null;
+        }
         await executeActions(bot, chatId, jobId, plan, controller.signal, {
           telegramUserId: st.userId || userId,
+          runtime: runtimeForPlan,
         });
         await bot.sendMessage(chatId, "🏁 액션 플랜 실행 완료.");
         await suggestNextPrompt(bot, chatId, jobId, "현재 상태에서 다음으로 무엇을 해야 하는지 action plan(JSON)으로 제안해줘.", "action_plan", controller.signal);
@@ -9433,6 +9502,20 @@ bot.on("message", async (msg) => {
       await bot.sendMessage(chatId, `✅ Job created: ${job.jobId}\ngoal: ${goal}\nworkspace: ${runWorkspaceDir(jobId)}\n복잡하면: /gptprompt ${job.jobId} <질문>`);
 
       try {
+        let runtimeForRoute = null;
+        try {
+          runtimeForRoute = await loadSupervisorRuntime(jobId, {
+            chatMeta: {
+              chat_id: String(chatId || ""),
+              telegram_user_id: String(userId || "").trim() || undefined,
+            },
+            includeContext: false,
+            includeGlobal: false,
+            telegramUserId: String(userId || "").trim(),
+          });
+        } catch {
+          runtimeForRoute = null;
+        }
         const route = await decideRunRoute(jobId, {
           mode: "run",
           goal,
@@ -9449,6 +9532,7 @@ bot.on("message", async (msg) => {
 
         const routed = await executeRoutedPlan(bot, chatId, jobId, route, controller.signal, {
           telegramUserId: userId,
+          runtime: runtimeForRoute,
         });
         if (!routed.askedChatGPT) {
           await suggestNextPrompt(bot, chatId, jobId, "현재 상태에서 다음 단계를 action plan(JSON)으로 제안해줘.", "run", controller.signal);
@@ -9484,6 +9568,20 @@ bot.on("message", async (msg) => {
     } catch {}
 
     try {
+      let runtimeForRoute = null;
+      try {
+        runtimeForRoute = await loadSupervisorRuntime(jobKey, {
+          chatMeta: {
+            chat_id: String(chatId || ""),
+            telegram_user_id: String(userId || "").trim() || undefined,
+          },
+          includeContext: false,
+          includeGlobal: false,
+          telegramUserId: String(userId || "").trim(),
+        });
+      } catch {
+        runtimeForRoute = null;
+      }
       const goal = getGoalFromResearch(jobKey);
       const route = await decideRunRoute(jobKey, {
         mode: "continue",
@@ -9501,6 +9599,7 @@ bot.on("message", async (msg) => {
 
       const routed = await executeRoutedPlan(bot, chatId, jobKey, route, controller.signal, {
         telegramUserId: userId,
+        runtime: runtimeForRoute,
       });
       if (!routed.askedChatGPT) {
         await suggestNextPrompt(bot, chatId, jobKey, "현재 변경 결과를 바탕으로 다음 action plan(JSON)을 제안해줘.", "continue", controller.signal);
