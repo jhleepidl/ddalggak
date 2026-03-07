@@ -664,6 +664,9 @@ function buildRouterPrompt(message, context = {}) {
   const row = asObject(context);
   const agents = Array.isArray(row.agents) ? row.agents : [];
   const agentsCatalog = Array.isArray(row.agentsCatalog) ? row.agentsCatalog : [];
+  const teamRecommendation = row.teamRecommendation && typeof row.teamRecommendation === "object"
+    ? row.teamRecommendation
+    : {};
   const enabledAgentIds = Array.isArray(row.enabledAgentIds)
     ? row.enabledAgentIds.map((id) => String(id || "").trim().toLowerCase()).filter(Boolean)
     : agents.map((agent) => String(agent?.id || "").trim().toLowerCase()).filter(Boolean);
@@ -714,6 +717,43 @@ function buildRouterPrompt(message, context = {}) {
       return `- id=${id || "unknown"}, name=${name}, system_key=${systemKey || "-"}, enabled=${enabledSet.has(id) ? "yes" : "no"}, provider=${provider}, model=${model}, desc=${desc || "(none)"}`;
     }).join("\n");
   })();
+  const teamCandidatesText = (() => {
+    const rows = Array.isArray(teamRecommendation?.candidates) ? teamRecommendation.candidates : [];
+    if (rows.length === 0) return "(none)";
+    return rows.slice(0, 12).map((agent) => {
+      const id = String(agent?.agent_id || agent?.id || "").trim().toLowerCase();
+      const name = String(agent?.name || id || "unknown").trim();
+      const provider = String(agent?.provider || "gemini").trim().toLowerCase();
+      const source = String(agent?.source || "catalog").trim().toLowerCase();
+      const score = Number(agent?.score || 0);
+      const why = clip(String(agent?.why || "").trim(), 140) || "(none)";
+      return `- id=${id || "unknown"}, name=${name}, provider=${provider}, source=${source}, score=${score}, why=${why}`;
+    }).join("\n");
+  })();
+  const recommendedTeamText = (() => {
+    const rows = Array.isArray(teamRecommendation?.selected_existing_agents)
+      ? teamRecommendation.selected_existing_agents
+      : [];
+    if (rows.length === 0) return "(none)";
+    return rows.slice(0, 8).map((agent) => {
+      const role = String(agent?.role || "").trim().toLowerCase() || "role";
+      const id = String(agent?.agent_id || agent?.id || "").trim().toLowerCase();
+      const name = String(agent?.name || id || "unknown").trim();
+      const provider = String(agent?.provider || "gemini").trim().toLowerCase();
+      const source = String(agent?.source || "catalog").trim().toLowerCase();
+      const why = clip(String(agent?.why || "").trim(), 140) || "(none)";
+      return `- role=${role}, id=${id || "unknown"}, name=${name}, provider=${provider}, source=${source}, why=${why}`;
+    }).join("\n");
+  })();
+  const missingCapabilitiesText = (() => {
+    const rows = Array.isArray(teamRecommendation?.missing_capabilities)
+      ? teamRecommendation.missing_capabilities
+      : [];
+    if (rows.length === 0) return "(none)";
+    return rows.slice(0, 8).map((item) => `- ${String(item || "").trim()}`).join("\n");
+  })();
+  const canSatisfyWithoutCreation = teamRecommendation?.can_satisfy_without_creation === true;
+  const teamCompositionIntent = teamRecommendation?.team_composition_intent === true;
 
   return [
     "너는 Telegram /chat supervisor_router다.",
@@ -784,6 +824,9 @@ function buildRouterPrompt(message, context = {}) {
       : "- 사용자가 명시적으로 요청하지 않은 한 chatgpt agent를 선택하지 마라.",
     "- catalog에 적합한 기존 agent가 있으면 propose_agent/create_agent_definition을 쓰지 말고 add_agent_to_conversation 또는 enable_agent를 사용한다.",
     "- propose_agent/create_agent_definition은 catalog에 없는 새로운 역량이 정말 필요할 때만 사용한다.",
+    "- recommended_existing_team이 can_satisfy_without_creation=true이면 propose_agent/create_agent_definition을 사용하지 마라.",
+    "- missing_capabilities가 비어 있으면 propose_agent/create_agent_definition을 사용하지 마라.",
+    "- 팀 구성 의도(team_composition_intent=yes)면 add_agent_to_conversation/enable_agent를 run_agent보다 우선 배치한다.",
     "- add/enable을 선택했으면 가능한 같은 plan에서 run_agent까지 이어서 배치한다.",
     "- 파일 변경이 필요한 실행은 risk를 L3로 올린다.",
     "- user_message에 코드/노트북/ipynb/실습 키워드가 있으면 coder step(run_agent 또는 spawn child)을 반드시 포함한다.",
@@ -811,6 +854,18 @@ function buildRouterPrompt(message, context = {}) {
     "relevant_catalog_agents:",
     relevantCatalogText,
     "",
+    "existing_team_candidates:",
+    teamCandidatesText,
+    "",
+    "recommended_existing_team:",
+    recommendedTeamText,
+    "",
+    "missing_capabilities:",
+    missingCapabilitiesText,
+    "",
+    `can_satisfy_without_creation=${canSatisfyWithoutCreation ? "yes" : "no"}`,
+    `team_composition_intent=${teamCompositionIntent ? "yes" : "no"}`,
+    "",
     "tool_specs:",
     toolText,
     "",
@@ -834,6 +889,7 @@ function buildRouterPrompt(message, context = {}) {
 export async function routeWithSupervisor(message, {
   agents = [],
   agentsCatalog = [],
+  teamRecommendation = null,
   enabledAgentIds = [],
   tools = [],
   jobConfig = {},
@@ -865,6 +921,7 @@ export async function routeWithSupervisor(message, {
   const prompt = buildRouterPrompt(msg, {
     agents,
     agentsCatalog,
+    teamRecommendation,
     enabledAgentIds,
     tools,
     jobConfig,

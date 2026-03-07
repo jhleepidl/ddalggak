@@ -3276,7 +3276,286 @@ function getConversationMembershipActionKey(action) {
   return `${type}:${agentId}`;
 }
 
-function rewritePlanToReuseAgents(routePlan, runtime = {}, { message = "" } = {}) {
+function isTeamCompositionIntentMessage(taskText = "") {
+  const text = String(taskText || "").toLowerCase();
+  if (!text) return false;
+  return text.includes("team 구성")
+    || text.includes("agent team")
+    || text.includes("팀 짜")
+    || text.includes("구성해줘")
+    || text.includes("세팅해줘")
+    || text.includes("적합한 agent들")
+    || text.includes("적합한 에이전트");
+}
+
+function buildAgentSearchText(agent = {}) {
+  const row = agent && typeof agent === "object" ? agent : {};
+  return [
+    row.id,
+    row.system_key,
+    row.systemKey,
+    row.name,
+    row.description,
+    row.prompt,
+    row.system_prompt,
+    row.systemPrompt,
+    row.instruction,
+    ...(Array.isArray(row.tools) ? row.tools : []),
+  ]
+    .map((entry) => String(entry || "").trim().toLowerCase())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function inferTaskCapabilityHints(taskText = "") {
+  const text = String(taskText || "").toLowerCase();
+  const has = (patterns = []) => patterns.some((pattern) => text.includes(pattern));
+  return {
+    coding: has(["code", "coding", "coder", "개발", "코드", "구현", "python", "ipynb", "노트북", "patch", "버그"]),
+    research: has(["research", "리서치", "조사", "분석", "시장", "search", "자료", "탐색", "invest"]),
+    browser: has(["browser", "web", "웹", "사이트", "뉴스", "크롤", "crawl"]),
+    review: has(["review", "critic", "qa", "audit", "검토", "리뷰", "품질", "리스크", "검증"]),
+    planning: has(["plan", "planner", "전략", "기획", "계획", "router", "orchestr"]),
+  };
+}
+
+function searchVisibleAgentsForTask(taskText, runtime, { limit = 12 } = {}) {
+  const maxItems = Math.max(1, Math.min(30, Number(limit) || 12));
+  const query = String(taskText || "").trim().toLowerCase();
+  const queryTokens = tokenizeAgentDedupeText(query, { maxTokens: 80 });
+  const queryTokenSet = new Set(queryTokens);
+  const hints = inferTaskCapabilityHints(query);
+  const catalogRows = Array.isArray(runtime?.agentsCatalog) ? runtime.agentsCatalog : [];
+  const enabledRows = Array.isArray(runtime?.agents) ? runtime.agents : [];
+  const conversationEnabledMap = buildConversationAgentEnabledMap(runtime?.conversationAgents || []);
+  const enabledSet = new Set(
+    (Array.isArray(runtime?.enabledAgentIds) ? runtime.enabledAgentIds : [])
+      .map((id) => String(id || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const poolById = new Map();
+  const addRows = (rows = []) => {
+    for (const row of (Array.isArray(rows) ? rows : [])) {
+      const id = String(row?.id || row?.agent_id || row?.agentId || "").trim().toLowerCase();
+      if (!id) continue;
+      if (!poolById.has(id)) {
+        poolById.set(id, row);
+        continue;
+      }
+      const prev = poolById.get(id);
+      const prevScore = buildAgentSearchText(prev).length;
+      const nextScore = buildAgentSearchText(row).length;
+      if (nextScore > prevScore) poolById.set(id, row);
+    }
+  };
+  addRows(catalogRows);
+  addRows(enabledRows);
+
+  const scored = [];
+  for (const [agentId, row] of poolById.entries()) {
+    const provider = String(row?.provider || "gemini").trim().toLowerCase() || "gemini";
+    const name = String(row?.name || row?.system_key || row?.systemKey || agentId).trim() || agentId;
+    const systemKey = String(row?.system_key || row?.systemKey || "").trim().toLowerCase();
+    const searchText = buildAgentSearchText(row);
+    const candidateTokenSet = new Set(tokenizeAgentDedupeText(searchText, { maxTokens: 140 }));
+    let overlap = 0;
+    for (const token of queryTokenSet) {
+      if (candidateTokenSet.has(token)) overlap += 1;
+    }
+
+    const why = [];
+    let score = overlap * 2;
+    if (agentId && query && query.includes(agentId)) {
+      score += 10;
+      why.push("id_match");
+    }
+    if (systemKey && query && query.includes(systemKey)) {
+      score += 9;
+      why.push("system_key_match");
+    }
+    if (name && query && query.includes(name.toLowerCase())) {
+      score += 8;
+      why.push("name_match");
+    }
+    if (overlap > 0) why.push(`token_overlap:${overlap}`);
+
+    if (hints.coding && (provider === "codex" || /code|coder|개발|구현|python|ipynb/.test(searchText))) {
+      score += 5;
+      why.push("coding_fit");
+    }
+    if ((hints.research || hints.browser) && (/research|analyst|search|browser|조사|분석|리서치/.test(searchText) || provider === "gemini")) {
+      score += 4;
+      why.push("research_fit");
+    }
+    if (hints.review && /review|critic|qa|audit|검토|리뷰|품질/.test(searchText)) {
+      score += 4;
+      why.push("review_fit");
+    }
+    if (hints.planning && /plan|planner|router|기획|전략|계획/.test(searchText)) {
+      score += 3;
+      why.push("planning_fit");
+    }
+
+    const inConversation = conversationEnabledMap.has(agentId);
+    const enabled = enabledSet.has(agentId) || conversationEnabledMap.get(agentId) === true;
+    if (inConversation) {
+      score += 6;
+      why.push("in_conversation");
+    }
+    if (enabled) {
+      score += 5;
+      why.push("enabled");
+    }
+
+    scored.push({
+      agent_id: agentId,
+      name,
+      provider,
+      score,
+      why: why.join(","),
+      source: inConversation ? "conversation" : "catalog",
+      _system_key: systemKey,
+      _search_text: searchText,
+      _enabled: enabled,
+      _in_conversation: inConversation,
+    });
+  }
+
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (a._in_conversation !== b._in_conversation) return a._in_conversation ? -1 : 1;
+    if (a._enabled !== b._enabled) return a._enabled ? -1 : 1;
+    return String(a.agent_id || "").localeCompare(String(b.agent_id || ""));
+  });
+
+  return scored.slice(0, maxItems).map((row) => ({
+    agent_id: row.agent_id,
+    name: row.name,
+    provider: row.provider,
+    score: row.score,
+    why: row.why || "",
+    source: row.source,
+  }));
+}
+
+function scoreCandidateForTeamRole(roleId, candidate = {}, runtimeAgent = {}) {
+  const text = buildAgentSearchText({
+    ...runtimeAgent,
+    id: candidate.agent_id,
+    name: candidate.name,
+    provider: candidate.provider,
+  });
+  const provider = String(candidate.provider || runtimeAgent?.provider || "").trim().toLowerCase();
+  let score = Number(candidate.score || 0) * 0.15;
+  const has = (keywords = []) => keywords.some((keyword) => text.includes(keyword));
+  if (roleId === "planner") {
+    if (has(["planner", "plan", "router", "orchestr", "기획", "전략", "계획"])) score += 6;
+    if (provider === "chatgpt") score += 1;
+  } else if (roleId === "researcher") {
+    if (has(["research", "analyst", "search", "browser", "조사", "분석", "리서치"])) score += 6;
+    if (provider === "gemini") score += 1;
+  } else if (roleId === "coder") {
+    if (has(["coder", "code", "개발", "구현", "python", "ipynb"])) score += 6;
+    if (provider === "codex") score += 2;
+  } else if (roleId === "critic_or_reviewer") {
+    if (has(["critic", "review", "qa", "audit", "검토", "리뷰", "품질", "검증"])) score += 6;
+    if (provider === "chatgpt") score += 1;
+  }
+  return score;
+}
+
+function recommendTeamForTask(taskText, runtime) {
+  const text = String(taskText || "").trim();
+  const hints = inferTaskCapabilityHints(text);
+  const teamIntent = isTeamCompositionIntentMessage(text);
+  const candidates = searchVisibleAgentsForTask(text, runtime, { limit: 12 });
+  const byId = new Map();
+  for (const row of [
+    ...(Array.isArray(runtime?.agentsCatalog) ? runtime.agentsCatalog : []),
+    ...(Array.isArray(runtime?.agents) ? runtime.agents : []),
+  ]) {
+    const id = String(row?.id || row?.agent_id || row?.agentId || "").trim().toLowerCase();
+    if (!id) continue;
+    if (!byId.has(id)) byId.set(id, row);
+  }
+
+  const roleDefs = [
+    { id: "planner", required: () => true },
+    { id: "researcher", required: () => teamIntent || hints.research || hints.browser || !hints.coding },
+    { id: "coder", required: () => teamIntent || hints.coding },
+    { id: "critic_or_reviewer", required: () => teamIntent || hints.review },
+  ];
+  const selected = [];
+  const selectedIds = new Set();
+  const missing = [];
+
+  for (const roleDef of roleDefs) {
+    let best = null;
+    for (const candidate of candidates) {
+      const agentId = String(candidate.agent_id || "").trim().toLowerCase();
+      if (!agentId || selectedIds.has(agentId)) continue;
+      const runtimeAgent = byId.get(agentId) || {};
+      const roleScore = scoreCandidateForTeamRole(roleDef.id, candidate, runtimeAgent);
+      if (roleScore <= 0) continue;
+      const totalScore = roleScore + Number(candidate.score || 0) * 0.1;
+      if (!best || totalScore > best.totalScore) {
+        best = {
+          role: roleDef.id,
+          agent_id: agentId,
+          name: candidate.name,
+          provider: candidate.provider,
+          source: candidate.source,
+          why: candidate.why,
+          totalScore,
+        };
+      }
+    }
+    if (best) {
+      selectedIds.add(best.agent_id);
+      selected.push({
+        role: best.role,
+        agent_id: best.agent_id,
+        name: best.name,
+        provider: best.provider,
+        source: best.source,
+        why: best.why,
+      });
+      continue;
+    }
+    if (roleDef.required()) missing.push(roleDef.id);
+  }
+
+  return {
+    candidates,
+    selected_existing_agents: selected,
+    missing_capabilities: missing,
+    can_satisfy_without_creation: missing.length === 0,
+    team_composition_intent: teamIntent,
+  };
+}
+
+function hasCloseExistingAgentForCapability(capability = "", agentsCatalog = []) {
+  const capTokens = new Set(tokenizeAgentDedupeText(String(capability || ""), { maxTokens: 24 }));
+  if (capTokens.size === 0) return false;
+  for (const row of (Array.isArray(agentsCatalog) ? agentsCatalog : [])) {
+    const view = buildCatalogAgentSimilarityView(row);
+    if (!view?.tokenSet || view.tokenSet.size === 0) continue;
+    const overlap = overlapCount(capTokens, view.tokenSet);
+    if (overlap >= Math.min(2, capTokens.size)) return true;
+    const ratio = overlap / Math.max(1, capTokens.size);
+    if (overlap >= 2 && ratio >= 0.5) return true;
+  }
+  return false;
+}
+
+function rewritePlanToReuseAgents(
+  routePlan,
+  runtime = {},
+  {
+    message = "",
+    teamRecommendation = null,
+  } = {}
+) {
   if (!routePlan || typeof routePlan !== "object") return routePlan;
   const sourceActions = Array.isArray(routePlan.actions) ? routePlan.actions : [];
   if (sourceActions.length === 0) return routePlan;
@@ -3292,6 +3571,24 @@ function rewritePlanToReuseAgents(routePlan, runtime = {}, { message = "" } = {}
   const emittedReplacementKeys = new Set();
   const rewrittenActions = [];
   let dedupedProposals = 0;
+  let droppedCreates = 0;
+  let survivedCreates = 0;
+  const selectedExistingIds = Array.from(new Set(
+    (Array.isArray(teamRecommendation?.selected_existing_agents) ? teamRecommendation.selected_existing_agents : [])
+      .map((row) => String(row?.agent_id || row?.id || "").trim().toLowerCase())
+      .filter(Boolean)
+  ));
+  const missingCapabilities = Array.from(new Set(
+    (Array.isArray(teamRecommendation?.missing_capabilities) ? teamRecommendation.missing_capabilities : [])
+      .map((item) => String(item || "").trim().toLowerCase())
+      .filter(Boolean)
+  ));
+  const canSatisfyWithoutCreation = teamRecommendation?.can_satisfy_without_creation === true;
+  const allowCreateFromMissing = (
+    !canSatisfyWithoutCreation
+    && missingCapabilities.length > 0
+    && missingCapabilities.some((capability) => !hasCloseExistingAgentForCapability(capability, agentsCatalog))
+  );
 
   for (const action of sourceActions) {
     const type = String(action?.type || "").trim().toLowerCase();
@@ -3301,13 +3598,27 @@ function rewritePlanToReuseAgents(routePlan, runtime = {}, { message = "" } = {}
     }
 
     const match = findBestCatalogAgentForProposal(action, agentsCatalog);
-    if (!match?.id) {
-      rewrittenActions.push(action);
+    let matchedAgentId = String(match?.id || "").trim().toLowerCase();
+    if (!matchedAgentId && canSatisfyWithoutCreation && selectedExistingIds.length > 0) {
+      matchedAgentId = (
+        selectedExistingIds.find((id) => !membership.has(id))
+        || selectedExistingIds.find((id) => membership.get(id) !== true)
+        || selectedExistingIds[0]
+        || ""
+      );
+    }
+    if (!matchedAgentId) {
+      if (allowCreateFromMissing) {
+        rewrittenActions.push(action);
+        survivedCreates += 1;
+        continue;
+      }
+      dedupedProposals += 1;
+      droppedCreates += 1;
       continue;
     }
 
     dedupedProposals += 1;
-    const matchedAgentId = String(match.id || "").trim().toLowerCase();
     const isMember = membership.has(matchedAgentId);
     const isEnabled = membership.get(matchedAgentId) === true;
     if (isMember && isEnabled) {
@@ -3342,7 +3653,7 @@ function rewritePlanToReuseAgents(routePlan, runtime = {}, { message = "" } = {}
     membership.set(matchedAgentId, true);
   }
 
-  if (dedupedProposals <= 0) return routePlan;
+  if (dedupedProposals <= 0 && droppedCreates <= 0) return routePlan;
 
   let finalActions = rewrittenActions;
   let reason = String(routePlan.reason || "supervisor route").trim() || "supervisor route";
@@ -3360,7 +3671,7 @@ function rewritePlanToReuseAgents(routePlan, runtime = {}, { message = "" } = {}
     }
   }
 
-  reason = `${reason}; deduped_proposals=${dedupedProposals}`;
+  reason = `${reason}; deduped_proposals=${dedupedProposals}; dropped_creates=${droppedCreates}; survived_creates=${survivedCreates}`;
   return {
     ...routePlan,
     reason,
@@ -7007,9 +7318,11 @@ async function runSupervisorChat(
         suggestedActions,
         followupHint,
       });
+      const teamRecommendation = recommendTeamForTask(lastUserText, runtime);
       const rawRoutePlan = await routeWithSupervisor(lastUserText, {
         agents: runtime.agents,
         agentsCatalog: runtime.agentsCatalog,
+        teamRecommendation,
         enabledAgentIds: runtime.enabledAgentIds,
         tools: runtime.tools,
         jobConfig: runtime.jobConfig,
@@ -7067,6 +7380,7 @@ async function runSupervisorChat(
       }
       routePlan = rewritePlanToReuseAgents(routePlan, runtime, {
         message: lastUserText,
+        teamRecommendation,
       });
       followupHint = String(routePlan?.followup_hint || "").trim();
       deliverables = normalizeDeliverableList([
