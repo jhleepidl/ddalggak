@@ -335,11 +335,33 @@ function isTelegramWebAppHttpsError(error) {
   return code === "ETELEGRAM" && /Only HTTPS links are allowed/i.test(merged);
 }
 
-function buildGocUiLink({ threadId, ctxId, token = "", base = "", withToken = null }) {
+function buildGocUiLink({
+  threadId,
+  ctxId,
+  token = "",
+  base = "",
+  withToken = null,
+  page = "",
+}) {
   const resolvedBase = String(base || resolveGocUiBase() || "").trim().replace(/\/+$/, "");
   if (!resolvedBase) throw new Error("Missing GOC_UI_BASE (or GOC_UI_PUBLIC_BASE)");
-  const baseForQuery = resolvedBase.endsWith("/") ? resolvedBase : `${resolvedBase}/`;
-  const query = `${baseForQuery}?thread=${encodeURIComponent(String(threadId || ""))}&ctx=${encodeURIComponent(String(ctxId || ""))}`;
+  const cleanPage = String(page || "").trim().toLowerCase();
+  const cleanThreadId = String(threadId || "").trim();
+  const cleanCtxId = String(ctxId || "").trim();
+  let query = "";
+  if (cleanPage === "agents") {
+    const agentsBase = `${resolvedBase}/agents`;
+    const qs = new URLSearchParams();
+    if (cleanThreadId) qs.set("thread", cleanThreadId);
+    if (cleanCtxId) qs.set("ctx", cleanCtxId);
+    query = qs.toString() ? `${agentsBase}?${qs.toString()}` : agentsBase;
+  } else {
+    const baseForQuery = resolvedBase.endsWith("/") ? resolvedBase : `${resolvedBase}/`;
+    const qs = new URLSearchParams();
+    qs.set("thread", cleanThreadId);
+    qs.set("ctx", cleanCtxId);
+    query = `${baseForQuery}?${qs.toString()}`;
+  }
   const useToken = typeof withToken === "boolean"
     ? withToken
     : (GOC_UI_LINK_MODE === "bearer_token");
@@ -349,7 +371,7 @@ function buildGocUiLink({ threadId, ctxId, token = "", base = "", withToken = nu
   return query;
 }
 
-async function buildContextLinks(client, { threadId, ctxId } = {}) {
+async function buildContextLinks(client, { threadId, ctxId, page = "" } = {}) {
   const base = resolveGocUiBase();
   if (!base) throw new Error("Missing GOC_UI_BASE (or GOC_UI_PUBLIC_BASE)");
 
@@ -364,6 +386,7 @@ async function buildContextLinks(client, { threadId, ctxId } = {}) {
     ctxId,
     token: miniAppToken?.token || "",
     base,
+    page,
     withToken: GOC_UI_LINK_MODE === "bearer_token",
   });
   const browserLink = buildGocUiLink({
@@ -371,6 +394,7 @@ async function buildContextLinks(client, { threadId, ctxId } = {}) {
     ctxId,
     token: browserToken?.token || "",
     base,
+    page,
     withToken: true,
   });
   return {
@@ -416,43 +440,85 @@ async function buildContextInfo(
     throw new Error(`GoC disabled (mode=${MEMORY_MODE}, effective=${memoryModeWithFallback()})`);
   }
 
-  const client = requireGocClient();
-  const targetRaw = String(target || "").trim();
-  let resolved = targetRaw || (chatId == null ? "" : resolveCurrentJobIdForChat(chatId));
+  const restoreActor = bindGocActor(userId);
+  try {
+    const client = requireGocClient();
+    const targetRaw = String(target || "").trim();
+    let resolved = targetRaw || (chatId == null ? "" : resolveCurrentJobIdForChat(chatId));
 
-  if (!resolved) {
-    if (!createIfMissing || chatId == null) {
-      throw new Error("Usage: /context <jobId|global>  (jobId omitted uses current running job)");
+    if (!resolved) {
+      if (!createIfMissing || chatId == null) {
+        throw new Error("Usage: /context <jobId|global>  (jobId omitted uses current running job)");
+      }
+      const seeded = await createJob("Open GoC context link", {
+        ownerUserId: userId,
+        ownerChatId: chatId,
+      });
+      resolved = String(seeded?.jobId || "").trim();
+      if (!resolved) throw new Error("Failed to create context job");
+      rememberLastChatJob(chatId, resolved);
+      chatSessionStore.upsert(chatId, {
+        jobId: resolved,
+        state: "idle",
+      });
     }
-    const seeded = await createJob("Open GoC context link", {
-      ownerUserId: userId,
-      ownerChatId: chatId,
-    });
-    resolved = String(seeded?.jobId || "").trim();
-    if (!resolved) throw new Error("Failed to create context job");
-    rememberLastChatJob(chatId, resolved);
-    chatSessionStore.upsert(chatId, {
-      jobId: resolved,
-      state: "idle",
-    });
-  }
 
-  if (resolved.toLowerCase() === "global") {
-    const g = await ensureGlobalThread(client, {
-      baseDir: jobs.baseDir,
-      title: "global:shared",
+    if (resolved.toLowerCase() === "global") {
+      const g = await ensureGlobalThread(client, {
+        baseDir: jobs.baseDir,
+        title: "global:shared",
+      });
+      const links = await buildContextLinks(client, {
+        threadId: g.threadId,
+        ctxId: g.ctxId,
+      });
+      const miniAppNotice = links.miniAppSupported
+        ? ""
+        : "Mini App 버튼은 HTTPS만 지원합니다. 지금은 브라우저 링크를 사용하세요.";
+      return {
+        scope: "global",
+        threadId: g.threadId,
+        ctxId: g.ctxId,
+        link: links.miniAppLink,
+        miniAppLink: links.miniAppLink,
+        browserLink: links.browserLink,
+        miniAppSupported: links.miniAppSupported,
+        miniAppTokenExp: links.miniAppTokenExp,
+        browserTokenExp: links.browserTokenExp,
+        lines: [
+          "global context",
+          `thread=${g.threadId}`,
+          `ctx=${g.ctxId}`,
+          links.miniAppTokenExp ? `miniapp_token_exp=${links.miniAppTokenExp}` : "",
+          links.browserTokenExp ? `browser_token_exp=${links.browserTokenExp}` : "",
+          `miniapp_link=${links.miniAppLink}`,
+          `browser_link=${links.browserLink}`,
+          miniAppNotice,
+          "",
+          "UI에서 편집/활성 토글/삭제하면 다음 스텝 호출부터 반영됩니다.",
+        ].filter(Boolean),
+      };
+    }
+
+    const jobId = String(resolved).trim();
+    const map = await ensureJobThread(client, {
+      jobId,
+      jobDir: runDir(jobId),
+      title: `job:${jobId}`,
+      telegram: chatId == null ? null : { chat_id: String(chatId || "") },
     });
     const links = await buildContextLinks(client, {
-      threadId: g.threadId,
-      ctxId: g.ctxId,
+      threadId: map.threadId,
+      ctxId: map.ctxSharedId,
     });
     const miniAppNotice = links.miniAppSupported
       ? ""
       : "Mini App 버튼은 HTTPS만 지원합니다. 지금은 브라우저 링크를 사용하세요.";
     return {
-      scope: "global",
-      threadId: g.threadId,
-      ctxId: g.ctxId,
+      scope: "job",
+      jobId,
+      threadId: map.threadId,
+      ctxId: map.ctxSharedId,
       link: links.miniAppLink,
       miniAppLink: links.miniAppLink,
       browserLink: links.browserLink,
@@ -460,9 +526,9 @@ async function buildContextInfo(
       miniAppTokenExp: links.miniAppTokenExp,
       browserTokenExp: links.browserTokenExp,
       lines: [
-        "global context",
-        `thread=${g.threadId}`,
-        `ctx=${g.ctxId}`,
+        `jobId=${jobId}`,
+        `thread=${map.threadId}`,
+        `ctx=${map.ctxSharedId}`,
         links.miniAppTokenExp ? `miniapp_token_exp=${links.miniAppTokenExp}` : "",
         links.browserTokenExp ? `browser_token_exp=${links.browserTokenExp}` : "",
         `miniapp_link=${links.miniAppLink}`,
@@ -472,46 +538,9 @@ async function buildContextInfo(
         "UI에서 편집/활성 토글/삭제하면 다음 스텝 호출부터 반영됩니다.",
       ].filter(Boolean),
     };
+  } finally {
+    restoreActor();
   }
-
-  const jobId = String(resolved).trim();
-  const map = await ensureJobThread(client, {
-    jobId,
-    jobDir: runDir(jobId),
-    title: `job:${jobId}`,
-    telegram: chatId == null ? null : { chat_id: String(chatId || "") },
-  });
-  const links = await buildContextLinks(client, {
-    threadId: map.threadId,
-    ctxId: map.ctxSharedId,
-  });
-  const miniAppNotice = links.miniAppSupported
-    ? ""
-    : "Mini App 버튼은 HTTPS만 지원합니다. 지금은 브라우저 링크를 사용하세요.";
-  return {
-    scope: "job",
-    jobId,
-    threadId: map.threadId,
-    ctxId: map.ctxSharedId,
-    link: links.miniAppLink,
-    miniAppLink: links.miniAppLink,
-    browserLink: links.browserLink,
-    miniAppSupported: links.miniAppSupported,
-    miniAppTokenExp: links.miniAppTokenExp,
-    browserTokenExp: links.browserTokenExp,
-    lines: [
-      `jobId=${jobId}`,
-      `thread=${map.threadId}`,
-      `ctx=${map.ctxSharedId}`,
-      links.miniAppTokenExp ? `miniapp_token_exp=${links.miniAppTokenExp}` : "",
-      links.browserTokenExp ? `browser_token_exp=${links.browserTokenExp}` : "",
-      `miniapp_link=${links.miniAppLink}`,
-      `browser_link=${links.browserLink}`,
-      miniAppNotice,
-      "",
-      "UI에서 편집/활성 토글/삭제하면 다음 스텝 호출부터 반영됩니다.",
-    ].filter(Boolean),
-  };
 }
 
 async function sendContextInfo(bot, chatId, target, { userId = null, createIfMissing = true } = {}) {
@@ -4650,33 +4679,68 @@ function parseChatMessageWithFlags(rawArgs) {
   };
 }
 
-async function openAgentsUiInfo() {
+async function openAgentsUiInfo({ chatId = null, jobId = "", userId = "" } = {}) {
   if (memoryModeWithFallback() !== "goc") {
     throw new Error("open_agents_ui requires MEMORY_MODE=goc");
   }
   const client = requireGocClient();
-  const slot = await ensureAgentsThread(client, { baseDir: jobs.baseDir });
-  const links = await buildContextLinks(client, {
-    threadId: slot.threadId,
-    ctxId: slot.ctxId,
-  });
-  const link = links.browserLink;
-  return {
-    threadId: slot.threadId,
-    ctxId: slot.ctxId,
-    browserLink: links.browserLink,
-    miniAppLink: links.miniAppLink,
-    link,
-    tokenExp: links.browserTokenExp || null,
-    lines: [
-      "agents context",
-      `thread=${slot.threadId}`,
-      `ctx=${slot.ctxId}`,
-      links.browserTokenExp ? `token_exp=${links.browserTokenExp}` : "",
-      `browser_link=${links.browserLink}`,
-      links.miniAppSupported ? `miniapp_link=${links.miniAppLink}` : "",
-    ].filter(Boolean),
-  };
+  const restoreActor = bindGocActor(userId);
+  try {
+    const requestedJobId = String(jobId || "").trim();
+    const resolvedJobId = requestedJobId || (chatId == null ? "" : String(resolveCurrentJobIdForChat(chatId) || "").trim());
+    if (resolvedJobId) {
+      const map = await ensureJobThread(client, {
+        jobId: resolvedJobId,
+        jobDir: runDir(resolvedJobId),
+        title: `job:${resolvedJobId}`,
+        telegram: chatId == null ? null : { chat_id: String(chatId || "") },
+      });
+      const links = await buildContextLinks(client, {
+        threadId: map.threadId,
+        ctxId: map.ctxSharedId,
+        page: "agents",
+      });
+      return {
+        scope: "job",
+        jobId: resolvedJobId,
+        threadId: map.threadId,
+        ctxId: map.ctxSharedId,
+        browserLink: links.browserLink,
+        miniAppLink: links.miniAppLink,
+        link: links.browserLink || links.miniAppLink,
+        tokenExp: links.browserTokenExp || null,
+        lines: [
+          "thread team",
+          `jobId=${resolvedJobId}`,
+          `thread=${map.threadId}`,
+          `ctx=${map.ctxSharedId}`,
+          links.browserTokenExp ? `token_exp=${links.browserTokenExp}` : "",
+          `browser_link=${links.browserLink}`,
+          links.miniAppSupported ? `miniapp_link=${links.miniAppLink}` : "",
+        ].filter(Boolean),
+      };
+    }
+
+    const links = await buildContextLinks(client, { page: "agents" });
+    return {
+      scope: "catalog",
+      jobId: "",
+      threadId: "",
+      ctxId: "",
+      browserLink: links.browserLink,
+      miniAppLink: links.miniAppLink,
+      link: links.browserLink || links.miniAppLink,
+      tokenExp: links.browserTokenExp || null,
+      lines: [
+        "agents catalog",
+        links.browserTokenExp ? `token_exp=${links.browserTokenExp}` : "",
+        `browser_link=${links.browserLink}`,
+        links.miniAppSupported ? `miniapp_link=${links.miniAppLink}` : "",
+      ].filter(Boolean),
+    };
+  } finally {
+    restoreActor();
+  }
 }
 
 async function createAgentDraftProposal(bot, chatId, userId, jobId, action) {
@@ -4734,14 +4798,16 @@ async function createAgentDraftProposal(bot, chatId, userId, jobId, action) {
     ? `reject_draft:${draftNodeId}`
     : `reject_agent:${profile.id}`;
 
-  if (jobId) {
-    tracking.append(jobId, "decisions.md", [
+  const cleanJobId = String(jobId || "").trim();
+  if (cleanJobId) {
+    tracking.append(cleanJobId, "decisions.md", [
       "## /chat propose_agent",
       `- agent_id: ${profile.id}`,
       `- draft_node: ${created?.id || "unknown"}`,
       `- proposed_by: telegram:${userId}`,
     ].join("\n"));
   }
+  const openAgentsUiCallback = cleanJobId ? `open_agents_ui:${cleanJobId}` : "open_agents_ui";
 
   await bot.sendMessage(
     chatId,
@@ -4753,8 +4819,8 @@ async function createAgentDraftProposal(bot, chatId, userId, jobId, action) {
       `provider/model=${providerModel}`,
       `prompt_preview=${promptPreview}`,
       `draft_node=${draftNodeId || "unknown"}`,
-      jobId
-        ? `승인하면 agent_profile이 registry에 추가되고, job_id=${String(jobId).trim()} participants에 반영됩니다.`
+      cleanJobId
+        ? `승인하면 agent_profile이 registry에 추가되고, job_id=${cleanJobId} participants에 반영됩니다.`
         : "승인하면 agent_profile이 registry에 추가됩니다. (job_id 미확인 시 participants 반영 생략)",
     ].join("\n"),
     {
@@ -4762,7 +4828,7 @@ async function createAgentDraftProposal(bot, chatId, userId, jobId, action) {
         inline_keyboard: [[
           { text: "✅ Approve", callback_data: approveCallback },
           { text: "❌ Reject", callback_data: rejectCallback },
-          { text: "🧭 Agents UI", callback_data: "open_agents_ui" },
+          { text: "🧭 Agents UI", callback_data: openAgentsUiCallback },
         ]],
       },
     }
@@ -6363,7 +6429,7 @@ function buildSupervisorExecutionCallbacks({
         toolName: "open_context",
         work: async () => {
           const target = action.scope === "global" ? "global" : jobId;
-          const info = await buildContextInfo(target, { chatId });
+          const info = await buildContextInfo(target, { chatId, userId: currentTelegramUserId || undefined });
           return {
             scope: info.scope,
             link: info.link,
@@ -7732,6 +7798,8 @@ async function sendTextWithOptionalGocButton(
   {
     miniAppLink = "",
     browserLink = "",
+    miniAppLabel = "Open GoC (Mini App)",
+    browserLabel = "Open GoC (Browser)",
   } = {}
 ) {
   const cleanText = String(text || "").trim();
@@ -7745,13 +7813,15 @@ async function sendTextWithOptionalGocButton(
 
   const buttons = [];
   const hasMiniApp = isHttps(cleanMiniAppLink);
+  const cleanMiniAppLabel = String(miniAppLabel || "Open GoC (Mini App)").trim() || "Open GoC (Mini App)";
+  const cleanBrowserLabel = String(browserLabel || "Open GoC (Browser)").trim() || "Open GoC (Browser)";
   if (hasMiniApp) {
-    buttons.push({ text: "Open GoC (Mini App)", web_app: { url: cleanMiniAppLink } });
+    buttons.push({ text: cleanMiniAppLabel, web_app: { url: cleanMiniAppLink } });
   }
   if (cleanBrowserLink) {
-    buttons.push({ text: "Open GoC (Browser)", url: cleanBrowserLink });
+    buttons.push({ text: cleanBrowserLabel, url: cleanBrowserLink });
   } else if (cleanMiniAppLink) {
-    buttons.push({ text: "Open GoC (Browser)", url: cleanMiniAppLink });
+    buttons.push({ text: cleanBrowserLabel, url: cleanMiniAppLink });
   }
   if (buttons.length === 0) {
     await sendLong(bot, chatId, cleanText);
@@ -7767,8 +7837,8 @@ async function sendTextWithOptionalGocButton(
     if (hasMiniApp && isTelegramWebAppHttpsError(e)) {
       const fallbackText = `${cleanText}\n\nMini App 버튼은 HTTPS만 지원합니다. 지금은 브라우저 링크를 사용하세요.`;
       const browserOnly = cleanBrowserLink
-        ? [{ text: "Open GoC (Browser)", url: cleanBrowserLink }]
-        : [{ text: "Open GoC (Browser)", url: cleanMiniAppLink }];
+        ? [{ text: cleanBrowserLabel, url: cleanBrowserLink }]
+        : [{ text: cleanBrowserLabel, url: cleanMiniAppLink }];
       await bot.sendMessage(chatId, fallbackText, {
         reply_markup: {
           inline_keyboard: [browserOnly],
@@ -7956,7 +8026,20 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
             : "등록된 agent가 없습니다.",
           "작업 지시를 보내면 chat별 job이 생성됩니다.",
         ];
-        await sendLong(bot, chatId, lines.join("\n"));
+        let fallbackAgentsUi = null;
+        if (memoryModeWithFallback() === "goc") {
+          try {
+            fallbackAgentsUi = await openAgentsUiInfo({ chatId, userId: telegramUserId });
+          } catch {
+            fallbackAgentsUi = null;
+          }
+        }
+        await sendTextWithOptionalGocButton(bot, chatId, lines.join("\n"), {
+          miniAppLink: fallbackAgentsUi?.miniAppLink || "",
+          browserLink: fallbackAgentsUi?.browserLink || fallbackAgentsUi?.link || "",
+          miniAppLabel: "Open Agents Catalog",
+          browserLabel: "Open Agents Catalog",
+        });
         return;
       }
       await bot.sendMessage(chatId, "현재 활성 job이 없어 tool 목록을 확인할 수 없습니다.");
@@ -7976,14 +8059,13 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
       return;
     }
 
-    let info = null;
-    try {
-      info = await buildContextInfo(currentJobId, { chatId });
-    } catch {
-      info = null;
-    }
-
     if (cleanKind === "agent") {
+      let threadTeamInfo = null;
+      try {
+        threadTeamInfo = await openAgentsUiInfo({ chatId, jobId: currentJobId, userId: telegramUserId });
+      } catch {
+        threadTeamInfo = null;
+      }
       const convRows = Array.isArray(runtime?.conversationAgents) ? runtime.conversationAgents : [];
       const enabled = runtime?.enabledAgentIds || [];
       const members = Array.from(new Set(
@@ -8014,10 +8096,19 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
         "명령: /agents registry | /agents public [query] | /agents add <id> | /agents remove <id> | /agents enable <id> | /agents disable <id>",
       ].filter(Boolean);
       await sendTextWithOptionalGocButton(bot, chatId, lines.join("\n"), {
-        miniAppLink: info?.miniAppLink || info?.link || "",
-        browserLink: info?.browserLink || "",
+        miniAppLink: threadTeamInfo?.miniAppLink || "",
+        browserLink: threadTeamInfo?.browserLink || threadTeamInfo?.link || "",
+        miniAppLabel: "Open Thread Team",
+        browserLabel: "Open Thread Team",
       });
       return;
+    }
+
+    let info = null;
+    try {
+      info = await buildContextInfo(currentJobId, { chatId, userId: telegramUserId || undefined });
+    } catch {
+      info = null;
     }
 
     const enabled = runtime?.toolSelection?.enabled_ids || runtime?.enabledToolIds || [];
@@ -8646,23 +8737,26 @@ bot.on("callback_query", async (q) => {
       return;
     }
 
-      if (data === "open_agents_ui") {
-      try {
-        const info = await openAgentsUiInfo();
-        await bot.answerCallbackQuery(q.id, { text: "agents ui" });
-        await bot.sendMessage(chatId, info.lines.join("\n"), {
-          reply_markup: {
-            inline_keyboard: [[
-              { text: "Open Agents UI", url: info.browserLink || info.link },
-            ]],
-          },
-        });
-      } catch (e) {
-        await bot.answerCallbackQuery(q.id, { text: "failed" });
-        await bot.sendMessage(chatId, `❌ agents ui 열기 실패: ${String(e?.message ?? e)}`);
+      if (data === "open_agents_ui" || data.startsWith("open_agents_ui:")) {
+        const parsedJobId = data.startsWith("open_agents_ui:")
+          ? String(data.slice("open_agents_ui:".length) || "").trim()
+          : "";
+        try {
+          const info = await openAgentsUiInfo({ chatId, jobId: parsedJobId, userId });
+          await bot.answerCallbackQuery(q.id, { text: info.scope === "job" ? "thread team" : "agents catalog" });
+          await bot.sendMessage(chatId, info.lines.join("\n"), {
+            reply_markup: {
+              inline_keyboard: [[
+                { text: info.scope === "job" ? "Open Thread Team" : "Open Agents Catalog", url: info.browserLink || info.link },
+              ]],
+            },
+          });
+        } catch (e) {
+          await bot.answerCallbackQuery(q.id, { text: "failed" });
+          await bot.sendMessage(chatId, `❌ agents ui 열기 실패: ${String(e?.message ?? e)}`);
+        }
+        return;
       }
-      return;
-    }
 
       if (
         data.startsWith("approve_draft:")
