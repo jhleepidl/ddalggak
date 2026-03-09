@@ -1,3 +1,8 @@
+import {
+  executeRunCommand,
+  executeContinueCommand,
+} from "../../application/route_executor.js";
+
 export function createTelegramCommandHandler(deps = {}) {
   const {
     bot,
@@ -386,65 +391,24 @@ export function createTelegramCommandHandler(deps = {}) {
         await bot.sendMessage(chatId, "Usage: /run <goal>");
         return true;
       }
-      const goal = args;
-      await bot.sendMessage(chatId, "🚀 시작합니다…");
-      try {
-        const job = await createJob(goal, { ownerUserId: userId, ownerChatId: chatId });
-        const jobId = String(job.jobId);
-        const controller = resetJobAbortController(jobId);
-        const chatKey = String(chatId);
-        activeJobByChat.set(chatKey, jobId);
-        await bot.sendMessage(chatId, `✅ Job created: ${job.jobId}\ngoal: ${goal}\nworkspace: ${runWorkspaceDir(jobId)}\n복잡하면: /gptprompt ${job.jobId} <질문>`);
-
-        try {
-          let runtimeForRoute = null;
-          try {
-            runtimeForRoute = await loadSupervisorRuntime(jobId, {
-              chatMeta: {
-                chat_id: String(chatId || ""),
-                telegram_user_id: String(userId || "").trim() || undefined,
-              },
-              includeContext: false,
-              includeGlobal: false,
-              telegramUserId: String(userId || "").trim(),
-            });
-          } catch {
-            runtimeForRoute = null;
-          }
-
-          const route = await decideRunRoute(jobId, {
-            mode: "run",
-            goal,
-            seedInstruction: goal,
-            signal: controller.signal,
-          });
-          tracking.append(jobId, "decisions.md", [
-            "## Multi-Agent routing",
-            "- mode: run",
-            `- reason: ${route.reason}`,
-            `- team_roles: ${Array.isArray(route?.team_plan?.roles) ? route.team_plan.roles.map((role) => role.id || role.role_label || role.role_type).join(", ") : "(none)"}`,
-            `- actions: ${route.actions.map((a) => actionLabel(a)).join(" -> ")}`,
-          ].join("\n"));
-          await bot.sendMessage(chatId, `🧭 Multi-Agent 라우팅\n${route.actions.map((a) => `- ${actionLabel(a)}`).join("\n")}`);
-
-          const routed = await executeRoutedPlan(bot, chatId, jobId, route, controller.signal, {
-            telegramUserId: userId,
-            runtime: runtimeForRoute,
-          });
-          if (!routed.askedChatGPT) {
-            await suggestNextPrompt(bot, chatId, jobId, "현재 상태에서 다음 단계를 action plan(JSON)으로 제안해줘.", "run", controller.signal);
-          }
-        } finally {
-          if (activeJobByChat.get(chatKey) === jobId) activeJobByChat.delete(chatKey);
-          jobAbortControllers.delete(jobId);
-        }
-      } catch (e) {
-        if (isCancelledError(e)) {
-          await bot.sendMessage(chatId, "⏹️ 작업이 중단되었습니다.");
-        } else {
-          await bot.sendMessage(chatId, `❌ 실패: ${String(e?.message ?? e)}`);
-        }
-      }
+      await executeRunCommand({
+        bot,
+        chatId,
+        userId,
+        goal: args,
+        createJob,
+        resetJobAbortController,
+        activeJobByChat,
+        jobAbortControllers,
+        runWorkspaceDir,
+        loadSupervisorRuntime,
+        decideRunRoute,
+        tracking,
+        actionLabel,
+        executeRoutedPlan,
+        suggestNextPrompt,
+        isCancelledError,
+      });
       return true;
     }
 
@@ -453,69 +417,25 @@ export function createTelegramCommandHandler(deps = {}) {
         await bot.sendMessage(chatId, "Usage: /continue <jobId>");
         return true;
       }
-      const jobId = args;
-      const jobKey = String(jobId);
-      const controller = resetJobAbortController(jobKey);
-      const chatKey = String(chatId);
-      activeJobByChat.set(chatKey, jobKey);
-      await bot.sendMessage(chatId, `▶️ Continue job ${jobId}\nworkspace: ${runWorkspaceDir(jobKey)}`);
-
-      let instruction = "run/shared의 plan.md와 research.md를 반영해 CODEX_WORKSPACE_ROOT 코드 변경을 진행해라.";
-      try {
-        const planText = tracking.read(jobId, "plan.md");
-        const extracted = extractCodexInstruction(planText);
-        if (extracted) instruction = extracted;
-      } catch {}
-
-      try {
-        let runtimeForRoute = null;
-        try {
-          runtimeForRoute = await loadSupervisorRuntime(jobKey, {
-            chatMeta: {
-              chat_id: String(chatId || ""),
-              telegram_user_id: String(userId || "").trim() || undefined,
-            },
-            includeContext: false,
-            includeGlobal: false,
-            telegramUserId: String(userId || "").trim(),
-          });
-        } catch {
-          runtimeForRoute = null;
-        }
-
-        const goal = getGoalFromResearch(jobKey);
-        const route = await decideRunRoute(jobKey, {
-          mode: "continue",
-          goal,
-          seedInstruction: instruction,
-          signal: controller.signal,
-        });
-        tracking.append(jobKey, "decisions.md", [
-          "## Multi-Agent routing",
-          "- mode: continue",
-          `- reason: ${route.reason}`,
-          `- team_roles: ${Array.isArray(route?.team_plan?.roles) ? route.team_plan.roles.map((role) => role.id || role.role_label || role.role_type).join(", ") : "(none)"}`,
-          `- actions: ${route.actions.map((a) => actionLabel(a)).join(" -> ")}`,
-        ].join("\n"));
-        await bot.sendMessage(chatId, `🧭 Multi-Agent 라우팅\n${route.actions.map((a) => `- ${actionLabel(a)}`).join("\n")}`);
-
-        const routed = await executeRoutedPlan(bot, chatId, jobKey, route, controller.signal, {
-          telegramUserId: userId,
-          runtime: runtimeForRoute,
-        });
-        if (!routed.askedChatGPT) {
-          await suggestNextPrompt(bot, chatId, jobKey, "현재 변경 결과를 바탕으로 다음 action plan(JSON)을 제안해줘.", "continue", controller.signal);
-        }
-      } catch (e) {
-        if (isCancelledError(e)) {
-          await bot.sendMessage(chatId, `⏹️ 작업이 중단되었습니다. (jobId=${jobKey})`);
-        } else {
-          await bot.sendMessage(chatId, `❌ 실패: ${String(e?.message ?? e)}`);
-        }
-      } finally {
-        if (activeJobByChat.get(chatKey) === jobKey) activeJobByChat.delete(chatKey);
-        jobAbortControllers.delete(jobKey);
-      }
+      await executeContinueCommand({
+        bot,
+        chatId,
+        userId,
+        jobId: args,
+        resetJobAbortController,
+        activeJobByChat,
+        jobAbortControllers,
+        runWorkspaceDir,
+        tracking,
+        extractCodexInstruction,
+        loadSupervisorRuntime,
+        getGoalFromResearch,
+        decideRunRoute,
+        actionLabel,
+        executeRoutedPlan,
+        suggestNextPrompt,
+        isCancelledError,
+      });
       return true;
     }
 

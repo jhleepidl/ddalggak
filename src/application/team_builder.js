@@ -146,7 +146,11 @@ export function buildTeamFromTemplates({
         lensSpec: defaultLensSpecForRole({ roleType: role, goal }),
         status: "ready",
       });
-      runtimeAgents.push(instance);
+      runtimeAgents.push({
+        ...instance,
+        ephemeral: false,
+        fallback: false,
+      });
       planRoles.push({
         id: role,
         role_type: role,
@@ -156,6 +160,8 @@ export function buildTeamFromTemplates({
         template_id: matched.id,
         provider: matched.provider,
         model: matched.model,
+        ephemeral: false,
+        fallback: false,
       });
       continue;
     }
@@ -175,7 +181,12 @@ export function buildTeamFromTemplates({
         lensSpec: defaultLensSpecForRole({ roleType: role, goal }),
         status: "ready",
       });
-      runtimeAgents.push(instance);
+      const isFallback = !!fallbackTemplate;
+      runtimeAgents.push({
+        ...instance,
+        ephemeral: true,
+        fallback: isFallback,
+      });
       planRoles.push({
         id: role,
         role_type: role,
@@ -185,6 +196,8 @@ export function buildTeamFromTemplates({
         template_id: fallbackTemplate?.id || undefined,
         provider: instance.provider,
         model: instance.model,
+        ephemeral: true,
+        fallback: isFallback,
       });
       continue;
     }

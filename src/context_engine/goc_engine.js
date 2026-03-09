@@ -1,4 +1,8 @@
 import { clip } from "../textutil.js";
+import {
+  normalizeLensSpec as normalizeLensSpecDomain,
+  defaultLensSpecForAgent as defaultLensSpecForAgentDomain,
+} from "../domain/lens.js";
 import { ContextEngineBase } from "./base.js";
 
 function asObject(value) {
@@ -28,68 +32,27 @@ function clamp(value, min, max, fallback) {
 }
 
 function normalizeLensSpec(rawLens, { fallbackBudget = 1200, goal = "", defaultArtifactIds = [] } = {}) {
-  const row = asObject(rawLens);
-  const query = String(row.query || "").trim();
-  const addNodeIds = uniqIds(row.add_node_ids || row.addNodeIds || []);
-  const removeNodeIds = uniqIds(row.remove_node_ids || row.removeNodeIds || []);
-  const modeRaw = String(row.mode || "").trim().toLowerCase();
-  const inferredMode = query
-    ? "unfold_query"
-    : (addNodeIds.length > 0 ? "add_nodes" : (removeNodeIds.length > 0 ? "remove_nodes" : "shared_only"));
-  const mode = ["shared_only", "unfold_query", "add_nodes", "remove_nodes"].includes(modeRaw)
-    ? modeRaw
-    : inferredMode;
-  const budgetTokens = clamp(row.budget_tokens, 200, 12000, clamp(fallbackBudget, 200, 12000, 1200));
-  const normalized = {
-    mode,
-    budget_tokens: budgetTokens,
-    closure_edge_types: asArray(row.closure_edge_types).map((item) => String(item || "").trim()).filter(Boolean).slice(0, 24),
-    closure_direction: ["both", "forward", "backward"].includes(String(row.closure_direction || "").trim().toLowerCase())
-      ? String(row.closure_direction || "").trim().toLowerCase()
-      : "both",
-    max_closure_nodes: clamp(row.max_closure_nodes, 10, 3000, 180),
-  };
-  if (query) normalized.query = query;
-  if (addNodeIds.length > 0) normalized.add_node_ids = addNodeIds;
-  if (removeNodeIds.length > 0) normalized.remove_node_ids = removeNodeIds;
-  if (mode === "coder" && defaultArtifactIds.length > 0 && !normalized.add_node_ids) {
-    normalized.add_node_ids = defaultArtifactIds.slice(0, 3);
-  }
-  if (!normalized.query && goal && mode === "unfold_query") {
+  const normalized = normalizeLensSpecDomain(rawLens, { fallbackBudget });
+  if (!normalized.query && goal && normalized.mode === "unfold_query") {
     normalized.query = clip(goal, 300);
+  }
+  if (
+    normalized.mode === "add_nodes"
+    && (!Array.isArray(normalized.add_node_ids) || normalized.add_node_ids.length === 0)
+    && Array.isArray(defaultArtifactIds)
+    && defaultArtifactIds.length > 0
+  ) {
+    normalized.add_node_ids = uniqIds(defaultArtifactIds).slice(0, 3);
   }
   return normalized;
 }
 
 function defaultLensSpecForAgent({ agentId = "", goal = "", recentArtifactNodeIds = [] } = {}) {
-  const cleanAgentId = String(agentId || "").trim().toLowerCase();
-  const cleanGoal = String(goal || "").trim();
-  if (cleanAgentId === "researcher") {
-    return {
-      mode: "unfold_query",
-      query: cleanGoal || "요청과 관련된 최신 조사 맥락",
-      budget_tokens: 1200,
-    };
-  }
-  if (cleanAgentId === "coder") {
-    return {
-      mode: "unfold_query",
-      query: cleanGoal || "코드 구현에 필요한 관련 맥락",
-      add_node_ids: uniqIds(recentArtifactNodeIds).slice(0, 3),
-      budget_tokens: 1400,
-    };
-  }
-  if (cleanAgentId === "planner" || cleanAgentId === "router") {
-    return {
-      mode: "shared_only",
-      budget_tokens: 900,
-    };
-  }
-  return {
-    mode: "unfold_query",
-    query: cleanGoal || "요청과 직접 관련된 맥락",
-    budget_tokens: 1200,
-  };
+  return defaultLensSpecForAgentDomain({
+    agentId,
+    goal,
+    recentArtifactNodeIds,
+  });
 }
 
 function parseNodeType(node = {}) {

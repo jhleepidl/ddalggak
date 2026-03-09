@@ -53,3 +53,23 @@ test("buildTeamFromTemplates selects known roles first", () => {
   assert.equal(built.missing_roles.length, 0);
   assert.ok(built.runtime_agents.length >= 3);
 });
+
+test("fallback runtime roles are clearly marked as ephemeral", () => {
+  const built = buildTeamFromTemplates({
+    goal: "간단한 요약만 해줘",
+    templates: [templates[0]], // planner only
+    maxAgents: 4,
+  });
+
+  const fallbackRoles = built.runtime_agents.filter((agent) =>
+    ["messenger", "context_curator"].includes(String(agent.role_label || "").toLowerCase())
+  );
+  assert.ok(fallbackRoles.length > 0);
+  for (const role of fallbackRoles) {
+    assert.equal(role.ephemeral, true);
+    assert.ok(
+      String(role.template_id || "").includes("ephemeral")
+      || String(role.template_id || "") === ""
+    );
+  }
+});

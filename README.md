@@ -18,8 +18,13 @@
 - `src/domain/team_plan.js`: `TeamPlan` 정규화/검증
 - `src/application/team_builder.js`: 목표 기반 runtime role 구성
 - `src/application/orchestrator.js`: route + team 조합
+- `src/application/runtime_metadata.js`: runtime team snapshot 표준 구조
+- `src/application/job_runtime.js`: job lifecycle(중단/컨트롤러) 헬퍼
+- `src/application/route_executor.js`: `/run`, `/continue` 라우트 실행 glue
+- `src/application/approval_flow.js`: 승인/거절/재개 플로우
 - `src/adapters/telegram/send.js`: Telegram 전송 어댑터
 - `src/adapters/telegram/commands.js`: Telegram 명령 디스패치
+- `src/adapters/telegram/callbacks.js`: Telegram callback_query 디스패치
 
 ### Internal Runtime Concepts
 
@@ -31,6 +36,27 @@
   - `{ mode, roles, dependencies, execution_order, reason, budget }`
 
 기존 `agents.json` / `src/agents.js` / `src/agent_registry.js`는 그대로 사용 가능하며, 내부적으로 `AgentTemplate`로 정규화됩니다.
+
+### Routing Precedence
+
+- 명시적 route plan(`actions`)이 있으면 그것이 우선입니다.
+- team builder는 route를 덮어쓰는 것이 아니라 `team_plan/runtime_agents/runtime_team_snapshot`으로 보강합니다.
+- team-generated actions는 명시적 route action이 비어있거나 fallback-only일 때만 사용됩니다.
+
+### Runtime Team Observability
+
+실행 중 아래 snapshot이 route/run/session 메타데이터에 포함됩니다:
+
+```json
+{
+  "team_plan": {},
+  "runtime_agents": [],
+  "generated_at": "2026-03-10T00:00:00.000Z",
+  "source": "team_builder"
+}
+```
+
+외부 Telegram 명령 UX(`/run`, `/continue`, `/gptprompt`, `/gptapply`, `/gptdone`, `/commit`, `/context`, `/agents`, `/memory`)은 그대로 유지됩니다.
 
 ---
 
