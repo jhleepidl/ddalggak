@@ -3,6 +3,11 @@ import {
   normalizeLensSpec as normalizeLensSpecDomain,
   defaultLensSpecForAgent as defaultLensSpecForAgentDomain,
 } from "../domain/lens.js";
+import {
+  normalizeRuntimeTeamSnapshot,
+  normalizeActionSource,
+  buildRuntimeMetadataPatch,
+} from "../application/runtime_metadata.js";
 import { ContextEngineBase } from "./base.js";
 
 function asObject(value) {
@@ -498,11 +503,17 @@ export class GocContextEngine extends ContextEngineBase {
     ).trim();
     const stepNodeId = String(runMeta.stepNodeId || runMeta.step_node_id || "").trim();
     const runNodeId = String(runMeta.runNodeId || runMeta.run_node_id || "").trim();
-    const runtimeTeamSnapshot = runMeta.runtimeTeamSnapshot && typeof runMeta.runtimeTeamSnapshot === "object"
-      ? runMeta.runtimeTeamSnapshot
-      : null;
+    const runtimeTeamSnapshot = normalizeRuntimeTeamSnapshot(runMeta);
+    const actionSource = normalizeActionSource(runMeta.action_source || runMeta.actionSource || "");
+    const runtimeMetadataPatch = buildRuntimeMetadataPatch({
+      runtime_team_snapshot: runtimeTeamSnapshot,
+      action_source: actionSource || undefined,
+    }, {
+      includeFlattened: true,
+    });
+    const hasRuntimeMetadataPatch = Object.keys(runtimeMetadataPatch).length > 0;
 
-    if (this.client && threadId && (stepNodeId || runNodeId || runtimeTeamSnapshot)) {
+    if (this.client && threadId && (stepNodeId || runNodeId || hasRuntimeMetadataPatch)) {
       const ts = new Date().toISOString();
       const payload = {
         mode: "goc",
@@ -514,7 +525,7 @@ export class GocContextEngine extends ContextEngineBase {
         goal: clip(String(row.goal || "").trim(), 400) || undefined,
         run_meta: runMeta,
         context_meta: contextMeta,
-        runtime_team_snapshot: runtimeTeamSnapshot || undefined,
+        ...runtimeMetadataPatch,
       };
       const metaResource = await this.client.createResource(threadId, {
         name: `context_meta@${ts}`,

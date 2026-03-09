@@ -113,12 +113,13 @@ test("goc_engine recordMeta persists additive metadata to GOC when run/step info
       threadId: "thread_2",
       sharedContextSetId: "ctx_shared_2",
       stepNodeId: "step_node_1",
-      runtimeTeamSnapshot: {
+      runtime_team_snapshot: {
         team_plan: { mode: "run", roles: [] },
         runtime_agents: [],
         generated_at: "2026-03-10T00:00:00.000Z",
         source: "team_builder",
       },
+      action_source: "generated",
     },
     meta: {
       lensSpec: { mode: "shared_only", budget_tokens: 900 },
@@ -130,6 +131,35 @@ test("goc_engine recordMeta persists additive metadata to GOC when run/step info
   assert.equal(fakeClient.state.resources[0].threadId, "thread_2");
   assert.equal(fakeClient.state.resources[0].payload.resource_kind, "context_meta");
   assert.ok(fakeClient.state.resources[0].payload.payload_json.runtime_team_snapshot);
+  assert.equal(fakeClient.state.resources[0].payload.payload_json.action_source, "generated_team_actions");
   assert.equal(fakeClient.state.edges.length, 1);
   assert.equal(fakeClient.state.edges[0].edgeType, "HAS_PART");
+
+  await engine.recordMeta({
+    jobId: "job_meta",
+    chatId: "chat_meta",
+    agentId: "coder",
+    stepKind: "agent",
+    goal: "implement",
+    runMeta: {
+      runId: "run_meta_1",
+      threadId: "thread_2",
+      sharedContextSetId: "ctx_shared_2",
+      stepNodeId: "step_node_2",
+      runtimeTeamSnapshot: {
+        teamPlan: { mode: "run", roles: [] },
+        runtimeAgents: [],
+        generatedAt: "2026-03-10T00:00:00.000Z",
+        source: "team_builder",
+      },
+      actionSource: "fallback",
+    },
+    meta: {
+      lensSpec: { mode: "shared_only", budget_tokens: 900 },
+      estimatedTokens: 120,
+    },
+  });
+
+  assert.equal(fakeClient.state.resources.length, 2);
+  assert.equal(fakeClient.state.resources[1].payload.payload_json.action_source, "default_fallback_route");
 });

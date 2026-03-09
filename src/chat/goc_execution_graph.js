@@ -1,4 +1,12 @@
 import { randomUUID } from "node:crypto";
+import {
+  normalizeActionSource as normalizeActionSourceShared,
+  normalizeRuntimeMetadataEnvelope,
+  mergeRuntimeMetadataEnvelope,
+  buildRuntimeMetadataPatch,
+  buildRuntimeRolePayload,
+  resolveRuntimeAgentForAction,
+} from "../application/runtime_metadata.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -40,187 +48,29 @@ function safeErrorMessage(error) {
 }
 
 function normalizeActionSource(value = "") {
-  const raw = String(value || "").trim().toLowerCase();
-  if (raw === "generated_team_actions") return "generated_team_actions";
-  if (raw === "explicit_route_plan") return "explicit_route_plan";
-  if (raw === "default_fallback_route") return "default_fallback_route";
-  return "";
-}
-
-function normalizeRuntimeAgent(agent = {}) {
-  const row = asObject(agent);
-  return {
-    instance_id: String(row.instance_id || "").trim(),
-    template_id: String(row.template_id || "").trim().toLowerCase() || undefined,
-    role_label: String(row.role_label || "").trim().toLowerCase() || undefined,
-    provider: String(row.provider || "").trim().toLowerCase() || undefined,
-    model: String(row.model || "").trim() || undefined,
-    assigned_goal: String(row.assigned_goal || "").trim() || undefined,
-    capability_tags: Array.isArray(row.capability_tags)
-      ? row.capability_tags.map((tag) => String(tag || "").trim().toLowerCase()).filter(Boolean)
-      : [],
-    lens_spec: row.lens_spec && typeof row.lens_spec === "object" ? row.lens_spec : undefined,
-    status: String(row.status || "").trim().toLowerCase() || undefined,
-    ephemeral: row.ephemeral === true,
-    fallback: row.fallback === true,
-  };
-}
-
-function normalizeRuntimeTeamSnapshot(snapshot = null) {
-  const row = asObject(snapshot);
-  if (!snapshot || typeof snapshot !== "object") return null;
-  const teamPlan = row.team_plan && typeof row.team_plan === "object"
-    ? row.team_plan
-    : (row.teamPlan && typeof row.teamPlan === "object" ? row.teamPlan : null);
-  const runtimeAgentsRaw = Array.isArray(row.runtime_agents)
-    ? row.runtime_agents
-    : (Array.isArray(row.runtimeAgents) ? row.runtimeAgents : []);
-  const runtimeAgents = runtimeAgentsRaw
-    .map((agent) => normalizeRuntimeAgent(agent))
-    .filter((agent) => agent.instance_id || agent.template_id || agent.role_label);
-  const generatedAt = String(row.generated_at || row.generatedAt || "").trim() || nowIso();
-  const source = String(row.source || "team_builder").trim() || "team_builder";
-  return {
-    team_plan: teamPlan,
-    runtime_agents: runtimeAgents,
-    generated_at: generatedAt,
-    source,
-  };
+  return normalizeActionSourceShared(value);
 }
 
 function normalizeRuntimeMetadata(raw = {}) {
-  const row = asObject(raw);
-  const actionSource = normalizeActionSource(row.action_source || row.actionSource || "");
-  const hasSnapshotObject = !!(
-    row.runtime_team_snapshot
-    || row.runtimeTeamSnapshot
-  );
-  const hasSnapshotFields = !!(
-    row.team_plan
-    || row.teamPlan
-    || Array.isArray(row.runtime_agents)
-    || Array.isArray(row.runtimeAgents)
-  );
-  const snapshotInput = hasSnapshotObject
-    ? (row.runtime_team_snapshot || row.runtimeTeamSnapshot)
-    : (hasSnapshotFields
-      ? {
-        team_plan: row.team_plan || row.teamPlan || null,
-        runtime_agents: row.runtime_agents || row.runtimeAgents || [],
-        generated_at: row.generated_at || row.generatedAt || nowIso(),
-        source: row.source || "team_builder",
-      }
-      : null);
-  const snapshotFromRaw = normalizeRuntimeTeamSnapshot(snapshotInput);
-  if (!snapshotFromRaw && !actionSource) return null;
-  return {
-    runtime_team_snapshot: snapshotFromRaw || null,
-    team_plan: snapshotFromRaw?.team_plan || null,
-    runtime_agents: snapshotFromRaw?.runtime_agents || [],
-    generated_at: snapshotFromRaw?.generated_at || undefined,
-    source: snapshotFromRaw?.source || undefined,
-    action_source: actionSource || undefined,
-  };
+  return normalizeRuntimeMetadataEnvelope(raw);
 }
 
 function mergeRuntimeMetadata(a = null, b = null) {
-  const base = asObject(a);
-  const patch = asObject(b);
-  const snapshotA = normalizeRuntimeTeamSnapshot(base.runtime_team_snapshot);
-  const snapshotB = normalizeRuntimeTeamSnapshot(patch.runtime_team_snapshot);
-  const mergedSnapshot = snapshotB || snapshotA || null;
-  const actionSource = normalizeActionSource(patch.action_source || base.action_source || "");
-  if (!mergedSnapshot && !actionSource) return null;
-  return {
-    runtime_team_snapshot: mergedSnapshot,
-    team_plan: mergedSnapshot?.team_plan || null,
-    runtime_agents: Array.isArray(mergedSnapshot?.runtime_agents) ? mergedSnapshot.runtime_agents : [],
-    generated_at: String(mergedSnapshot?.generated_at || nowIso()),
-    source: String(mergedSnapshot?.source || "team_builder"),
-    action_source: actionSource || undefined,
-  };
+  return mergeRuntimeMetadataEnvelope(a, b);
 }
 
 function runtimeMetadataPatch(metadata = null) {
-  const row = asObject(metadata);
-  const snapshot = normalizeRuntimeTeamSnapshot(row.runtime_team_snapshot);
-  const actionSource = normalizeActionSource(row.action_source || "");
-  if (!snapshot && !actionSource) return {};
-  return {
-    runtime_team_snapshot: snapshot || undefined,
-    team_plan: snapshot?.team_plan || undefined,
-    runtime_agents: Array.isArray(snapshot?.runtime_agents) && snapshot.runtime_agents.length > 0
-      ? snapshot.runtime_agents
-      : undefined,
-    generated_at: snapshot?.generated_at || undefined,
-    source: snapshot?.source || undefined,
-    action_source: actionSource || undefined,
-  };
+  return buildRuntimeMetadataPatch(metadata, {
+    includeFlattened: true,
+  });
 }
 
 function runtimeAgentForAction(action = {}, runtimeTeamSnapshot = null) {
-  const snapshot = normalizeRuntimeTeamSnapshot(runtimeTeamSnapshot);
-  const agents = Array.isArray(snapshot?.runtime_agents) ? snapshot.runtime_agents : [];
-  if (agents.length === 0) return null;
-  const actionRow = asObject(action);
-  const actionInputs = asObject(actionRow.inputs);
-  const runtimeInstanceId = String(
-    actionInputs.runtime_instance_id
-    || actionInputs.runtimeInstanceId
-    || actionRow.runtime_instance_id
-    || actionRow.runtimeInstanceId
-    || ""
-  ).trim();
-  const roleLabel = String(
-    actionInputs.role_label
-    || actionInputs.roleLabel
-    || actionRow.role_label
-    || actionRow.roleLabel
-    || ""
-  ).trim().toLowerCase();
-  const targetAgentId = actionAgentId(actionRow);
-  if (runtimeInstanceId) {
-    const byInstance = agents.find((agent) => String(agent.instance_id || "").trim() === runtimeInstanceId);
-    if (byInstance) return byInstance;
-  }
-  if (roleLabel) {
-    const byRole = agents.find((agent) => String(agent.role_label || "").trim().toLowerCase() === roleLabel);
-    if (byRole) return byRole;
-  }
-  if (targetAgentId) {
-    const byTemplate = agents.find((agent) => String(agent.template_id || "").trim().toLowerCase() === targetAgentId);
-    if (byTemplate) return byTemplate;
-    const byRole = agents.find((agent) => String(agent.role_label || "").trim().toLowerCase() === targetAgentId);
-    if (byRole) return byRole;
-  }
-  return null;
+  return resolveRuntimeAgentForAction(action, runtimeTeamSnapshot);
 }
 
 function runtimeRolePatchFromAgent(runtimeAgent = null) {
-  const agent = normalizeRuntimeAgent(runtimeAgent);
-  if (!agent.instance_id && !agent.template_id && !agent.role_label) return {};
-  return {
-    runtime_role: {
-      role_label: agent.role_label || undefined,
-      runtime_instance_id: agent.instance_id || undefined,
-      template_id: agent.template_id || undefined,
-      provider: agent.provider || undefined,
-      model: agent.model || undefined,
-      capability_tags: Array.isArray(agent.capability_tags) ? agent.capability_tags : [],
-      runtime_status: agent.status || undefined,
-      ephemeral: agent.ephemeral === true,
-      fallback: agent.fallback === true,
-    },
-    role_label: agent.role_label || undefined,
-    runtime_instance_id: agent.instance_id || undefined,
-    template_id: agent.template_id || undefined,
-    provider: agent.provider || undefined,
-    model: agent.model || undefined,
-    capability_tags: Array.isArray(agent.capability_tags) ? agent.capability_tags : [],
-    runtime_status: agent.status || undefined,
-    ephemeral: agent.ephemeral === true,
-    fallback: agent.fallback === true,
-  };
+  return buildRuntimeRolePayload(runtimeAgent);
 }
 
 export class GocExecutionGraphRecorder {

@@ -45,22 +45,37 @@
 
 ### Runtime Team Observability
 
-실행 중 아래 snapshot이 route/run/session 메타데이터에 포함됩니다:
+실행 중 canonical 메타데이터 계약은 아래와 같습니다:
 
 ```json
 {
-  "team_plan": {},
-  "runtime_agents": [],
-  "generated_at": "2026-03-10T00:00:00.000Z",
-  "source": "team_builder"
+  "runtime_team_snapshot": {
+    "team_plan": {},
+    "runtime_agents": [],
+    "generated_at": "2026-03-10T00:00:00.000Z",
+    "source": "team_builder"
+  },
+  "action_source": "explicit_route_plan | generated_team_actions | default_fallback_route"
 }
 ```
 
-`MEMORY_MODE=goc`에서 execution graph recorder가 활성화된 경우, 같은 `runtime_team_snapshot`이 GOC `Run`/`Step` payload에도 additive 필드로 저장됩니다.
-또한 `action_source`는 최소한 아래 3가지로 구분됩니다.
-- `explicit_route_plan`
-- `generated_team_actions`
-- `default_fallback_route`
+step payload의 runtime role 필드는 아래 canonical 키를 사용합니다:
+- `role_label`
+- `runtime_instance_id`
+- `template_id`
+- `provider`
+- `model`
+- `capability_tags`
+- `runtime_status`
+- `ephemeral`
+- `fallback`
+
+`MEMORY_MODE=goc`에서 execution graph recorder가 활성화된 경우, 같은 metadata가 GOC `Run`/`Step` payload와 `recordMeta` 리소스 노드에 additive 방식으로 저장됩니다.
+
+입력 호환성:
+- `runtime_team_snapshot`(권장 canonical)과 `runtimeTeamSnapshot`(legacy/camelCase) 모두 허용
+- `action_source`와 `actionSource` 모두 허용
+- downstream은 `runtime_team_snapshot`과 canonical `action_source` enum을 우선 사용 권장
 
 그래서 graph-of-context-ui/control-plane에서 실제 런타임 팀 구성과 action 생성 출처를 사후 조회할 수 있습니다.
 

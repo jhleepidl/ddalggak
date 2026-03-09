@@ -1,4 +1,5 @@
 import { makeContextEngine } from "../context_engine/index.js";
+import { normalizeActionSource, normalizeRuntimeTeamSnapshot } from "./runtime_metadata.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -183,18 +184,24 @@ export async function handleActionApprovalCallback({
   } else {
     runtime.contextMeta = null;
   }
-  const resumeRuntimeTeamSnapshot = pending?.runtime_team_snapshot && typeof pending.runtime_team_snapshot === "object"
-    ? pending.runtime_team_snapshot
-    : (session?.last_route?.runtime_team_snapshot && typeof session.last_route.runtime_team_snapshot === "object"
-      ? session.last_route.runtime_team_snapshot
-      : (runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
-        ? runtime.runtimeTeamSnapshot
-        : null));
-  const resumeActionSource = String(
+  const rawResumeRuntimeSnapshot = (
+    pending?.runtime_team_snapshot
+    || pending?.runtimeTeamSnapshot
+    || session?.last_route?.runtime_team_snapshot
+    || session?.last_route?.runtimeTeamSnapshot
+    || runtime?.runtimeTeamSnapshot
+    || runtime?.runtime_team_snapshot
+    || null
+  );
+  const resumeRuntimeTeamSnapshot = normalizeRuntimeTeamSnapshot(rawResumeRuntimeSnapshot);
+  const resumeActionSource = normalizeActionSource(
     pending?.action_source
+    || pending?.actionSource
     || session?.last_route?.action_source
-    || "explicit_route_plan"
-  ).trim() || "explicit_route_plan";
+    || session?.last_route?.actionSource
+    || "",
+    { fallback: "explicit_route_plan" }
+  ) || "explicit_route_plan";
   if (resumeRuntimeTeamSnapshot) {
     runtime.runtimeTeamSnapshot = resumeRuntimeTeamSnapshot;
   }

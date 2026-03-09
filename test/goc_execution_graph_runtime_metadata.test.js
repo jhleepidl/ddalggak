@@ -68,8 +68,8 @@ test("runtime_team_snapshot is persisted on GOC Run payloads", async () => {
   await recorder.startRun({
     userText: "hello",
     metadata: {
-      runtime_team_snapshot: sampleRuntimeSnapshot(),
-      action_source: "generated_team_actions",
+      runtimeTeamSnapshot: sampleRuntimeSnapshot(),
+      actionSource: "team_generated",
     },
   });
 
@@ -98,11 +98,14 @@ test("step payloads include additive runtime role metadata and update run metada
       type: "run_agent",
       agent_id: "coder",
       goal: "implement feature",
+      inputs: {
+        runtimeInstanceId: "inst_coder_1",
+      },
     },
   ], {
     metadata: {
-      runtime_team_snapshot: sampleRuntimeSnapshot(),
-      action_source: "explicit_route_plan",
+      runtimeTeamSnapshot: sampleRuntimeSnapshot(),
+      actionSource: "explicit",
     },
   });
 
@@ -130,8 +133,8 @@ test("non-GOC/no-recorder flow remains no-op safe", async () => {
   await recorder.startRun({
     userText: "local-only",
     metadata: {
-      runtime_team_snapshot: sampleRuntimeSnapshot(),
-      action_source: "default_fallback_route",
+      runtimeTeamSnapshot: sampleRuntimeSnapshot(),
+      actionSource: "fallback",
     },
   });
   await recorder.queueMainSteps([{
@@ -140,8 +143,8 @@ test("non-GOC/no-recorder flow remains no-op safe", async () => {
     goal: "noop",
   }], {
     metadata: {
-      runtime_team_snapshot: sampleRuntimeSnapshot(),
-      action_source: "default_fallback_route",
+      runtimeTeamSnapshot: sampleRuntimeSnapshot(),
+      actionSource: "fallback",
     },
   });
   await recorder.finishRun({ status: "done" });
