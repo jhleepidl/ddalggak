@@ -475,4 +475,70 @@ export class GocContextEngine extends ContextEngineBase {
       },
     };
   }
+
+  async recordMeta(args = {}) {
+    const row = asObject(args);
+    const runMeta = asObject(row.runMeta);
+    const contextMeta = asObject(row.meta);
+    const threadId = String(
+      row.threadId
+      || runMeta.threadId
+      || runMeta.thread_id
+      || this.runtime?.map?.threadId
+      || ""
+    ).trim();
+    const contextSetId = String(
+      runMeta.sharedContextSetId
+      || runMeta.shared_context_set_id
+      || runMeta.contextSetId
+      || runMeta.context_set_id
+      || this.runtime?.map?.ctxSharedId
+      || this.runtime?.map?.ctxId
+      || ""
+    ).trim();
+    const stepNodeId = String(runMeta.stepNodeId || runMeta.step_node_id || "").trim();
+    const runNodeId = String(runMeta.runNodeId || runMeta.run_node_id || "").trim();
+    const runtimeTeamSnapshot = runMeta.runtimeTeamSnapshot && typeof runMeta.runtimeTeamSnapshot === "object"
+      ? runMeta.runtimeTeamSnapshot
+      : null;
+
+    if (this.client && threadId && (stepNodeId || runNodeId || runtimeTeamSnapshot)) {
+      const ts = new Date().toISOString();
+      const payload = {
+        mode: "goc",
+        ts,
+        job_id: String(row.jobId || "").trim() || undefined,
+        chat_id: String(row.chatId || "").trim() || undefined,
+        step_kind: String(row.stepKind || "").trim() || undefined,
+        agent_id: String(row.agentId || "").trim().toLowerCase() || undefined,
+        goal: clip(String(row.goal || "").trim(), 400) || undefined,
+        run_meta: runMeta,
+        context_meta: contextMeta,
+        runtime_team_snapshot: runtimeTeamSnapshot || undefined,
+      };
+      const metaResource = await this.client.createResource(threadId, {
+        name: `context_meta@${ts}`,
+        summary: clip(`context meta ${String(row.stepKind || "step").trim() || "step"} ${String(row.agentId || "").trim()}`, 180),
+        text_mode: "plain",
+        raw_text: clip(JSON.stringify(payload, null, 2), 18000),
+        resource_kind: "context_meta",
+        uri: String(row.jobId || "").trim()
+          ? `ddalggak://jobs/${String(row.jobId || "").trim()}/context_meta/${Date.now().toString(36)}`
+          : undefined,
+        context_set_id: contextSetId || undefined,
+        auto_activate: false,
+        payload_json: payload,
+      }).catch(() => null);
+      const metaNodeId = String(metaResource?.id || "").trim();
+      if (metaNodeId) {
+        if (stepNodeId) {
+          await this.client.createEdge(threadId, stepNodeId, metaNodeId, "HAS_PART").catch(() => {});
+        } else if (runNodeId) {
+          await this.client.createEdge(threadId, runNodeId, metaNodeId, "HAS_PART").catch(() => {});
+        }
+      }
+    }
+
+    return await super.recordMeta(args);
+  }
 }

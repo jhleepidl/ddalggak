@@ -183,6 +183,21 @@ export async function handleActionApprovalCallback({
   } else {
     runtime.contextMeta = null;
   }
+  const resumeRuntimeTeamSnapshot = pending?.runtime_team_snapshot && typeof pending.runtime_team_snapshot === "object"
+    ? pending.runtime_team_snapshot
+    : (session?.last_route?.runtime_team_snapshot && typeof session.last_route.runtime_team_snapshot === "object"
+      ? session.last_route.runtime_team_snapshot
+      : (runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
+        ? runtime.runtimeTeamSnapshot
+        : null));
+  const resumeActionSource = String(
+    pending?.action_source
+    || session?.last_route?.action_source
+    || "explicit_route_plan"
+  ).trim() || "explicit_route_plan";
+  if (resumeRuntimeTeamSnapshot) {
+    runtime.runtimeTeamSnapshot = resumeRuntimeTeamSnapshot;
+  }
   const contextEngine = makeContextEngine({
     memoryMode: memoryModeWithFallback(),
     jobs,
@@ -237,6 +252,8 @@ export async function handleActionApprovalCallback({
     last_route: {
       reason: `resume_after_approval:${approvalId}`,
       actions: resumedActions,
+      action_source: resumeActionSource,
+      runtime_team_snapshot: resumeRuntimeTeamSnapshot,
       final_response_style: runtime.jobConfig?.final_response_style || "concise",
     },
   });
@@ -250,6 +267,8 @@ export async function handleActionApprovalCallback({
       runId: String(resumeExecutionGraph?.runId || "").trim() || undefined,
       threadId: resumeThreadId,
       sharedContextSetId: resumeSharedCtxId,
+      runtimeTeamSnapshot: resumeRuntimeTeamSnapshot || undefined,
+      actionSource: resumeActionSource,
     };
     if (contextEngine && typeof contextEngine.prepareRouterContext === "function") {
       if (typeof contextEngine.setRuntime === "function") {
@@ -292,13 +311,24 @@ export async function handleActionApprovalCallback({
     const resumePlan = {
       reason: `resume_after_approval:${approvalId}`,
       actions: resumedActions,
+      runtime_team_snapshot: resumeRuntimeTeamSnapshot,
+      action_source: resumeActionSource,
       final_response_style: runtime.jobConfig?.final_response_style || "concise",
     };
     if (resumeExecutionGraph) {
       await resumeExecutionGraph.startRun({
         userText: resumeUserText,
+        metadata: {
+          runtime_team_snapshot: resumeRuntimeTeamSnapshot,
+          action_source: resumeActionSource,
+        },
       });
-      await resumeExecutionGraph.queueMainSteps(resumedActions);
+      await resumeExecutionGraph.queueMainSteps(resumedActions, {
+        metadata: {
+          runtime_team_snapshot: resumeRuntimeTeamSnapshot,
+          action_source: resumeActionSource,
+        },
+      });
     }
     const resumedExecution = await executeSupervisorActions({
       chatId,
@@ -380,6 +410,7 @@ export async function handleActionApprovalCallback({
     tracking.append(pendingJobId, "decisions.md", [
       "## /chat approval resumed",
       `- approval_id: ${approvalId}`,
+      `- action_source: ${resumeActionSource}`,
       `- resumed_actions: ${resumedActions.map((row) => chatActionLabel(row)).join(" -> ")}`,
       `- pending_after_resume: ${resumedExecution.pendingApproval ? "yes" : "no"}`,
       `- interrupted_during_resume: ${interruptedDuringResume ? "yes" : "no"}`,
@@ -407,6 +438,8 @@ export async function handleActionApprovalCallback({
         state: "awaiting_approval",
         pending_approval: {
           ...resumedExecution.pendingApproval,
+          action_source: resumeActionSource,
+          runtime_team_snapshot: resumeRuntimeTeamSnapshot || undefined,
           blocked_index: Number.isFinite(Number(resumedExecution.blocked_index))
             ? Number(resumedExecution.blocked_index)
             : Number(resumedExecution.pendingApproval?.blocked_index ?? -1),

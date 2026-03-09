@@ -56,6 +56,14 @@
 }
 ```
 
+`MEMORY_MODE=goc`에서 execution graph recorder가 활성화된 경우, 같은 `runtime_team_snapshot`이 GOC `Run`/`Step` payload에도 additive 필드로 저장됩니다.
+또한 `action_source`는 최소한 아래 3가지로 구분됩니다.
+- `explicit_route_plan`
+- `generated_team_actions`
+- `default_fallback_route`
+
+그래서 graph-of-context-ui/control-plane에서 실제 런타임 팀 구성과 action 생성 출처를 사후 조회할 수 있습니다.
+
 외부 Telegram 명령 UX(`/run`, `/continue`, `/gptprompt`, `/gptapply`, `/gptdone`, `/commit`, `/context`, `/agents`, `/memory`)은 그대로 유지됩니다.
 
 ---

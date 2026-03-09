@@ -1891,7 +1891,7 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
       mode,
       goal,
       seedInstruction,
-      routePlan: planned || fallbackRoute,
+      routePlan: planned || null,
       registry: agentRegistry,
       preferredRoles: [],
       maxAgents: 6,
@@ -1902,6 +1902,7 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
         ? orchestration.route_plan.actions
         : fallbackRoute.actions,
       reason: String(orchestration?.route_plan?.reason || planned?.reason || fallbackRoute.reason || "router route").trim(),
+      action_source: String(orchestration?.route_plan?.action_source || "default_fallback_route").trim(),
       team_plan: orchestration?.team_plan || null,
       runtime_agents: orchestration?.runtime_agents || [],
       runtime_team_snapshot: orchestration?.runtime_team_snapshot || null,
@@ -1912,7 +1913,7 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
       mode,
       goal,
       seedInstruction,
-      routePlan: fallbackRoute,
+      routePlan: null,
       registry: agentRegistry,
       preferredRoles: [],
       maxAgents: 6,
@@ -1923,6 +1924,7 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
         ? orchestration.route_plan.actions
         : fallbackRoute.actions,
       reason: String(orchestration?.route_plan?.reason || fallbackRoute.reason || "router fallback").trim(),
+      action_source: String(orchestration?.route_plan?.action_source || "default_fallback_route").trim(),
       team_plan: orchestration?.team_plan || null,
       runtime_agents: orchestration?.runtime_agents || [],
       runtime_team_snapshot: orchestration?.runtime_team_snapshot || null,
@@ -6862,6 +6864,11 @@ async function runSupervisorChat(
       await executionGraph.startRun({
         userMessageNodeId: String(userMessageGoc?.id || "").trim(),
         userText: message,
+        metadata: {
+          runtime_team_snapshot: runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
+            ? runtime.runtimeTeamSnapshot
+            : undefined,
+        },
       });
     }
     const autopilotEnabled = AUTOPILOT_ENABLED;
@@ -7065,6 +7072,7 @@ async function runSupervisorChat(
         allowReadOnlyControl: false,
         forceMode: cleanForceMode,
       });
+      let usedSuggestedActionsFallback = false;
       if (
         (!Array.isArray(routePlan?.actions) || routePlan.actions.length === 0)
         && routePlan?.done !== true
@@ -7072,6 +7080,7 @@ async function runSupervisorChat(
         && Array.isArray(suggestedActions)
         && suggestedActions.length > 0
       ) {
+        usedSuggestedActionsFallback = true;
         routePlan = {
           ...routePlan,
           reason: `${String(routePlan.reason || "supervisor route")}; suggested_actions_fallback`,
@@ -7082,10 +7091,17 @@ async function runSupervisorChat(
         message: lastUserText,
         teamRecommendation,
       });
+      const routeActionSource = (
+        usedSuggestedActionsFallback
+        || String(routePlan?.reason || "").trim().toLowerCase().includes("fallback")
+      )
+        ? "default_fallback_route"
+        : "explicit_route_plan";
       runtime.runtimeTeamSnapshot = runtimeTeamSnapshot;
       routePlan = {
         ...routePlan,
         runtime_team_snapshot: runtimeTeamSnapshot,
+        action_source: routeActionSource,
       };
       followupHint = String(routePlan?.followup_hint || "").trim();
       deliverables = normalizeDeliverableList([
@@ -7110,7 +7126,12 @@ async function runSupervisorChat(
       totalActions += planActions.length;
 
       if (executionGraph) {
-        await executionGraph.queueMainSteps(planActions);
+        await executionGraph.queueMainSteps(planActions, {
+          metadata: {
+            runtime_team_snapshot: runtimeTeamSnapshot,
+            action_source: routeActionSource,
+          },
+        });
       }
       const queuedAgentStatus = buildQueuedAgentStatusFromActions(planActions);
 
@@ -7119,6 +7140,7 @@ async function runSupervisorChat(
         agent_status: queuedAgentStatus,
         last_route: {
           reason: routePlan.reason,
+          action_source: routePlan.action_source || routeActionSource,
           actions: planActions,
           runtime_team_snapshot: runtimeTeamSnapshot,
           done: routePlan.done === true,
@@ -7198,6 +7220,7 @@ async function runSupervisorChat(
         `- message: ${clip(lastUserText, 260)}`,
         `- reason: ${routePlan.reason || "(none)"}`,
         `- runtime_team_source: ${String(routePlan?.runtime_team_snapshot?.source || "team_builder")}`,
+        `- action_source: ${String(routePlan?.action_source || routeActionSource || "explicit_route_plan")}`,
         `- actions: ${planActions.map((row) => chatActionLabel(row)).join(" -> ") || "(none)"}`,
         `- mode: ${runtime.mode}`,
         `- pending_approval: ${execution.pendingApproval ? execution.pendingApproval.reason : "none"}`,
@@ -7304,6 +7327,10 @@ async function runSupervisorChat(
     if (mergedExecution.pendingApproval) {
       const pendingApproval = {
         ...mergedExecution.pendingApproval,
+        action_source: String(routePlan?.action_source || "explicit_route_plan").trim() || "explicit_route_plan",
+        runtime_team_snapshot: routePlan?.runtime_team_snapshot && typeof routePlan.runtime_team_snapshot === "object"
+          ? routePlan.runtime_team_snapshot
+          : undefined,
         blocked_index: Number.isFinite(Number(mergedExecution.blocked_index))
           ? Number(mergedExecution.blocked_index)
           : Number(mergedExecution.pendingApproval?.blocked_index ?? -1),
@@ -7453,6 +7480,11 @@ async function runSupervisorChat(
           await executionGraph.startRun({
             userMessageNodeId: String(userMessageGoc?.id || "").trim(),
             userText: message,
+            metadata: {
+              runtime_team_snapshot: runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
+                ? runtime.runtimeTeamSnapshot
+                : undefined,
+            },
           });
           await executionGraph.finishRun({
             status: "error",
@@ -7756,6 +7788,7 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
   if (runtimeTeamSnapshot && Array.isArray(runtimeTeamSnapshot.runtime_agents) && runtimeTeamSnapshot.runtime_agents.length > 0) {
     tracking.append(jobId, "decisions.md", [
       "## Runtime team snapshot",
+      `- action_source: ${String(route?.action_source || "unknown")}`,
       `- source: ${String(runtimeTeamSnapshot.source || "team_builder")}`,
       `- generated_at: ${String(runtimeTeamSnapshot.generated_at || "")}`,
       `- roles: ${runtimeTeamSnapshot.runtime_agents.map((agent) => `${agent.role_label || "role"}:${agent.template_id || "ephemeral"}`).join(", ")}`,

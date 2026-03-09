@@ -35,3 +35,35 @@ test("explicit route actions take precedence over generated team actions", () =>
     ["agent_run", "git_summary"]
   );
 });
+
+test("generated team actions are used when no explicit route plan exists", () => {
+  const orchestration = buildRuntimeOrchestration({
+    mode: "run",
+    goal: "코드 구현 진행",
+    seedInstruction: "구현해줘",
+    routePlan: null,
+    registry,
+    resolveAgentId: (id) => String(id || "").trim().toLowerCase(),
+  });
+
+  assert.equal(orchestration.route_plan.action_source, "generated_team_actions");
+  assert.ok(Array.isArray(orchestration.route_plan.actions));
+  assert.ok(orchestration.route_plan.actions.length > 0);
+});
+
+test("default fallback route is used when no explicit route and no team actions are available", () => {
+  const orchestration = buildRuntimeOrchestration({
+    mode: "chat",
+    goal: "아무거나",
+    seedInstruction: "",
+    routePlan: null,
+    registry: { agents: [] },
+    resolveAgentId: (id) => String(id || "").trim().toLowerCase(),
+  });
+
+  assert.equal(orchestration.route_plan.action_source, "default_fallback_route");
+  assert.deepEqual(
+    orchestration.route_plan.actions.map((action) => action.type),
+    ["agent_run", "agent_run", "git_summary"]
+  );
+});

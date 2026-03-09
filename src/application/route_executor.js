@@ -58,6 +58,7 @@ export async function executeRunCommand({
         "## Multi-Agent routing",
         "- mode: run",
         `- reason: ${route.reason}`,
+        `- action_source: ${String(route.action_source || "unknown")}`,
         `- team_roles: ${Array.isArray(route?.team_plan?.roles) ? route.team_plan.roles.map((role) => role.id || role.role_label || role.role_type).join(", ") : "(none)"}`,
         `- actions: ${route.actions.map((a) => actionLabel(a)).join(" -> ")}`,
       ].join("\n"));
@@ -151,6 +152,7 @@ export async function executeContinueCommand({
       "## Multi-Agent routing",
       "- mode: continue",
       `- reason: ${route.reason}`,
+      `- action_source: ${String(route.action_source || "unknown")}`,
       `- team_roles: ${Array.isArray(route?.team_plan?.roles) ? route.team_plan.roles.map((role) => role.id || role.role_label || role.role_type).join(", ") : "(none)"}`,
       `- actions: ${route.actions.map((a) => actionLabel(a)).join(" -> ")}`,
     ].join("\n"));

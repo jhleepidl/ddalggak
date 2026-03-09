@@ -98,7 +98,11 @@ export function shouldUseGeneratedTeamActions({
   normalizedRoute = null,
   defaultRoute = null,
   teamActions = [],
+  hasExplicitRoutePlan = true,
 } = {}) {
+  if (!hasExplicitRoutePlan) {
+    return Array.isArray(teamActions) && teamActions.length > 0;
+  }
   const explicitActions = Array.isArray(normalizedRoute?.actions) ? normalizedRoute.actions : [];
   if (!Array.isArray(teamActions) || teamActions.length === 0) return false;
   if (explicitActions.length === 0) return true;
@@ -112,6 +116,15 @@ export function shouldUseGeneratedTeamActions({
   return false;
 }
 
+function classifyActionSource({
+  useTeamActions = false,
+  explicitActions = [],
+} = {}) {
+  if (useTeamActions) return "generated_team_actions";
+  if (Array.isArray(explicitActions) && explicitActions.length > 0) return "explicit_route_plan";
+  return "default_fallback_route";
+}
+
 export function buildRuntimeOrchestration({
   mode = "run",
   goal = "",
@@ -123,7 +136,8 @@ export function buildRuntimeOrchestration({
   resolveAgentId = null,
 } = {}) {
   const defaultRoute = createDefaultRunRoute(mode, goal, seedInstruction);
-  const normalizedRoute = normalizeRoutePlan(routePlan || defaultRoute, {
+  const hasExplicitRoutePlan = !!(routePlan && typeof routePlan === "object");
+  const normalizedRoute = normalizeRoutePlan(hasExplicitRoutePlan ? routePlan : null, {
     maxActions: 4,
     resolveAgentId,
   });
@@ -142,17 +156,26 @@ export function buildRuntimeOrchestration({
     normalizedRoute,
     defaultRoute,
     teamActions,
+    hasExplicitRoutePlan,
   });
+  const explicitActions = Array.isArray(normalizedRoute.actions) ? normalizedRoute.actions : [];
   const effectiveActions = useTeamActions
     ? teamActions
-    : (Array.isArray(normalizedRoute.actions) && normalizedRoute.actions.length > 0
-      ? normalizedRoute.actions
+    : (explicitActions.length > 0
+      ? explicitActions
       : defaultRoute.actions);
+  const actionSource = classifyActionSource({
+    useTeamActions,
+    explicitActions,
+  });
   const runtimeTeamSnapshot = createRuntimeTeamSnapshot({
     teamPlan: teamBuild.team_plan,
     runtimeAgents: teamBuild.runtime_agents,
     source: "team_builder",
   });
+  const routeReason = actionSource === "default_fallback_route"
+    ? String(defaultRoute.reason || "fallback route")
+    : String(normalizedRoute.reason || "route plan");
 
   return {
     team_plan: teamBuild.team_plan,
@@ -163,9 +186,9 @@ export function buildRuntimeOrchestration({
       ...normalizedRoute,
       mode: String(mode || "run").trim().toLowerCase(),
       actions: effectiveActions,
-      action_source: useTeamActions ? "generated_team_actions" : "explicit_route_plan",
+      action_source: actionSource,
       reason: [
-        String(normalizedRoute.reason || "route plan"),
+        routeReason,
         String(teamBuild.reason || "team build"),
       ].filter(Boolean).join("; "),
     }, runtimeTeamSnapshot),

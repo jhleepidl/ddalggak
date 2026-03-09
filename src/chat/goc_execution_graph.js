@@ -22,6 +22,7 @@ function actionType(action) {
 function actionAgentId(action) {
   const type = actionType(action);
   if (type === "run_agent") return String(action?.agent_id || action?.agent || "").trim().toLowerCase();
+  if (type === "agent_run") return String(action?.agent || action?.agent_id || "").trim().toLowerCase();
   if (type === "spawn_agents") return "router";
   if (type === "need_more_detail") return "context";
   return "system";
@@ -30,11 +31,196 @@ function actionAgentId(action) {
 function actionGoal(action) {
   const type = actionType(action);
   if (type === "spawn_agents") return String(action?.summary || action?.goal || "").trim();
+  if (type === "chatgpt_prompt") return String(action?.question || action?.prompt || "").trim();
   return String(action?.goal || action?.prompt || action?.task || action?.hint || "").trim();
 }
 
 function safeErrorMessage(error) {
   return String(error?.message ?? error ?? "").trim();
+}
+
+function normalizeActionSource(value = "") {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "generated_team_actions") return "generated_team_actions";
+  if (raw === "explicit_route_plan") return "explicit_route_plan";
+  if (raw === "default_fallback_route") return "default_fallback_route";
+  return "";
+}
+
+function normalizeRuntimeAgent(agent = {}) {
+  const row = asObject(agent);
+  return {
+    instance_id: String(row.instance_id || "").trim(),
+    template_id: String(row.template_id || "").trim().toLowerCase() || undefined,
+    role_label: String(row.role_label || "").trim().toLowerCase() || undefined,
+    provider: String(row.provider || "").trim().toLowerCase() || undefined,
+    model: String(row.model || "").trim() || undefined,
+    assigned_goal: String(row.assigned_goal || "").trim() || undefined,
+    capability_tags: Array.isArray(row.capability_tags)
+      ? row.capability_tags.map((tag) => String(tag || "").trim().toLowerCase()).filter(Boolean)
+      : [],
+    lens_spec: row.lens_spec && typeof row.lens_spec === "object" ? row.lens_spec : undefined,
+    status: String(row.status || "").trim().toLowerCase() || undefined,
+    ephemeral: row.ephemeral === true,
+    fallback: row.fallback === true,
+  };
+}
+
+function normalizeRuntimeTeamSnapshot(snapshot = null) {
+  const row = asObject(snapshot);
+  if (!snapshot || typeof snapshot !== "object") return null;
+  const teamPlan = row.team_plan && typeof row.team_plan === "object"
+    ? row.team_plan
+    : (row.teamPlan && typeof row.teamPlan === "object" ? row.teamPlan : null);
+  const runtimeAgentsRaw = Array.isArray(row.runtime_agents)
+    ? row.runtime_agents
+    : (Array.isArray(row.runtimeAgents) ? row.runtimeAgents : []);
+  const runtimeAgents = runtimeAgentsRaw
+    .map((agent) => normalizeRuntimeAgent(agent))
+    .filter((agent) => agent.instance_id || agent.template_id || agent.role_label);
+  const generatedAt = String(row.generated_at || row.generatedAt || "").trim() || nowIso();
+  const source = String(row.source || "team_builder").trim() || "team_builder";
+  return {
+    team_plan: teamPlan,
+    runtime_agents: runtimeAgents,
+    generated_at: generatedAt,
+    source,
+  };
+}
+
+function normalizeRuntimeMetadata(raw = {}) {
+  const row = asObject(raw);
+  const actionSource = normalizeActionSource(row.action_source || row.actionSource || "");
+  const hasSnapshotObject = !!(
+    row.runtime_team_snapshot
+    || row.runtimeTeamSnapshot
+  );
+  const hasSnapshotFields = !!(
+    row.team_plan
+    || row.teamPlan
+    || Array.isArray(row.runtime_agents)
+    || Array.isArray(row.runtimeAgents)
+  );
+  const snapshotInput = hasSnapshotObject
+    ? (row.runtime_team_snapshot || row.runtimeTeamSnapshot)
+    : (hasSnapshotFields
+      ? {
+        team_plan: row.team_plan || row.teamPlan || null,
+        runtime_agents: row.runtime_agents || row.runtimeAgents || [],
+        generated_at: row.generated_at || row.generatedAt || nowIso(),
+        source: row.source || "team_builder",
+      }
+      : null);
+  const snapshotFromRaw = normalizeRuntimeTeamSnapshot(snapshotInput);
+  if (!snapshotFromRaw && !actionSource) return null;
+  return {
+    runtime_team_snapshot: snapshotFromRaw || null,
+    team_plan: snapshotFromRaw?.team_plan || null,
+    runtime_agents: snapshotFromRaw?.runtime_agents || [],
+    generated_at: snapshotFromRaw?.generated_at || undefined,
+    source: snapshotFromRaw?.source || undefined,
+    action_source: actionSource || undefined,
+  };
+}
+
+function mergeRuntimeMetadata(a = null, b = null) {
+  const base = asObject(a);
+  const patch = asObject(b);
+  const snapshotA = normalizeRuntimeTeamSnapshot(base.runtime_team_snapshot);
+  const snapshotB = normalizeRuntimeTeamSnapshot(patch.runtime_team_snapshot);
+  const mergedSnapshot = snapshotB || snapshotA || null;
+  const actionSource = normalizeActionSource(patch.action_source || base.action_source || "");
+  if (!mergedSnapshot && !actionSource) return null;
+  return {
+    runtime_team_snapshot: mergedSnapshot,
+    team_plan: mergedSnapshot?.team_plan || null,
+    runtime_agents: Array.isArray(mergedSnapshot?.runtime_agents) ? mergedSnapshot.runtime_agents : [],
+    generated_at: String(mergedSnapshot?.generated_at || nowIso()),
+    source: String(mergedSnapshot?.source || "team_builder"),
+    action_source: actionSource || undefined,
+  };
+}
+
+function runtimeMetadataPatch(metadata = null) {
+  const row = asObject(metadata);
+  const snapshot = normalizeRuntimeTeamSnapshot(row.runtime_team_snapshot);
+  const actionSource = normalizeActionSource(row.action_source || "");
+  if (!snapshot && !actionSource) return {};
+  return {
+    runtime_team_snapshot: snapshot || undefined,
+    team_plan: snapshot?.team_plan || undefined,
+    runtime_agents: Array.isArray(snapshot?.runtime_agents) && snapshot.runtime_agents.length > 0
+      ? snapshot.runtime_agents
+      : undefined,
+    generated_at: snapshot?.generated_at || undefined,
+    source: snapshot?.source || undefined,
+    action_source: actionSource || undefined,
+  };
+}
+
+function runtimeAgentForAction(action = {}, runtimeTeamSnapshot = null) {
+  const snapshot = normalizeRuntimeTeamSnapshot(runtimeTeamSnapshot);
+  const agents = Array.isArray(snapshot?.runtime_agents) ? snapshot.runtime_agents : [];
+  if (agents.length === 0) return null;
+  const actionRow = asObject(action);
+  const actionInputs = asObject(actionRow.inputs);
+  const runtimeInstanceId = String(
+    actionInputs.runtime_instance_id
+    || actionInputs.runtimeInstanceId
+    || actionRow.runtime_instance_id
+    || actionRow.runtimeInstanceId
+    || ""
+  ).trim();
+  const roleLabel = String(
+    actionInputs.role_label
+    || actionInputs.roleLabel
+    || actionRow.role_label
+    || actionRow.roleLabel
+    || ""
+  ).trim().toLowerCase();
+  const targetAgentId = actionAgentId(actionRow);
+  if (runtimeInstanceId) {
+    const byInstance = agents.find((agent) => String(agent.instance_id || "").trim() === runtimeInstanceId);
+    if (byInstance) return byInstance;
+  }
+  if (roleLabel) {
+    const byRole = agents.find((agent) => String(agent.role_label || "").trim().toLowerCase() === roleLabel);
+    if (byRole) return byRole;
+  }
+  if (targetAgentId) {
+    const byTemplate = agents.find((agent) => String(agent.template_id || "").trim().toLowerCase() === targetAgentId);
+    if (byTemplate) return byTemplate;
+    const byRole = agents.find((agent) => String(agent.role_label || "").trim().toLowerCase() === targetAgentId);
+    if (byRole) return byRole;
+  }
+  return null;
+}
+
+function runtimeRolePatchFromAgent(runtimeAgent = null) {
+  const agent = normalizeRuntimeAgent(runtimeAgent);
+  if (!agent.instance_id && !agent.template_id && !agent.role_label) return {};
+  return {
+    runtime_role: {
+      role_label: agent.role_label || undefined,
+      runtime_instance_id: agent.instance_id || undefined,
+      template_id: agent.template_id || undefined,
+      provider: agent.provider || undefined,
+      model: agent.model || undefined,
+      capability_tags: Array.isArray(agent.capability_tags) ? agent.capability_tags : [],
+      runtime_status: agent.status || undefined,
+      ephemeral: agent.ephemeral === true,
+      fallback: agent.fallback === true,
+    },
+    role_label: agent.role_label || undefined,
+    runtime_instance_id: agent.instance_id || undefined,
+    template_id: agent.template_id || undefined,
+    provider: agent.provider || undefined,
+    model: agent.model || undefined,
+    capability_tags: Array.isArray(agent.capability_tags) ? agent.capability_tags : [],
+    runtime_status: agent.status || undefined,
+    ephemeral: agent.ephemeral === true,
+    fallback: agent.fallback === true,
+  };
 }
 
 export class GocExecutionGraphRecorder {
@@ -70,6 +256,7 @@ export class GocExecutionGraphRecorder {
     this.runNodeId = "";
     this.payloadByNodeId = new Map();
     this.stepMetaByAction = new WeakMap();
+    this.runtimeMetadata = null;
   }
 
   _sharedContextPayload() {
@@ -178,9 +365,27 @@ export class GocExecutionGraphRecorder {
     }
   }
 
-  async startRun({ userMessageNodeId = "", userText = "" } = {}) {
+  _runtimeMetadataPatch() {
+    return runtimeMetadataPatch(this.runtimeMetadata);
+  }
+
+  async setRuntimeMetadata(metadata = null, { updateRun = true } = {}) {
+    const normalized = normalizeRuntimeMetadata(metadata);
+    if (!normalized) return;
+    this.runtimeMetadata = mergeRuntimeMetadata(this.runtimeMetadata, normalized);
+    if (updateRun && this.runNodeId) {
+      await this._updateNodePayload(this.runNodeId, this._runtimeMetadataPatch());
+    }
+  }
+
+  async updateRunMetadata(metadata = null) {
+    await this.setRuntimeMetadata(metadata, { updateRun: true });
+  }
+
+  async startRun({ userMessageNodeId = "", userText = "", metadata = null } = {}) {
     if (!this.isEnabled()) return null;
     if (this.runNodeId) return { id: this.runNodeId };
+    await this.setRuntimeMetadata(metadata, { updateRun: false });
     const startedAt = nowIso();
     const payload = {
       run_id: this.runId,
@@ -191,6 +396,7 @@ export class GocExecutionGraphRecorder {
       ended_at: null,
       user_message_node_id: String(userMessageNodeId || "").trim() || undefined,
       user_message_preview: clipPreview(userText, 300) || undefined,
+      ...this._runtimeMetadataPatch(),
       ...this._sharedContextPayload(),
     };
     const run = await this._createNode("Run", {
@@ -221,8 +427,9 @@ export class GocExecutionGraphRecorder {
     });
   }
 
-  async queueMainSteps(actions = []) {
+  async queueMainSteps(actions = [], { metadata = null } = {}) {
     if (!this.isEnabled()) return;
+    await this.setRuntimeMetadata(metadata, { updateRun: true });
     const rows = Array.isArray(actions) ? actions : [];
     let previousStepNodeId = "";
     for (let i = 0; i < rows.length; i += 1) {
@@ -232,6 +439,10 @@ export class GocExecutionGraphRecorder {
       const stepId = `step_${randomUUID()}`;
       const goal = actionGoal(action);
       const agentId = actionAgentId(action);
+      const runtimeRolePatch = runtimeRolePatchFromAgent(runtimeAgentForAction(
+        action,
+        this.runtimeMetadata?.runtime_team_snapshot || null
+      ));
       const payload = {
         run_id: this.runId,
         step_id: stepId,
@@ -247,6 +458,8 @@ export class GocExecutionGraphRecorder {
         lens_spec: action?.lens && typeof action.lens === "object"
           ? action.lens
           : { mode: "shared_only" },
+        ...runtimeRolePatch,
+        ...this._runtimeMetadataPatch(),
         ...this._sharedContextPayload(),
       };
       const created = await this._createNode("Step", {
@@ -373,6 +586,10 @@ export class GocExecutionGraphRecorder {
       const childGoal = String(child.goal || child.prompt || child.task || "").trim();
       if (!childAgentId || !childGoal) continue;
       const childStepId = `step_${randomUUID()}`;
+      const childRuntimeRolePatch = runtimeRolePatchFromAgent(runtimeAgentForAction(
+        { type: "run_agent", agent_id: childAgentId, inputs: child.inputs || {} },
+        this.runtimeMetadata?.runtime_team_snapshot || null
+      ));
       const payload = {
         run_id: this.runId,
         step_id: childStepId,
@@ -389,6 +606,8 @@ export class GocExecutionGraphRecorder {
         lens_spec: child.lens && typeof child.lens === "object"
           ? child.lens
           : { mode: "shared_only" },
+        ...childRuntimeRolePatch,
+        ...this._runtimeMetadataPatch(),
         ...this._sharedContextPayload(),
       };
       const childNode = await this._createNode("Step", {
@@ -433,6 +652,7 @@ export class GocExecutionGraphRecorder {
       started_at: null,
       ended_at: null,
       error: null,
+      ...this._runtimeMetadataPatch(),
       ...this._sharedContextPayload(),
     };
     const joinNode = await this._createNode("Step", {

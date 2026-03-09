@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import { GocContextEngine } from "../src/context_engine/goc_engine.js";
 
 function createFakeClient() {
+  const state = {
+    resources: [],
+    edges: [],
+  };
   return {
+    state,
     async getCompiledContextWithMeta() {
       return {
         text: "compiled-context",
@@ -35,6 +40,14 @@ function createFakeClient() {
       return { ok: true };
     },
     async deactivateNodes() {
+      return { ok: true };
+    },
+    async createResource(threadId, payload = {}) {
+      state.resources.push({ threadId, payload });
+      return { id: `res_${state.resources.length}` };
+    },
+    async createEdge(threadId, fromId, toId, edgeType) {
+      state.edges.push({ threadId, fromId, toId, edgeType });
       return { ok: true };
     },
   };
@@ -77,4 +90,46 @@ test("goc_engine lens handling follows shared domain normalization", async () =>
 
   assert.equal(defaultPrepared.meta.lensSpec.mode, "shared_only");
   assert.equal(defaultPrepared.meta.lensSpec.budget_tokens, 900);
+});
+
+test("goc_engine recordMeta persists additive metadata to GOC when run/step info exists", async () => {
+  const fakeClient = createFakeClient();
+  const engine = new GocContextEngine({
+    client: fakeClient,
+    runtime: {
+      map: { threadId: "thread_2", ctxSharedId: "ctx_shared_2" },
+      jobConfig: {},
+    },
+  });
+
+  await engine.recordMeta({
+    jobId: "job_meta",
+    chatId: "chat_meta",
+    agentId: "coder",
+    stepKind: "agent",
+    goal: "implement",
+    runMeta: {
+      runId: "run_meta_1",
+      threadId: "thread_2",
+      sharedContextSetId: "ctx_shared_2",
+      stepNodeId: "step_node_1",
+      runtimeTeamSnapshot: {
+        team_plan: { mode: "run", roles: [] },
+        runtime_agents: [],
+        generated_at: "2026-03-10T00:00:00.000Z",
+        source: "team_builder",
+      },
+    },
+    meta: {
+      lensSpec: { mode: "shared_only", budget_tokens: 900 },
+      estimatedTokens: 120,
+    },
+  });
+
+  assert.equal(fakeClient.state.resources.length, 1);
+  assert.equal(fakeClient.state.resources[0].threadId, "thread_2");
+  assert.equal(fakeClient.state.resources[0].payload.resource_kind, "context_meta");
+  assert.ok(fakeClient.state.resources[0].payload.payload_json.runtime_team_snapshot);
+  assert.equal(fakeClient.state.edges.length, 1);
+  assert.equal(fakeClient.state.edges[0].edgeType, "HAS_PART");
 });
