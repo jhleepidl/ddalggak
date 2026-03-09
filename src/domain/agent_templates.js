@@ -1,0 +1,161 @@
+import crypto from "node:crypto";
+import { normalizeLensSpec } from "./lens.js";
+import { normalizeProviderName, normalizeStringList } from "../shared/normalize.js";
+
+const DEFAULT_ROLE_BY_ID = {
+  planner: "planner",
+  researcher: "researcher",
+  coder: "coder",
+  reviewer: "reviewer",
+  verifier: "reviewer",
+  router: "planner",
+};
+
+const DEFAULT_CAPABILITY_TAGS = {
+  planner: ["planning", "routing", "prioritization"],
+  researcher: ["research", "analysis", "risk_assessment"],
+  coder: ["implementation", "coding", "refactoring"],
+  reviewer: ["review", "qa", "verification"],
+  messenger: ["communication", "summary"],
+  context_curator: ["context", "memory", "curation"],
+};
+
+function inferRoleType(raw = {}) {
+  const explicit = String(raw.role_type || raw.roleType || "").trim().toLowerCase();
+  if (explicit) return explicit;
+  const id = String(raw.id || raw.agent_id || raw.agentId || "").trim().toLowerCase();
+  if (id && DEFAULT_ROLE_BY_ID[id]) return DEFAULT_ROLE_BY_ID[id];
+  const systemKey = String(raw.system_key || raw.systemKey || "").trim().toLowerCase();
+  if (systemKey && DEFAULT_ROLE_BY_ID[systemKey]) return DEFAULT_ROLE_BY_ID[systemKey];
+  const provider = normalizeProviderName(raw.provider || raw.model || "gemini");
+  if (provider === "codex") return "coder";
+  return "researcher";
+}
+
+function inferCapabilityTags(raw = {}, roleType = "") {
+  const explicit = normalizeStringList(raw.capability_tags ?? raw.capabilityTags ?? [], {
+    max: 32,
+    lower: true,
+  });
+  if (explicit.length > 0) return explicit;
+
+  const fromTools = normalizeStringList(raw.tools ?? raw.tool_ids ?? raw.toolIds ?? [], {
+    max: 24,
+    lower: true,
+  });
+  const base = DEFAULT_CAPABILITY_TAGS[roleType] || [];
+  return normalizeStringList([...base, ...fromTools], { max: 32, lower: true });
+}
+
+export function normalizeAgentTemplate(raw = {}) {
+  const row = raw && typeof raw === "object" ? raw : {};
+  const id = String(row.id || row.agent_id || row.agentId || "").trim().toLowerCase();
+  if (!id) return null;
+
+  const provider = normalizeProviderName(row.provider || row.model || "gemini");
+  const model = String(row.model || provider).trim() || provider;
+  const roleType = inferRoleType(row);
+  const tools = normalizeStringList(row.tools ?? row.tool_ids ?? row.toolIds ?? [], {
+    max: 32,
+    lower: true,
+  });
+
+  const template = {
+    id,
+    name: String(row.name || row.title || id).trim() || id,
+    role_type: roleType,
+    description: String(row.description || "").trim(),
+    capability_tags: inferCapabilityTags(row, roleType),
+    provider,
+    model,
+    prompt: String(
+      row.prompt
+      || row.base_prompt
+      || row.basePrompt
+      || row.system_prompt
+      || row.systemPrompt
+      || row.instruction
+      || ""
+    ).trim(),
+    tools,
+    meta: row.meta && typeof row.meta === "object" ? row.meta : {},
+  };
+
+  if (!template.meta.legacy && (row.system_key || row.systemKey)) {
+    template.meta = {
+      ...template.meta,
+      system_key: String(row.system_key || row.systemKey || "").trim().toLowerCase(),
+    };
+  }
+
+  return template;
+}
+
+export function normalizeLegacyAgentToTemplate(raw = {}) {
+  const template = normalizeAgentTemplate(raw);
+  if (!template) return null;
+  return {
+    ...template,
+    meta: {
+      ...(template.meta || {}),
+      legacy: true,
+      legacy_id: String(raw.id || raw.agent_id || raw.agentId || "").trim().toLowerCase() || undefined,
+    },
+  };
+}
+
+export function normalizeAgentRegistryToTemplates(registry = {}) {
+  const rows = Array.isArray(registry?.agents) ? registry.agents : [];
+  const templates = [];
+  const byId = new Map();
+  for (const row of rows) {
+    const template = normalizeLegacyAgentToTemplate(row);
+    if (!template) continue;
+    if (byId.has(template.id)) continue;
+    byId.set(template.id, template);
+    templates.push(template);
+  }
+  return {
+    templates,
+    byId,
+  };
+}
+
+export function createRuntimeAgentInstance({
+  template = null,
+  templateId = "",
+  roleLabel = "",
+  assignedGoal = "",
+  lensSpec = null,
+  status = "ready",
+  capabilityTags = [],
+  provider = "",
+  model = "",
+} = {}) {
+  const tpl = template && typeof template === "object" ? template : null;
+  const cleanTemplateId = String(templateId || tpl?.id || "").trim().toLowerCase();
+  const cleanProvider = String(provider || tpl?.provider || "gemini").trim().toLowerCase() || "gemini";
+  const cleanModel = String(model || tpl?.model || cleanProvider).trim() || cleanProvider;
+  const cleanRoleLabel = String(roleLabel || tpl?.role_type || tpl?.name || cleanTemplateId || "runtime_role").trim();
+  const cleanCapabilityTags = normalizeStringList(
+    capabilityTags.length > 0 ? capabilityTags : (tpl?.capability_tags || []),
+    { max: 32, lower: true }
+  );
+
+  const rawStatus = String(status || "ready").trim().toLowerCase();
+  const instanceStatus = ["ready", "running", "done", "error", "disabled"].includes(rawStatus)
+    ? rawStatus
+    : "ready";
+
+  return {
+    instance_id: `inst_${Date.now().toString(36)}_${crypto.randomBytes(4).toString("hex")}`,
+    template_id: cleanTemplateId,
+    role_label: cleanRoleLabel,
+    assigned_goal: String(assignedGoal || "").trim() || undefined,
+    capability_tags: cleanCapabilityTags,
+    provider: cleanProvider,
+    model: cleanModel,
+    lens_spec: normalizeLensSpec(lensSpec || {}),
+    status: instanceStatus,
+  };
+}

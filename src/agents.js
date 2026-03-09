@@ -1,11 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
+import { normalizeProviderName, normalizeStringList } from "./shared/normalize.js";
+import {
+  normalizeAgentTemplate,
+  normalizeLegacyAgentToTemplate,
+} from "./domain/agent_templates.js";
 
 const DEFAULT_AGENTS = [
   {
     id: "planner",
     name: "Planner",
+    role_type: "planner",
     description: "상위 의사결정/다음 단계 계획 수립",
+    capability_tags: ["planning", "routing", "prioritization"],
     provider: "chatgpt",
     model: "chatgpt",
     prompt: [
@@ -17,7 +24,9 @@ const DEFAULT_AGENTS = [
   {
     id: "coder",
     name: "Coder",
+    role_type: "coder",
     description: "코드 구현/수정 담당",
+    capability_tags: ["implementation", "coding", "refactor"],
     provider: "codex",
     model: "codex",
     prompt: [
@@ -29,7 +38,9 @@ const DEFAULT_AGENTS = [
   {
     id: "researcher",
     name: "Researcher",
+    role_type: "researcher",
     description: "조사/리스크 분석 담당",
+    capability_tags: ["research", "analysis", "risk_assessment"],
     provider: "gemini",
     model: "gemini",
     prompt: [
@@ -41,7 +52,9 @@ const DEFAULT_AGENTS = [
   {
     id: "reviewer",
     name: "Reviewer",
+    role_type: "reviewer",
     description: "변경 검토/회귀 위험 점검",
+    capability_tags: ["review", "qa", "verification"],
     provider: "gemini",
     model: "gemini",
     prompt: [
@@ -52,30 +65,30 @@ const DEFAULT_AGENTS = [
   },
 ];
 
-const PROVIDER_ALIASES = {
-  gpt: "chatgpt",
-  openai: "chatgpt",
-  codex: "codex",
-  gemini: "gemini",
-  chatgpt: "chatgpt",
-};
-
-function normalizeProvider(raw) {
-  const key = String(raw || "").trim().toLowerCase();
-  return PROVIDER_ALIASES[key] || "gemini";
-}
-
 function normalizeAgent(raw) {
   if (!raw || typeof raw !== "object") return null;
   const id = String(raw.id || "").trim().toLowerCase();
   if (!id) return null;
+  const provider = normalizeProviderName(raw.provider || raw.model || "gemini");
+  const roleType = String(raw.role_type || raw.roleType || id).trim().toLowerCase() || id;
+  const capabilityTags = normalizeStringList(raw.capability_tags ?? raw.capabilityTags ?? [], {
+    max: 32,
+    lower: true,
+  });
+  const tools = normalizeStringList(raw.tools ?? raw.tool_ids ?? raw.toolIds ?? [], {
+    max: 32,
+    lower: true,
+  });
   return {
     id,
     name: String(raw.name || id).trim(),
+    role_type: roleType,
     description: String(raw.description || "").trim(),
-    provider: normalizeProvider(raw.provider),
-    model: String(raw.model || raw.provider || "").trim() || normalizeProvider(raw.provider),
+    capability_tags: capabilityTags,
+    provider,
+    model: String(raw.model || raw.provider || "").trim() || provider,
     prompt: String(raw.prompt || "").trim(),
+    tools,
     meta: raw.meta && typeof raw.meta === "object" ? raw.meta : {},
   };
 }
@@ -117,8 +130,20 @@ export function loadAgents() {
   }
 
   const agents = dedupeById(loaded.length > 0 ? loaded : defaults);
+  const templates = dedupeById(
+    agents
+      .map((agent) => normalizeLegacyAgentToTemplate(agent))
+      .filter(Boolean)
+  );
   const byId = new Map(agents.map((agent) => [agent.id, agent]));
-  return { path: registryPath, agents, byId };
+  const templatesById = new Map(templates.map((template) => [template.id, template]));
+  return {
+    path: registryPath,
+    agents,
+    byId,
+    templates,
+    templatesById,
+  };
 }
 
 export function getAgent(agentId, registry = null) {
@@ -127,3 +152,25 @@ export function getAgent(agentId, registry = null) {
   return reg.byId.get(key) || null;
 }
 
+export function loadAgentTemplates(registry = null) {
+  const reg = registry || loadAgents();
+  const templates = Array.isArray(reg.templates)
+    ? reg.templates
+    : (Array.isArray(reg.agents)
+      ? reg.agents.map((agent) => normalizeAgentTemplate(agent)).filter(Boolean)
+      : []);
+  const byId = reg.templatesById instanceof Map
+    ? reg.templatesById
+    : new Map(templates.map((template) => [template.id, template]));
+  return {
+    path: reg.path,
+    templates,
+    byId,
+  };
+}
+
+export function getAgentTemplate(agentId, registry = null) {
+  const reg = loadAgentTemplates(registry || loadAgents());
+  const key = String(agentId || "").trim().toLowerCase();
+  return reg.byId.get(key) || null;
+}

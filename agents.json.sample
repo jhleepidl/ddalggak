@@ -3,34 +3,49 @@
     {
       "id": "planner",
       "name": "Planner",
+      "role_type": "planner",
       "description": "High-level planning and prioritization",
+      "capability_tags": ["planning", "routing", "prioritization"],
       "provider": "chatgpt",
       "model": "chatgpt",
-      "prompt": "Role: planner. Decide the next minimal actions and explain tradeoffs briefly."
+      "prompt": "Role: planner. Decide the next minimal actions and explain tradeoffs briefly.",
+      "tools": [],
+      "meta": {
+        "team_default": true
+      }
     },
     {
       "id": "coder",
       "name": "Coder",
+      "role_type": "coder",
       "description": "Implementation agent",
+      "capability_tags": ["implementation", "coding", "refactor"],
       "provider": "codex",
       "model": "codex",
-      "prompt": "Role: coder. Make precise code changes and summarize impact by file."
+      "prompt": "Role: coder. Make precise code changes and summarize impact by file.",
+      "tools": []
     },
     {
       "id": "researcher",
       "name": "Researcher",
+      "role_type": "researcher",
       "description": "Research and risk analysis",
+      "capability_tags": ["research", "analysis", "risk_assessment"],
       "provider": "gemini",
       "model": "gemini",
-      "prompt": "Role: researcher. Focus on constraints, risks, and validation checklist."
+      "prompt": "Role: researcher. Focus on constraints, risks, and validation checklist.",
+      "tools": []
     },
     {
       "id": "reviewer",
       "name": "Reviewer",
+      "role_type": "reviewer",
       "description": "Regression and quality review",
+      "capability_tags": ["review", "qa", "verification"],
       "provider": "gemini",
       "model": "gemini",
-      "prompt": "Role: reviewer. Prioritize bugs, regressions, and missing tests."
+      "prompt": "Role: reviewer. Prioritize bugs, regressions, and missing tests.",
+      "tools": []
     }
   ]
 }

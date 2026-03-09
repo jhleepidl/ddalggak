@@ -13,8 +13,29 @@ import { runCodexExec } from "./src/codex.js";
 import { runGeminiPrompt } from "./src/gemini.js";
 import { OrchestratorMemory } from "./src/settings.js";
 import { orchestratorNotes, buildChatGPTNextStepPrompt } from "./src/prompts.js";
-import { clip, chunk, extractCodexInstruction, extractJsonPlan } from "./src/textutil.js";
+import { clip, extractCodexInstruction, extractJsonPlan } from "./src/textutil.js";
 import { loadAgents, getAgent } from "./src/agents.js";
+import {
+  parseAutoSuggestDecision as parseAutoSuggestDecisionShared,
+  parseJsonObjectFromText as parseJsonObjectFromTextShared,
+} from "./src/shared/json_extract.js";
+import {
+  parseRouterPlan as parseRouterPlanDomain,
+  sanitizeSupervisorRoutePlan as sanitizeSupervisorRoutePlanDomain,
+  normalizeForceMode as normalizeForceModeDomain,
+} from "./src/domain/route_plan.js";
+import {
+  normalizeLensSpec as normalizeLensSpecDomain,
+  defaultLensSpecForAgent as defaultLensSpecForAgentDomain,
+  resolveEffectiveLensSpec as resolveEffectiveLensSpecDomain,
+  dedupeNodeIds as dedupeLensNodeIds,
+} from "./src/domain/lens.js";
+import { buildRuntimeOrchestration, createDefaultRunRoute } from "./src/application/orchestrator.js";
+import {
+  sendLong as sendLongAdapter,
+  sendTextWithOptionalGocButton as sendTextWithOptionalGocButtonAdapter,
+} from "./src/adapters/telegram/send.js";
+import { createTelegramCommandHandler } from "./src/adapters/telegram/commands.js";
 import {
   loadAgentsFromGoc,
   createAgentProfile,
@@ -1216,7 +1237,7 @@ function convoToText(convo) {
 }
 
 async function sendLong(bot, chatId, text) {
-  for (const part of chunk(text, 3800)) await bot.sendMessage(chatId, part);
+  return sendLongAdapter(bot, chatId, text);
 }
 
 function ensureCommandOk(name, result) {
@@ -1554,134 +1575,16 @@ function formatAgentMemorySummary() {
   ].join("\n");
 }
 
-function findFirstJsonObject(text) {
-  const s = String(text || "");
-  const start = s.indexOf("{");
-  if (start < 0) return null;
-
-  let depth = 0;
-  let inStr = false;
-  let escaped = false;
-  for (let i = start; i < s.length; i += 1) {
-    const ch = s[i];
-    if (inStr) {
-      if (escaped) {
-        escaped = false;
-      } else if (ch === "\\") {
-        escaped = true;
-      } else if (ch === "\"") {
-        inStr = false;
-      }
-      continue;
-    }
-    if (ch === "\"") {
-      inStr = true;
-      continue;
-    }
-    if (ch === "{") depth += 1;
-    if (ch === "}") {
-      depth -= 1;
-      if (depth === 0) return s.slice(start, i + 1);
-    }
-  }
-  return null;
-}
-
 function parseAutoSuggestDecision(raw) {
-  const text = String(raw || "");
-  const candidates = [];
-
-  const fenced = text.match(/```json\s*([\s\S]*?)```/i) || text.match(/```\s*([\s\S]*?)```/i);
-  if (fenced?.[1]) candidates.push(fenced[1].trim());
-  candidates.push(text.trim());
-
-  for (const c of candidates) {
-    if (!c) continue;
-    const direct = (() => { try { return JSON.parse(c); } catch { return null; } })();
-    if (direct && typeof direct === "object") return direct;
-
-    const objText = findFirstJsonObject(c);
-    if (!objText) continue;
-    try {
-      const parsed = JSON.parse(objText);
-      if (parsed && typeof parsed === "object") return parsed;
-    } catch {}
-  }
-  return null;
+  return parseAutoSuggestDecisionShared(raw);
 }
 
 function parseJsonObjectFromText(raw) {
-  const text = String(raw || "");
-  const candidates = [];
-  const fenced = text.match(/```json\s*([\s\S]*?)```/i) || text.match(/```\s*([\s\S]*?)```/i);
-  if (fenced?.[1]) candidates.push(fenced[1].trim());
-  candidates.push(text.trim());
-
-  for (const c of candidates) {
-    if (!c) continue;
-    try {
-      const parsed = JSON.parse(c);
-      if (parsed && typeof parsed === "object") return parsed;
-    } catch {}
-    const objText = findFirstJsonObject(c);
-    if (!objText) continue;
-    try {
-      const parsed = JSON.parse(objText);
-      if (parsed && typeof parsed === "object") return parsed;
-    } catch {}
-  }
-  return null;
-}
-
-function normalizeRouterAction(raw) {
-  const type = String(raw?.type || "").trim().toLowerCase();
-  if (!type) return null;
-
-  if (type === "agent_run") {
-    const agent = resolveAgentId(raw.agent || raw.agentId || raw.role);
-    const prompt = String(raw.prompt || raw.task || raw.instruction || "").trim();
-    const inputs = raw.inputs && typeof raw.inputs === "object" ? raw.inputs : {};
-    if (!agent || !prompt) return null;
-    return { type: "agent_run", agent, prompt, inputs };
-  }
-
-  if (type === "gemini" || type === "gemini_research") {
-    const prompt = String(raw.prompt || raw.query || raw.task || "").trim();
-    if (!prompt) return null;
-    return { type: "agent_run", agent: "researcher", prompt, inputs: {} };
-  }
-
-  if (type === "codex" || type === "codex_implement") {
-    const instruction = String(raw.instruction || raw.prompt || raw.task || "").trim();
-    if (!instruction) return null;
-    return { type: "agent_run", agent: "coder", prompt: instruction, inputs: {} };
-  }
-
-  if (type === "git_summary") return { type: "git_summary" };
-
-  if (type === "chatgpt_prompt") {
-    const question = String(raw.question || raw.prompt || raw.task || "").trim();
-    return { type: "chatgpt_prompt", question };
-  }
-
-  if (type === "chatgpt") {
-    const prompt = String(raw.question || raw.prompt || raw.task || "").trim();
-    if (!prompt) return null;
-    return { type: "agent_run", agent: "planner", prompt, inputs: {} };
-  }
-
-  return null;
+  return parseJsonObjectFromTextShared(raw);
 }
 
 function parseRouterPlan(raw) {
-  const parsed = parseJsonObjectFromText(raw);
-  if (!parsed || !Array.isArray(parsed.actions)) return null;
-  const actions = parsed.actions.map(normalizeRouterAction).filter(Boolean);
-  if (actions.length === 0) return null;
-  return {
-    actions,
-    reason: String(parsed.reason || "").trim() || "(no reason)",
-  };
+  return parseRouterPlanDomain(raw, { resolveAgentId });
 }
 
 // concurrency gate
@@ -1936,23 +1839,7 @@ function getGoalFromResearch(jobId) {
 }
 
 function defaultRouteFor(mode, goal, seedInstruction = "") {
-  if (mode === "continue") {
-    return {
-      actions: [
-        { type: "agent_run", agent: "coder", prompt: seedInstruction || "run/shared 문서를 반영해 CODEX_WORKSPACE_ROOT 코드 변경을 진행하라.", inputs: {} },
-        { type: "git_summary" },
-      ],
-      reason: "fallback: continue default",
-    };
-  }
-  return {
-    actions: [
-      { type: "agent_run", agent: "researcher", prompt: goal, inputs: {} },
-      { type: "agent_run", agent: "coder", prompt: goal, inputs: {} },
-      { type: "git_summary" },
-    ],
-    reason: "fallback: run default",
-  };
+  return createDefaultRunRoute(mode, goal, seedInstruction);
 }
 
 async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal = null }) {
@@ -2016,33 +1903,46 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
       { jobId, signal, label: "agent_router" }
     );
     const out = (r.stdout || r.stderr || "").trim();
-    if (!r.ok) return defaultRouteFor(mode, goal, seedInstruction);
-
-    const planned = parseRouterPlan(out);
-    if (!planned) return defaultRouteFor(mode, goal, seedInstruction);
-
-    const normalized = [];
-    for (const a of planned.actions) {
-      if (normalized.length >= 4) break;
-      if (a.type === "agent_run") {
-        const agent = resolveAgentId(a.agent || "");
-        const promptText = String(a.prompt || "").trim() || (agent === "coder" ? (seedInstruction || goal) : goal);
-        if (!agent || !promptText) continue;
-        normalized.push({ type: "agent_run", agent, prompt: promptText, inputs: a.inputs && typeof a.inputs === "object" ? a.inputs : {} });
-        continue;
-      }
-      if (a.type === "chatgpt_prompt") {
-        normalized.push({ type: "chatgpt_prompt", question: a.question || "현재 상태에서 다음 단계를 action plan(JSON)으로 제안해줘." });
-        continue;
-      }
-      if (a.type === "git_summary") {
-        normalized.push({ type: "git_summary" });
-      }
-    }
-    if (normalized.length === 0) return defaultRouteFor(mode, goal, seedInstruction);
-    return { actions: normalized, reason: planned.reason };
+    const planned = r.ok ? parseRouterPlan(out) : null;
+    const fallbackRoute = defaultRouteFor(mode, goal, seedInstruction);
+    const orchestration = buildRuntimeOrchestration({
+      mode,
+      goal,
+      seedInstruction,
+      routePlan: planned || fallbackRoute,
+      registry: agentRegistry,
+      preferredRoles: [],
+      maxAgents: 6,
+      resolveAgentId,
+    });
+    return {
+      actions: Array.isArray(orchestration?.route_plan?.actions) && orchestration.route_plan.actions.length > 0
+        ? orchestration.route_plan.actions
+        : fallbackRoute.actions,
+      reason: String(orchestration?.route_plan?.reason || planned?.reason || fallbackRoute.reason || "router route").trim(),
+      team_plan: orchestration?.team_plan || null,
+      runtime_agents: orchestration?.runtime_agents || [],
+    };
   } catch {
-    return defaultRouteFor(mode, goal, seedInstruction);
+    const fallbackRoute = defaultRouteFor(mode, goal, seedInstruction);
+    const orchestration = buildRuntimeOrchestration({
+      mode,
+      goal,
+      seedInstruction,
+      routePlan: fallbackRoute,
+      registry: agentRegistry,
+      preferredRoles: [],
+      maxAgents: 6,
+      resolveAgentId,
+    });
+    return {
+      actions: Array.isArray(orchestration?.route_plan?.actions) && orchestration.route_plan.actions.length > 0
+        ? orchestration.route_plan.actions
+        : fallbackRoute.actions,
+      reason: String(orchestration?.route_plan?.reason || fallbackRoute.reason || "router fallback").trim(),
+      team_plan: orchestration?.team_plan || null,
+      runtime_agents: orchestration?.runtime_agents || [],
+    };
   }
 }
 
@@ -2269,7 +2169,7 @@ const READ_ONLY_CONTROL_ACTION_TYPES = new Set([
 ]);
 
 function normalizeForceMode(raw) {
-  return String(raw || "").trim().toLowerCase() === "work" ? "work" : "normal";
+  return normalizeForceModeDomain(raw);
 }
 
 function isWorkLikeMessage(message) {
@@ -2934,161 +2834,21 @@ function sanitizeSupervisorRoutePlan(
     forceMode = "normal",
   } = {}
 ) {
-  const cleanForceMode = normalizeForceMode(forceMode);
-  let done = routePlan?.done === true;
-  let awaitUser = routePlan?.await_user === true || routePlan?.awaitUser === true;
-  let deliverables = normalizeStringList(routePlan?.deliverables, { max: 24 });
-  let completedDeliverables = normalizeStringList(
-    routePlan?.completed_deliverables ?? routePlan?.completedDeliverables,
-    { max: 24 }
-  );
-  const followupHint = String((routePlan?.followup_hint ?? routePlan?.followupHint) || "").trim();
-  const sourceActions = Array.isArray(routePlan?.actions) ? routePlan.actions : [];
-  const enabledAgentSet = new Set(
-    (Array.isArray(agents) ? agents : [])
-      .map((row) => String(row?.id || "").trim().toLowerCase())
-      .filter(Boolean)
-  );
-  const normalizeActionAgentId = (rawAction = {}) => String(
-    rawAction?.agent_id
-    || rawAction?.agentId
-    || rawAction?.agent
-    || ""
-  ).trim().toLowerCase();
-  const filtered = [];
-  let droppedDisabledAgentActions = 0;
-
-  for (const action of sourceActions) {
-    if (!action || typeof action !== "object") continue;
-    if (!allowReadOnlyControl && isReadOnlyControlAction(action)) continue;
-    if (cleanForceMode === "work" && isMutatingAction(action)) continue;
-
-    const type = String(action.type || "").trim().toLowerCase();
-    if (type === "run_agent") {
-      const targetAgentId = normalizeActionAgentId(action);
-      if (!targetAgentId || !enabledAgentSet.has(targetAgentId)) {
-        droppedDisabledAgentActions += 1;
-        continue;
-      }
-      filtered.push({
-        ...action,
-        agent_id: targetAgentId,
-      });
-      continue;
-    }
-
-    if (type === "spawn_agents") {
-      const children = Array.isArray(action.agents) ? action.agents : [];
-      const nextChildren = [];
-      for (const child of children) {
-        const childAgentId = normalizeActionAgentId(child);
-        const childGoal = String(child?.goal || child?.prompt || child?.task || "").trim();
-        if (!childAgentId || !childGoal) continue;
-        if (!enabledAgentSet.has(childAgentId)) {
-          droppedDisabledAgentActions += 1;
-          continue;
-        }
-        nextChildren.push({
-          ...child,
-          agent_id: childAgentId,
-        });
-        if (nextChildren.length >= 8) break;
-      }
-      if (nextChildren.length === 0) continue;
-      filtered.push({
-        ...action,
-        agents: nextChildren,
-      });
-      continue;
-    }
-
-    filtered.push(action);
-  }
-
-  let actions = filtered;
-  let reason = String(routePlan?.reason || "supervisor route").trim() || "supervisor route";
-  if (droppedDisabledAgentActions > 0) {
-    reason = `${reason}; filtered_disabled_agents=${droppedDisabledAgentActions}`;
-  }
-  if (actions.length === 0) {
-    if (!done && !awaitUser && isWorkLikeMessage(message)) {
-      const plannerAvailable = enabledAgentSet.has("planner");
-      const fallbackAgent = plannerAvailable
-        ? "planner"
-        : (pickRuntimeDefaultAgentId(agents) || findDefaultChatAgentId());
-      if (fallbackAgent) {
-        actions = [{
-          type: "run_agent",
-          agent_id: fallbackAgent,
-          goal: `사용자 요청을 계획하고 필요한 agent 작업을 제안/수행: ${String(message || "").trim()}`,
-          risk: "L1",
-        }];
-        reason = `${reason}; empty_actions_work_like_planner_fallback`;
-        done = false;
-      } else {
-        actions = [{
-          type: "summarize",
-          hint: "작업 실행 가능한 enabled agent가 없어 summarize로 종료",
-          risk: "L0",
-        }];
-        reason = `${reason}; no_enabled_agents_summary_fallback`;
-      }
-    } else if (!done && !awaitUser) {
-      const fallbackAgent = pickRuntimeDefaultAgentId(agents) || findDefaultChatAgentId();
-      if (fallbackAgent) {
-        actions = [{
-          type: "run_agent",
-          agent_id: fallbackAgent,
-          goal: String(message || "").trim() || "현재 우선순위 작업을 진행해줘.",
-          risk: "L1",
-        }];
-        reason = `${reason}; filtered_to_work_fallback`;
-        done = false;
-      } else {
-        actions = [{
-          type: "summarize",
-          hint: "작업 실행 가능한 enabled agent가 없어 summarize로 종료",
-          risk: "L0",
-        }];
-        reason = `${reason}; filtered_to_summary_fallback`;
-      }
-    }
-  }
-
-  if (deliverables.length === 0) {
-    deliverables = extractDeliverablesFromMessage(message);
-  }
-  completedDeliverables = completedDeliverables.filter((entry) => deliverables.length === 0
-    || deliverables.some((item) => item.toLowerCase() === String(entry || "").trim().toLowerCase()));
-
-  if (!awaitUser && !done && isCodeNotebookRequest(message)) {
-    const coderAgentId = pickCoderAgentId(agents);
-    if (coderAgentId && !hasCoderDelegation(actions, coderAgentId)) {
-      const coderAction = {
-        type: "run_agent",
-        agent_id: coderAgentId,
-        goal: `요청된 코드/노트북 산출물을 구현: ${String(message || "").trim()}`,
-        risk: "L3",
-      };
-      if (actions.length < 4) {
-        actions = [...actions, coderAction];
-      } else {
-        actions = [...actions.slice(0, 3), coderAction];
-      }
-      reason = `${reason}; forced_coder_for_code_deliverable`;
-      done = false;
-    }
-  }
-  return {
-    reason,
-    actions: actions.slice(0, 4),
-    final_response_style: routePlan?.final_response_style || "concise",
-    done,
-    await_user: awaitUser,
-    deliverables,
-    completed_deliverables: completedDeliverables,
-    followup_hint: followupHint || undefined,
-  };
+  return sanitizeSupervisorRoutePlanDomain(routePlan, {
+    message,
+    agents,
+    allowReadOnlyControl,
+    forceMode,
+    isReadOnlyControlAction,
+    isMutatingAction,
+    isWorkLikeMessage,
+    isCodeNotebookRequest,
+    pickRuntimeDefaultAgentId,
+    findDefaultChatAgentId,
+    pickCoderAgentId,
+    hasCoderDelegation,
+    extractDeliverablesFromMessage,
+  });
 }
 
 const AGENT_DEDUPE_STOPWORDS = new Set([
@@ -5513,100 +5273,27 @@ function buildSupervisorExecutionCallbacks({
   }
 
   function normalizeLensSpec(rawLens, { fallbackBudget = 1200 } = {}) {
-    const row = rawLens && typeof rawLens === "object" ? rawLens : {};
-    const query = String(row.query || "").trim();
-    const addNodeSource = Array.isArray(row.add_node_ids)
-      ? row.add_node_ids
-      : (Array.isArray(row.addNodeIds) ? row.addNodeIds : []);
-    const addNodeIds = Array.isArray(addNodeSource)
-      ? addNodeSource.map((entry) => String(entry || "").trim()).filter(Boolean)
-      : [];
-    const removeNodeSource = Array.isArray(row.remove_node_ids)
-      ? row.remove_node_ids
-      : (Array.isArray(row.removeNodeIds) ? row.removeNodeIds : []);
-    const removeNodeIds = Array.isArray(removeNodeSource)
-      ? removeNodeSource.map((entry) => String(entry || "").trim()).filter(Boolean)
-      : [];
-    const modeRaw = String(row.mode || "").trim().toLowerCase();
-    const inferredMode = query
-      ? "unfold_query"
-      : (addNodeIds.length > 0 ? "add_nodes" : (removeNodeIds.length > 0 ? "remove_nodes" : "shared_only"));
-    const mode = ["shared_only", "unfold_query", "add_nodes", "remove_nodes"].includes(modeRaw)
-      ? modeRaw
-      : inferredMode;
-    return {
-      mode,
-      query: query || undefined,
-      add_node_ids: addNodeIds.length > 0 ? addNodeIds : undefined,
-      remove_node_ids: removeNodeIds.length > 0 ? removeNodeIds : undefined,
-      budget_tokens: Number.isFinite(Number(row.budget_tokens))
-        ? Math.max(200, Math.min(12000, Math.floor(Number(row.budget_tokens))))
-        : Math.max(200, Math.min(12000, Math.floor(Number(fallbackBudget) || 1200))),
-      closure_edge_types: Array.isArray(row.closure_edge_types)
-        ? row.closure_edge_types.map((entry) => String(entry || "").trim()).filter(Boolean).slice(0, 16)
-        : undefined,
-      closure_direction: ["both", "forward", "backward"].includes(String(row.closure_direction || "").trim().toLowerCase())
-        ? String(row.closure_direction || "").trim().toLowerCase()
-        : "both",
-      max_closure_nodes: Number.isFinite(Number(row.max_closure_nodes))
-        ? Math.max(10, Math.min(2000, Math.floor(Number(row.max_closure_nodes))))
-        : 180,
-    };
+    return normalizeLensSpecDomain(rawLens, { fallbackBudget });
   }
 
   function dedupeNodeIds(nodeIds = []) {
-    const out = [];
-    const seen = new Set();
-    for (const entry of Array.isArray(nodeIds) ? nodeIds : []) {
-      const id = String(entry || "").trim();
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      out.push(id);
-    }
-    return out;
+    return dedupeLensNodeIds(nodeIds);
   }
 
   function defaultLensSpecForAgent({ agentId = "", goal = "" } = {}) {
-    const cleanAgentId = String(agentId || "").trim().toLowerCase();
-    const query = clip(String(goal || "").trim(), 280) || undefined;
-    if (["planner", "router"].includes(cleanAgentId)) {
-      return {
-        mode: "shared_only",
-        budget_tokens: 900,
-      };
-    }
-    if (cleanAgentId === "researcher") {
-      return {
-        mode: "unfold_query",
-        query: query || "최근 사용자 요구 관련 핵심 맥락",
-        budget_tokens: 1200,
-      };
-    }
-    if (cleanAgentId === "coder") {
-      const artifactIds = dedupeNodeIds(runtime?.recentArtifactNodeIds || []).slice(0, 3);
-      return {
-        mode: "unfold_query",
-        query: query || "코드 변경과 직접 연관된 맥락",
-        add_node_ids: artifactIds.length > 0 ? artifactIds : undefined,
-        budget_tokens: 1400,
-      };
-    }
-    return {
-      mode: "unfold_query",
-      query: query || undefined,
-      budget_tokens: 1200,
-    };
+    return defaultLensSpecForAgentDomain({
+      agentId,
+      goal: clip(String(goal || "").trim(), 280),
+      recentArtifactNodeIds: runtime?.recentArtifactNodeIds || [],
+    });
   }
 
   function resolveEffectiveLensSpec(rawLens, { agentId = "", goal = "" } = {}) {
-    const hasUserLens = !!(rawLens && typeof rawLens === "object" && Object.keys(rawLens).length > 0);
-    const base = hasUserLens
-      ? rawLens
-      : defaultLensSpecForAgent({ agentId, goal });
-    const fallbackBudget = hasUserLens
-      ? Number(rawLens?.budget_tokens)
-      : Number(defaultLensSpecForAgent({ agentId, goal })?.budget_tokens || 1200);
-    return normalizeLensSpec(base, { fallbackBudget });
+    return resolveEffectiveLensSpecDomain(rawLens, {
+      agentId,
+      goal: clip(String(goal || "").trim(), 280),
+      recentArtifactNodeIds: runtime?.recentArtifactNodeIds || [],
+    });
   }
 
   async function getThreadNodeMap(client, { refresh = false } = {}) {
@@ -8170,52 +7857,14 @@ async function sendTextWithOptionalGocButton(
     browserLabel = "Open GoC (Browser)",
   } = {}
 ) {
-  const cleanText = String(text || "").trim();
-  if (!cleanText) return;
-  const cleanMiniAppLink = String(miniAppLink || "").trim();
-  const cleanBrowserLink = String(browserLink || "").trim();
-  if (!cleanMiniAppLink && !cleanBrowserLink) {
-    await sendLong(bot, chatId, cleanText);
-    return;
-  }
-
-  const buttons = [];
-  const hasMiniApp = isHttps(cleanMiniAppLink);
-  const cleanMiniAppLabel = String(miniAppLabel || "Open GoC (Mini App)").trim() || "Open GoC (Mini App)";
-  const cleanBrowserLabel = String(browserLabel || "Open GoC (Browser)").trim() || "Open GoC (Browser)";
-  if (hasMiniApp) {
-    buttons.push({ text: cleanMiniAppLabel, web_app: { url: cleanMiniAppLink } });
-  }
-  if (cleanBrowserLink) {
-    buttons.push({ text: cleanBrowserLabel, url: cleanBrowserLink });
-  } else if (cleanMiniAppLink) {
-    buttons.push({ text: cleanBrowserLabel, url: cleanMiniAppLink });
-  }
-  if (buttons.length === 0) {
-    await sendLong(bot, chatId, cleanText);
-    return;
-  }
-  try {
-    await bot.sendMessage(chatId, cleanText, {
-      reply_markup: {
-        inline_keyboard: [buttons],
-      },
-    });
-  } catch (e) {
-    if (hasMiniApp && isTelegramWebAppHttpsError(e)) {
-      const fallbackText = `${cleanText}\n\nMini App 버튼은 HTTPS만 지원합니다. 지금은 브라우저 링크를 사용하세요.`;
-      const browserOnly = cleanBrowserLink
-        ? [{ text: cleanBrowserLabel, url: cleanBrowserLink }]
-        : [{ text: cleanBrowserLabel, url: cleanMiniAppLink }];
-      await bot.sendMessage(chatId, fallbackText, {
-        reply_markup: {
-          inline_keyboard: [browserOnly],
-        },
-      });
-      return;
-    }
-    throw e;
-  }
+  return sendTextWithOptionalGocButtonAdapter(bot, chatId, text, {
+    miniAppLink,
+    browserLink,
+    miniAppLabel,
+    browserLabel,
+    isHttps,
+    isTelegramWebAppHttpsError,
+  });
 }
 
 async function sendChatStatus(bot, chatId, { telegramUserId = "" } = {}) {
@@ -9388,6 +9037,56 @@ bot.on("callback_query", async (q) => {
   }
 });
 
+const handleTelegramCommand = createTelegramCommandHandler({
+  bot,
+  sendLong,
+  formatRunningJobs,
+  getAwait,
+  clearAwait,
+  setAwait,
+  rememberLastChatJob,
+  resetChatSession,
+  activeJobByChat,
+  lastChatJobByChat,
+  cancelJobExecution,
+  chatSessionStore,
+  memory,
+  formatMemorySummary,
+  formatAgentMemorySummary,
+  sendChatStatus,
+  sendAgentOrToolListQuick,
+  resolveLiveJobIdForChat,
+  parseClampedInt,
+  collectWorkspaceFileEntries,
+  formatWorkspaceFileListText,
+  deliverWorkspaceOutputs,
+  OUTPUT_AUTO_SEND_MAX_FILES,
+  sendWorkspaceFileByRelativePath,
+  formatByteSize,
+  clip,
+  sendContextInfo,
+  parseChatMessageWithFlags,
+  sendRouterAckMessage,
+  chatRunManager,
+  runSupervisorChat,
+  createJob,
+  resetJobAbortController,
+  runWorkspaceDir,
+  loadSupervisorRuntime,
+  decideRunRoute,
+  tracking,
+  actionLabel,
+  executeRoutedPlan,
+  suggestNextPrompt,
+  isCancelledError,
+  getGoalFromResearch,
+  extractCodexInstruction,
+  sendChatGPTPrompt,
+  jobs,
+  approvals,
+  jobAbortControllers,
+});
+
 bot.on("message", async (msg) => {
   const chatId = msg.chat?.id;
   const userId = msg.from?.id;
@@ -9493,481 +9192,8 @@ bot.on("message", async (msg) => {
     return;
   }
 
-  const [cmd, ...rest] = text.split(/\s+/);
-  const args = rest.join(" ").trim();
-
-  if (cmd === "/help") {
-    const sub = String(args || "").trim().toLowerCase();
-    if (sub === "advanced") {
-      await bot.sendMessage(chatId, "Commands:\n- plain text: 기본 /chat(supervisor) 처리\n- /whoami\n- /running\n- /status\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents [registry|public [query]|add <id>|remove <id>|enable <id>|disable <id>]\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
-      return;
-    }
-    await bot.sendMessage(chatId, "Commands:\n- plain text: 대화/작업 지시\n- /context [global]\n- /agents [registry|public [query]|add <id>|remove <id>|enable <id>|disable <id>]\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /status\n- /stop [jobId]\n- /running\n- /whoami\n- /help advanced");
-    return;
-  }
-
-  if (cmd === "/whoami") {
-    await bot.sendMessage(chatId, `chat_id=${chatId}\nuser_id=${userId}`);
-    return;
-  }
-
-  if (cmd === "/running") {
-    await sendLong(bot, chatId, formatRunningJobs(chatId));
-    return;
-  }
-
-  if (cmd === "/stop") {
-    const chatKey = String(chatId);
-    const fromAwait = getAwait(chatId)?.jobId;
-    const targetJobId = args || activeJobByChat.get(chatKey) || fromAwait;
-    if (!targetJobId) {
-      if (lastChatJobByChat.has(chatKey)) {
-        resetChatSession(chatId);
-        await bot.sendMessage(chatId, "✅ 현재 /chat 세션을 초기화했어요.");
-        return;
-      }
-      await bot.sendMessage(chatId, `중단할 jobId를 찾지 못했어요. Usage: /stop <jobId>\n\n${formatRunningJobs(chatId)}`);
-      return;
-    }
-
-    const { aborted, dropped } = cancelJobExecution(targetJobId);
-    if (activeJobByChat.get(chatKey) === String(targetJobId)) activeJobByChat.delete(chatKey);
-    if (fromAwait && String(fromAwait) === String(targetJobId)) clearAwait(chatId);
-    if (lastChatJobByChat.get(chatKey) === String(targetJobId)) lastChatJobByChat.delete(chatKey);
-    chatSessionStore.upsert(chatId, (session) => {
-      if (String(session.jobId || "").trim() && String(session.jobId || "").trim() !== String(targetJobId).trim()) {
-        return session;
-      }
-      return {
-        ...session,
-        interrupt: {
-          requested: true,
-          mode: "cancel",
-          reason: "/stop",
-          ts: new Date().toISOString(),
-        },
-        pending_user_messages: [],
-        pending_approval: null,
-        state: "idle",
-      };
-    });
-
-    if (!aborted && dropped === 0) {
-      await bot.sendMessage(chatId, `중단할 실행이 없어요. (jobId=${targetJobId})\n이미 종료되었거나 큐에 없습니다.\n\n${formatRunningJobs(chatId)}`);
-      return;
-    }
-    await bot.sendMessage(chatId, `⏹️ 중단 요청 완료\njobId=${targetJobId}\n실행중 중단=${aborted}\n큐 제거=${dropped}`);
-    return;
-  }
-
-  if (cmd === "/memory" || cmd === "/settings") {
-    const sub = String(rest[0] || "show").trim().toLowerCase();
-
-    if (sub === "show") {
-      await sendLong(bot, chatId, formatMemorySummary());
-      return;
-    }
-
-    if (sub === "md") {
-      await sendLong(bot, chatId, memory.readMarkdown());
-      return;
-    }
-
-    if (sub === "reset") {
-      memory.reset();
-      await sendLong(bot, chatId, `✅ 메모리를 기본값으로 되돌렸습니다.\n\n${formatMemorySummary()}`);
-      return;
-    }
-
-    if (sub === "policy") {
-      const value = rest.slice(1).join(" ").trim();
-      if (!value) return bot.sendMessage(chatId, "Usage: /memory policy <자연어 프롬프트>");
-      try {
-        memory.setPolicyPrompt(value);
-        await sendLong(bot, chatId, `✅ reflection prompt 업데이트 완료.\n\n${formatMemorySummary()}`);
-      } catch (e) {
-        await bot.sendMessage(chatId, `❌ 업데이트 실패: ${String(e?.message ?? e)}`);
-      }
-      return;
-    }
-
-    if (sub === "routing") {
-      const value = rest.slice(1).join(" ").trim();
-      if (!value) return bot.sendMessage(chatId, "Usage: /memory routing <자연어 프롬프트>");
-      try {
-        memory.setRouterPrompt(value);
-        await sendLong(bot, chatId, `✅ router prompt 업데이트 완료.\n\n${formatMemorySummary()}`);
-      } catch (e) {
-        await bot.sendMessage(chatId, `❌ 업데이트 실패: ${String(e?.message ?? e)}`);
-      }
-      return;
-    }
-
-    if (sub === "role") {
-      const agent = String(rest[1] || "").trim().toLowerCase();
-      const value = rest.slice(2).join(" ").trim();
-      if (!agent || !value) return bot.sendMessage(chatId, "Usage: /memory role <gemini|codex|chatgpt> <자연어 역할>");
-      try {
-        memory.setAgentRole(agent, value);
-        await sendLong(bot, chatId, `✅ ${agent} role 업데이트 완료.\n\n${formatAgentMemorySummary()}`);
-      } catch (e) {
-        await bot.sendMessage(chatId, `❌ role 업데이트 실패: ${String(e?.message ?? e)}`);
-      }
-      return;
-    }
-
-    if (sub === "agents") {
-      await sendLong(bot, chatId, formatAgentMemorySummary());
-      return;
-    }
-
-    if (sub === "note") {
-      const value = rest.slice(1).join(" ").trim();
-      if (!value) return bot.sendMessage(chatId, "Usage: /memory note <메모>");
-      try {
-        memory.addOperatorNote(value);
-        await sendLong(bot, chatId, `✅ operator note 추가 완료.\n\n${formatMemorySummary()}`);
-      } catch (e) {
-        await bot.sendMessage(chatId, `❌ 메모 추가 실패: ${String(e?.message ?? e)}`);
-      }
-      return;
-    }
-
-    if (sub === "lesson") {
-      const value = rest.slice(1).join(" ").trim();
-      if (!value) return bot.sendMessage(chatId, "Usage: /memory lesson <교훈>");
-      try {
-        memory.addRecentLesson(value);
-        await sendLong(bot, chatId, `✅ recent lesson 추가 완료.\n\n${formatMemorySummary()}`);
-      } catch (e) {
-        await bot.sendMessage(chatId, `❌ 교훈 추가 실패: ${String(e?.message ?? e)}`);
-      }
-      return;
-    }
-
-    await bot.sendMessage(chatId, "Usage:\n/memory show\n/memory md\n/memory policy <자연어 프롬프트>\n/memory routing <자연어 프롬프트>\n/memory role <gemini|codex|chatgpt> <자연어 역할>\n/memory agents\n/memory note <메모>\n/memory lesson <교훈>\n/memory reset");
-    return;
-  }
-
-  if (cmd === "/gptdone") {
-    clearAwait(chatId);
-    await bot.sendMessage(chatId, "✅ gpt paste 모드를 종료했어요.");
-    return;
-  }
-
-  if (cmd === "/status") {
-    await sendChatStatus(bot, chatId, { telegramUserId: userId });
-    return;
-  }
-
-  if (cmd === "/agents") {
-    await sendAgentOrToolListQuick(bot, chatId, "agent", args, { telegramUserId: userId });
-    return;
-  }
-
-  if (cmd === "/tools") {
-    await sendAgentOrToolListQuick(bot, chatId, "tool", "", { telegramUserId: userId });
-    return;
-  }
-
-  if (cmd === "/files") {
-    const currentJobId = resolveLiveJobIdForChat(chatId);
-    if (!currentJobId) {
-      await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어요. 먼저 /chat 또는 /run으로 job을 시작해 주세요.");
-      return;
-    }
-    const first = String(rest[0] || "").trim().toLowerCase();
-    const hasScope = first === "uploads" || first === "outputs" || first === "all";
-    const scope = hasScope ? first : "all";
-    const limit = parseClampedInt(hasScope ? rest[1] : rest[0], 20, { min: 1, max: 100 });
-    const entries = collectWorkspaceFileEntries(currentJobId, { scope }).slice(0, limit);
-    await sendLong(
-      bot,
-      chatId,
-      `📂 workspace files\n${formatWorkspaceFileListText(currentJobId, entries, { scope, limit })}`
-    );
-    return;
-  }
-
-  if (cmd === "/outputs") {
-    const currentJobId = resolveLiveJobIdForChat(chatId);
-    if (!currentJobId) {
-      await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어요. 먼저 /chat 또는 /run으로 job을 시작해 주세요.");
-      return;
-    }
-    const mode = String(rest[0] || "").trim().toLowerCase();
-    if (mode === "send") {
-      const sendLimit = parseClampedInt(rest[1], OUTPUT_AUTO_SEND_MAX_FILES, { min: 1, max: 10 });
-      await deliverWorkspaceOutputs(bot, chatId, currentJobId, {
-        replyToMessageId: msg.message_id,
-        maxFiles: sendLimit,
-      });
-      await bot.sendMessage(chatId, `✅ outputs 전송 시도 완료 (limit=${sendLimit})`);
-      return;
-    }
-    const limit = parseClampedInt(rest[0], 20, { min: 1, max: 100 });
-    const entries = collectWorkspaceFileEntries(currentJobId, { scope: "outputs" }).slice(0, limit);
-    await sendLong(
-      bot,
-      chatId,
-      `📦 outputs\n${formatWorkspaceFileListText(currentJobId, entries, { scope: "outputs", limit })}`
-    );
-    return;
-  }
-
-  if (cmd === "/sendfile") {
-    const currentJobId = resolveLiveJobIdForChat(chatId);
-    if (!currentJobId) {
-      await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어요. 먼저 /chat 또는 /run으로 job을 시작해 주세요.");
-      return;
-    }
-    const relativePath = String(args || "").trim();
-    if (!relativePath) {
-      await bot.sendMessage(chatId, "Usage: /sendfile <relative_path>");
-      return;
-    }
-    try {
-      const sent = await sendWorkspaceFileByRelativePath(bot, chatId, currentJobId, relativePath, {
-        replyToMessageId: msg.message_id,
-      });
-      await bot.sendMessage(
-        chatId,
-        `✅ 파일 전송 완료\njob_id=${currentJobId}\npath=${sent.rel}\nsize=${formatByteSize(sent.size)}`
-      );
-    } catch (e) {
-      await bot.sendMessage(chatId, `❌ /sendfile 실패: ${clip(String(e?.message ?? e), 260)}`);
-    }
-    return;
-  }
-
-  if (cmd === "/context") {
-    try {
-      const arg = String(rest[0] || "").trim();
-      await sendContextInfo(bot, chatId, arg, {
-        userId,
-        createIfMissing: true,
-      });
-    } catch (e) {
-      await bot.sendMessage(chatId, `❌ /context 실패: ${String(e?.message ?? e)}`);
-    }
-    return;
-  }
-
-  if (cmd === "/chat") {
-    const raw = String(args || "").trim();
-    if (!raw) return bot.sendMessage(chatId, "Usage: /chat [--debug] <message>\n세션 초기화: /chat reset");
-    if (raw.toLowerCase() === "reset") {
-      resetChatSession(chatId);
-      await bot.sendMessage(chatId, "✅ /chat 세션을 초기화했습니다.");
-      return;
-    }
-    const parsed = parseChatMessageWithFlags(raw);
-    const message = parsed.message;
-    if (!message) return bot.sendMessage(chatId, "Usage: /chat [--debug] <message>\n세션 초기화: /chat reset");
-
-    try {
-      if (!parsed.debug) {
-        await sendRouterAckMessage(bot, chatId, {
-          replyToMessageId: msg.message_id,
-        });
-        await chatRunManager.handleIncoming({
-          chatId,
-          userId,
-          text: message,
-          kind: "normal",
-          telegramMessageId: msg.message_id,
-          chatInfo: {
-            chat_id: String(chatId || ""),
-            title: String(msg.chat?.title || msg.chat?.username || "").trim(),
-            type: String(msg.chat?.type || "").trim(),
-          },
-        });
-        return;
-      }
-      await sendRouterAckMessage(bot, chatId, {
-        replyToMessageId: msg.message_id,
-      });
-      await runSupervisorChat(bot, chatId, userId, message, {
-        debug: parsed.debug,
-        chatInfo: {
-          chat_id: String(chatId || ""),
-          title: String(msg.chat?.title || msg.chat?.username || "").trim(),
-          type: String(msg.chat?.type || "").trim(),
-        },
-        inputKind: "command_chat",
-        telegramMessageId: msg.message_id,
-      });
-    } catch (e) {
-      await bot.sendMessage(chatId, `❌ /chat 실패: ${String(e?.message ?? e)}`);
-    }
-    return;
-  }
-
-  if (cmd === "/run") {
-    if (!args) return bot.sendMessage(chatId, "Usage: /run <goal>");
-    const goal = args;
-    await bot.sendMessage(chatId, "🚀 시작합니다…");
-    try {
-      const job = await createJob(goal, { ownerUserId: userId, ownerChatId: chatId });
-      const jobId = String(job.jobId);
-      const controller = resetJobAbortController(jobId);
-      const chatKey = String(chatId);
-      activeJobByChat.set(chatKey, jobId);
-      await bot.sendMessage(chatId, `✅ Job created: ${job.jobId}\ngoal: ${goal}\nworkspace: ${runWorkspaceDir(jobId)}\n복잡하면: /gptprompt ${job.jobId} <질문>`);
-
-      try {
-        let runtimeForRoute = null;
-        try {
-          runtimeForRoute = await loadSupervisorRuntime(jobId, {
-            chatMeta: {
-              chat_id: String(chatId || ""),
-              telegram_user_id: String(userId || "").trim() || undefined,
-            },
-            includeContext: false,
-            includeGlobal: false,
-            telegramUserId: String(userId || "").trim(),
-          });
-        } catch {
-          runtimeForRoute = null;
-        }
-        const route = await decideRunRoute(jobId, {
-          mode: "run",
-          goal,
-          seedInstruction: goal,
-          signal: controller.signal,
-        });
-        tracking.append(jobId, "decisions.md", [
-          "## Multi-Agent routing",
-          `- mode: run`,
-          `- reason: ${route.reason}`,
-          `- actions: ${route.actions.map((a) => actionLabel(a)).join(" -> ")}`,
-        ].join("\n"));
-        await bot.sendMessage(chatId, `🧭 Multi-Agent 라우팅\n${route.actions.map((a) => `- ${actionLabel(a)}`).join("\n")}`);
-
-        const routed = await executeRoutedPlan(bot, chatId, jobId, route, controller.signal, {
-          telegramUserId: userId,
-          runtime: runtimeForRoute,
-        });
-        if (!routed.askedChatGPT) {
-          await suggestNextPrompt(bot, chatId, jobId, "현재 상태에서 다음 단계를 action plan(JSON)으로 제안해줘.", "run", controller.signal);
-        }
-      } finally {
-        if (activeJobByChat.get(chatKey) === jobId) activeJobByChat.delete(chatKey);
-        jobAbortControllers.delete(jobId);
-      }
-    } catch (e) {
-      if (isCancelledError(e)) {
-        await bot.sendMessage(chatId, "⏹️ 작업이 중단되었습니다.");
-      } else {
-        await bot.sendMessage(chatId, `❌ 실패: ${String(e?.message ?? e)}`);
-      }
-    }
-    return;
-  }
-
-  if (cmd === "/continue") {
-    if (!args) return bot.sendMessage(chatId, "Usage: /continue <jobId>");
-    const jobId = args;
-    const jobKey = String(jobId);
-    const controller = resetJobAbortController(jobKey);
-    const chatKey = String(chatId);
-    activeJobByChat.set(chatKey, jobKey);
-    await bot.sendMessage(chatId, `▶️ Continue job ${jobId}\nworkspace: ${runWorkspaceDir(jobKey)}`);
-
-    let instruction = "run/shared의 plan.md와 research.md를 반영해 CODEX_WORKSPACE_ROOT 코드 변경을 진행해라.";
-    try {
-      const planText = tracking.read(jobId, "plan.md");
-      const extracted = extractCodexInstruction(planText);
-      if (extracted) instruction = extracted;
-    } catch {}
-
-    try {
-      let runtimeForRoute = null;
-      try {
-        runtimeForRoute = await loadSupervisorRuntime(jobKey, {
-          chatMeta: {
-            chat_id: String(chatId || ""),
-            telegram_user_id: String(userId || "").trim() || undefined,
-          },
-          includeContext: false,
-          includeGlobal: false,
-          telegramUserId: String(userId || "").trim(),
-        });
-      } catch {
-        runtimeForRoute = null;
-      }
-      const goal = getGoalFromResearch(jobKey);
-      const route = await decideRunRoute(jobKey, {
-        mode: "continue",
-        goal,
-        seedInstruction: instruction,
-        signal: controller.signal,
-      });
-      tracking.append(jobKey, "decisions.md", [
-        "## Multi-Agent routing",
-        `- mode: continue`,
-        `- reason: ${route.reason}`,
-        `- actions: ${route.actions.map((a) => actionLabel(a)).join(" -> ")}`,
-      ].join("\n"));
-      await bot.sendMessage(chatId, `🧭 Multi-Agent 라우팅\n${route.actions.map((a) => `- ${actionLabel(a)}`).join("\n")}`);
-
-      const routed = await executeRoutedPlan(bot, chatId, jobKey, route, controller.signal, {
-        telegramUserId: userId,
-        runtime: runtimeForRoute,
-      });
-      if (!routed.askedChatGPT) {
-        await suggestNextPrompt(bot, chatId, jobKey, "현재 변경 결과를 바탕으로 다음 action plan(JSON)을 제안해줘.", "continue", controller.signal);
-      }
-    } catch (e) {
-      if (isCancelledError(e)) {
-        await bot.sendMessage(chatId, `⏹️ 작업이 중단되었습니다. (jobId=${jobKey})`);
-      } else {
-        await bot.sendMessage(chatId, `❌ 실패: ${String(e?.message ?? e)}`);
-      }
-    } finally {
-      if (activeJobByChat.get(chatKey) === jobKey) activeJobByChat.delete(chatKey);
-      jobAbortControllers.delete(jobKey);
-    }
-    return;
-  }
-
-  if (cmd === "/gptprompt") {
-    const parts = rest;
-    const jobId = parts[0];
-    const question = parts.slice(1).join(" ").trim();
-    if (!jobId || !question) return bot.sendMessage(chatId, "Usage: /gptprompt <jobId> <question>");
-
-    jobs.appendConversation(jobId, "user", `/gptprompt ${question}`, { kind: "gptprompt" });
-    await sendChatGPTPrompt(bot, chatId, jobId, question);
-    return;
-  }
-
-  if (cmd === "/gptapply") {
-    const targetJobId = String(args || resolveCurrentJobIdForChat(chatId) || "").trim();
-    if (!targetJobId) return bot.sendMessage(chatId, "Usage: /gptapply [jobId]");
-    setAwait(chatId, targetJobId, userId);
-    rememberLastChatJob(chatId, targetJobId);
-    await bot.sendMessage(chatId, "🟣 이제 ChatGPT 답변을 그대로 붙여넣어 주세요. (20분 내)\nJSON 액션 플랜이 있으면 자동 실행됩니다.\n종료: /gptdone");
-    return;
-  }
-
-  if (cmd === "/commit") {
-    const parts = rest;
-    const jobId = parts[0];
-    const message = parts.slice(1).join(" ").trim();
-    if (!jobId || !message) return bot.sendMessage(chatId, "Usage: /commit <jobId> <message>");
-    const rec = approvals.request(jobId, { purpose: "git commit", summary: `Commit changes with message: ${message}`, payload: { action: "git_commit", message } });
-
-    await bot.sendMessage(chatId,
-      `🟡 커밋 승인 필요\njobId=${jobId}\nmessage=${message}\ntoken=${rec.token}`,
-      { reply_markup: { inline_keyboard: [[{ text: "✅ Approve", callback_data: `approve:${jobId}:${rec.token}` }, { text: "❌ Deny", callback_data: `deny:${jobId}:${rec.token}` }]] } }
-    );
-    return;
-  }
-
-  if (cmd.startsWith("/")) {
-    await bot.sendMessage(chatId, "알 수 없는 명령입니다. /help 를 참고하세요.");
-  }
+  const handledCommand = await handleTelegramCommand({ msg, text, chatId, userId });
+  if (handledCommand) return;
 });
 
 process.on("SIGINT", () => { void shutdown(0); });

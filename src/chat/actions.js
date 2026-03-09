@@ -1,3 +1,5 @@
+import { normalizeLensSpec as normalizeDomainLensSpec } from "../domain/lens.js";
+
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
 }
@@ -44,49 +46,12 @@ function normalizeStringArray(raw, { max = 16 } = {}) {
   return out;
 }
 
-function normalizeLensMode(rawMode = "", fallback = "shared_only") {
-  const mode = String(rawMode || "").trim().toLowerCase();
-  if (["shared_only", "unfold_query", "add_nodes", "remove_nodes"].includes(mode)) return mode;
-  return fallback;
-}
-
 function normalizeLensSpec(raw) {
   const row = asObject(raw);
   if (Object.keys(row).length === 0) return null;
-
-  const query = String(row.query || row.prompt || "").trim();
-  const addNodeIds = normalizeNodeIds(row.add_node_ids ?? row.addNodeIds);
-  const removeNodeIds = normalizeNodeIds(row.remove_node_ids ?? row.removeNodeIds);
-  const modeFallback = query
-    ? "unfold_query"
-    : (addNodeIds.length > 0 ? "add_nodes" : (removeNodeIds.length > 0 ? "remove_nodes" : "shared_only"));
-  const mode = normalizeLensMode(row.mode, modeFallback);
-  const budgetRaw = Number(row.budget_tokens ?? row.budgetTokens);
-  const maxClosureRaw = Number(row.max_closure_nodes ?? row.maxClosureNodes);
-  const closureDirectionRaw = String((row.closure_direction ?? row.closureDirection) || "").trim().toLowerCase();
-  const closureEdgeTypes = Array.isArray(row.closure_edge_types ?? row.closureEdgeTypes)
-    ? (row.closure_edge_types ?? row.closureEdgeTypes)
-      .map((entry) => String(entry || "").trim())
-      .filter(Boolean)
-      .slice(0, 16)
-    : [];
-
-  return {
-    mode,
-    query: query || undefined,
-    add_node_ids: addNodeIds.length > 0 ? addNodeIds : undefined,
-    remove_node_ids: removeNodeIds.length > 0 ? removeNodeIds : undefined,
-    budget_tokens: Number.isFinite(budgetRaw)
-      ? Math.max(200, Math.min(12000, Math.floor(budgetRaw)))
-      : 1200,
-    closure_edge_types: closureEdgeTypes.length > 0 ? closureEdgeTypes : undefined,
-    closure_direction: ["both", "forward", "backward"].includes(closureDirectionRaw)
-      ? closureDirectionRaw
-      : "both",
-    max_closure_nodes: Number.isFinite(maxClosureRaw)
-      ? Math.max(10, Math.min(2000, Math.floor(maxClosureRaw)))
-      : 180,
-  };
+  return normalizeDomainLensSpec(row, {
+    fallbackBudget: Number(row.budget_tokens ?? row.budgetTokens) || 1200,
+  });
 }
 
 function normalizeRunAgent(raw) {

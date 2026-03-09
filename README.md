@@ -5,6 +5,33 @@
 - Telegram 메시지로 트리거 → Codex CLI + Gemini CLI 실행 → 결과/상태/승인을 Telegram에서 처리
 - 복잡한 판단은 **중앙 통제 AI(=ChatGPT)**에게 물어보고, 답을 붙여넣으면 자동 실행(액션 플랜 JSON)
 
+## Architecture (v2 Runtime Refactor)
+
+외부 Telegram UX/명령은 유지하면서 내부 런타임을 모듈화했습니다.
+
+- `telegram_runner.js`: bootstrap + 이벤트 수신 + 오케스트레이션 위임
+- `src/shared/json_extract.js`: JSON 추출/파싱 공통 헬퍼
+- `src/shared/normalize.js`: 문자열/리스트/provider 정규화 공통 헬퍼
+- `src/domain/lens.js`: lens spec 정규화/기본값/검증
+- `src/domain/route_plan.js`: route plan/action 정규화 및 sanitize
+- `src/domain/agent_templates.js`: `AgentTemplate`, `RuntimeAgentInstance` 정규화/생성
+- `src/domain/team_plan.js`: `TeamPlan` 정규화/검증
+- `src/application/team_builder.js`: 목표 기반 runtime role 구성
+- `src/application/orchestrator.js`: route + team 조합
+- `src/adapters/telegram/send.js`: Telegram 전송 어댑터
+- `src/adapters/telegram/commands.js`: Telegram 명령 디스패치
+
+### Internal Runtime Concepts
+
+- `AgentTemplate`
+  - `{ id, name, role_type, description, capability_tags, provider, model, prompt, tools, meta }`
+- `RuntimeAgentInstance`
+  - `{ instance_id, template_id, role_label, assigned_goal, capability_tags, provider, model, lens_spec, status }`
+- `TeamPlan`
+  - `{ mode, roles, dependencies, execution_order, reason, budget }`
+
+기존 `agents.json` / `src/agents.js` / `src/agent_registry.js`는 그대로 사용 가능하며, 내부적으로 `AgentTemplate`로 정규화됩니다.
+
 ---
 
 ## A. Telegram 앱 설치 & 봇 만들기 (모바일/데스크톱)
@@ -100,6 +127,11 @@ gemini   # 1회 로그인
 ### 4) 실행 (개발용)
 ```bash
 npm start
+```
+
+테스트:
+```bash
+npm test
 ```
 
 ### 5) systemd로 상시 실행

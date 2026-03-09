@@ -1,74 +1,14 @@
 import path from "node:path";
 import { runGeminiPrompt } from "./gemini.js";
+import { parseJsonObjectFromText } from "./shared/json_extract.js";
+import { normalizeProviderName } from "./shared/normalize.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
 }
 
-function parseJsonMaybe(text) {
-  const raw = String(text || "").trim();
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-function findFirstJsonObject(text) {
-  const s = String(text || "");
-  const start = s.indexOf("{");
-  if (start < 0) return null;
-
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < s.length; i += 1) {
-    const ch = s[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === "\"") inString = false;
-      continue;
-    }
-    if (ch === "\"") {
-      inString = true;
-      continue;
-    }
-    if (ch === "{") depth += 1;
-    if (ch === "}") {
-      depth -= 1;
-      if (depth === 0) return s.slice(start, i + 1);
-    }
-  }
-  return null;
-}
-
-function parseJsonObjectFromText(text) {
-  const src = String(text || "");
-  const candidates = [];
-  const fenced = src.match(/```json\s*([\s\S]*?)```/i) || src.match(/```\s*([\s\S]*?)```/i);
-  if (fenced?.[1]) candidates.push(fenced[1].trim());
-  candidates.push(src.trim());
-
-  for (const c of candidates) {
-    if (!c) continue;
-    const direct = parseJsonMaybe(c);
-    if (direct && typeof direct === "object") return direct;
-    const objText = findFirstJsonObject(c);
-    if (!objText) continue;
-    const parsed = parseJsonMaybe(objText);
-    if (parsed && typeof parsed === "object") return parsed;
-  }
-  return null;
-}
-
 function normalizeProvider(raw) {
-  const key = String(raw || "").trim().toLowerCase();
-  if (["chatgpt", "gpt", "openai"].includes(key)) return "chatgpt";
-  if (["codex"].includes(key)) return "codex";
-  if (["gemini"].includes(key)) return "gemini";
-  return "gemini";
+  return normalizeProviderName(raw, "gemini");
 }
 
 function normalizeAgentProfile(raw) {
