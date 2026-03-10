@@ -237,6 +237,7 @@ export async function executeSupervisorActions({
       chat_id: String(chatId || ""),
       job_id: String(jobId || ""),
       action: mutatingAction,
+      action_display_label: actionLabel(mutatingAction, { agentIndex: agentDisplayIndex }),
       reason: "관리 변경 적용 전 확인이 필요합니다.",
       preview_reason: approvalReasonCategory(mutatingAction, "관리 변경 적용 전 확인이 필요합니다."),
       actions_summary: approvalActionSummary(actions, { agentIndex: agentDisplayIndex }),
@@ -317,6 +318,7 @@ export async function executeSupervisorActions({
         chat_id: String(chatId || ""),
         job_id: String(jobId || ""),
         action,
+        action_display_label: actionLabel(action, { agentIndex: agentDisplayIndex }),
         reason: approval.reason,
         preview_reason: approvalReasonCategory(action, approval.reason),
         actions_summary: approvalActionSummary(remainingActions, { agentIndex: agentDisplayIndex }),
@@ -658,14 +660,20 @@ export async function executeSupervisorActions({
         const enabledAgentDisplays = enabledAgents.map((id) => formatAgentDisplayName(id, agentDisplayIndex, {
           includeShortId: true,
         }));
+        const baseOutput = `✅ conversation agent 추가: ${targetAgentDisplay}${enabledAgentDisplays.length > 0 ? `\nenabled=${enabledAgentDisplays.join(", ")}` : ""}`;
+        const changedOutput = String(changed?.text || "").trim();
         outputs.push({
           agentId: "system",
           provider: "system",
           mode: "conversation_agent_add",
-          output: String(changed?.text || "").trim()
-            || `✅ conversation agent 추가: ${targetAgentDisplay}${enabledAgentDisplays.length > 0 ? `\nenabled=${enabledAgentDisplays.join(", ")}` : ""}`,
+          output: changedOutput && changedOutput !== baseOutput
+            ? `${baseOutput}\n${changedOutput}`
+            : baseOutput,
           agent_id: targetAgentId || undefined,
           enabled_agents: enabledAgents,
+          membership_change: changed?.membership_change && typeof changed.membership_change === "object"
+            ? changed.membership_change
+            : undefined,
           jobId: String(jobId || ""),
         });
         results.push({ label, status: "ok", note: targetAgentId ? targetAgentDisplay : "added" });
@@ -691,14 +699,20 @@ export async function executeSupervisorActions({
         const enabledAgentDisplays = enabledAgents.map((id) => formatAgentDisplayName(id, agentDisplayIndex, {
           includeShortId: true,
         }));
+        const baseOutput = `🛑 conversation agent 제거: ${targetAgentDisplay}${enabledAgentDisplays.length > 0 ? `\nenabled=${enabledAgentDisplays.join(", ")}` : ""}`;
+        const changedOutput = String(changed?.text || "").trim();
         outputs.push({
           agentId: "system",
           provider: "system",
           mode: "conversation_agent_remove",
-          output: String(changed?.text || "").trim()
-            || `🛑 conversation agent 제거: ${targetAgentDisplay}${enabledAgentDisplays.length > 0 ? `\nenabled=${enabledAgentDisplays.join(", ")}` : ""}`,
+          output: changedOutput && changedOutput !== baseOutput
+            ? `${baseOutput}\n${changedOutput}`
+            : baseOutput,
           agent_id: targetAgentId || undefined,
           enabled_agents: enabledAgents,
+          membership_change: changed?.membership_change && typeof changed.membership_change === "object"
+            ? changed.membership_change
+            : undefined,
           jobId: String(jobId || ""),
         });
         results.push({ label, status: "ok", note: targetAgentId ? targetAgentDisplay : "removed" });
@@ -763,6 +777,9 @@ export async function executeSupervisorActions({
           op,
           id: targetId,
           updated: updated || null,
+          membership_change: updated?.membership_change && typeof updated.membership_change === "object"
+            ? updated.membership_change
+            : undefined,
           jobId: String(jobId || ""),
         });
         results.push({ label, status: "ok", note: line.replace(/^[✅🚫]\s*/, "") });
@@ -924,7 +941,21 @@ export async function executeSupervisorActions({
       results.push({ label, status: "skip", note: "unsupported action" });
     } catch (e) {
       if (isAbortLikeError(e)) throw e;
-      results.push({ label, status: "error", note: String(e?.message ?? e) });
+      const errorMessage = String(e?.message ?? e);
+      const membershipConfirmationFailed = e?.membershipConfirmationFailed === true
+        || String(e?.code || "").trim().toUpperCase() === "MEMBERSHIP_CONFIRMATION_FAILED";
+      results.push({ label, status: "error", note: errorMessage });
+      if (membershipConfirmationFailed) {
+        blockedActions += 1;
+        blockedIndex = i;
+        remainingActions = actions.slice(i + 1);
+        results.push({
+          label: "membership_confirmation",
+          status: "blocked",
+          note: "team membership verification failed; stopped remaining actions",
+        });
+        break;
+      }
     }
 
     const interruptAfter = readInterruptState(sessionStore, chatId);

@@ -267,6 +267,12 @@ export class GocExecutionGraphRecorder {
   async finishRun({ status = "done", summary = "", error = "" } = {}) {
     if (!this.runNodeId) return;
     const normalizedStatus = String(status || "").trim().toLowerCase() || "done";
+    const staleQueuedReason = normalizedStatus === "await_user"
+      ? "await_user"
+      : (normalizedStatus === "done" ? "superseded" : normalizedStatus);
+    await this._markQueuedStepsInactive({
+      reason: staleQueuedReason,
+    });
     await this._updateNodePayload(this.runNodeId, {
       status: normalizedStatus,
       ended_at: nowIso(),
@@ -275,6 +281,26 @@ export class GocExecutionGraphRecorder {
     }, {
       summary: clipPreview(summary || error || normalizedStatus, 220),
     });
+  }
+
+  async _markQueuedStepsInactive({ reason = "superseded" } = {}) {
+    if (!this.isEnabled()) return;
+    const skippedAt = nowIso();
+    const cleanReason = clipPreview(reason || "superseded", 1200) || "superseded";
+    const entries = [...this.payloadByNodeId.entries()];
+    for (const [nodeId, payloadRaw] of entries) {
+      const payload = asObject(payloadRaw);
+      if (!payload.step_id) continue;
+      if (String(payload.run_id || "").trim() !== this.runId) continue;
+      if (String(payload.status || "").trim().toLowerCase() !== "queued") continue;
+      await this._updateNodePayload(nodeId, {
+        status: "skipped",
+        ended_at: skippedAt,
+        skip_reason: cleanReason,
+      }, {
+        summary: clipPreview(cleanReason, 220),
+      });
+    }
   }
 
   async queueMainSteps(actions = [], { metadata = null } = {}) {

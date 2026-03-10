@@ -151,3 +151,64 @@ test("non-GOC/no-recorder flow remains no-op safe", async () => {
 
   assert.equal(recorder.getRunNodeId(), "");
 });
+
+test("queued steps can be marked skipped to prevent stale active work", async () => {
+  const client = createFakeGraphClient();
+  const recorder = new GocExecutionGraphRecorder({
+    client,
+    threadId: "thread_3",
+    contextSetId: "ctx_3",
+    sharedContextSetId: "ctx_3",
+    runId: "run_3",
+    chatId: "chat_3",
+    jobId: "job_3",
+  });
+
+  const action = { type: "run_agent", agent_id: "researcher", goal: "analyze" };
+  await recorder.startRun({ userText: "start" });
+  await recorder.queueMainSteps([action], {
+    metadata: {
+      actionSource: "explicit",
+    },
+  });
+  await recorder.markStepSkipped(action, {
+    reason: "awaiting_approval",
+  });
+
+  const stepUpdate = client.state.updatedNodes.find((row) =>
+    String(row?.body?.payload_json?.status || "") === "skipped"
+  );
+  assert.ok(stepUpdate);
+  assert.equal(stepUpdate.body.payload_json.skip_reason, "awaiting_approval");
+});
+
+test("finishRun marks leftover queued steps as skipped for hygiene", async () => {
+  const client = createFakeGraphClient();
+  const recorder = new GocExecutionGraphRecorder({
+    client,
+    threadId: "thread_4",
+    contextSetId: "ctx_4",
+    sharedContextSetId: "ctx_4",
+    runId: "run_4",
+    chatId: "chat_4",
+    jobId: "job_4",
+  });
+
+  await recorder.startRun({ userText: "start" });
+  await recorder.queueMainSteps([
+    { type: "run_agent", agent_id: "researcher", goal: "analysis" },
+    { type: "run_agent", agent_id: "coder", goal: "implement" },
+  ]);
+  await recorder.finishRun({
+    status: "await_user",
+    summary: "pending approval",
+  });
+
+  const skippedUpdates = client.state.updatedNodes.filter((row) =>
+    String(row?.body?.payload_json?.status || "") === "skipped"
+  );
+  assert.ok(skippedUpdates.length >= 2);
+  for (const row of skippedUpdates) {
+    assert.equal(row.body.payload_json.skip_reason, "await_user");
+  }
+});

@@ -48,13 +48,16 @@
 - 사용자 요청이 명시적 팀 재구성 의도일 때만(team composition intent) thread team diff를 계산합니다.
 - 이 경우 `add/enable`뿐 아니라 필요 시 `remove_agent_from_conversation`(또는 경로별 disable)도 포함될 수 있습니다.
 - 일반 작업 요청에서는 기존처럼 보수적으로 동작하며, 불필요한 자동 제거를 하지 않습니다.
+- membership mutation(`add/remove/enable/disable`)은 write 이후 readback 확인이 성공해야만 성공으로 처리됩니다.
+- readback 확인 실패 시 팀 변경 성공으로 간주하지 않고, 진단 메타데이터를 기록한 뒤 후속 실행을 중단합니다.
 
 ### Mutation-Only Plan Safeguard
 
 - 승인 후 재개된 plan이 팀 설정 mutation만 포함하고 실제 실행 액션(`run_agent`/`spawn_agents` 등)이 없으면:
-  - 팀 설정 전용 요청이 아닌 경우, 작업 실행 모드로 1회 post-mutation reroute를 시도합니다.
+  - 팀 설정 전용 요청이 아니고, membership 변경이 readback으로 확인된 경우에만 작업 실행 모드로 1회 post-mutation reroute를 시도합니다.
   - 루프 방지를 위해 reroute guard(1회 제한)를 둡니다.
   - guard에 막힌 경우 사용자에게 명시적으로 안내 메시지를 보냅니다.
+- 동일 unresolved membership 실패는 fail-fast로 안내하며, 같은 세션에서 자동 반복 루프를 만들지 않도록 차단합니다.
 
 추가 메타데이터(가산형):
 - `post_mutation_reroute: true|false`
@@ -88,6 +91,8 @@ step payload의 runtime role 필드는 아래 canonical 키를 사용합니다:
 - `fallback`
 
 `MEMORY_MODE=goc`에서 execution graph recorder가 활성화된 경우, 같은 metadata가 GOC `Run`/`Step` payload와 `recordMeta` 리소스 노드에 additive 방식으로 저장됩니다.
+
+추가로 reroute/approval/interruption으로 더 이상 활성 상태가 아닌 queued step은 가능한 범위에서 `skipped`(reason 포함)로 정리하여 "Now" 오염을 줄입니다.
 
 입력 호환성:
 - `runtime_team_snapshot`(권장 canonical)과 `runtimeTeamSnapshot`(legacy/camelCase) 모두 허용

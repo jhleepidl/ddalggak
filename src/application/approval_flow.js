@@ -1,6 +1,9 @@
 import { makeContextEngine } from "../context_engine/index.js";
 import { normalizeActionSource, normalizeRuntimeTeamSnapshot } from "./runtime_metadata.js";
-import { isMutationOnlyTeamSetupPlan } from "../chat/action_classification.js";
+import {
+  isMutationOnlyTeamSetupPlan,
+  isTeamMembershipMutationAction,
+} from "../chat/action_classification.js";
 import { isTeamSetupOnlyRequest } from "./team_intent.js";
 
 function asObject(v) {
@@ -17,11 +20,74 @@ export function buildPostMutationRerouteKey({ jobId = "", userText = "" } = {}) 
   return `${cleanJobId}::${cleanText}`;
 }
 
+function membershipActionKey(action = {}) {
+  const type = String(action?.type || "").trim().toLowerCase();
+  if (!isTeamMembershipMutationAction(type)) return "";
+  const agentId = String(action?.agent_id || action?.agent || action?.agentId || "").trim().toLowerCase();
+  if (!agentId) return "";
+  return `${type}:${agentId}`;
+}
+
+export function summarizeMembershipMutationConfirmation({
+  actions = [],
+  outputs = [],
+  results = [],
+} = {}) {
+  const actionRows = Array.isArray(actions) ? actions : [];
+  const outputRows = Array.isArray(outputs) ? outputs : [];
+  const resultRows = Array.isArray(results) ? results : [];
+  const requestedKeys = [];
+  const seenRequested = new Set();
+  for (const action of actionRows) {
+    const key = membershipActionKey(action);
+    if (!key || seenRequested.has(key)) continue;
+    seenRequested.add(key);
+    requestedKeys.push(key);
+  }
+
+  const confirmedByKey = new Map();
+  for (const row of outputRows) {
+    const change = row?.membership_change && typeof row.membership_change === "object"
+      ? row.membership_change
+      : null;
+    if (!change) continue;
+    const key = membershipActionKey({
+      type: change.action,
+      agent_id: change.target_agent_id,
+    });
+    if (!key) continue;
+    confirmedByKey.set(key, change.confirmed === true);
+  }
+
+  let confirmedCount = 0;
+  const unresolvedKeys = [];
+  for (const key of requestedKeys) {
+    if (confirmedByKey.get(key) === true) {
+      confirmedCount += 1;
+      continue;
+    }
+    unresolvedKeys.push(key);
+  }
+  const failedCount = unresolvedKeys.length;
+  const verificationErrorHints = resultRows
+    .map((row) => String(row?.note || "").trim())
+    .filter((note) => /membership|멤버십|readback|verification/i.test(note));
+  return {
+    required_count: requestedKeys.length,
+    confirmed_count: confirmedCount,
+    failed_count: failedCount,
+    all_confirmed: requestedKeys.length === 0 || failedCount === 0,
+    unresolved_keys: unresolvedKeys,
+    verification_error_hints: verificationErrorHints.slice(0, 6),
+  };
+}
+
 export function shouldTriggerPostMutationReroute({
   resumedActions = [],
   originalUserText = "",
   forceMode = "normal",
   workLikeHint = false,
+  membershipConfirmation = null,
   rerouteGuard = null,
   rerouteLimit = 1,
 } = {}) {
@@ -29,6 +95,16 @@ export function shouldTriggerPostMutationReroute({
     return {
       should_reroute: false,
       reason: "has_real_execution_or_non_team_actions",
+      blocked_by_guard: false,
+    };
+  }
+  const membership = membershipConfirmation && typeof membershipConfirmation === "object"
+    ? membershipConfirmation
+    : { required_count: 0, all_confirmed: true };
+  if (Number(membership.required_count || 0) > 0 && membership.all_confirmed !== true) {
+    return {
+      should_reroute: false,
+      reason: "membership_confirmation_failed",
       blocked_by_guard: false,
     };
   }
@@ -140,7 +216,7 @@ export async function handleActionApprovalCallback({
       tracking.append(pendingJobId, "decisions.md", [
         "## /chat approval switched_to_work",
         `- approval_id: ${approvalId}`,
-        `- action: ${chatActionLabel(pending.action)}`,
+        `- action: ${String(pending?.action_display_label || "").trim() || chatActionLabel(pending.action)}`,
         `- switched_by: telegram:${userId}`,
       ].join("\n"));
     }
@@ -184,7 +260,7 @@ export async function handleActionApprovalCallback({
     tracking.append(pendingJobId, "decisions.md", [
       "## /chat approval rejected",
       `- approval_id: ${approvalId}`,
-      `- action: ${chatActionLabel(pending.action)}`,
+      `- action: ${String(pending?.action_display_label || "").trim() || chatActionLabel(pending.action)}`,
       `- rejected_by: telegram:${userId}`,
     ].join("\n"));
     await bot.answerCallbackQuery(q.id, { text: "rejected" });
@@ -406,7 +482,9 @@ export async function handleActionApprovalCallback({
       originalUserText: resumeUserText,
       forceMode: resumeForceMode,
       jobConfig: runtime.jobConfig,
-      agents: runtime.agents,
+      agents: Array.isArray(runtime?.agentsCatalog) && runtime.agentsCatalog.length > 0
+        ? runtime.agentsCatalog
+        : runtime.agents,
       tools: runtime.tools,
       sessionStore: chatSessionStore,
       callbacks: buildSupervisorExecutionCallbacks({
@@ -469,6 +547,11 @@ export async function handleActionApprovalCallback({
       jobId: pendingJobId,
       userText: resumeUserText,
     });
+    const membershipConfirmation = summarizeMembershipMutationConfirmation({
+      actions: resumedActions,
+      outputs: resumedExecution.outputs,
+      results: resumedExecution.results,
+    });
     const currentGuard = (
       session?.post_mutation_reroute_guard
       && typeof session.post_mutation_reroute_guard === "object"
@@ -482,6 +565,7 @@ export async function handleActionApprovalCallback({
         originalUserText: resumeUserText,
         forceMode: resumeForceMode,
         workLikeHint: pending.work_like_hint === true,
+        membershipConfirmation,
         rerouteGuard: currentGuard,
         rerouteLimit: 1,
       })
@@ -490,6 +574,7 @@ export async function handleActionApprovalCallback({
         reason: resumedExecution.pendingApproval ? "pending_followup_approval" : "interrupted",
         blocked_by_guard: false,
       };
+    const membershipConfirmationFailed = postMutationRerouteDecision.reason === "membership_confirmation_failed";
 
     const summaryPlan = session.last_route && typeof session.last_route === "object"
       ? session.last_route
@@ -508,6 +593,11 @@ export async function handleActionApprovalCallback({
       `- resumed_actions: ${resumedActions.map((row) => chatActionLabel(row)).join(" -> ")}`,
       `- pending_after_resume: ${resumedExecution.pendingApproval ? "yes" : "no"}`,
       `- interrupted_during_resume: ${interruptedDuringResume ? "yes" : "no"}`,
+      `- membership_confirmation_required: ${membershipConfirmation.required_count}`,
+      `- membership_confirmation_failed: ${membershipConfirmation.failed_count}`,
+      membershipConfirmation.unresolved_keys.length > 0
+        ? `- membership_unresolved_keys: ${membershipConfirmation.unresolved_keys.join(",")}`
+        : "",
       `- post_mutation_reroute: ${postMutationRerouteDecision.should_reroute ? "yes" : "no"}`,
       `- reroute_reason: ${postMutationRerouteDecision.reason}`,
       `- approved_by: telegram:${userId}`,
@@ -516,7 +606,11 @@ export async function handleActionApprovalCallback({
       chatId,
       resumedExecution.pendingApproval
         ? "✅ 승인 적용 완료 (추가 승인 필요)"
-        : (interruptedDuringResume ? "⚠️ 승인 적용 중 중단됨" : "✅ 승인 적용 완료"),
+        : (interruptedDuringResume
+          ? "⚠️ 승인 적용 중 중단됨"
+          : (membershipConfirmationFailed
+            ? "⚠️ 승인 적용 완료 (팀 멤버십 확인 실패)"
+            : "✅ 승인 적용 완료")),
       Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
         ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
         : undefined
@@ -584,6 +678,16 @@ export async function handleActionApprovalCallback({
           status: "await_user",
           summary: resumedExecution.pendingApproval.reason || "approval required",
         });
+        if (typeof resumeExecutionGraph.markStepSkipped === "function") {
+          const pendingRows = Array.isArray(resumedExecution.remaining_actions)
+            ? resumedExecution.remaining_actions
+            : [];
+          for (const action of pendingRows) {
+            await resumeExecutionGraph.markStepSkipped(action, {
+              reason: "awaiting_approval",
+            });
+          }
+        }
       }
       chatSessionStore.upsert(chatId, {
         jobId: pendingJobId,
@@ -644,10 +748,19 @@ export async function handleActionApprovalCallback({
           : undefined
       );
     } else {
+      if (membershipConfirmationFailed && resumeExecutionGraph && typeof resumeExecutionGraph.markStepSkipped === "function") {
+        for (const action of resumeRemainingActions) {
+          await resumeExecutionGraph.markStepSkipped(action, {
+            reason: "membership_confirmation_failed",
+          });
+        }
+      }
       if (resumeExecutionGraph) {
         await resumeExecutionGraph.finishRun({
-          status: "done",
-          summary: clip(replyText, 900),
+          status: membershipConfirmationFailed ? "await_user" : "done",
+          summary: membershipConfirmationFailed
+            ? "membership confirmation failed"
+            : clip(replyText, 900),
         });
       }
       chatSessionStore.upsert(chatId, (currentSession) => ({
@@ -656,7 +769,43 @@ export async function handleActionApprovalCallback({
         state: "idle",
         pending_approval: null,
         post_mutation_reroute_guard: null,
+        membership_confirmation_fail_guard: membershipConfirmationFailed
+          ? (() => {
+            const unresolvedSignature = membershipConfirmation.unresolved_keys.join("|") || "unknown";
+            const nextKey = `${rerouteKey}::${unresolvedSignature}`;
+            const prevGuard = currentSession?.membership_confirmation_fail_guard
+              && typeof currentSession.membership_confirmation_fail_guard === "object"
+              ? currentSession.membership_confirmation_fail_guard
+              : null;
+            const prevCount = prevGuard && String(prevGuard.key || "") === nextKey
+              ? Math.max(0, Math.floor(Number(prevGuard.count || 0)))
+              : 0;
+            return {
+              key: nextKey,
+              count: prevCount + 1,
+              ts: new Date().toISOString(),
+              unresolved: membershipConfirmation.unresolved_keys,
+            };
+          })()
+          : null,
+        last_route: {
+          ...(currentSession?.last_route && typeof currentSession.last_route === "object"
+            ? currentSession.last_route
+            : {}),
+          membership_confirmation_required: membershipConfirmation.required_count,
+          membership_confirmation_failed: membershipConfirmation.failed_count,
+          membership_unresolved_keys: membershipConfirmation.unresolved_keys,
+        },
       }));
+      if (membershipConfirmationFailed) {
+        await bot.sendMessage(
+          chatId,
+          "⚠️ 팀 멤버십 변경을 readback으로 확인하지 못해 후속 작업 실행을 중단했습니다. /agents 와 /context 로 상태를 확인한 뒤 다시 요청해주세요.",
+          Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
+            ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
+            : undefined
+        );
+      }
       if (postMutationRerouteDecision.blocked_by_guard) {
         await bot.sendMessage(
           chatId,

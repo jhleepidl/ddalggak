@@ -44,6 +44,7 @@
   - 팀 설정만 끝내고 종료될 수 있음(정상 동작)
 - 일반 작업 요청(예: 분석/구현/작성):
   - 팀 설정 액션만 있는 플랜이면, 승인 후 실제 작업 실행 경로로 한 번 더 재라우팅
+  - 단, 멤버십 변경이 readback으로 확인된 경우에만 재라우팅
   - 즉, "팀만 구성하고 작업을 안 하는" 조기 종료를 방지
 
 ## 6) Troubleshooting
@@ -51,7 +52,13 @@
 ### 증상: 팀 구성 로그만 나오고 실제 작업 실행이 안 됨
 
 - 최신 패치에서는 일반 작업 요청에 대해 mutation-only 플랜이면 자동 후속 reroute를 시도합니다.
+- 멤버십 readback 확인이 실패하면 reroute 대신 fail-fast로 멈추고 진단 로그를 남깁니다.
 - 여전히 반복되면:
   1. 요청을 더 구체적으로 다시 지시 (`무엇을 산출해야 하는지` 명시)
   2. `/status`, `/context`로 현재 상태 확인
   3. 필요 시 `/chat <작업지시>`로 재요청
+
+### 참고: Graph "Now"가 오래된 queued step을 보일 때
+
+- reroute/approval/interruption으로 대체된 queued step은 가능한 범위에서 `skipped`로 정리됩니다.
+- 그래프를 새로고침한 뒤에도 오래된 queued가 남으면 최근 run의 `summary/status`와 `skip_reason`을 함께 확인하세요.

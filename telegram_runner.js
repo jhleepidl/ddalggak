@@ -52,6 +52,10 @@ import {
 } from "./src/application/team_intent.js";
 import { buildExplicitTeamReconfigurationActions } from "./src/application/team_config_diff.js";
 import {
+  verifyConversationMembershipMutation,
+  createMembershipConfirmationError,
+} from "./src/application/membership_confirmation.js";
+import {
   loadAgentsFromGoc,
   createAgentProfile,
   updateAgentProfile,
@@ -1497,7 +1501,7 @@ function buildChatStatusCard(chatId, runtime = null) {
     ? session.pending_approval
     : null;
   const pendingApprovalActionLabel = pendingApproval?.action
-    ? chatActionLabel(pendingApproval.action)
+    ? (String(pendingApproval?.action_display_label || "").trim() || chatActionLabel(pendingApproval.action))
     : "";
   const lastRoute = session.last_route && typeof session.last_route === "object"
     ? session.last_route
@@ -4588,12 +4592,16 @@ async function loadSupervisorRuntime(
     const toolsSlot = await ensureToolsThread(client, { baseDir: jobs.baseDir });
 
     const warningLines = [];
-    const pushConversationWarning = (stage, error = null) => {
-      const base = `conversation membership bootstrap failed for thread=${String(map.threadId || "").trim() || "(none)"} user=${effectiveTelegramUserId || "(none)"}`;
-      const detail = stage ? `${base}; stage=${stage}` : base;
-      const line = error
-        ? `${detail}; error=${String(error?.message ?? error)}`
-        : detail;
+    const pushConversationWarning = (stage, error = null, extra = {}) => {
+      const payload = {
+        thread_id: String(map.threadId || "").trim() || "(none)",
+        context_set_id: String(map.ctxSharedId || "").trim() || "(none)",
+        user_id: effectiveTelegramUserId || "(none)",
+        stage: String(stage || "unknown"),
+        error: error ? String(error?.message ?? error) : "",
+        ...((extra && typeof extra === "object") ? extra : {}),
+      };
+      const line = `conversation_membership_warning ${JSON.stringify(payload)}`;
       warningLines.push(line);
       if (jobId) jobs.log(jobId, line);
     };
@@ -4670,7 +4678,9 @@ async function loadSupervisorRuntime(
     }
 
     if (conversationAgents.length === 0) {
-      pushConversationWarning("membership_still_empty_after_bootstrap");
+      pushConversationWarning("membership_still_empty_after_bootstrap", null, {
+        after_bootstrap_count: 0,
+      });
     }
     const conversationMembershipWarning = warningLines.join(" | ");
 
@@ -5043,6 +5053,24 @@ async function appendParticipantToJobConfig(client, { jobId, agentId, actor = ""
         .map((row) => String(row?.agent_id || "").trim().toLowerCase())
         .filter(Boolean)
     ));
+    const verification = verifyConversationMembershipMutation({
+      actionType: "add_agent_to_conversation",
+      threadId: map.threadId,
+      targetAgentId: cleanAgentId,
+      expectedPresent: true,
+      expectedEnabled: true,
+      conversationRows: conversationAgents,
+      source: "append_participant",
+      extra: {
+        job_id: String(jobId || "").trim(),
+      },
+    });
+    if (!verification.confirmed) {
+      recordMembershipMutationDiagnostic(jobId, verification, {
+        stage: "membership_confirmation_failed",
+      });
+      throw createMembershipConfirmationError(verification);
+    }
     return {
       map,
       created: {
@@ -5053,10 +5081,25 @@ async function appendParticipantToJobConfig(client, { jobId, agentId, actor = ""
       actor,
       enabledAgentIds,
       conversationAgents,
+      membership_change: verification,
     };
   }
 
   return { map, created: null, config: null, source: "none" };
+}
+
+function recordMembershipMutationDiagnostic(jobId, diagnostic = {}, { stage = "" } = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  const row = diagnostic && typeof diagnostic === "object" ? diagnostic : {};
+  const stageLabel = String(stage || "").trim() || "membership_mutation";
+  const text = JSON.stringify(row);
+  if (cleanJobId) {
+    tracking.append(cleanJobId, "decisions.md", [
+      `## /chat ${stageLabel}`,
+      `- diagnostic: ${text}`,
+    ].join("\n"));
+    jobs.log(cleanJobId, `[membership] ${stageLabel} ${text}`);
+  }
 }
 
 async function updateJobConfigSelection(client, {
@@ -5122,12 +5165,31 @@ async function updateJobConfigSelection(client, {
         .map((row) => String(row?.agent_id || "").trim().toLowerCase())
         .filter(Boolean)
     ));
+    const verification = verifyConversationMembershipMutation({
+      actionType: cleanOp === "enable" ? "enable_agent" : "disable_agent",
+      threadId: map.threadId,
+      targetAgentId: cleanId,
+      expectedPresent: true,
+      expectedEnabled: cleanOp === "enable",
+      conversationRows: conversationAgents,
+      source: "update_job_config_selection",
+      extra: {
+        job_id: cleanJobId,
+      },
+    });
+    if (!verification.confirmed) {
+      recordMembershipMutationDiagnostic(cleanJobId, verification, {
+        stage: "membership_confirmation_failed",
+      });
+      throw createMembershipConfirmationError(verification);
+    }
     return {
       map,
       config: null,
       source: "conversation_agents",
       conversationAgents,
       enabledAgentIds,
+      membership_change: verification,
       op: cleanOp,
       kind: cleanKind,
       id: cleanId,
@@ -5283,6 +5345,13 @@ function buildSupervisorExecutionCallbacks({
     } finally {
       restoreActor();
     }
+  };
+
+  const formatRuntimeAgentDisplay = (agentId = "") => {
+    const index = buildAgentDisplayIndexShared(agentRegistry, runtime);
+    return formatAgentDisplayName(agentId, index, {
+      includeShortId: true,
+    });
   };
 
   function estimateTokens(text) {
@@ -6315,6 +6384,26 @@ function buildSupervisorExecutionCallbacks({
             }
             return { created, createdId, addedToConversation, convRowsAfterAdd };
           });
+          const membershipChange = (action?.add_to_conversation === true && createdId)
+            ? verifyConversationMembershipMutation({
+              actionType: "add_agent_to_conversation",
+              threadId: String(runtime?.map?.threadId || "").trim(),
+              targetAgentId: createdId,
+              expectedPresent: true,
+              expectedEnabled: action?.enabled !== false,
+              conversationRows: Array.isArray(convRowsAfterAdd) ? convRowsAfterAdd : [],
+              source: "create_agent_definition",
+              extra: {
+                job_id: String(jobId || "").trim(),
+              },
+            })
+            : null;
+          if (membershipChange && membershipChange.confirmed !== true) {
+            recordMembershipMutationDiagnostic(jobId, membershipChange, {
+              stage: "membership_confirmation_failed",
+            });
+            throw createMembershipConfirmationError(membershipChange);
+          }
           if (Array.isArray(convRowsAfterAdd)) {
             const enabled = Array.from(new Set(
               convRowsAfterAdd
@@ -6342,6 +6431,7 @@ function buildSupervisorExecutionCallbacks({
             model: createdModel,
             tools: createdTools,
             added_to_conversation: addedToConversation,
+            membership_change: membershipChange || undefined,
             text: [
               "✅ agent definition 생성 완료",
               `- name: ${createdName}`,
@@ -6411,16 +6501,36 @@ function buildSupervisorExecutionCallbacks({
               .map((row) => String(row?.agent_id || "").trim().toLowerCase())
               .filter(Boolean)
           ));
+          const verification = verifyConversationMembershipMutation({
+            actionType: "add_agent_to_conversation",
+            threadId,
+            targetAgentId: agentId,
+            expectedPresent: true,
+            expectedEnabled: action?.enabled !== false,
+            conversationRows: convRows,
+            source: "chat_executor_callback",
+            extra: {
+              job_id: String(jobId || "").trim(),
+            },
+          });
+          if (!verification.confirmed) {
+            recordMembershipMutationDiagnostic(jobId, verification, {
+              stage: "membership_confirmation_failed",
+            });
+            throw createMembershipConfirmationError(verification);
+          }
           runtime.conversationAgents = convRows;
           runtime.enabledAgentIds = enabled;
           runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
             .filter((agent) => enabled.includes(String(agent?.id || "").trim().toLowerCase()));
           runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
+          const agentDisplay = formatRuntimeAgentDisplay(agentId);
           return {
             agent_id: agentId,
             enabled_agents: enabled,
+            membership_change: verification,
             source: "conversation_agents",
-            text: `✅ conversation에 @${agentId} 추가 완료`,
+            text: `✅ conversation에 ${agentDisplay} 추가 완료`,
           };
         },
       });
@@ -6452,16 +6562,36 @@ function buildSupervisorExecutionCallbacks({
               .map((row) => String(row?.agent_id || "").trim().toLowerCase())
               .filter(Boolean)
           ));
+          const verification = verifyConversationMembershipMutation({
+            actionType: "remove_agent_from_conversation",
+            threadId,
+            targetAgentId: agentId,
+            expectedPresent: false,
+            expectedEnabled: false,
+            conversationRows: convRows,
+            source: "chat_executor_callback",
+            extra: {
+              job_id: String(jobId || "").trim(),
+            },
+          });
+          if (!verification.confirmed) {
+            recordMembershipMutationDiagnostic(jobId, verification, {
+              stage: "membership_confirmation_failed",
+            });
+            throw createMembershipConfirmationError(verification);
+          }
           runtime.conversationAgents = convRows;
           runtime.enabledAgentIds = enabled;
           runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
             .filter((agent) => enabled.includes(String(agent?.id || "").trim().toLowerCase()));
           runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
+          const agentDisplay = formatRuntimeAgentDisplay(agentId);
           return {
             agent_id: agentId,
             enabled_agents: enabled,
+            membership_change: verification,
             source: "conversation_agents",
-            text: `🛑 conversation에서 @${agentId} 제거 완료`,
+            text: `🛑 conversation에서 ${agentDisplay} 제거 완료`,
           };
         },
       });
@@ -7250,15 +7380,38 @@ async function runSupervisorChat(
         originalUserText: message,
         forceMode: cleanForceMode,
         jobConfig: runtime.jobConfig,
-        agents: runtime.agents,
+        agents: Array.isArray(runtime?.agentsCatalog) && runtime.agentsCatalog.length > 0
+          ? runtime.agentsCatalog
+          : runtime.agents,
         tools: runtime.tools,
         sessionStore: chatSessionStore,
         callbacks,
       });
       const turnResults = Array.isArray(execution?.results) ? execution.results : [];
       const turnOutputs = Array.isArray(execution?.outputs) ? execution.outputs : [];
+      const turnRemainingActions = Array.isArray(execution?.remaining_actions)
+        ? execution.remaining_actions
+        : [];
       mergedResults = [...mergedResults, ...turnResults];
       mergedOutputs = [...mergedOutputs, ...turnOutputs];
+
+      if (
+        executionGraph
+        && typeof executionGraph.markStepSkipped === "function"
+        && turnRemainingActions.length > 0
+        && !execution.pendingApproval
+      ) {
+        const interruptedByReplan = turnResults.some((row) => {
+          const label = String(row?.label || "").trim().toLowerCase();
+          const note = String(row?.note || "").trim().toLowerCase();
+          return label === "interrupt" || note.includes("replan requested");
+        });
+        for (const action of turnRemainingActions) {
+          await executionGraph.markStepSkipped(action, {
+            reason: interruptedByReplan ? "superseded_by_replan" : "superseded",
+          });
+        }
+      }
 
       const suggestedFromTurn = collectSuggestedActionsFromOutputs(turnOutputs);
       if (suggestedFromTurn.length > 0) {
@@ -7285,6 +7438,16 @@ async function runSupervisorChat(
       ].join("\n"));
 
       if (execution.pendingApproval) {
+        if (executionGraph && typeof executionGraph.markStepSkipped === "function") {
+          const pendingRows = Array.isArray(execution?.remaining_actions)
+            ? execution.remaining_actions
+            : [];
+          for (const action of pendingRows) {
+            await executionGraph.markStepSkipped(action, {
+              reason: "awaiting_approval",
+            });
+          }
+        }
         stopReason = "pending_approval";
         break;
       }
@@ -7409,7 +7572,7 @@ async function runSupervisorChat(
       tracking.append(currentJobId, "decisions.md", [
         "## /chat approval required",
         `- reason: ${pendingApproval.reason}`,
-        `- action: ${chatActionLabel(pendingApproval.action)}`,
+        `- action: ${String(pendingApproval?.action_display_label || "").trim() || chatActionLabel(pendingApproval.action)}`,
       ].join("\n"));
     }
 
@@ -8117,6 +8280,26 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
             .filter(Boolean)
         ));
         const disabled = allAgentIds.filter((id) => !enabled.includes(id));
+        const verification = verifyConversationMembershipMutation({
+          actionType: sub === "add"
+            ? "add_agent_to_conversation"
+            : (sub === "remove" ? "remove_agent_from_conversation" : `${sub}_agent`),
+          threadId,
+          targetAgentId,
+          expectedPresent: sub !== "remove",
+          expectedEnabled: sub === "disable" ? false : true,
+          conversationRows: updated,
+          source: "telegram_agents_command",
+          extra: {
+            job_id: String(currentJobId || "").trim(),
+          },
+        });
+        if (!verification.confirmed) {
+          recordMembershipMutationDiagnostic(currentJobId, verification, {
+            stage: "membership_confirmation_failed",
+          });
+          throw createMembershipConfirmationError(verification);
+        }
         let agentIndex = buildAgentDisplayIndex(agentRegistry, runtime);
         if (
           agentIndex.size === 0
