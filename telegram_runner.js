@@ -48,6 +48,10 @@ import {
 } from "./src/application/job_runtime.js";
 import { createRuntimeTeamSnapshot } from "./src/application/runtime_metadata.js";
 import {
+  isExplicitTeamConfigurationIntentMessage,
+} from "./src/application/team_intent.js";
+import { buildExplicitTeamReconfigurationActions } from "./src/application/team_config_diff.js";
+import {
   loadAgentsFromGoc,
   createAgentProfile,
   updateAgentProfile,
@@ -66,6 +70,12 @@ import {
 import { ChatSessionStore } from "./src/chat/session.js";
 import { routeWithSupervisor } from "./src/chat/supervisor_router.js";
 import { executeSupervisorActions, isMutatingAction } from "./src/chat/executor.js";
+import {
+  buildAgentDisplayIndex as buildAgentDisplayIndexShared,
+  formatAgentDisplayName,
+  resolveActionAgentId,
+  resolveActionAgentNameHint,
+} from "./src/shared/agent_labels.js";
 import { normalizeActionPlan } from "./src/chat/actions.js";
 import { expandDetailContext } from "./src/chat/unfold.js";
 import { ChatRunManager } from "./src/chat/run_manager.js";
@@ -2102,7 +2112,13 @@ function normalizeActionShape(raw) {
 
 function actionLabel(act) {
   if (!act || !act.type) return "(unknown)";
-  if (act.type === "agent_run") return `agent_run:${act.agent}`;
+  const globalAgentIndex = buildAgentDisplayIndexShared(agentRegistry);
+  if (act.type === "agent_run") {
+    const agentDisplay = formatAgentDisplayName(act.agent, globalAgentIndex, {
+      includeShortId: true,
+    });
+    return `agent_run:${agentDisplay}`;
+  }
   if (act.type === "chatgpt_prompt") return "chatgpt_prompt";
   if (act.type === "track_append") return `track_append:${act.doc || "plan.md"}`;
   return String(act.type);
@@ -2119,27 +2135,43 @@ function formatRegistryLines(reg) {
   ].join("\n");
 }
 
-function chatActionLabel(action) {
+function formatActionAgentLabel(action = {}, { agentIndex = null } = {}) {
+  const resolvedIndex = agentIndex instanceof Map
+    ? agentIndex
+    : buildAgentDisplayIndexShared(agentRegistry);
+  const agentId = resolveActionAgentId(action);
+  const nameHint = resolveActionAgentNameHint(action);
+  if (!agentId && !nameHint) return "unknown";
+  return formatAgentDisplayName(agentId || nameHint, resolvedIndex, {
+    nameHint,
+    includeShortId: true,
+  });
+}
+
+function chatActionLabel(action, { agentIndex = null } = {}) {
+  const resolvedIndex = agentIndex instanceof Map
+    ? agentIndex
+    : buildAgentDisplayIndexShared(agentRegistry);
   const type = String(action?.type || "").trim().toLowerCase();
   if (!type) return "(unknown)";
-  if (type === "run_agent") return `run_agent:${action.agent_id || action.agent || "unknown"}`;
-  if (type === "propose_agent") return `propose_agent:${action.agent_id || action.agent || "unknown"}`;
+  if (type === "run_agent") return `run_agent:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
+  if (type === "propose_agent") return `propose_agent:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
   if (type === "need_more_detail") return `need_more_detail:${action.context_set_id || "ctx"}`;
   if (type === "search_public_agents") return `search_public_agents:${action.query || ""}`;
   if (type === "install_agent_blueprint") return `install_agent_blueprint:${action.blueprint_id || action.public_node_id || ""}`;
-  if (type === "publish_agent") return `publish_agent:${action.agent_id || action.agent_node_id || ""}`;
-  if (type === "add_agent_to_conversation") return `add_agent_to_conversation:${action.agent_id || "unknown"}`;
-  if (type === "remove_agent_from_conversation") return `remove_agent_from_conversation:${action.agent_id || "unknown"}`;
-  if (type === "create_agent_definition") return `create_agent_definition:${action.agent_spec?.id || action.agent_spec?.name || action.agent_id || "unknown"}`;
-  if (type === "fork_agent") return `fork_agent:${action.agent_id || "unknown"}`;
-  if (type === "disable_agent") return `disable_agent:${action.agent_id || "unknown"}`;
-  if (type === "enable_agent") return `enable_agent:${action.agent_id || "unknown"}`;
+  if (type === "publish_agent") return `publish_agent:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
+  if (type === "add_agent_to_conversation") return `add_agent_to_conversation:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
+  if (type === "remove_agent_from_conversation") return `remove_agent_from_conversation:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
+  if (type === "create_agent_definition") return `create_agent_definition:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
+  if (type === "fork_agent") return `fork_agent:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
+  if (type === "disable_agent") return `disable_agent:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
+  if (type === "enable_agent") return `enable_agent:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
   if (type === "disable_tool") return `disable_tool:${action.tool_id || "unknown"}`;
   if (type === "enable_tool") return `enable_tool:${action.tool_id || "unknown"}`;
   if (type === "list_agents") return "list_agents";
   if (type === "list_tools") return "list_tools";
-  if (type === "create_agent") return `create_agent:${action.agent?.id || action.agent_id || "unknown"}`;
-  if (type === "update_agent") return `update_agent:${action.agentId || action.agent_id || "unknown"}`;
+  if (type === "create_agent") return `create_agent:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
+  if (type === "update_agent") return `update_agent:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
   if (type === "get_status") return "get_status";
   if (type === "interrupt") return `interrupt:${action.mode || "replan"}`;
   if (type === "spawn_agents") return `spawn_agents:${Array.isArray(action.agents) ? action.agents.length : 0}`;
@@ -2250,29 +2282,30 @@ function hasCoderDelegation(actions = [], coderAgentId = "") {
 
 function buildPlanPreviewLines(actions = []) {
   const rows = Array.isArray(actions) ? actions : [];
+  const agentIndex = buildAgentDisplayIndexShared(agentRegistry);
   const lines = [];
   for (const action of rows) {
     const type = String(action?.type || "").trim().toLowerCase();
     if (type === "run_agent") {
-      const agentId = String(action.agent_id || action.agent || "").trim().toLowerCase() || "unknown";
+      const agentId = formatActionAgentLabel(action, { agentIndex });
       const goal = clip(getActionGoal(action) || "(goal 없음)", 220);
-      lines.push(`- @${agentId}: ${goal}`);
+      lines.push(`- ${agentId}: ${goal}`);
       continue;
     }
     if (type === "spawn_agents") {
       const children = Array.isArray(action.agents) ? action.agents : [];
       if (children.length === 0) {
-        lines.push(`- (system) ${chatActionLabel(action)}`);
+        lines.push(`- (system) ${chatActionLabel(action, { agentIndex })}`);
         continue;
       }
       for (const child of children) {
-        const childId = String(child?.agent_id || child?.agent || "").trim().toLowerCase() || "unknown";
+        const childId = formatActionAgentLabel(child, { agentIndex });
         const goal = clip(String(child?.goal || child?.prompt || child?.task || "(goal 없음)"), 220);
-        lines.push(`- @${childId}: ${goal}`);
+        lines.push(`- ${childId}: ${goal}`);
       }
       continue;
     }
-    lines.push(`- (system) ${chatActionLabel(action)}`);
+    lines.push(`- (system) ${chatActionLabel(action, { agentIndex })}`);
   }
   if (lines.length === 0) lines.push("- (system) no actions");
   return lines;
@@ -2408,17 +2441,20 @@ function shouldSendAgentStatusMessage(chatId, agentId, state) {
 
 function buildAgentTransitionText({ agentId = "", state = "", goal = "", error = "" } = {}) {
   const cleanAgentId = String(agentId || "").trim().toLowerCase() || "unknown";
+  const agentDisplay = formatAgentDisplayName(cleanAgentId, buildAgentDisplayIndexShared(agentRegistry), {
+    includeShortId: true,
+  });
   const cleanState = String(state || "").trim().toLowerCase();
   if (cleanState === "running") {
-    return `▶️ @${cleanAgentId} 시작: ${clip(String(goal || "").trim() || "(goal 없음)", 240)}`;
+    return `▶️ ${agentDisplay} 시작: ${clip(String(goal || "").trim() || "(goal 없음)", 240)}`;
   }
   if (cleanState === "done") {
-    return `✅ @${cleanAgentId} 완료`;
+    return `✅ ${agentDisplay} 완료`;
   }
   if (cleanState === "error") {
-    return `❌ @${cleanAgentId} 실패: ${clip(String(error || "unknown error"), 240)}`;
+    return `❌ ${agentDisplay} 실패: ${clip(String(error || "unknown error"), 240)}`;
   }
-  return `ℹ️ @${cleanAgentId} 상태: ${cleanState || "queued"}`;
+  return `ℹ️ ${agentDisplay} 상태: ${cleanState || "queued"}`;
 }
 
 async function sendAgentStatusTransitionMessage(
@@ -3023,15 +3059,7 @@ function getConversationMembershipActionKey(action) {
 }
 
 function isTeamCompositionIntentMessage(taskText = "") {
-  const text = String(taskText || "").toLowerCase();
-  if (!text) return false;
-  return text.includes("team 구성")
-    || text.includes("agent team")
-    || text.includes("팀 짜")
-    || text.includes("구성해줘")
-    || text.includes("세팅해줘")
-    || text.includes("적합한 agent들")
-    || text.includes("적합한 에이전트");
+  return isExplicitTeamConfigurationIntentMessage(taskText);
 }
 
 function buildAgentSearchText(agent = {}) {
@@ -3330,6 +3358,8 @@ function rewritePlanToReuseAgents(
       .filter(Boolean)
   ));
   const canSatisfyWithoutCreation = teamRecommendation?.can_satisfy_without_creation === true;
+  const explicitTeamConfigIntent = teamRecommendation?.team_composition_intent === true
+    || isExplicitTeamConfigurationIntentMessage(message);
   const allowCreateFromMissing = (
     !canSatisfyWithoutCreation
     && missingCapabilities.length > 0
@@ -3399,12 +3429,38 @@ function rewritePlanToReuseAgents(
     membership.set(matchedAgentId, true);
   }
 
-  if (dedupedProposals <= 0 && droppedCreates <= 0) return routePlan;
+  const teamDiffResult = explicitTeamConfigIntent && selectedExistingIds.length > 0
+    ? buildExplicitTeamReconfigurationActions({
+      currentMembership: membership,
+      desiredAgentIds: selectedExistingIds,
+      existingActions: [...sourceActions, ...rewrittenActions],
+      allowRemoval: canSatisfyWithoutCreation,
+      removalMode: "remove",
+    })
+    : { actions: [], stats: { added: 0, enabled: 0, removed: 0, disabled: 0 } };
+  const teamDiffActions = Array.isArray(teamDiffResult.actions) ? teamDiffResult.actions : [];
+  const teamDiffStats = teamDiffResult.stats && typeof teamDiffResult.stats === "object"
+    ? teamDiffResult.stats
+    : { added: 0, enabled: 0, removed: 0, disabled: 0 };
+  if (teamDiffActions.length > 0) {
+    rewrittenActions.push(...teamDiffActions);
+  }
+
+  const teamDiffTotal = Number(teamDiffStats.added || 0)
+    + Number(teamDiffStats.enabled || 0)
+    + Number(teamDiffStats.removed || 0)
+    + Number(teamDiffStats.disabled || 0);
+  if (dedupedProposals <= 0 && droppedCreates <= 0 && teamDiffTotal <= 0) return routePlan;
 
   let finalActions = rewrittenActions;
   let reason = String(routePlan.reason || "supervisor route").trim() || "supervisor route";
 
-  if (finalActions.length === 0 && routePlan.done !== true && routePlan.await_user !== true) {
+  if (
+    finalActions.length === 0
+    && routePlan.done !== true
+    && routePlan.await_user !== true
+    && !explicitTeamConfigIntent
+  ) {
     const fallbackAgent = pickRuntimeDefaultAgentId(runtime?.agents || []) || findDefaultChatAgentId();
     if (fallbackAgent) {
       finalActions = [{
@@ -3417,7 +3473,7 @@ function rewritePlanToReuseAgents(
     }
   }
 
-  reason = `${reason}; deduped_proposals=${dedupedProposals}; dropped_creates=${droppedCreates}; survived_creates=${survivedCreates}`;
+  reason = `${reason}; deduped_proposals=${dedupedProposals}; dropped_creates=${droppedCreates}; survived_creates=${survivedCreates}; team_diff_add=${Number(teamDiffStats.added || 0)}; team_diff_enable=${Number(teamDiffStats.enabled || 0)}; team_diff_remove=${Number(teamDiffStats.removed || 0)}; team_diff_disable=${Number(teamDiffStats.disabled || 0)}`;
   return {
     ...routePlan,
     reason,
@@ -7772,6 +7828,7 @@ async function executeAgentRun(
 
 async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts = {}) {
   const runtime = opts?.runtime && typeof opts.runtime === "object" ? opts.runtime : null;
+  const agentIndex = buildAgentDisplayIndexShared(agentRegistry, runtime);
   const telegramUserId = String(opts?.telegramUserId || "").trim();
   const runtimeTeamSnapshot = route?.runtime_team_snapshot && typeof route.runtime_team_snapshot === "object"
     ? route.runtime_team_snapshot
@@ -7802,7 +7859,8 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
     if (act.type === "agent_run") {
       const agentInfo = findAgentConfigInRuntime(act.agent, runtime) || findAgentConfig(act.agent);
       const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
-      await bot.sendMessage(chatId, `🤖 ${act.agent} 실행 중… (${provider})`);
+      const displayName = formatAgentDisplayName(act.agent, agentIndex, { includeShortId: true });
+      await bot.sendMessage(chatId, `🤖 ${displayName} 실행 중… (${provider})`);
       const result = await enqueue(
         () => executeAgentRun(bot, chatId, jobId, act, {
           signal,
@@ -7811,7 +7869,7 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
         }),
         { jobId, signal, label: `agent_run_${act.agent}` }
       );
-      await sendLong(bot, chatId, `🤖 ${act.agent} 완료 (${result.mode})\n${clip(result.output, 3500)}`);
+      await sendLong(bot, chatId, `🤖 ${displayName} 완료 (${result.mode})\n${clip(result.output, 3500)}`);
       if (result.provider === "chatgpt") askedChatGPT = true;
       continue;
     }
@@ -7838,6 +7896,7 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
 
 async function executeActions(bot, chatId, jobId, plan, signal = null, opts = {}) {
   const runtime = opts?.runtime && typeof opts.runtime === "object" ? opts.runtime : null;
+  const agentIndex = buildAgentDisplayIndexShared(agentRegistry, runtime);
   const telegramUserId = String(opts?.telegramUserId || "").trim();
   if (!plan || !Array.isArray(plan.actions)) return;
   const allowed = new Set(["track_append", "agent_run", "gemini", "codex", "git_summary", "chatgpt_prompt", "chatgpt", "commit_request"]);
@@ -7855,7 +7914,8 @@ async function executeActions(bot, chatId, jobId, plan, signal = null, opts = {}
     if (act.type === "agent_run") {
       const agentInfo = findAgentConfigInRuntime(act.agent, runtime) || findAgentConfig(act.agent);
       const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
-      await bot.sendMessage(chatId, `🤖 ${act.agent} 실행 중… (${provider})`);
+      const displayName = formatAgentDisplayName(act.agent, agentIndex, { includeShortId: true });
+      await bot.sendMessage(chatId, `🤖 ${displayName} 실행 중… (${provider})`);
       const r = await enqueue(
         () => executeAgentRun(bot, chatId, jobId, act, {
           signal,
@@ -7864,7 +7924,7 @@ async function executeActions(bot, chatId, jobId, plan, signal = null, opts = {}
         }),
         { jobId, signal, label: `agent_run_${act.agent}` }
       );
-      await sendLong(bot, chatId, `🤖 ${act.agent} 결과 (${r.mode})\n${clip(r.output, 3500)}`);
+      await sendLong(bot, chatId, `🤖 ${displayName} 결과 (${r.mode})\n${clip(r.output, 3500)}`);
     }
 
     if (act.type === "git_summary") {
@@ -7958,28 +8018,13 @@ async function sendChatStatus(bot, chatId, { telegramUserId = "" } = {}) {
 }
 
 function buildAgentDisplayIndex(registry = null, runtime = null) {
-  const index = new Map();
-  const pushRows = (rows = []) => {
-    for (const row of (Array.isArray(rows) ? rows : [])) {
-      const id = String(row?.id || row?.agent_id || row?.agentId || "").trim().toLowerCase();
-      if (!id) continue;
-      index.set(id, row);
-    }
-  };
-  pushRows(registry?.agents || []);
-  pushRows(runtime?.agentsCatalog || []);
-  pushRows(runtime?.agents || []);
-  return index;
+  return buildAgentDisplayIndexShared(registry, runtime);
 }
 
 function formatAgentRef(agentId, agentIndex = new Map()) {
-  const id = String(agentId || "").trim().toLowerCase();
-  if (!id) return "@unknown";
-  const row = agentIndex.get(id) || null;
-  const name = String(row?.name || row?.title || row?.system_key || id).trim();
-  const shortId = id.slice(0, 8) || "unknown";
-  if (row && name) return `${name} [${shortId}]`;
-  return `@${shortId}`;
+  return formatAgentDisplayName(agentId, agentIndex, {
+    includeShortId: true,
+  });
 }
 
 async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "", opts = {}) {

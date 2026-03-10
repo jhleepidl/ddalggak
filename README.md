@@ -43,6 +43,23 @@
 - team builder는 route를 덮어쓰는 것이 아니라 `team_plan/runtime_agents/runtime_team_snapshot`으로 보강합니다.
 - team-generated actions는 명시적 route action이 비어있거나 fallback-only일 때만 사용됩니다.
 
+### Team Reconfiguration Behavior
+
+- 사용자 요청이 명시적 팀 재구성 의도일 때만(team composition intent) thread team diff를 계산합니다.
+- 이 경우 `add/enable`뿐 아니라 필요 시 `remove_agent_from_conversation`(또는 경로별 disable)도 포함될 수 있습니다.
+- 일반 작업 요청에서는 기존처럼 보수적으로 동작하며, 불필요한 자동 제거를 하지 않습니다.
+
+### Mutation-Only Plan Safeguard
+
+- 승인 후 재개된 plan이 팀 설정 mutation만 포함하고 실제 실행 액션(`run_agent`/`spawn_agents` 등)이 없으면:
+  - 팀 설정 전용 요청이 아닌 경우, 작업 실행 모드로 1회 post-mutation reroute를 시도합니다.
+  - 루프 방지를 위해 reroute guard(1회 제한)를 둡니다.
+  - guard에 막힌 경우 사용자에게 명시적으로 안내 메시지를 보냅니다.
+
+추가 메타데이터(가산형):
+- `post_mutation_reroute: true|false`
+- `reroute_reason: mutation_only_plan_for_work_request` (해당 시)
+
 ### Runtime Team Observability
 
 실행 중 canonical 메타데이터 계약은 아래와 같습니다:
@@ -80,6 +97,8 @@ step payload의 runtime role 필드는 아래 canonical 키를 사용합니다:
 그래서 graph-of-context-ui/control-plane에서 실제 런타임 팀 구성과 action 생성 출처를 사후 조회할 수 있습니다.
 
 외부 Telegram 명령 UX(`/run`, `/continue`, `/gptprompt`, `/gptapply`, `/gptdone`, `/commit`, `/context`, `/agents`, `/memory`)은 그대로 유지됩니다.
+
+운영자 UI 가이드는 [`UI_USAGE_GUIDE.md`](./UI_USAGE_GUIDE.md)를 참고하세요.
 
 ---
 

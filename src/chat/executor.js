@@ -4,6 +4,17 @@ import {
   isActionAllowed,
   parseAllowlist,
 } from "./actions.js";
+import {
+  isRealExecutionAction,
+  isTeamSetupAction,
+  isMutationOnlyTeamSetupPlan,
+} from "./action_classification.js";
+import {
+  buildAgentDisplayIndex,
+  formatAgentDisplayName,
+  resolveActionAgentId,
+  resolveActionAgentNameHint,
+} from "../shared/agent_labels.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -33,6 +44,12 @@ export function isMutatingAction(actionOrType) {
   return MUTATING_ACTION_TYPES.has(key);
 }
 
+export {
+  isRealExecutionAction,
+  isTeamSetupAction,
+  isMutationOnlyTeamSetupPlan,
+};
+
 function isMutatingApproved(action) {
   if (!action || typeof action !== "object") return false;
   return action.approved === true
@@ -46,11 +63,11 @@ function looksLikeWorkRequest(text) {
   return /만들어줘|작성해줘|과제|리서치|분석|구현|코드|work|task|research|analy/i.test(src);
 }
 
-function mutatingPreviewLines(actions = []) {
+function mutatingPreviewLines(actions = [], { agentIndex = new Map() } = {}) {
   const rows = Array.isArray(actions)
     ? actions.filter((action) => isMutatingAction(action))
     : [];
-  return rows.slice(0, 8).map((action) => `- ${actionLabel(action)}`);
+  return rows.slice(0, 8).map((action) => `- ${actionLabel(action, { agentIndex })}`);
 }
 
 function approvalReasonCategory(action = {}, fallbackReason = "") {
@@ -73,32 +90,44 @@ function approvalReasonCategory(action = {}, fallbackReason = "") {
   return "외부 상태 변경";
 }
 
-function approvalActionSummary(actions = []) {
+function approvalActionSummary(actions = [], { agentIndex = new Map() } = {}) {
   const rows = Array.isArray(actions) ? actions : [];
-  return rows.slice(0, 8).map((action) => `- ${actionLabel(action)}`);
+  return rows.slice(0, 8).map((action) => `- ${actionLabel(action, { agentIndex })}`);
 }
 
-function actionLabel(action) {
+function formatActionAgent(action = {}, agentIndex = new Map(), {
+  fallback = "unknown",
+} = {}) {
+  const agentId = resolveActionAgentId(action);
+  const nameHint = resolveActionAgentNameHint(action);
+  if (!agentId && !nameHint) return fallback;
+  return formatAgentDisplayName(agentId || nameHint, agentIndex, {
+    nameHint,
+    includeShortId: true,
+  });
+}
+
+function actionLabel(action, { agentIndex = new Map() } = {}) {
   const type = String(action?.type || "").trim().toLowerCase();
   if (!type) return "(unknown)";
-  if (type === "run_agent") return `run_agent:${action.agent_id || "unknown"}`;
-  if (type === "propose_agent") return `propose_agent:${action.agent_id || "unknown"}`;
+  if (type === "run_agent") return `run_agent:${formatActionAgent(action, agentIndex)}`;
+  if (type === "propose_agent") return `propose_agent:${formatActionAgent(action, agentIndex)}`;
   if (type === "need_more_detail") return `need_more_detail:${action.context_set_id || "unknown"}`;
   if (type === "search_public_agents") return `search_public_agents:${action.query || ""}`;
   if (type === "install_agent_blueprint") return `install_agent_blueprint:${action.blueprint_id || action.public_node_id || ""}`;
-  if (type === "publish_agent") return `publish_agent:${action.agent_id || action.agent_node_id || ""}`;
-  if (type === "add_agent_to_conversation") return `add_agent_to_conversation:${action.agent_id || "unknown"}`;
-  if (type === "remove_agent_from_conversation") return `remove_agent_from_conversation:${action.agent_id || "unknown"}`;
-  if (type === "create_agent_definition") return `create_agent_definition:${action.agent_spec?.id || action.agent_spec?.name || action.agent_id || "unknown"}`;
-  if (type === "fork_agent") return `fork_agent:${action.agent_id || "unknown"}`;
-  if (type === "disable_agent") return `disable_agent:${action.agent_id || "unknown"}`;
-  if (type === "enable_agent") return `enable_agent:${action.agent_id || "unknown"}`;
+  if (type === "publish_agent") return `publish_agent:${formatActionAgent(action, agentIndex, { fallback: action.agent_node_id || "unknown" })}`;
+  if (type === "add_agent_to_conversation") return `add_agent_to_conversation:${formatActionAgent(action, agentIndex)}`;
+  if (type === "remove_agent_from_conversation") return `remove_agent_from_conversation:${formatActionAgent(action, agentIndex)}`;
+  if (type === "create_agent_definition") return `create_agent_definition:${formatActionAgent(action, agentIndex)}`;
+  if (type === "fork_agent") return `fork_agent:${formatActionAgent(action, agentIndex)}`;
+  if (type === "disable_agent") return `disable_agent:${formatActionAgent(action, agentIndex)}`;
+  if (type === "enable_agent") return `enable_agent:${formatActionAgent(action, agentIndex)}`;
   if (type === "disable_tool") return `disable_tool:${action.tool_id || "unknown"}`;
   if (type === "enable_tool") return `enable_tool:${action.tool_id || "unknown"}`;
   if (type === "list_agents") return "list_agents";
   if (type === "list_tools") return "list_tools";
-  if (type === "create_agent") return `create_agent:${action.agent?.id || action.agent_id || "unknown"}`;
-  if (type === "update_agent") return `update_agent:${action.agentId || action.agent_id || "unknown"}`;
+  if (type === "create_agent") return `create_agent:${formatActionAgent(action, agentIndex)}`;
+  if (type === "update_agent") return `update_agent:${formatActionAgent(action, agentIndex)}`;
   if (type === "get_status") return "get_status";
   if (type === "interrupt") return `interrupt:${action.mode || "replan"}`;
   if (type === "spawn_agents") return `spawn_agents:${Array.isArray(action.agents) ? action.agents.length : 0}`;
@@ -166,6 +195,7 @@ export async function executeSupervisorActions({
   const approvalCfg = asObject(config.approval);
   const allowlist = parseAllowlist(config, tools);
   const actions = Array.isArray(plan?.actions) ? plan.actions : [];
+  const agentDisplayIndex = buildAgentDisplayIndex(agents);
   const maxActions = Number.isFinite(Number(budgetCfg.max_actions))
     ? Math.max(1, Math.floor(Number(budgetCfg.max_actions)))
     : 4;
@@ -209,7 +239,7 @@ export async function executeSupervisorActions({
       action: mutatingAction,
       reason: "관리 변경 적용 전 확인이 필요합니다.",
       preview_reason: approvalReasonCategory(mutatingAction, "관리 변경 적용 전 확인이 필요합니다."),
-      actions_summary: approvalActionSummary(actions),
+      actions_summary: approvalActionSummary(actions, { agentIndex: agentDisplayIndex }),
       cancel_impact: "취소 시 영향 없음",
       gate_type: "mutating_confirm",
       mode_choice_required: true,
@@ -224,10 +254,10 @@ export async function executeSupervisorActions({
       original_user_text: cleanOriginalUserText,
       force_mode: cleanForceMode,
       work_like_hint: workLikeHint,
-      preview_lines: mutatingPreviewLines(actions),
+      preview_lines: mutatingPreviewLines(actions, { agentIndex: agentDisplayIndex }),
     };
     results.push({
-      label: actionLabel(mutatingAction),
+      label: actionLabel(mutatingAction, { agentIndex: agentDisplayIndex }),
       status: "blocked",
       note: "mutating confirm required",
     });
@@ -241,7 +271,7 @@ export async function executeSupervisorActions({
 
   for (let i = 0; i < actions.length && !pendingApproval; i += 1) {
     const action = actions[i];
-    const label = actionLabel(action);
+    const label = actionLabel(action, { agentIndex: agentDisplayIndex });
     const interruptBefore = readInterruptState(sessionStore, chatId);
     if (interruptBefore?.requested) {
       if (interruptBefore.mode === "cancel") {
@@ -289,7 +319,7 @@ export async function executeSupervisorActions({
         action,
         reason: approval.reason,
         preview_reason: approvalReasonCategory(action, approval.reason),
-        actions_summary: approvalActionSummary(remainingActions),
+        actions_summary: approvalActionSummary(remainingActions, { agentIndex: agentDisplayIndex }),
         cancel_impact: "취소 시 영향 없음",
         blocked_index: i,
         remaining_actions: remainingActions,
@@ -622,17 +652,23 @@ export async function executeSupervisorActions({
         });
         const targetAgentId = String(action.agent_id || changed?.agent_id || "").trim().toLowerCase();
         const enabledAgents = Array.isArray(changed?.enabled_agents) ? changed.enabled_agents : [];
+        const targetAgentDisplay = formatAgentDisplayName(targetAgentId, agentDisplayIndex, {
+          includeShortId: true,
+        });
+        const enabledAgentDisplays = enabledAgents.map((id) => formatAgentDisplayName(id, agentDisplayIndex, {
+          includeShortId: true,
+        }));
         outputs.push({
           agentId: "system",
           provider: "system",
           mode: "conversation_agent_add",
           output: String(changed?.text || "").trim()
-            || `✅ conversation agent 추가: @${targetAgentId || "unknown"}${enabledAgents.length > 0 ? `\nenabled=${enabledAgents.map((id) => `@${id}`).join(", ")}` : ""}`,
+            || `✅ conversation agent 추가: ${targetAgentDisplay}${enabledAgentDisplays.length > 0 ? `\nenabled=${enabledAgentDisplays.join(", ")}` : ""}`,
           agent_id: targetAgentId || undefined,
           enabled_agents: enabledAgents,
           jobId: String(jobId || ""),
         });
-        results.push({ label, status: "ok", note: targetAgentId ? `@${targetAgentId}` : "added" });
+        results.push({ label, status: "ok", note: targetAgentId ? targetAgentDisplay : "added" });
         usedActions += 1;
         continue;
       }
@@ -649,17 +685,23 @@ export async function executeSupervisorActions({
         });
         const targetAgentId = String(action.agent_id || changed?.agent_id || "").trim().toLowerCase();
         const enabledAgents = Array.isArray(changed?.enabled_agents) ? changed.enabled_agents : [];
+        const targetAgentDisplay = formatAgentDisplayName(targetAgentId, agentDisplayIndex, {
+          includeShortId: true,
+        });
+        const enabledAgentDisplays = enabledAgents.map((id) => formatAgentDisplayName(id, agentDisplayIndex, {
+          includeShortId: true,
+        }));
         outputs.push({
           agentId: "system",
           provider: "system",
           mode: "conversation_agent_remove",
           output: String(changed?.text || "").trim()
-            || `🛑 conversation agent 제거: @${targetAgentId || "unknown"}${enabledAgents.length > 0 ? `\nenabled=${enabledAgents.map((id) => `@${id}`).join(", ")}` : ""}`,
+            || `🛑 conversation agent 제거: ${targetAgentDisplay}${enabledAgentDisplays.length > 0 ? `\nenabled=${enabledAgentDisplays.join(", ")}` : ""}`,
           agent_id: targetAgentId || undefined,
           enabled_agents: enabledAgents,
           jobId: String(jobId || ""),
         });
-        results.push({ label, status: "ok", note: targetAgentId ? `@${targetAgentId}` : "removed" });
+        results.push({ label, status: "ok", note: targetAgentId ? targetAgentDisplay : "removed" });
         usedActions += 1;
         continue;
       }
@@ -706,8 +748,11 @@ export async function executeSupervisorActions({
           userId,
         });
         const marker = op === "enable" ? "✅" : "🚫";
+        const targetDisplay = kind === "agent"
+          ? formatAgentDisplayName(targetId, agentDisplayIndex, { includeShortId: true })
+          : targetId;
         const line = kind === "agent"
-          ? `${marker} @${targetId} ${op === "enable" ? "enabled" : "disabled"}`
+          ? `${marker} ${targetDisplay} ${op === "enable" ? "enabled" : "disabled"}`
           : `${marker} tool ${targetId} ${op === "enable" ? "enabled" : "disabled"}`;
         outputs.push({
           agentId: "system",

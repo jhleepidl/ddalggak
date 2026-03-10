@@ -1,8 +1,65 @@
 import { makeContextEngine } from "../context_engine/index.js";
 import { normalizeActionSource, normalizeRuntimeTeamSnapshot } from "./runtime_metadata.js";
+import { isMutationOnlyTeamSetupPlan } from "../chat/action_classification.js";
+import { isTeamSetupOnlyRequest } from "./team_intent.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
+}
+
+function normalizeForceModeValue(raw = "") {
+  return String(raw || "").trim().toLowerCase() === "work" ? "work" : "normal";
+}
+
+export function buildPostMutationRerouteKey({ jobId = "", userText = "" } = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  const cleanText = String(userText || "").trim().toLowerCase().replace(/\s+/g, " ");
+  return `${cleanJobId}::${cleanText}`;
+}
+
+export function shouldTriggerPostMutationReroute({
+  resumedActions = [],
+  originalUserText = "",
+  forceMode = "normal",
+  workLikeHint = false,
+  rerouteGuard = null,
+  rerouteLimit = 1,
+} = {}) {
+  if (!isMutationOnlyTeamSetupPlan(resumedActions)) {
+    return {
+      should_reroute: false,
+      reason: "has_real_execution_or_non_team_actions",
+      blocked_by_guard: false,
+    };
+  }
+  const teamSetupOnly = isTeamSetupOnlyRequest(originalUserText, {
+    forceMode: normalizeForceModeValue(forceMode),
+    workLikeHint: workLikeHint === true,
+  });
+  if (teamSetupOnly) {
+    return {
+      should_reroute: false,
+      reason: "team_setup_only_request",
+      blocked_by_guard: false,
+    };
+  }
+  const guard = asObject(rerouteGuard);
+  const count = Number.isFinite(Number(guard.count))
+    ? Math.max(0, Math.floor(Number(guard.count)))
+    : 0;
+  const limit = Math.max(1, Math.floor(Number(rerouteLimit) || 1));
+  if (count >= limit) {
+    return {
+      should_reroute: false,
+      reason: "reroute_limit_reached",
+      blocked_by_guard: true,
+    };
+  }
+  return {
+    should_reroute: true,
+    reason: "mutation_only_plan_for_work_request",
+    blocked_by_guard: false,
+  };
 }
 
 export function isActionApprovalCallbackData(data = "") {
@@ -160,6 +217,10 @@ export async function handleActionApprovalCallback({
     if (index !== 0 || !action || typeof action !== "object") return action;
     return { ...action, approved: true, _approved: true };
   });
+  const normalizeForceModeFn = typeof normalizeForceMode === "function"
+    ? normalizeForceMode
+    : normalizeForceModeValue;
+  const resumeForceMode = normalizeForceModeFn(pending.force_mode || "normal");
   const runtime = await loadSupervisorRuntime(pendingJobId, {
     chatMeta: { chat_id: String(chatId || ""), telegram_user_id: String(userId || "") },
     telegramUserId: userId,
@@ -343,7 +404,7 @@ export async function handleActionApprovalCallback({
       jobId: pendingJobId,
       plan: resumePlan,
       originalUserText: resumeUserText,
-      forceMode: normalizeForceMode(pending.force_mode || "normal"),
+      forceMode: resumeForceMode,
       jobConfig: runtime.jobConfig,
       agents: runtime.agents,
       tools: runtime.tools,
@@ -404,6 +465,32 @@ export async function handleActionApprovalCallback({
         });
       }
     }
+    const rerouteKey = buildPostMutationRerouteKey({
+      jobId: pendingJobId,
+      userText: resumeUserText,
+    });
+    const currentGuard = (
+      session?.post_mutation_reroute_guard
+      && typeof session.post_mutation_reroute_guard === "object"
+      && String(session.post_mutation_reroute_guard.key || "") === rerouteKey
+    )
+      ? session.post_mutation_reroute_guard
+      : { key: rerouteKey, count: 0 };
+    const postMutationRerouteDecision = (!resumedExecution.pendingApproval && !interruptedDuringResume)
+      ? shouldTriggerPostMutationReroute({
+        resumedActions,
+        originalUserText: resumeUserText,
+        forceMode: resumeForceMode,
+        workLikeHint: pending.work_like_hint === true,
+        rerouteGuard: currentGuard,
+        rerouteLimit: 1,
+      })
+      : {
+        should_reroute: false,
+        reason: resumedExecution.pendingApproval ? "pending_followup_approval" : "interrupted",
+        blocked_by_guard: false,
+      };
+
     const summaryPlan = session.last_route && typeof session.last_route === "object"
       ? session.last_route
       : resumePlan;
@@ -421,6 +508,8 @@ export async function handleActionApprovalCallback({
       `- resumed_actions: ${resumedActions.map((row) => chatActionLabel(row)).join(" -> ")}`,
       `- pending_after_resume: ${resumedExecution.pendingApproval ? "yes" : "no"}`,
       `- interrupted_during_resume: ${interruptedDuringResume ? "yes" : "no"}`,
+      `- post_mutation_reroute: ${postMutationRerouteDecision.should_reroute ? "yes" : "no"}`,
+      `- reroute_reason: ${postMutationRerouteDecision.reason}`,
       `- approved_by: telegram:${userId}`,
     ].join("\n"));
     await bot.sendMessage(
@@ -433,7 +522,63 @@ export async function handleActionApprovalCallback({
         : undefined
     );
 
-    if (resumedExecution.pendingApproval?.id) {
+    if (postMutationRerouteDecision.should_reroute) {
+      if (resumeExecutionGraph) {
+        await resumeExecutionGraph.finishRun({
+          status: "await_user",
+          summary: "post mutation reroute to work execution",
+        });
+      }
+      const nextGuardCount = Number.isFinite(Number(currentGuard.count))
+        ? Math.max(1, Math.floor(Number(currentGuard.count)) + 1)
+        : 1;
+      chatSessionStore.upsert(chatId, (currentSession) => ({
+        ...currentSession,
+        jobId: pendingJobId,
+        state: "idle",
+        pending_approval: null,
+        interrupt: null,
+        post_mutation_reroute_guard: {
+          key: rerouteKey,
+          count: nextGuardCount,
+          ts: new Date().toISOString(),
+        },
+        last_route: {
+          ...(currentSession?.last_route && typeof currentSession.last_route === "object"
+            ? currentSession.last_route
+            : {}),
+          post_mutation_reroute: true,
+          reroute_reason: "mutation_only_plan_for_work_request",
+        },
+      }));
+      await bot.sendMessage(
+        chatId,
+        "🔁 팀 구성 변경만 적용되어 실제 작업 실행 계획을 다시 생성합니다.",
+        Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
+          ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
+          : undefined
+      );
+      if (chatRunManager && typeof chatRunManager.handleIncoming === "function") {
+        await chatRunManager.handleIncoming({
+          chatId,
+          userId,
+          text: resumeUserText,
+          telegramMessageId: msg?.message_id,
+          kind: "normal",
+          forceMode: "work",
+          chatInfo: {
+            chat_id: String(chatId || ""),
+            title: String(msg?.chat?.title || msg?.chat?.username || "").trim(),
+            type: String(msg?.chat?.type || "").trim(),
+          },
+        });
+      } else {
+        await bot.sendMessage(
+          chatId,
+          "다시 실행할 런타임 매니저를 찾지 못했습니다. 같은 요청을 한 번 더 보내주세요."
+        );
+      }
+    } else if (resumedExecution.pendingApproval?.id) {
       if (resumeExecutionGraph) {
         await resumeExecutionGraph.finishRun({
           status: "await_user",
@@ -505,11 +650,22 @@ export async function handleActionApprovalCallback({
           summary: clip(replyText, 900),
         });
       }
-      chatSessionStore.upsert(chatId, {
+      chatSessionStore.upsert(chatId, (currentSession) => ({
+        ...currentSession,
         jobId: pendingJobId,
         state: "idle",
         pending_approval: null,
-      });
+        post_mutation_reroute_guard: null,
+      }));
+      if (postMutationRerouteDecision.blocked_by_guard) {
+        await bot.sendMessage(
+          chatId,
+          "⚠️ 팀 설정 변경 액션만 반복되어 자동 재라우팅을 중단했습니다. 작업을 바로 수행하려면 구체 작업 지시를 다시 보내주세요.",
+          Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
+            ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
+            : undefined
+        );
+      }
     }
     await maybeAutoSendOutputs(bot, chatId, pendingJobId, {
       when: "run_end",
