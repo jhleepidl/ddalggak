@@ -50,6 +50,9 @@
 - 일반 작업 요청에서는 기존처럼 보수적으로 동작하며, 불필요한 자동 제거를 하지 않습니다.
 - membership mutation(`add/remove/enable/disable`)은 write 이후 readback 확인이 성공해야만 성공으로 처리됩니다.
 - readback 확인 실패 시 팀 변경 성공으로 간주하지 않고, 진단 메타데이터를 기록한 뒤 후속 실행을 중단합니다.
+- membership write/readback/`/agents`는 동일한 canonical target을 사용합니다:
+  - `{ thread_id, conversation_id, workspace_id, account_id, source }`
+  - `ensureConversation` 응답의 `thread_id`가 요청 thread와 다르면 mismatch로 기록하고, 자동으로 다른 thread scope로 전환하지 않습니다.
 
 ### Mutation-Only Plan Safeguard
 
@@ -93,6 +96,13 @@ step payload의 runtime role 필드는 아래 canonical 키를 사용합니다:
 `MEMORY_MODE=goc`에서 execution graph recorder가 활성화된 경우, 같은 metadata가 GOC `Run`/`Step` payload와 `recordMeta` 리소스 노드에 additive 방식으로 저장됩니다.
 
 추가로 reroute/approval/interruption으로 더 이상 활성 상태가 아닌 queued step은 가능한 범위에서 `skipped`(reason 포함)로 정리하여 "Now" 오염을 줄입니다.
+
+membership 진단 로그에는 최소 아래 정보가 포함됩니다(가산형):
+- `action`, `target_agent_id`
+- `membership_target`(canonical target 요약)
+- `mutation_response` 요약
+- `readback` 요약(대상 agent 존재/활성, readback thread 샘플)
+- `ensured_thread_mismatch` 여부
 
 입력 호환성:
 - `runtime_team_snapshot`(권장 canonical)과 `runtimeTeamSnapshot`(legacy/camelCase) 모두 허용

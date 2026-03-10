@@ -16,6 +16,8 @@
 - Thread Team은 현재 대화 스레드에서 사용 가능한 agent 멤버십입니다.
 - `add/remove/enable/disable` 액션은 이 Thread Team 구성에 영향을 줍니다.
 - 같은 agent라도 conversation membership 상태에 따라 실행 가능 여부가 달라질 수 있습니다.
+- 멤버십 변경 확인은 canonical target(`thread_id + conversation_id`) 기준으로 수행됩니다.
+- `/agents`도 같은 source-of-truth(readback 경로)를 사용하므로, 확인 로직과 표시 결과가 일치해야 합니다.
 
 ## 3) Run Studio / Graph / Execution 뷰
 
@@ -53,6 +55,7 @@
 
 - 최신 패치에서는 일반 작업 요청에 대해 mutation-only 플랜이면 자동 후속 reroute를 시도합니다.
 - 멤버십 readback 확인이 실패하면 reroute 대신 fail-fast로 멈추고 진단 로그를 남깁니다.
+- `ensureConversation` 결과 thread가 요청 thread와 다르면 mismatch 진단을 기록하고 자동 실행은 중단됩니다.
 - 여전히 반복되면:
   1. 요청을 더 구체적으로 다시 지시 (`무엇을 산출해야 하는지` 명시)
   2. `/status`, `/context`로 현재 상태 확인

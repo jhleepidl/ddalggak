@@ -331,6 +331,50 @@ function normalizeConversationAgent(entity, fallbackThreadId = "") {
   };
 }
 
+function normalizeConversationTarget(rawTarget = {}, fallback = {}) {
+  const row = rawTarget && typeof rawTarget === "object"
+    ? rawTarget
+    : { thread_id: rawTarget };
+  const base = fallback && typeof fallback === "object" ? fallback : {};
+  const threadId = String(
+    pick(row, ["thread_id", "threadId"])
+    || pick(base, ["thread_id", "threadId"])
+    || ""
+  ).trim();
+  const conversationId = String(
+    pick(row, ["conversation_id", "conversationId", "id"])
+    || pick(base, ["conversation_id", "conversationId", "id"])
+    || ""
+  ).trim();
+  return {
+    thread_id: threadId,
+    conversation_id: conversationId,
+  };
+}
+
+function buildConversationIdentityPatchBody(baseBody = {}, target = {}) {
+  const identity = {};
+  if (target.thread_id) {
+    identity.thread_id = target.thread_id;
+    identity.threadId = target.thread_id;
+  }
+  if (target.conversation_id) {
+    identity.conversation_id = target.conversation_id;
+    identity.conversationId = target.conversation_id;
+  }
+  return {
+    ...identity,
+    ...(baseBody && typeof baseBody === "object" ? baseBody : {}),
+  };
+}
+
+function buildConversationIdentityQuery(target = {}) {
+  const query = {};
+  if (target.thread_id) query.thread_id = target.thread_id;
+  if (target.conversation_id) query.conversation_id = target.conversation_id;
+  return query;
+}
+
 function extractConversationAgentsArray(data) {
   if (Array.isArray(data)) return data;
   const root = asObject(data);
@@ -1550,28 +1594,34 @@ export class GocClient {
     };
   }
 
-  async ensureConversation(threadId) {
-    const tid = String(threadId || "").trim();
+  async ensureConversation(threadTarget) {
+    const target = normalizeConversationTarget(threadTarget);
+    const tid = String(target.thread_id || "").trim();
     if (!tid) throw new Error("ensureConversation requires threadId");
-    const body = {
-      thread_id: tid,
-      threadId: tid,
+    const body = buildConversationIdentityPatchBody({
       bootstrap_defaults: true,
       bootstrapDefaults: true,
-    };
+    }, target);
     const data = await this._requestAny({
       method: "POST",
       attempts: [
         { path: `/api/threads/${encodeURIComponent(tid)}/conversation/ensure`, body },
         { path: `/threads/${encodeURIComponent(tid)}/conversation/ensure`, body },
         { path: `/api/threads/${encodeURIComponent(tid)}/conversation`, body },
+        ...(target.conversation_id ? [
+          { path: `/api/conversations/${encodeURIComponent(target.conversation_id)}/ensure`, body },
+          { path: `/api/conversations/${encodeURIComponent(target.conversation_id)}`, body },
+        ] : []),
         { path: "/api/conversations/ensure", body },
         { path: "/api/conversations", body },
         { path: "/conversations/ensure", body },
         { path: "/conversations", body },
       ],
     });
-    return normalizeConversation(normalizeEntity(data, ["conversation", "data"]), tid);
+    return normalizeConversation(
+      normalizeEntity(data, ["conversation", "data"]),
+      tid
+    );
   }
 
   async bootstrapDefaultAgents(threadId, { addToConversation = true } = {}) {
@@ -1593,18 +1643,25 @@ export class GocClient {
     });
   }
 
-  async listConversationAgents(threadId) {
-    const tid = String(threadId || "").trim();
-    if (!tid) throw new Error("listConversationAgents requires threadId");
+  async listConversationAgents(threadTarget) {
+    const target = normalizeConversationTarget(threadTarget);
+    const tid = String(target.thread_id || "").trim();
+    const cid = String(target.conversation_id || "").trim();
+    if (!tid && !cid) throw new Error("listConversationAgents requires threadId or conversationId");
+    const query = buildConversationIdentityQuery(target);
     const data = await this._requestAny({
       method: "GET",
       attempts: [
-        { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents` },
-        { path: `/threads/${encodeURIComponent(tid)}/conversation/agents` },
-        { path: `/api/conversations/${encodeURIComponent(tid)}/agents` },
-        { path: "/api/conversation_agents", query: { thread_id: tid } },
-        { path: "/api/conversation-agents", query: { thread_id: tid } },
-        { path: "/conversation_agents", query: { thread_id: tid } },
+        ...(tid ? [
+          { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents` },
+          { path: `/threads/${encodeURIComponent(tid)}/conversation/agents` },
+        ] : []),
+        ...(cid ? [
+          { path: `/api/conversations/${encodeURIComponent(cid)}/agents` },
+        ] : []),
+        { path: "/api/conversation_agents", query },
+        { path: "/api/conversation-agents", query },
+        { path: "/conversation_agents", query },
       ],
     });
     return extractConversationAgentsArray(data)
@@ -1612,23 +1669,28 @@ export class GocClient {
       .filter((row) => row.agent_id);
   }
 
-  async addConversationAgent(threadId, agentId, enabled = true) {
-    const tid = String(threadId || "").trim();
+  async addConversationAgent(threadTarget, agentId, enabled = true) {
+    const target = normalizeConversationTarget(threadTarget);
+    const tid = String(target.thread_id || "").trim();
+    const cid = String(target.conversation_id || "").trim();
     const aid = String(agentId || "").trim().toLowerCase();
-    if (!tid || !aid) throw new Error("addConversationAgent requires threadId and agentId");
-    const body = {
-      thread_id: tid,
-      threadId: tid,
+    if ((!tid && !cid) || !aid) throw new Error("addConversationAgent requires threadId|conversationId and agentId");
+    const addBody = {
       agent_id: aid,
       agentId: aid,
       enabled: enabled !== false,
     };
+    const body = buildConversationIdentityPatchBody(addBody, target);
     const data = await this._requestAny({
       method: "POST",
       attempts: [
-        { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents`, body: { agent_id: aid, enabled: enabled !== false } },
-        { path: `/threads/${encodeURIComponent(tid)}/conversation/agents`, body: { agent_id: aid, enabled: enabled !== false } },
-        { path: `/api/conversations/${encodeURIComponent(tid)}/agents`, body: { agent_id: aid, enabled: enabled !== false } },
+        ...(tid ? [
+          { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents`, body: addBody },
+          { path: `/threads/${encodeURIComponent(tid)}/conversation/agents`, body: addBody },
+        ] : []),
+        ...(cid ? [
+          { path: `/api/conversations/${encodeURIComponent(cid)}/agents`, body: addBody },
+        ] : []),
         { path: "/api/conversation_agents", body },
         { path: "/api/conversation-agents", body },
         { path: "/conversation_agents", body },
@@ -1643,10 +1705,12 @@ export class GocClient {
     return normalizeConversationAgent(normalizeEntity(data, ["conversation_agent", "membership", "data"]), tid);
   }
 
-  async patchConversationAgent(threadId, agentId, patch = {}) {
-    const tid = String(threadId || "").trim();
+  async patchConversationAgent(threadTarget, agentId, patch = {}) {
+    const target = normalizeConversationTarget(threadTarget);
+    const tid = String(target.thread_id || "").trim();
+    const cid = String(target.conversation_id || "").trim();
     const aid = String(agentId || "").trim().toLowerCase();
-    if (!tid || !aid) throw new Error("patchConversationAgent requires threadId and agentId");
+    if ((!tid && !cid) || !aid) throw new Error("patchConversationAgent requires threadId|conversationId and agentId");
     const row = asObject(patch);
     const orderIndexRaw = Number(row.order_index ?? row.orderIndex ?? row.order ?? row.position);
     const overridesRaw = row.overrides_json ?? row.overridesJson ?? row.overrides;
@@ -1658,19 +1722,21 @@ export class GocClient {
       order_index: Number.isFinite(orderIndexRaw) ? Math.floor(orderIndexRaw) : undefined,
       overrides_json: Object.keys(overridesJson).length > 0 ? overridesJson : undefined,
     };
-    const patchBodyWithIdentity = {
-      thread_id: tid,
-      threadId: tid,
+    const patchBodyWithIdentity = buildConversationIdentityPatchBody({
       agent_id: aid,
       agentId: aid,
       ...patchBody,
-    };
+    }, target);
     const data = await this._requestAny({
       method: "PATCH",
       attempts: [
-        { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}`, body: patchBody },
-        { path: `/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}`, body: patchBody },
-        { path: `/api/conversations/${encodeURIComponent(tid)}/agents/${encodeURIComponent(aid)}`, body: patchBody },
+        ...(tid ? [
+          { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}`, body: patchBody },
+          { path: `/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}`, body: patchBody },
+        ] : []),
+        ...(cid ? [
+          { path: `/api/conversations/${encodeURIComponent(cid)}/agents/${encodeURIComponent(aid)}`, body: patchBody },
+        ] : []),
         { path: "/api/conversation_agents", body: patchBodyWithIdentity },
         { path: "/api/conversation-agents", body: patchBodyWithIdentity },
       ],
@@ -1698,28 +1764,37 @@ export class GocClient {
     };
   }
 
-  async removeConversationAgent(threadId, agentId) {
-    const tid = String(threadId || "").trim();
+  async removeConversationAgent(threadTarget, agentId) {
+    const target = normalizeConversationTarget(threadTarget);
+    const tid = String(target.thread_id || "").trim();
+    const cid = String(target.conversation_id || "").trim();
     const aid = String(agentId || "").trim().toLowerCase();
-    if (!tid || !aid) throw new Error("removeConversationAgent requires threadId and agentId");
-    const body = {
-      thread_id: tid,
-      threadId: tid,
+    if ((!tid && !cid) || !aid) throw new Error("removeConversationAgent requires threadId|conversationId and agentId");
+    const body = buildConversationIdentityPatchBody({
       agent_id: aid,
       agentId: aid,
-    };
+    }, target);
     await this._requestAny({
       method: "DELETE",
       attempts: [
-        { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}` },
-        { path: `/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}` },
-        { path: `/api/conversations/${encodeURIComponent(tid)}/agents/${encodeURIComponent(aid)}` },
+        ...(tid ? [
+          { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}` },
+          { path: `/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}` },
+        ] : []),
+        ...(cid ? [
+          { path: `/api/conversations/${encodeURIComponent(cid)}/agents/${encodeURIComponent(aid)}` },
+        ] : []),
         { path: "/api/conversation_agents", body },
         { path: "/api/conversation-agents", body },
         { path: "/conversation_agents", body },
       ],
     });
-    return { ok: true, thread_id: tid, agent_id: aid };
+    return {
+      ok: true,
+      thread_id: tid,
+      conversation_id: cid,
+      agent_id: aid,
+    };
   }
 
   async listAgents(scope = "") {

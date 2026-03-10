@@ -3,16 +3,29 @@ function normalizeRows(rows = []) {
     .map((row) => ({
       agent_id: String(row?.agent_id || row?.agentId || "").trim().toLowerCase(),
       enabled: row?.enabled !== false,
+      thread_id: String(row?.thread_id || row?.threadId || "").trim(),
+      conversation_id: String(row?.conversation_id || row?.conversationId || "").trim(),
     }))
     .filter((row) => row.agent_id);
 }
 
-export function summarizeConversationReadback(rows = [], { targetAgentId = "" } = {}) {
+export function summarizeConversationReadback(rows = [], { targetAgentId = "", targetThreadId = "" } = {}) {
   const normalizedRows = normalizeRows(rows);
   const target = String(targetAgentId || "").trim().toLowerCase();
+  const expectedThread = String(targetThreadId || "").trim();
   const enabled = normalizedRows.filter((row) => row.enabled).map((row) => row.agent_id);
   const disabled = normalizedRows.filter((row) => !row.enabled).map((row) => row.agent_id);
   const targetRow = normalizedRows.find((row) => row.agent_id === target) || null;
+  const threadIds = Array.from(new Set(
+    normalizedRows
+      .map((row) => String(row.thread_id || "").trim())
+      .filter(Boolean)
+  ));
+  const conversationIds = Array.from(new Set(
+    normalizedRows
+      .map((row) => String(row.conversation_id || "").trim())
+      .filter(Boolean)
+  ));
   return {
     total: normalizedRows.length,
     enabled_count: enabled.length,
@@ -21,12 +34,18 @@ export function summarizeConversationReadback(rows = [], { targetAgentId = "" } 
     disabled_sample: disabled.slice(0, 12),
     target_present: !!targetRow,
     target_enabled: targetRow ? targetRow.enabled === true : false,
+    readback_thread_ids: threadIds.slice(0, 8),
+    readback_conversation_ids: conversationIds.slice(0, 8),
+    expected_thread_seen: expectedThread
+      ? threadIds.includes(expectedThread)
+      : null,
   };
 }
 
 export function verifyConversationMembershipMutation({
   actionType = "",
   threadId = "",
+  conversationId = "",
   targetAgentId = "",
   expectedPresent = true,
   expectedEnabled = true,
@@ -36,9 +55,11 @@ export function verifyConversationMembershipMutation({
 } = {}) {
   const cleanAction = String(actionType || "").trim().toLowerCase();
   const cleanThreadId = String(threadId || "").trim();
+  const cleanConversationId = String(conversationId || "").trim();
   const cleanTarget = String(targetAgentId || "").trim().toLowerCase();
   const summary = summarizeConversationReadback(conversationRows, {
     targetAgentId: cleanTarget,
+    targetThreadId: cleanThreadId,
   });
   const confirmed = expectedPresent
     ? (summary.target_present && summary.target_enabled === (expectedEnabled === true))
@@ -46,6 +67,7 @@ export function verifyConversationMembershipMutation({
   return {
     action: cleanAction || "membership_mutation",
     thread_id: cleanThreadId,
+    conversation_id: cleanConversationId,
     target_agent_id: cleanTarget,
     expected_present: expectedPresent === true,
     expected_enabled: expectedPresent ? (expectedEnabled === true) : null,

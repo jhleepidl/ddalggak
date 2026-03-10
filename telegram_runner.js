@@ -56,6 +56,10 @@ import {
   createMembershipConfirmationError,
 } from "./src/application/membership_confirmation.js";
 import {
+  resolveConversationMembershipTarget,
+  summarizeMembershipTarget,
+} from "./src/application/membership_target.js";
+import {
   loadAgentsFromGoc,
   createAgentProfile,
   updateAgentProfile,
@@ -4561,6 +4565,7 @@ async function loadSupervisorRuntime(
         agentsSlot: null,
         toolsSlot: null,
         conversation: null,
+        conversationMembershipTarget: null,
         conversationAgents: [],
         conversationMembershipWarning: "",
         jobConfig: fallbackNormalized.configNormalized,
@@ -4606,23 +4611,26 @@ async function loadSupervisorRuntime(
       if (jobId) jobs.log(jobId, line);
     };
 
+    const membershipTarget = await resolveMembershipTargetForThread(client, {
+      threadId: map.threadId,
+      jobId,
+      source: "load_supervisor_runtime",
+    });
     let conversation = {
-      id: "",
-      thread_id: String(map.threadId || "").trim(),
+      id: String(membershipTarget.conversation_id || "").trim(),
+      thread_id: String(membershipTarget.thread_id || map.threadId || "").trim(),
     };
-    if (typeof client.ensureConversation === "function") {
-      try {
-        const ensured = await client.ensureConversation(map.threadId);
-        if (ensured && typeof ensured === "object") {
-          conversation = {
-            id: String(ensured.id || "").trim(),
-            thread_id: String(ensured.thread_id || ensured.threadId || map.threadId || "").trim(),
-          };
-        }
-      } catch (e) {
-        pushConversationWarning("ensure_conversation", e);
-      }
-    } else {
+    if (membershipTarget.ensure_error) {
+      pushConversationWarning("ensure_conversation", membershipTarget.ensure_error);
+    }
+    if (membershipTarget.ensured_thread_mismatch) {
+      pushConversationWarning("ensure_conversation_thread_mismatch", null, {
+        requested_thread_id: String(membershipTarget?.requested_target?.thread_id || map.threadId || "").trim() || "(none)",
+        ensured_thread_id: String(membershipTarget?.ensured_target?.thread_id || "").trim() || "(none)",
+        conversation_id: String(membershipTarget?.ensured_target?.conversation_id || "").trim() || "(none)",
+      });
+    }
+    if (typeof client.ensureConversation !== "function") {
       pushConversationWarning("ensure_conversation_api_unavailable");
     }
 
@@ -4630,7 +4638,7 @@ async function loadSupervisorRuntime(
       if (typeof client.listConversationAgents !== "function") {
         throw new Error("listConversationAgents API unavailable");
       }
-      const rows = await client.listConversationAgents(map.threadId);
+      const rows = await client.listConversationAgents(membershipTarget);
       return Array.isArray(rows) ? rows : [];
     };
 
@@ -4645,7 +4653,7 @@ async function loadSupervisorRuntime(
     if (conversationAgents.length === 0) {
       if (typeof client.bootstrapDefaultAgents === "function") {
         try {
-          await client.bootstrapDefaultAgents(map.threadId, { addToConversation: true });
+          await client.bootstrapDefaultAgents(membershipTarget.thread_id || map.threadId, { addToConversation: true });
           conversationAgents = await listConversationAgentsStrict();
         } catch (e) {
           pushConversationWarning("bootstrap_default_agents", e);
@@ -4664,7 +4672,7 @@ async function loadSupervisorRuntime(
       } else {
         for (const baselineAgentId of baselineAgentIds) {
           try {
-            await client.addConversationAgent(map.threadId, baselineAgentId, true);
+            await client.addConversationAgent(membershipTarget, baselineAgentId, true);
           } catch (e) {
             pushConversationWarning(`add_baseline_agent:${baselineAgentId}`, e);
           }
@@ -4681,6 +4689,23 @@ async function loadSupervisorRuntime(
       pushConversationWarning("membership_still_empty_after_bootstrap", null, {
         after_bootstrap_count: 0,
       });
+    } else {
+      const observedThreadIds = Array.from(new Set(
+        conversationAgents
+          .map((row) => String(row?.thread_id || row?.threadId || "").trim())
+          .filter(Boolean)
+      ));
+      if (
+        membershipTarget.thread_id
+        && observedThreadIds.length > 0
+        && !observedThreadIds.includes(String(membershipTarget.thread_id || "").trim())
+      ) {
+        pushConversationWarning("conversation_readback_thread_mismatch", null, {
+          target_thread_id: String(membershipTarget.thread_id || "").trim() || "(none)",
+          observed_thread_ids: observedThreadIds.slice(0, 6),
+          membership_target: summarizeMembershipTarget(membershipTarget),
+        });
+      }
     }
     const conversationMembershipWarning = warningLines.join(" | ");
 
@@ -4762,6 +4787,7 @@ async function loadSupervisorRuntime(
       agentsCatalog: reg.agents,
       toolsCatalog,
       conversation,
+      conversationMembershipTarget: summarizeMembershipTarget(membershipTarget),
       conversationAgents: Array.isArray(conversationAgents) ? conversationAgents : [],
       conversationMembershipWarning,
       enabledAgentIds: enabledConversationAgentIds,
@@ -5044,9 +5070,13 @@ async function appendParticipantToJobConfig(client, { jobId, agentId, actor = ""
     && typeof client.addConversationAgent === "function"
     && typeof client.listConversationAgents === "function"
   ) {
-    await client.ensureConversation(map.threadId);
-    await client.addConversationAgent(map.threadId, cleanAgentId, true);
-    const conversationAgents = await client.listConversationAgents(map.threadId);
+    const membershipTarget = await resolveMembershipTargetForThread(client, {
+      threadId: map.threadId,
+      jobId,
+      source: "append_participant_to_job_config",
+    });
+    const mutationResponse = await client.addConversationAgent(membershipTarget, cleanAgentId, true);
+    const conversationAgents = await client.listConversationAgents(membershipTarget);
     const enabledAgentIds = Array.from(new Set(
       (Array.isArray(conversationAgents) ? conversationAgents : [])
         .filter((row) => row?.enabled !== false)
@@ -5055,7 +5085,8 @@ async function appendParticipantToJobConfig(client, { jobId, agentId, actor = ""
     ));
     const verification = verifyConversationMembershipMutation({
       actionType: "add_agent_to_conversation",
-      threadId: map.threadId,
+      threadId: membershipTarget.thread_id || map.threadId,
+      conversationId: membershipTarget.conversation_id || "",
       targetAgentId: cleanAgentId,
       expectedPresent: true,
       expectedEnabled: true,
@@ -5063,6 +5094,9 @@ async function appendParticipantToJobConfig(client, { jobId, agentId, actor = ""
       source: "append_participant",
       extra: {
         job_id: String(jobId || "").trim(),
+        membership_target: summarizeMembershipTarget(membershipTarget),
+        ensured_thread_mismatch: membershipTarget.ensured_thread_mismatch === true,
+        mutation_response: summarizeMembershipMutationResponse(mutationResponse),
       },
     });
     if (!verification.confirmed) {
@@ -5081,6 +5115,7 @@ async function appendParticipantToJobConfig(client, { jobId, agentId, actor = ""
       actor,
       enabledAgentIds,
       conversationAgents,
+      membership_target: summarizeMembershipTarget(membershipTarget),
       membership_change: verification,
     };
   }
@@ -5100,6 +5135,55 @@ function recordMembershipMutationDiagnostic(jobId, diagnostic = {}, { stage = ""
     ].join("\n"));
     jobs.log(cleanJobId, `[membership] ${stageLabel} ${text}`);
   }
+}
+
+async function resolveMembershipTargetForThread(client, {
+  threadId,
+  conversationId = "",
+  jobId = "",
+  source = "",
+} = {}) {
+  const target = await resolveConversationMembershipTarget(client, {
+    threadId,
+    conversationId,
+    source: source || "membership_target_resolution",
+  });
+  if (target.ensure_error) {
+    recordMembershipMutationDiagnostic(jobId, {
+      action: "resolve_membership_target",
+      stage: "ensure_conversation_error",
+      source: source || "membership_target_resolution",
+      target: summarizeMembershipTarget(target),
+      ensure_error: target.ensure_error,
+    }, {
+      stage: "membership_target_ensure_error",
+    });
+  }
+  if (target.ensured_thread_mismatch) {
+    recordMembershipMutationDiagnostic(jobId, {
+      action: "resolve_membership_target",
+      stage: "ensure_thread_mismatch",
+      source: source || "membership_target_resolution",
+      requested_target: target.requested_target,
+      ensured_target: target.ensured_target,
+      target: summarizeMembershipTarget(target),
+    }, {
+      stage: "membership_target_mismatch",
+    });
+  }
+  return target;
+}
+
+function summarizeMembershipMutationResponse(raw = {}) {
+  const row = raw && typeof raw === "object" ? raw : {};
+  return {
+    ok: row.ok === true ? true : undefined,
+    id: String(row.id || "").trim() || undefined,
+    thread_id: String(row.thread_id || row.threadId || "").trim() || undefined,
+    conversation_id: String(row.conversation_id || row.conversationId || "").trim() || undefined,
+    agent_id: String(row.agent_id || row.agentId || "").trim().toLowerCase() || undefined,
+    enabled: typeof row.enabled === "boolean" ? row.enabled : undefined,
+  };
 }
 
 async function updateJobConfigSelection(client, {
@@ -5130,35 +5214,44 @@ async function updateJobConfigSelection(client, {
     if (typeof client.ensureConversation !== "function" || typeof client.listConversationAgents !== "function") {
       throw new Error("conversation agent APIs unavailable");
     }
-    await client.ensureConversation(map.threadId);
+    const membershipTarget = await resolveMembershipTargetForThread(client, {
+      threadId: map.threadId,
+      jobId: cleanJobId,
+      source: "update_job_config_selection",
+    });
+    let mutationResponse = null;
     if (cleanOp === "disable") {
       if (typeof client.patchConversationAgent === "function") {
-        await client.patchConversationAgent(map.threadId, cleanId, { enabled: false }).catch(async () => {
+        await client.patchConversationAgent(membershipTarget, cleanId, { enabled: false }).then((row) => {
+          mutationResponse = row;
+        }).catch(async () => {
           if (typeof client.addConversationAgent === "function") {
-            await client.addConversationAgent(map.threadId, cleanId, false);
+            mutationResponse = await client.addConversationAgent(membershipTarget, cleanId, false);
           } else {
             throw new Error("conversation agent disable is not supported by API");
           }
         });
       } else if (typeof client.addConversationAgent === "function") {
-        await client.addConversationAgent(map.threadId, cleanId, false);
+        mutationResponse = await client.addConversationAgent(membershipTarget, cleanId, false);
       } else {
         throw new Error("conversation agent disable is not supported by API");
       }
     } else if (typeof client.patchConversationAgent === "function") {
-      await client.patchConversationAgent(map.threadId, cleanId, { enabled: true }).catch(async () => {
+      await client.patchConversationAgent(membershipTarget, cleanId, { enabled: true }).then((row) => {
+        mutationResponse = row;
+      }).catch(async () => {
         if (typeof client.addConversationAgent === "function") {
-          await client.addConversationAgent(map.threadId, cleanId, true);
+          mutationResponse = await client.addConversationAgent(membershipTarget, cleanId, true);
         } else {
           throw new Error("conversation agent enable is not supported by API");
         }
       });
     } else if (typeof client.addConversationAgent === "function") {
-      await client.addConversationAgent(map.threadId, cleanId, true);
+      mutationResponse = await client.addConversationAgent(membershipTarget, cleanId, true);
     } else {
       throw new Error("conversation agent enable is not supported by API");
     }
-    const conversationAgents = await client.listConversationAgents(map.threadId);
+    const conversationAgents = await client.listConversationAgents(membershipTarget);
     const enabledAgentIds = Array.from(new Set(
       (Array.isArray(conversationAgents) ? conversationAgents : [])
         .filter((row) => row?.enabled !== false)
@@ -5167,7 +5260,8 @@ async function updateJobConfigSelection(client, {
     ));
     const verification = verifyConversationMembershipMutation({
       actionType: cleanOp === "enable" ? "enable_agent" : "disable_agent",
-      threadId: map.threadId,
+      threadId: membershipTarget.thread_id || map.threadId,
+      conversationId: membershipTarget.conversation_id || "",
       targetAgentId: cleanId,
       expectedPresent: true,
       expectedEnabled: cleanOp === "enable",
@@ -5175,6 +5269,9 @@ async function updateJobConfigSelection(client, {
       source: "update_job_config_selection",
       extra: {
         job_id: cleanJobId,
+        membership_target: summarizeMembershipTarget(membershipTarget),
+        ensured_thread_mismatch: membershipTarget.ensured_thread_mismatch === true,
+        mutation_response: summarizeMembershipMutationResponse(mutationResponse),
       },
     });
     if (!verification.confirmed) {
@@ -5189,6 +5286,7 @@ async function updateJobConfigSelection(client, {
       source: "conversation_agents",
       conversationAgents,
       enabledAgentIds,
+      membership_target: summarizeMembershipTarget(membershipTarget),
       membership_change: verification,
       op: cleanOp,
       kind: cleanKind,
@@ -6365,7 +6463,8 @@ function buildSupervisorExecutionCallbacks({
           if (!spec.name) {
             throw new Error("create_agent_definition requires agent_spec.name");
           }
-          const { created, createdId, addedToConversation, convRowsAfterAdd } = await withBoundGocActor(async () => {
+          let membershipTarget = null;
+          const { created, createdId, addedToConversation, convRowsAfterAdd, addMutationResponse } = await withBoundGocActor(async () => {
             const client = requireGocClient();
             if (typeof client.createAgent !== "function") {
               throw new Error("GoC createAgent API unavailable");
@@ -6374,20 +6473,32 @@ function buildSupervisorExecutionCallbacks({
             const createdId = String(created?.id || "").trim();
             let addedToConversation = false;
             let convRowsAfterAdd = null;
+            let addMutationResponse = null;
             if (action?.add_to_conversation === true && runtime?.map?.threadId && createdId) {
-              await client.ensureConversation(runtime.map.threadId);
-              await client.addConversationAgent(runtime.map.threadId, createdId, action?.enabled !== false);
+              membershipTarget = await resolveMembershipTargetForThread(client, {
+                threadId: runtime.map.threadId,
+                jobId,
+                source: "create_agent_definition",
+              });
+              addMutationResponse = await client.addConversationAgent(membershipTarget, createdId, action?.enabled !== false);
               if (typeof client.listConversationAgents === "function") {
-                convRowsAfterAdd = await client.listConversationAgents(runtime.map.threadId);
+                convRowsAfterAdd = await client.listConversationAgents(membershipTarget);
               }
               addedToConversation = true;
             }
-            return { created, createdId, addedToConversation, convRowsAfterAdd };
+            return {
+              created,
+              createdId,
+              addedToConversation,
+              convRowsAfterAdd,
+              addMutationResponse,
+            };
           });
           const membershipChange = (action?.add_to_conversation === true && createdId)
             ? verifyConversationMembershipMutation({
               actionType: "add_agent_to_conversation",
-              threadId: String(runtime?.map?.threadId || "").trim(),
+              threadId: String(membershipTarget?.thread_id || runtime?.map?.threadId || "").trim(),
+              conversationId: String(membershipTarget?.conversation_id || "").trim(),
               targetAgentId: createdId,
               expectedPresent: true,
               expectedEnabled: action?.enabled !== false,
@@ -6395,6 +6506,9 @@ function buildSupervisorExecutionCallbacks({
               source: "create_agent_definition",
               extra: {
                 job_id: String(jobId || "").trim(),
+                membership_target: membershipTarget ? summarizeMembershipTarget(membershipTarget) : undefined,
+                ensured_thread_mismatch: membershipTarget?.ensured_thread_mismatch === true,
+                mutation_response: summarizeMembershipMutationResponse(addMutationResponse),
               },
             })
             : null;
@@ -6413,6 +6527,9 @@ function buildSupervisorExecutionCallbacks({
             ));
             runtime.conversationAgents = convRowsAfterAdd;
             runtime.enabledAgentIds = enabled;
+            if (membershipTarget) {
+              runtime.conversationMembershipTarget = summarizeMembershipTarget(membershipTarget);
+            }
             runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
               .filter((agent) => enabled.includes(String(agent?.id || "").trim().toLowerCase()));
             runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
@@ -6486,14 +6603,19 @@ function buildSupervisorExecutionCallbacks({
           if (!threadId) throw new Error("conversation thread is not ready");
           const agentId = String(action?.agent_id || "").trim().toLowerCase();
           if (!agentId) throw new Error("add_agent_to_conversation requires agent_id");
-          const convRows = await withBoundGocActor(async () => {
+          const { convRows, membershipTarget, mutationResponse } = await withBoundGocActor(async () => {
             const client = requireGocClient();
-            await client.ensureConversation(threadId);
-            await client.addConversationAgent(threadId, agentId, action?.enabled !== false);
+            const membershipTarget = await resolveMembershipTargetForThread(client, {
+              threadId,
+              jobId,
+              source: "chat_executor_add_agent",
+            });
+            const mutationResponse = await client.addConversationAgent(membershipTarget, agentId, action?.enabled !== false);
             if (typeof client.listConversationAgents !== "function") {
               throw new Error("listConversationAgents API unavailable");
             }
-            return await client.listConversationAgents(threadId);
+            const convRows = await client.listConversationAgents(membershipTarget);
+            return { convRows, membershipTarget, mutationResponse };
           });
           const enabled = Array.from(new Set(
             convRows
@@ -6503,7 +6625,8 @@ function buildSupervisorExecutionCallbacks({
           ));
           const verification = verifyConversationMembershipMutation({
             actionType: "add_agent_to_conversation",
-            threadId,
+            threadId: membershipTarget.thread_id || threadId,
+            conversationId: membershipTarget.conversation_id || "",
             targetAgentId: agentId,
             expectedPresent: true,
             expectedEnabled: action?.enabled !== false,
@@ -6511,6 +6634,9 @@ function buildSupervisorExecutionCallbacks({
             source: "chat_executor_callback",
             extra: {
               job_id: String(jobId || "").trim(),
+              membership_target: summarizeMembershipTarget(membershipTarget),
+              ensured_thread_mismatch: membershipTarget.ensured_thread_mismatch === true,
+              mutation_response: summarizeMembershipMutationResponse(mutationResponse),
             },
           });
           if (!verification.confirmed) {
@@ -6521,6 +6647,7 @@ function buildSupervisorExecutionCallbacks({
           }
           runtime.conversationAgents = convRows;
           runtime.enabledAgentIds = enabled;
+          runtime.conversationMembershipTarget = summarizeMembershipTarget(membershipTarget);
           runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
             .filter((agent) => enabled.includes(String(agent?.id || "").trim().toLowerCase()));
           runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
@@ -6547,14 +6674,19 @@ function buildSupervisorExecutionCallbacks({
           if (!threadId) throw new Error("conversation thread is not ready");
           const agentId = String(action?.agent_id || "").trim().toLowerCase();
           if (!agentId) throw new Error("remove_agent_from_conversation requires agent_id");
-          const convRows = await withBoundGocActor(async () => {
+          const { convRows, membershipTarget, mutationResponse } = await withBoundGocActor(async () => {
             const client = requireGocClient();
-            await client.ensureConversation(threadId);
-            await client.removeConversationAgent(threadId, agentId);
+            const membershipTarget = await resolveMembershipTargetForThread(client, {
+              threadId,
+              jobId,
+              source: "chat_executor_remove_agent",
+            });
+            const mutationResponse = await client.removeConversationAgent(membershipTarget, agentId);
             if (typeof client.listConversationAgents !== "function") {
               throw new Error("listConversationAgents API unavailable");
             }
-            return await client.listConversationAgents(threadId);
+            const convRows = await client.listConversationAgents(membershipTarget);
+            return { convRows, membershipTarget, mutationResponse };
           });
           const enabled = Array.from(new Set(
             convRows
@@ -6564,7 +6696,8 @@ function buildSupervisorExecutionCallbacks({
           ));
           const verification = verifyConversationMembershipMutation({
             actionType: "remove_agent_from_conversation",
-            threadId,
+            threadId: membershipTarget.thread_id || threadId,
+            conversationId: membershipTarget.conversation_id || "",
             targetAgentId: agentId,
             expectedPresent: false,
             expectedEnabled: false,
@@ -6572,6 +6705,9 @@ function buildSupervisorExecutionCallbacks({
             source: "chat_executor_callback",
             extra: {
               job_id: String(jobId || "").trim(),
+              membership_target: summarizeMembershipTarget(membershipTarget),
+              ensured_thread_mismatch: membershipTarget.ensured_thread_mismatch === true,
+              mutation_response: summarizeMembershipMutationResponse(mutationResponse),
             },
           });
           if (!verification.confirmed) {
@@ -6582,6 +6718,7 @@ function buildSupervisorExecutionCallbacks({
           }
           runtime.conversationAgents = convRows;
           runtime.enabledAgentIds = enabled;
+          runtime.conversationMembershipTarget = summarizeMembershipTarget(membershipTarget);
           runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
             .filter((agent) => enabled.includes(String(agent?.id || "").trim().toLowerCase()));
           runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
@@ -8257,19 +8394,34 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
         const threadId = String(runtime?.map?.threadId || "").trim();
         if (!threadId) throw new Error("threadId not ready");
         const client = requireGocClient();
-        await client.ensureConversation(threadId);
+        const membershipTarget = await resolveMembershipTargetForThread(client, {
+          threadId,
+          jobId: currentJobId,
+          source: "telegram_agents_command",
+        });
+        let mutationResponse = null;
         if (sub === "add") {
-          await client.addConversationAgent(threadId, targetAgentId, true);
+          mutationResponse = await client.addConversationAgent(membershipTarget, targetAgentId, true);
         } else if (sub === "remove") {
-          await client.removeConversationAgent(threadId, targetAgentId);
+          mutationResponse = await client.removeConversationAgent(membershipTarget, targetAgentId);
         } else if (sub === "enable") {
-          await client.patchConversationAgent(threadId, targetAgentId, { enabled: true }).catch(async () => {
-            await client.addConversationAgent(threadId, targetAgentId, true);
+          await client.patchConversationAgent(membershipTarget, targetAgentId, { enabled: true }).then((row) => {
+            mutationResponse = row;
+          }).catch(async () => {
+            mutationResponse = await client.addConversationAgent(membershipTarget, targetAgentId, true);
           });
+          if (!mutationResponse) {
+            mutationResponse = {
+              agent_id: targetAgentId,
+              enabled: true,
+              thread_id: membershipTarget.thread_id || "",
+              conversation_id: membershipTarget.conversation_id || "",
+            };
+          }
         } else if (sub === "disable") {
-          await client.patchConversationAgent(threadId, targetAgentId, { enabled: false });
+          mutationResponse = await client.patchConversationAgent(membershipTarget, targetAgentId, { enabled: false });
         }
-        const updated = await client.listConversationAgents(threadId);
+        const updated = await client.listConversationAgents(membershipTarget);
         const allAgentIds = Array.from(new Set(
           updated.map((row) => String(row?.agent_id || "").trim().toLowerCase()).filter(Boolean)
         ));
@@ -8284,7 +8436,8 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
           actionType: sub === "add"
             ? "add_agent_to_conversation"
             : (sub === "remove" ? "remove_agent_from_conversation" : `${sub}_agent`),
-          threadId,
+          threadId: membershipTarget.thread_id || threadId,
+          conversationId: membershipTarget.conversation_id || "",
           targetAgentId,
           expectedPresent: sub !== "remove",
           expectedEnabled: sub === "disable" ? false : true,
@@ -8292,6 +8445,9 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
           source: "telegram_agents_command",
           extra: {
             job_id: String(currentJobId || "").trim(),
+            membership_target: summarizeMembershipTarget(membershipTarget),
+            ensured_thread_mismatch: membershipTarget.ensured_thread_mismatch === true,
+            mutation_response: summarizeMembershipMutationResponse(mutationResponse),
           },
         });
         if (!verification.confirmed) {
@@ -8400,6 +8556,7 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
         "현재 conversation membership",
         `- job_id: ${currentJobId}`,
         `- thread_id: ${String(runtime?.map?.threadId || "").trim() || "(none)"}`,
+        `- conversation_id: ${String(runtime?.conversationMembershipTarget?.conversation_id || runtime?.conversation?.id || "").trim() || "(none)"}`,
         enabled.length > 0
           ? `- enabled: ${enabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
           : "- enabled: (none)",
@@ -8593,8 +8750,6 @@ const onCallbackQuery = createTelegramCallbackQueryHandler({
   resolveCurrentJobIdForChat,
   createAgentProfile,
   jobs,
-  runDir,
-  ensureJobThread,
   appendParticipantToJobConfig,
   tracking,
   refreshAgentRegistry,

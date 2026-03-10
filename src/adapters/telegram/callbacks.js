@@ -20,8 +20,6 @@ export function createTelegramCallbackQueryHandler(deps = {}) {
     resolveCurrentJobIdForChat,
     createAgentProfile,
     jobs,
-    runDir,
-    ensureJobThread,
     appendParticipantToJobConfig,
     tracking,
     refreshAgentRegistry,
@@ -213,29 +211,13 @@ export function createTelegramCallbackQueryHandler(deps = {}) {
             let conversationTeamApplied = false;
             if (draftJobId) {
               try {
-                const map = await ensureJobThread(client, {
-                  jobId: draftJobId,
-                  jobDir: runDir(draftJobId),
-                  title: `job:${draftJobId}`,
-                  telegram: { chat_id: String(chatId || "") },
-                });
-                await client.ensureConversation(map.threadId);
-                await client.addConversationAgent(map.threadId, effectiveAgentId, true);
-                conversationTeamApplied = true;
-              } catch (e) {
-                tracking.append(draftJobId, "decisions.md", [
-                  "## /chat approve_agent (conversation add failed)",
-                  `- agent_id: ${effectiveAgentId}`,
-                  `- error: ${String(e?.message ?? e)}`,
-                ].join("\n"));
-              }
-              try {
                 await appendParticipantToJobConfig(client, {
                   jobId: draftJobId,
                   agentId: effectiveAgentId,
                   actor: `telegram:${userId}`,
                 });
                 participantsApplied = true;
+                conversationTeamApplied = true;
                 tracking.append(draftJobId, "decisions.md", [
                   "## /chat approve_agent",
                   `- agent_id: ${effectiveAgentId}`,
