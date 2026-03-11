@@ -84,6 +84,69 @@ function sampleRuntimeSnapshot() {
         "skill.run_trace_debugging.v1": "instructions",
       },
     },
+    selection_reason_summary: {
+      coder: "skill.run_trace_debugging.v1:debug support",
+    },
+    skill_usage_events: [
+      {
+        run_id: "run_1",
+        runtime_agent_instance_id: "inst_coder_1",
+        skill_id: "skill.run_trace_debugging.v1",
+        event_type: "attached",
+        payload: { load_level: "instructions" },
+        created_at: "2026-03-10T00:00:00.000Z",
+      },
+    ],
+    skill_usage_summary: {
+      attached: 1,
+    },
+    generated_at: "2026-03-10T00:00:00.000Z",
+    source: "team_builder",
+  };
+}
+
+function sampleRuntimeSnapshotNoSkills() {
+  return {
+    team_plan: {
+      mode: "run",
+      roles: [{ id: "coder", role_label: "coder" }],
+      dependencies: [],
+      execution_order: ["coder"],
+      reason: "team selected",
+      budget: {},
+    },
+    runtime_agents: [
+      {
+        instance_id: "inst_coder_empty",
+        template_id: "coder",
+        role_label: "coder",
+        attached_skills: [],
+        context_pack_id: "ctxp_coder_empty",
+        provider: "codex",
+        model: "gpt-5-codex",
+        capability_tags: ["coding"],
+        status: "ready",
+      },
+    ],
+    context_packs: [
+      {
+        id: "ctxp_coder_empty",
+        run_id: "run_empty",
+        scope: "role",
+        target_runtime_agent_instance_id: "inst_coder_empty",
+        shared_items: [],
+        role_specific_items: [],
+        skill_items: [],
+        excluded_items: [],
+        missing_items: [],
+        conflicts: [],
+        token_budget: { soft_limit: 1200, hard_limit: 2000 },
+      },
+    ],
+    selected_skill_ids: [],
+    skill_load_levels: {
+      inst_coder_empty: {},
+    },
     generated_at: "2026-03-10T00:00:00.000Z",
     source: "team_builder",
   };
@@ -115,6 +178,10 @@ test("runtime_team_snapshot is persisted on GOC Run payloads", async () => {
   assert.equal(runNode.body.payload_json.runtime_team_snapshot.source, "team_builder");
   assert.equal(runNode.body.payload_json.runtime_agents[0].template_id, "coder");
   assert.ok(runNode.body.payload_json.selected_skill_ids.includes("skill.run_trace_debugging.v1"));
+  assert.equal(runNode.body.payload_json.context_packs[0].id, "ctxp_coder_1");
+  assert.equal(runNode.body.payload_json.skill_load_levels.inst_coder_1["skill.run_trace_debugging.v1"], "instructions");
+  assert.equal(runNode.body.payload_json.selection_reason_summary.coder.includes("debug support"), true);
+  assert.equal(runNode.body.payload_json.skill_usage_events.length, 1);
 });
 
 test("step payloads include additive runtime role metadata and update run metadata", async () => {
@@ -158,6 +225,9 @@ test("step payloads include additive runtime role metadata and update run metada
   assert.equal(stepNode.body.payload_json.runtime_role.role_label, "coder");
   assert.equal(stepNode.body.payload_json.runtime_role.runtime_status, "ready");
   assert.ok(stepNode.body.payload_json.runtime_role.selected_skill_ids.includes("skill.run_trace_debugging.v1"));
+  assert.equal(stepNode.body.payload_json.runtime_role.skill_load_levels["skill.run_trace_debugging.v1"], "instructions");
+  assert.equal(Array.isArray(stepNode.body.payload_json.runtime_role.attached_skills), true);
+  assert.equal(stepNode.body.payload_json.runtime_role.attached_skills.length, 1);
   assert.equal(stepNode.body.payload_json.context_pack_id, "ctxp_coder_1");
   assert.equal(stepNode.body.payload_json.action_source, "explicit_route_plan");
 });
@@ -189,6 +259,52 @@ test("non-GOC/no-recorder flow remains no-op safe", async () => {
   await recorder.finishRun({ status: "done" });
 
   assert.equal(recorder.getRunNodeId(), "");
+});
+
+test("GOC payload path remains valid when runtime snapshot has no skills", async () => {
+  const client = createFakeGraphClient();
+  const recorder = new GocExecutionGraphRecorder({
+    client,
+    threadId: "thread_no_skill",
+    contextSetId: "ctx_no_skill",
+    sharedContextSetId: "ctx_no_skill",
+    runId: "run_no_skill",
+    chatId: "chat_no_skill",
+    jobId: "job_no_skill",
+  });
+
+  await recorder.startRun({
+    userText: "start",
+    metadata: {
+      runtimeTeamSnapshot: sampleRuntimeSnapshotNoSkills(),
+      actionSource: "explicit",
+    },
+  });
+  await recorder.queueMainSteps([
+    {
+      type: "run_agent",
+      agent_id: "coder",
+      goal: "implement",
+      inputs: {
+        runtimeInstanceId: "inst_coder_empty",
+      },
+    },
+  ], {
+    metadata: {
+      runtimeTeamSnapshot: sampleRuntimeSnapshotNoSkills(),
+      actionSource: "explicit",
+    },
+  });
+
+  const runNode = client.state.createdNodes.find((row) => row.body.node_type === "Run");
+  const stepNode = client.state.createdNodes.find((row) => row.body.node_type === "Step");
+  assert.ok(runNode);
+  assert.ok(stepNode);
+  assert.equal(runNode.body.payload_json.action_source, "explicit_route_plan");
+  assert.equal(Array.isArray(runNode.body.payload_json.selected_skill_ids), false);
+  assert.equal(Array.isArray(stepNode.body.payload_json.runtime_role.selected_skill_ids), true);
+  assert.equal(stepNode.body.payload_json.runtime_role.selected_skill_ids.length, 0);
+  assert.deepEqual(stepNode.body.payload_json.runtime_role.skill_load_levels, {});
 });
 
 test("queued steps can be marked skipped to prevent stale active work", async () => {

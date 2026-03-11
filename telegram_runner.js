@@ -2347,10 +2347,6 @@ async function sendAgentStatusTransitionMessage(
   );
 }
 
-function buildGeminiRetryNoticeText({ retryCount = 0, maxRetries = 0, agentId = "" } = {}) {
-  return buildGeminiRetryNoticeTextShared({ retryCount, maxRetries, agentId });
-}
-
 async function sendGeminiRetryMessage(
   bot,
   chatId,
@@ -2367,13 +2363,9 @@ async function sendGeminiRetryMessage(
     : (Number.isFinite(Number(fallbackReply)) && Number(fallbackReply) > 0 ? Number(fallbackReply) : null);
   await bot.sendMessage(
     chatId,
-    buildGeminiRetryNoticeText({ retryCount, maxRetries, agentId }),
+    buildGeminiRetryNoticeTextShared({ retryCount, maxRetries, agentId }),
     replyId ? { reply_to_message_id: replyId } : undefined
   );
-}
-
-function buildGeminiModelSwitchNoticeText({ toModel = "", agentId = "" } = {}) {
-  return buildGeminiModelSwitchNoticeTextShared({ toModel, agentId });
 }
 
 async function sendGeminiModelSwitchMessage(
@@ -2391,13 +2383,9 @@ async function sendGeminiModelSwitchMessage(
     : (Number.isFinite(Number(fallbackReply)) && Number(fallbackReply) > 0 ? Number(fallbackReply) : null);
   await bot.sendMessage(
     chatId,
-    buildGeminiModelSwitchNoticeText({ toModel, agentId }),
+    buildGeminiModelSwitchNoticeTextShared({ toModel, agentId }),
     replyId ? { reply_to_message_id: replyId } : undefined
   );
-}
-
-function buildGeminiGiveUpNoticeText({ reason = "", agentId = "" } = {}) {
-  return buildGeminiGiveUpNoticeTextShared({ reason, agentId });
 }
 
 async function sendGeminiGiveUpMessage(
@@ -2415,7 +2403,7 @@ async function sendGeminiGiveUpMessage(
     : (Number.isFinite(Number(fallbackReply)) && Number(fallbackReply) > 0 ? Number(fallbackReply) : null);
   await bot.sendMessage(
     chatId,
-    buildGeminiGiveUpNoticeText({ reason, agentId }),
+    buildGeminiGiveUpNoticeTextShared({ reason, agentId }),
     replyId ? { reply_to_message_id: replyId } : undefined
   );
 }

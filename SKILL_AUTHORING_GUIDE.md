@@ -72,3 +72,22 @@ skills/
 
 과도한 스크립트화보다, 단순한 절차는 `SKILL.md`/체크리스트로 유지하는 것을 우선합니다.
 
+## 6) Runtime 연동 시 canonical 포인트
+
+- role에 붙는 런타임 attachment shape:
+
+```json
+{
+  "skill_id": "skill.example_skill.v1",
+  "selected_by": "skill_resolver",
+  "selection_reason": "trigger_matches:2",
+  "load_level": "metadata_only|instructions|resources",
+  "status": "selected"
+}
+```
+
+- `load_level`은 manifest가 아니라 런타임에서 결정됩니다.
+  - 기본: `metadata_only`
+  - 실행 직전 필요 시 `instructions`/`resources`로 승격
+- ContextPack에는 `skill_items[{ skill_id, load_level }]`가 기록됩니다.
+- runtime/GOC 메타데이터에는 `selected_skill_ids`, `skill_load_levels`, `selection_reason_summary`, `skill_usage_events`가 additive 필드로 노출됩니다.

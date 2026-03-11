@@ -115,7 +115,43 @@ test("goc_engine recordMeta persists additive metadata to GOC when run/step info
       stepNodeId: "step_node_1",
       runtime_team_snapshot: {
         team_plan: { mode: "run", roles: [] },
-        runtime_agents: [],
+        runtime_agents: [{
+          instance_id: "inst_1",
+          template_id: "researcher",
+          role_label: "researcher",
+          attached_skills: [{
+            skill_id: "skill.claim_evidence_audit.v1",
+            selected_by: "skill_resolver",
+            load_level: "instructions",
+            status: "selected",
+          }],
+          context_pack_id: "ctxp_1",
+        }],
+        context_packs: [{
+          id: "ctxp_1",
+          run_id: "run_meta_1",
+          scope: "role",
+          target_runtime_agent_instance_id: "inst_1",
+          shared_items: [],
+          role_specific_items: [],
+          skill_items: [{
+            skill_id: "skill.claim_evidence_audit.v1",
+            load_level: "instructions",
+          }],
+          excluded_items: [],
+          missing_items: [],
+          conflicts: [],
+          token_budget: { soft_limit: 1000, hard_limit: 2000 },
+        }],
+        selected_skill_ids: ["skill.claim_evidence_audit.v1"],
+        skill_load_levels: {
+          inst_1: {
+            "skill.claim_evidence_audit.v1": "instructions",
+          },
+        },
+        selection_reason_summary: {
+          researcher: "skill.claim_evidence_audit.v1:evidence audit",
+        },
         generated_at: "2026-03-10T00:00:00.000Z",
         source: "team_builder",
       },
@@ -132,6 +168,12 @@ test("goc_engine recordMeta persists additive metadata to GOC when run/step info
   assert.equal(fakeClient.state.resources[0].payload.resource_kind, "context_meta");
   assert.ok(fakeClient.state.resources[0].payload.payload_json.runtime_team_snapshot);
   assert.equal(fakeClient.state.resources[0].payload.payload_json.action_source, "generated_team_actions");
+  assert.ok(fakeClient.state.resources[0].payload.payload_json.selected_skill_ids.includes("skill.claim_evidence_audit.v1"));
+  assert.equal(
+    fakeClient.state.resources[0].payload.payload_json.skill_load_levels.inst_1["skill.claim_evidence_audit.v1"],
+    "instructions"
+  );
+  assert.equal(fakeClient.state.resources[0].payload.payload_json.context_packs[0].id, "ctxp_1");
   assert.equal(fakeClient.state.edges.length, 1);
   assert.equal(fakeClient.state.edges[0].edgeType, "HAS_PART");
 

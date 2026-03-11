@@ -60,6 +60,94 @@
 - RuntimeAgentInstance = 실제 실행 단위(role + attached skills)
 - ContextPack = shared + role + skill 로딩 계획
 
+### Canonical Schema (Implemented)
+
+`SkillPackage` (manifest 정규화 결과):
+
+```json
+{
+  "id": "skill.example.v1",
+  "slug": "example",
+  "name": "Example",
+  "version": "1.0.0",
+  "description": "",
+  "category": "general",
+  "capability_tags": [],
+  "trigger_terms": [],
+  "compatible_roles": [],
+  "input_contract": {},
+  "output_contract": {},
+  "instructions_ref": "SKILL.md",
+  "resource_refs": [],
+  "utility_refs": [],
+  "default_context_policy": {},
+  "validation_policy": {},
+  "safety_policy": {},
+  "ranking_metadata": {},
+  "visibility": "internal",
+  "status": "active"
+}
+```
+
+`TeamPlan.role` skill 확장:
+
+```json
+{
+  "role_type": "researcher",
+  "template_id": "researcher",
+  "role_label": "researcher",
+  "attached_skills": [
+    {
+      "skill_id": "skill.claim_evidence_audit.v1",
+      "selected_by": "skill_resolver",
+      "selection_reason": "trigger_matches:2",
+      "load_level": "metadata_only|instructions|resources",
+      "status": "selected|active|disabled|skipped|error"
+    }
+  ]
+}
+```
+
+`RuntimeAgentInstance` skill 필드:
+
+```json
+{
+  "instance_id": "inst_x",
+  "template_id": "researcher",
+  "role_label": "researcher",
+  "attached_skills": [],
+  "context_pack_id": "ctxp_x",
+  "status": "ready"
+}
+```
+
+`ContextPack.skill_items`:
+
+```json
+{
+  "id": "ctxp_x",
+  "target_runtime_agent_instance_id": "inst_x",
+  "shared_items": [],
+  "role_specific_items": [],
+  "skill_items": [
+    { "skill_id": "skill.claim_evidence_audit.v1", "load_level": "instructions" }
+  ],
+  "excluded_items": [],
+  "missing_items": [],
+  "conflicts": []
+}
+```
+
+runtime/GOC additive 메타데이터:
+- `runtime_team_snapshot`
+- `selected_skill_ids`
+- `skill_load_levels`
+- `context_packs`
+- `selection_reason_summary`
+- `skill_usage_events`
+- `skill_usage_summary`
+- `action_source`
+
 기존 `agents.json` / `src/agents.js` / `src/agent_registry.js`는 그대로 사용 가능하며, 내부적으로 `AgentTemplate`로 정규화됩니다.
 
 ### Routing Precedence
