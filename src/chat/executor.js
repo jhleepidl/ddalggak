@@ -12,9 +12,8 @@ import {
 import {
   buildAgentDisplayIndex,
   formatAgentDisplayName,
-  resolveActionAgentId,
-  resolveActionAgentNameHint,
 } from "../shared/agent_labels.js";
+import { formatChatActionLabel } from "../adapters/telegram/preview_formatting.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -95,44 +94,13 @@ function approvalActionSummary(actions = [], { agentIndex = new Map() } = {}) {
   return rows.slice(0, 8).map((action) => `- ${actionLabel(action, { agentIndex })}`);
 }
 
-function formatActionAgent(action = {}, agentIndex = new Map(), {
-  fallback = "unknown",
-} = {}) {
-  const agentId = resolveActionAgentId(action);
-  const nameHint = resolveActionAgentNameHint(action);
-  if (!agentId && !nameHint) return fallback;
-  return formatAgentDisplayName(agentId || nameHint, agentIndex, {
-    nameHint,
-    includeShortId: true,
-  });
-}
-
 function actionLabel(action, { agentIndex = new Map() } = {}) {
-  const type = String(action?.type || "").trim().toLowerCase();
-  if (!type) return "(unknown)";
-  if (type === "run_agent") return `run_agent:${formatActionAgent(action, agentIndex)}`;
-  if (type === "propose_agent") return `propose_agent:${formatActionAgent(action, agentIndex)}`;
-  if (type === "need_more_detail") return `need_more_detail:${action.context_set_id || "unknown"}`;
-  if (type === "search_public_agents") return `search_public_agents:${action.query || ""}`;
-  if (type === "install_agent_blueprint") return `install_agent_blueprint:${action.blueprint_id || action.public_node_id || ""}`;
-  if (type === "publish_agent") return `publish_agent:${formatActionAgent(action, agentIndex, { fallback: action.agent_node_id || "unknown" })}`;
-  if (type === "add_agent_to_conversation") return `add_agent_to_conversation:${formatActionAgent(action, agentIndex)}`;
-  if (type === "remove_agent_from_conversation") return `remove_agent_from_conversation:${formatActionAgent(action, agentIndex)}`;
-  if (type === "create_agent_definition") return `create_agent_definition:${formatActionAgent(action, agentIndex)}`;
-  if (type === "fork_agent") return `fork_agent:${formatActionAgent(action, agentIndex)}`;
-  if (type === "disable_agent") return `disable_agent:${formatActionAgent(action, agentIndex)}`;
-  if (type === "enable_agent") return `enable_agent:${formatActionAgent(action, agentIndex)}`;
-  if (type === "disable_tool") return `disable_tool:${action.tool_id || "unknown"}`;
-  if (type === "enable_tool") return `enable_tool:${action.tool_id || "unknown"}`;
-  if (type === "list_agents") return "list_agents";
-  if (type === "list_tools") return "list_tools";
-  if (type === "create_agent") return `create_agent:${formatActionAgent(action, agentIndex)}`;
-  if (type === "update_agent") return `update_agent:${formatActionAgent(action, agentIndex)}`;
-  if (type === "get_status") return "get_status";
-  if (type === "interrupt") return `interrupt:${action.mode || "replan"}`;
-  if (type === "spawn_agents") return `spawn_agents:${Array.isArray(action.agents) ? action.agents.length : 0}`;
-  if (type === "open_context") return `open_context:${action.scope || "current"}`;
-  return type;
+  return formatChatActionLabel(action, {
+    agentIndex,
+    needMoreDetailFallback: "unknown",
+    publishFallbackMode: "agent_node_id",
+    openContextFallback: "current",
+  });
 }
 
 function getProviderByAgent(agents = [], agentId = "") {

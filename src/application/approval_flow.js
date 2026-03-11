@@ -1,5 +1,6 @@
 import { makeContextEngine } from "../context_engine/index.js";
 import { normalizeActionSource, normalizeRuntimeTeamSnapshot } from "./runtime_metadata.js";
+import { markActionsSkipped, wasInterruptedByReplan } from "./run_status_cleanup.js";
 import {
   isMutationOnlyTeamSetupPlan,
   isTeamMembershipMutationAction,
@@ -530,18 +531,15 @@ export async function handleActionApprovalCallback({
     const resumeRemainingActions = Array.isArray(resumedExecution.remaining_actions)
       ? resumedExecution.remaining_actions
       : [];
-    const interruptedDuringResume = resumeResultRows.some((row) => {
-      const label = String(row?.label || "").trim().toLowerCase();
-      const status = String(row?.status || "").trim().toLowerCase();
-      const note = String(row?.note || "").trim().toLowerCase();
-      return label === "interrupt" || (status === "skip" && note.includes("replan requested"));
-    }) || (!resumedExecution.pendingApproval && resumeRemainingActions.length > 0);
-    if (interruptedDuringResume && resumeExecutionGraph && typeof resumeExecutionGraph.markStepSkipped === "function") {
-      for (const action of resumeRemainingActions) {
-        await resumeExecutionGraph.markStepSkipped(action, {
-          reason: "interrupted_by_replan",
-        });
-      }
+    const interruptedDuringResume = wasInterruptedByReplan({
+      results: resumeResultRows,
+      remainingActions: resumeRemainingActions,
+      pendingApproval: resumedExecution.pendingApproval,
+    });
+    if (interruptedDuringResume) {
+      await markActionsSkipped(resumeExecutionGraph, resumeRemainingActions, {
+        reason: "interrupted_by_replan",
+      });
     }
     const rerouteKey = buildPostMutationRerouteKey({
       jobId: pendingJobId,
@@ -678,16 +676,12 @@ export async function handleActionApprovalCallback({
           status: "await_user",
           summary: resumedExecution.pendingApproval.reason || "approval required",
         });
-        if (typeof resumeExecutionGraph.markStepSkipped === "function") {
-          const pendingRows = Array.isArray(resumedExecution.remaining_actions)
-            ? resumedExecution.remaining_actions
-            : [];
-          for (const action of pendingRows) {
-            await resumeExecutionGraph.markStepSkipped(action, {
-              reason: "awaiting_approval",
-            });
-          }
-        }
+        const pendingRows = Array.isArray(resumedExecution.remaining_actions)
+          ? resumedExecution.remaining_actions
+          : [];
+        await markActionsSkipped(resumeExecutionGraph, pendingRows, {
+          reason: "awaiting_approval",
+        });
       }
       chatSessionStore.upsert(chatId, {
         jobId: pendingJobId,
@@ -748,12 +742,10 @@ export async function handleActionApprovalCallback({
           : undefined
       );
     } else {
-      if (membershipConfirmationFailed && resumeExecutionGraph && typeof resumeExecutionGraph.markStepSkipped === "function") {
-        for (const action of resumeRemainingActions) {
-          await resumeExecutionGraph.markStepSkipped(action, {
-            reason: "membership_confirmation_failed",
-          });
-        }
+      if (membershipConfirmationFailed) {
+        await markActionsSkipped(resumeExecutionGraph, resumeRemainingActions, {
+          reason: "membership_confirmation_failed",
+        });
       }
       if (resumeExecutionGraph) {
         await resumeExecutionGraph.finishRun({

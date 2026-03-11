@@ -30,7 +30,12 @@
 - `src/application/job_runtime.js`: job lifecycle(중단/컨트롤러) 헬퍼
 - `src/application/route_executor.js`: `/run`, `/continue` 라우트 실행 glue
 - `src/application/approval_flow.js`: 승인/거절/재개 플로우
+- `src/application/run_status_cleanup.js`: interrupted/superseded/awaiting-approval skip 정리 헬퍼
+- `src/application/runtime_snapshot_display.js`: runtime snapshot 표시용 요약 헬퍼
 - `src/adapters/telegram/send.js`: Telegram 전송 어댑터
+- `src/adapters/telegram/context_links.js`: GoC 링크/버튼 조립 헬퍼
+- `src/adapters/telegram/preview_formatting.js`: route/approval/autopilot/chat-fallback 공통 포맷터
+- `src/adapters/telegram/status_messages.js`: Gemini retry/switch/fail 알림 포맷터
 - `src/adapters/telegram/commands.js`: Telegram 명령 디스패치
 - `src/adapters/telegram/callbacks.js`: Telegram callback_query 디스패치
 

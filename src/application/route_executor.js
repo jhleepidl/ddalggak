@@ -1,4 +1,5 @@
 import { createRuntimeTeamSnapshot } from "./runtime_metadata.js";
+import { summarizeRuntimeTeamSnapshotLines } from "./runtime_snapshot_display.js";
 
 export async function executeRunCommand({
   bot,
@@ -59,10 +60,9 @@ export async function executeRunCommand({
         "## Multi-Agent routing",
         "- mode: run",
         `- reason: ${route.reason}`,
-        `- action_source: ${String(route.action_source || "unknown")}`,
-        `- team_roles: ${Array.isArray(route?.team_plan?.roles) ? route.team_plan.roles.map((role) => role.id || role.role_label || role.role_type).join(", ") : "(none)"}`,
-        `- selected_skill_ids: ${Array.isArray(runtimeTeamSnapshot?.selected_skill_ids) && runtimeTeamSnapshot.selected_skill_ids.length > 0 ? runtimeTeamSnapshot.selected_skill_ids.join(", ") : "(none)"}`,
-        `- context_packs: ${Array.isArray(runtimeTeamSnapshot?.context_packs) ? runtimeTeamSnapshot.context_packs.length : 0}`,
+        ...summarizeRuntimeTeamSnapshotLines(runtimeTeamSnapshot, {
+          actionSource: String(route.action_source || "unknown"),
+        }),
         `- actions: ${route.actions.map((a) => actionLabel(a)).join(" -> ")}`,
       ].join("\n"));
       await bot.sendMessage(chatId, `🧭 Multi-Agent 라우팅\n${route.actions.map((a) => `- ${actionLabel(a)}`).join("\n")}`);
@@ -156,10 +156,9 @@ export async function executeContinueCommand({
       "## Multi-Agent routing",
       "- mode: continue",
       `- reason: ${route.reason}`,
-      `- action_source: ${String(route.action_source || "unknown")}`,
-      `- team_roles: ${Array.isArray(route?.team_plan?.roles) ? route.team_plan.roles.map((role) => role.id || role.role_label || role.role_type).join(", ") : "(none)"}`,
-      `- selected_skill_ids: ${Array.isArray(runtimeTeamSnapshot?.selected_skill_ids) && runtimeTeamSnapshot.selected_skill_ids.length > 0 ? runtimeTeamSnapshot.selected_skill_ids.join(", ") : "(none)"}`,
-      `- context_packs: ${Array.isArray(runtimeTeamSnapshot?.context_packs) ? runtimeTeamSnapshot.context_packs.length : 0}`,
+      ...summarizeRuntimeTeamSnapshotLines(runtimeTeamSnapshot, {
+        actionSource: String(route.action_source || "unknown"),
+      }),
       `- actions: ${route.actions.map((a) => actionLabel(a)).join(" -> ")}`,
     ].join("\n"));
     await bot.sendMessage(chatId, `🧭 Multi-Agent 라우팅\n${route.actions.map((a) => `- ${actionLabel(a)}`).join("\n")}`);

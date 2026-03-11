@@ -39,6 +39,31 @@ import {
   buildPendingApprovalPrompt as buildPendingApprovalPromptAdapter,
   formatChatSummary as formatChatSummaryAdapter,
 } from "./src/adapters/telegram/formatting.js";
+import {
+  buildContextLinks,
+  buildContextLinkButtons,
+  isTelegramWebAppHttpsError,
+} from "./src/adapters/telegram/context_links.js";
+import {
+  getActionGoal as getActionGoalShared,
+  formatActionAgentLabel as formatActionAgentLabelShared,
+  formatChatActionLabel as chatActionLabelShared,
+  buildPlanPreviewLines as buildPlanPreviewLinesShared,
+  buildQueuedAgentStatusFromActions as buildQueuedAgentStatusFromActionsShared,
+  buildRoutedDashboardText as buildRoutedDashboardTextShared,
+  inferApprovalPreviewReason as inferApprovalPreviewReasonShared,
+  buildApprovalActionSummaryLines as buildApprovalActionSummaryLinesShared,
+  buildAutopilotProgressSummary as buildAutopilotProgressSummaryShared,
+  buildAutopilotFollowupMessage as buildAutopilotFollowupMessageShared,
+  updateCompletedDeliverablesFromOutputs as updateCompletedDeliverablesFromOutputsShared,
+  summarizeSpecialChatOutputs as summarizeSpecialChatOutputsShared,
+  buildChatSynthesisFallback as buildChatSynthesisFallbackShared,
+} from "./src/adapters/telegram/preview_formatting.js";
+import {
+  buildGeminiRetryNoticeText as buildGeminiRetryNoticeTextShared,
+  buildGeminiModelSwitchNoticeText as buildGeminiModelSwitchNoticeTextShared,
+  buildGeminiGiveUpNoticeText as buildGeminiGiveUpNoticeTextShared,
+} from "./src/adapters/telegram/status_messages.js";
 import { createTelegramCommandHandler } from "./src/adapters/telegram/commands.js";
 import { createTelegramCallbackQueryHandler } from "./src/adapters/telegram/callbacks.js";
 import {
@@ -46,7 +71,9 @@ import {
   makeCancelledError as makeCancelledErrorDomain,
   isCancelledError as isCancelledErrorDomain,
 } from "./src/application/job_runtime.js";
+import { summarizeRuntimeTeamSnapshotLines } from "./src/application/runtime_snapshot_display.js";
 import { createRuntimeTeamSnapshot } from "./src/application/runtime_metadata.js";
+import { markActionsSkipped, wasInterruptedByReplan } from "./src/application/run_status_cleanup.js";
 import {
   isExplicitTeamConfigurationIntentMessage,
 } from "./src/application/team_intent.js";
@@ -367,95 +394,6 @@ function loadLocalContextDocs(jobId, docNames, maxCharsPerDoc = 3500) {
   return out.trim() || "(none)";
 }
 
-function resolveGocUiBase() {
-  const publicBase = String(process.env.GOC_UI_PUBLIC_BASE || "").trim().replace(/\/+$/, "");
-  const internalBase = String(process.env.GOC_UI_BASE || "").trim().replace(/\/+$/, "");
-  return publicBase || internalBase;
-}
-
-function isHttps(url) {
-  return /^https:\/\//i.test(String(url || "").trim());
-}
-
-function isTelegramWebAppHttpsError(error) {
-  const code = String(error?.code || "").trim().toUpperCase();
-  const desc = String(error?.response?.body?.description || "");
-  const msg = String(error?.message || error || "");
-  const merged = `${desc}\n${msg}`;
-  return code === "ETELEGRAM" && /Only HTTPS links are allowed/i.test(merged);
-}
-
-function buildGocUiLink({
-  threadId,
-  ctxId,
-  token = "",
-  base = "",
-  withToken = null,
-  page = "",
-}) {
-  const resolvedBase = String(base || resolveGocUiBase() || "").trim().replace(/\/+$/, "");
-  if (!resolvedBase) throw new Error("Missing GOC_UI_BASE (or GOC_UI_PUBLIC_BASE)");
-  const cleanPage = String(page || "").trim().toLowerCase();
-  const cleanThreadId = String(threadId || "").trim();
-  const cleanCtxId = String(ctxId || "").trim();
-  let query = "";
-  if (cleanPage === "agents") {
-    const agentsBase = `${resolvedBase}/agents`;
-    const qs = new URLSearchParams();
-    if (cleanThreadId) qs.set("thread", cleanThreadId);
-    if (cleanCtxId) qs.set("ctx", cleanCtxId);
-    query = qs.toString() ? `${agentsBase}?${qs.toString()}` : agentsBase;
-  } else {
-    const baseForQuery = resolvedBase.endsWith("/") ? resolvedBase : `${resolvedBase}/`;
-    const qs = new URLSearchParams();
-    qs.set("thread", cleanThreadId);
-    qs.set("ctx", cleanCtxId);
-    query = `${baseForQuery}?${qs.toString()}`;
-  }
-  const useToken = typeof withToken === "boolean"
-    ? withToken
-    : (GOC_UI_LINK_MODE === "bearer_token");
-  if (useToken && token) {
-    return `${query}#token=${encodeURIComponent(String(token || ""))}`;
-  }
-  return query;
-}
-
-async function buildContextLinks(client, { threadId, ctxId, page = "" } = {}) {
-  const base = resolveGocUiBase();
-  if (!base) throw new Error("Missing GOC_UI_BASE (or GOC_UI_PUBLIC_BASE)");
-
-  let miniAppToken = null;
-  if (GOC_UI_LINK_MODE === "bearer_token") {
-    miniAppToken = await client.mintUiToken(GOC_UI_TOKEN_TTL_SEC);
-  }
-  const browserToken = await client.mintUiToken(GOC_UI_BROWSER_TOKEN_TTL_SEC);
-
-  const miniAppLink = buildGocUiLink({
-    threadId,
-    ctxId,
-    token: miniAppToken?.token || "",
-    base,
-    page,
-    withToken: GOC_UI_LINK_MODE === "bearer_token",
-  });
-  const browserLink = buildGocUiLink({
-    threadId,
-    ctxId,
-    token: browserToken?.token || "",
-    base,
-    page,
-    withToken: true,
-  });
-  return {
-    miniAppLink,
-    browserLink,
-    miniAppTokenExp: miniAppToken?.exp || null,
-    browserTokenExp: browserToken?.exp || null,
-    miniAppSupported: isHttps(miniAppLink),
-  };
-}
-
 function resolveCurrentJobIdForChat(chatId) {
   const chatKey = String(chatId);
   const fromSession = chatSessionStore.get(chatId)?.jobId || "";
@@ -521,6 +459,9 @@ async function buildContextInfo(
       const links = await buildContextLinks(client, {
         threadId: g.threadId,
         ctxId: g.ctxId,
+        linkMode: GOC_UI_LINK_MODE,
+        uiTokenTtlSec: GOC_UI_TOKEN_TTL_SEC,
+        browserTokenTtlSec: GOC_UI_BROWSER_TOKEN_TTL_SEC,
       });
       const miniAppNotice = links.miniAppSupported
         ? ""
@@ -560,6 +501,9 @@ async function buildContextInfo(
     const links = await buildContextLinks(client, {
       threadId: map.threadId,
       ctxId: map.ctxSharedId,
+      linkMode: GOC_UI_LINK_MODE,
+      uiTokenTtlSec: GOC_UI_TOKEN_TTL_SEC,
+      browserTokenTtlSec: GOC_UI_BROWSER_TOKEN_TTL_SEC,
     });
     const miniAppNotice = links.miniAppSupported
       ? ""
@@ -596,16 +540,13 @@ async function buildContextInfo(
 async function sendContextInfo(bot, chatId, target, { userId = null, createIfMissing = true } = {}) {
   const info = await buildContextInfo(target, { chatId, userId, createIfMissing });
   const text = info.lines.join("\n");
-  const hasMiniApp = isHttps(info.miniAppLink || "");
-  const buttons = [];
-  if (hasMiniApp) {
-    buttons.push({ text: "Open GoC (Mini App)", web_app: { url: info.miniAppLink } });
-  }
-  if (info.browserLink) {
-    buttons.push({ text: "Open GoC (Browser)", url: info.browserLink });
-  } else if (info.miniAppLink) {
-    buttons.push({ text: "Open GoC (Browser)", url: info.miniAppLink });
-  }
+  const {
+    hasMiniApp,
+    buttons,
+  } = buildContextLinkButtons({
+    miniAppLink: info.miniAppLink,
+    browserLink: info.browserLink,
+  });
 
   if (buttons.length === 0) {
     await sendLong(bot, chatId, text);
@@ -2155,12 +2096,9 @@ function formatActionAgentLabel(action = {}, { agentIndex = null } = {}) {
   const resolvedIndex = agentIndex instanceof Map
     ? agentIndex
     : buildAgentDisplayIndexShared(agentRegistry);
-  const agentId = resolveActionAgentId(action);
-  const nameHint = resolveActionAgentNameHint(action);
-  if (!agentId && !nameHint) return "unknown";
-  return formatAgentDisplayName(agentId || nameHint, resolvedIndex, {
-    nameHint,
-    includeShortId: true,
+  return formatActionAgentLabelShared(action, {
+    agentIndex: resolvedIndex,
+    fallback: "unknown",
   });
 }
 
@@ -2168,31 +2106,12 @@ function chatActionLabel(action, { agentIndex = null } = {}) {
   const resolvedIndex = agentIndex instanceof Map
     ? agentIndex
     : buildAgentDisplayIndexShared(agentRegistry);
-  const type = String(action?.type || "").trim().toLowerCase();
-  if (!type) return "(unknown)";
-  if (type === "run_agent") return `run_agent:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
-  if (type === "propose_agent") return `propose_agent:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
-  if (type === "need_more_detail") return `need_more_detail:${action.context_set_id || "ctx"}`;
-  if (type === "search_public_agents") return `search_public_agents:${action.query || ""}`;
-  if (type === "install_agent_blueprint") return `install_agent_blueprint:${action.blueprint_id || action.public_node_id || ""}`;
-  if (type === "publish_agent") return `publish_agent:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
-  if (type === "add_agent_to_conversation") return `add_agent_to_conversation:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
-  if (type === "remove_agent_from_conversation") return `remove_agent_from_conversation:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
-  if (type === "create_agent_definition") return `create_agent_definition:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
-  if (type === "fork_agent") return `fork_agent:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
-  if (type === "disable_agent") return `disable_agent:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
-  if (type === "enable_agent") return `enable_agent:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
-  if (type === "disable_tool") return `disable_tool:${action.tool_id || "unknown"}`;
-  if (type === "enable_tool") return `enable_tool:${action.tool_id || "unknown"}`;
-  if (type === "list_agents") return "list_agents";
-  if (type === "list_tools") return "list_tools";
-  if (type === "create_agent") return `create_agent:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
-  if (type === "update_agent") return `update_agent:${formatActionAgentLabel(action, { agentIndex: resolvedIndex })}`;
-  if (type === "get_status") return "get_status";
-  if (type === "interrupt") return `interrupt:${action.mode || "replan"}`;
-  if (type === "spawn_agents") return `spawn_agents:${Array.isArray(action.agents) ? action.agents.length : 0}`;
-  if (type === "open_context") return `open_context:${action.scope || "current"}`;
-  return type;
+  return chatActionLabelShared(action, {
+    agentIndex: resolvedIndex,
+    needMoreDetailFallback: "ctx",
+    publishFallbackMode: "unknown",
+    openContextFallback: "current",
+  });
 }
 
 const READ_ONLY_CONTROL_ACTION_TYPES = new Set([
@@ -2234,8 +2153,7 @@ function pickRuntimeDefaultAgentId(agents = []) {
 }
 
 function getActionGoal(action) {
-  if (!action || typeof action !== "object") return "";
-  return String(action.goal || action.prompt || action.task || "").trim();
+  return getActionGoalShared(action);
 }
 
 function pickCoderAgentId(agents = []) {
@@ -2297,100 +2215,23 @@ function hasCoderDelegation(actions = [], coderAgentId = "") {
 }
 
 function buildPlanPreviewLines(actions = []) {
-  const rows = Array.isArray(actions) ? actions : [];
-  const agentIndex = buildAgentDisplayIndexShared(agentRegistry);
-  const lines = [];
-  for (const action of rows) {
-    const type = String(action?.type || "").trim().toLowerCase();
-    if (type === "run_agent") {
-      const agentId = formatActionAgentLabel(action, { agentIndex });
-      const goal = clip(getActionGoal(action) || "(goal 없음)", 220);
-      lines.push(`- ${agentId}: ${goal}`);
-      continue;
-    }
-    if (type === "spawn_agents") {
-      const children = Array.isArray(action.agents) ? action.agents : [];
-      if (children.length === 0) {
-        lines.push(`- (system) ${chatActionLabel(action, { agentIndex })}`);
-        continue;
-      }
-      for (const child of children) {
-        const childId = formatActionAgentLabel(child, { agentIndex });
-        const goal = clip(String(child?.goal || child?.prompt || child?.task || "(goal 없음)"), 220);
-        lines.push(`- ${childId}: ${goal}`);
-      }
-      continue;
-    }
-    lines.push(`- (system) ${chatActionLabel(action, { agentIndex })}`);
-  }
-  if (lines.length === 0) lines.push("- (system) no actions");
-  return lines;
+  return buildPlanPreviewLinesShared(actions, {
+    agentIndex: buildAgentDisplayIndexShared(agentRegistry),
+    actionLabel: (action) => chatActionLabel(action),
+  });
 }
 
 function buildQueuedAgentStatusFromActions(actions = []) {
-  const rows = Array.isArray(actions) ? actions : [];
-  const out = {};
-  for (const action of rows) {
-    const type = String(action?.type || "").trim().toLowerCase();
-    if (type === "run_agent") {
-      const agentId = String(action.agent_id || action.agent || "").trim().toLowerCase();
-      if (!agentId || out[agentId]) continue;
-      out[agentId] = {
-        state: "queued",
-        goal: getActionGoal(action),
-      };
-      continue;
-    }
-    if (type !== "spawn_agents") continue;
-    const children = Array.isArray(action.agents) ? action.agents : [];
-    for (const child of children) {
-      const agentId = String(child?.agent_id || child?.agent || "").trim().toLowerCase();
-      if (!agentId || out[agentId]) continue;
-      out[agentId] = {
-        state: "queued",
-        goal: String(child?.goal || child?.prompt || child?.task || "").trim(),
-      };
-    }
-  }
-  return out;
-}
-
-function buildAgentStatusLines(agentStatusMap = {}) {
-  const map = agentStatusMap && typeof agentStatusMap === "object" ? agentStatusMap : {};
-  const entries = Object.entries(map);
-  if (entries.length === 0) return ["- (agent 없음)"];
-  const stateEmoji = {
-    queued: "⏳",
-    running: "🏃",
-    done: "✅",
-    error: "❌",
-  };
-  return entries
-    .map(([agentIdRaw, rowRaw]) => {
-      const agentId = String(agentIdRaw || "").trim().toLowerCase();
-      if (!agentId) return "";
-      const row = rowRaw && typeof rowRaw === "object" ? rowRaw : {};
-      const state = String(row.state || "").trim().toLowerCase();
-      const normalizedState = ["queued", "running", "done", "error"].includes(state)
-        ? state
-        : "queued";
-      const emoji = stateEmoji[normalizedState] || "⏳";
-      return `- @${agentId} ${emoji} ${normalizedState}`;
-    })
-    .filter(Boolean);
+  return buildQueuedAgentStatusFromActionsShared(actions);
 }
 
 function buildRoutedDashboardText({ actions = [], agentStatus = {} } = {}) {
-  const planLines = buildPlanPreviewLines(actions);
-  const statusLines = buildAgentStatusLines(agentStatus);
-  return [
-    "🧭 분담(아래) + 상태판(아래)",
-    "🧭 분담",
-    ...planLines,
-    "",
-    "📡 상태",
-    ...statusLines,
-  ].join("\n");
+  return buildRoutedDashboardTextShared({
+    actions,
+    agentStatus,
+    actionLabel: (action) => chatActionLabel(action),
+    agentIndex: buildAgentDisplayIndexShared(agentRegistry),
+  });
 }
 
 function getCurrentTurnReplyMessageId(chatId) {
@@ -2507,12 +2348,7 @@ async function sendAgentStatusTransitionMessage(
 }
 
 function buildGeminiRetryNoticeText({ retryCount = 0, maxRetries = 0, agentId = "" } = {}) {
-  const cleanRetry = Math.max(1, Math.floor(Number(retryCount) || 1));
-  const cleanMax = Math.max(cleanRetry, Math.floor(Number(maxRetries) || cleanRetry));
-  const suffix = String(agentId || "").trim().toLowerCase();
-  return suffix
-    ? `⏳ Gemini 혼잡으로 재시도 중 (${cleanRetry}/${cleanMax})… (@${suffix})`
-    : `⏳ Gemini 혼잡으로 재시도 중 (${cleanRetry}/${cleanMax})…`;
+  return buildGeminiRetryNoticeTextShared({ retryCount, maxRetries, agentId });
 }
 
 async function sendGeminiRetryMessage(
@@ -2537,11 +2373,7 @@ async function sendGeminiRetryMessage(
 }
 
 function buildGeminiModelSwitchNoticeText({ toModel = "", agentId = "" } = {}) {
-  const modelText = clip(String(toModel || "auto"), 120);
-  const suffix = String(agentId || "").trim().toLowerCase();
-  return suffix
-    ? `🔁 혼잡 회피를 위해 모델을 ${modelText}로 전환했어요. (@${suffix})`
-    : `🔁 혼잡 회피를 위해 모델을 ${modelText}로 전환했어요.`;
+  return buildGeminiModelSwitchNoticeTextShared({ toModel, agentId });
 }
 
 async function sendGeminiModelSwitchMessage(
@@ -2565,12 +2397,7 @@ async function sendGeminiModelSwitchMessage(
 }
 
 function buildGeminiGiveUpNoticeText({ reason = "", agentId = "" } = {}) {
-  const suffix = String(agentId || "").trim().toLowerCase();
-  const cleanReason = String(reason || "").trim().toLowerCase();
-  const base = cleanReason === "model_not_found"
-    ? "❌ Gemini 모델을 찾을 수 없어요(모델명/권한 문제).\nworkspace 설정(.gemini/settings.json)의 model.name을 제거하거나,\nGEMINI_WORKSPACE_MODEL/GEMINI_MODEL_PRIMARY를 사용 가능한 모델로 설정하세요.\n(gemini CLI에서 /model로 확인 가능)"
-    : "❌ Gemini 혼잡이 지속돼요. 잠시 후 재시도하거나 모델/도구를 바꿀게요.";
-  return suffix ? `${base} (@${suffix})` : base;
+  return buildGeminiGiveUpNoticeTextShared({ reason, agentId });
 }
 
 async function sendGeminiGiveUpMessage(
@@ -2771,32 +2598,17 @@ function buildAutopilotProgressSummary({
   suggestedActions = [],
   followupHint = "",
 } = {}) {
-  const allDeliverables = normalizeDeliverableList(deliverables, { max: 24 });
-  const doneSet = new Set(
-    normalizeDeliverableList(completedDeliverables, { max: 24 }).map((row) => row.toLowerCase())
-  );
-  const remaining = allDeliverables.filter((row) => !doneSet.has(row.toLowerCase()));
-  const okCount = (Array.isArray(results) ? results : []).filter((row) => String(row?.status || "") === "ok").length;
-  const errorCount = (Array.isArray(results) ? results : []).filter((row) => String(row?.status || "") === "error").length;
-  const outputPreview = (Array.isArray(outputs) ? outputs : [])
-    .slice(-3)
-    .map((row) => `- ${String(row?.agentId || "system")}: ${clip(String(row?.output || ""), 120)}`)
-    .filter(Boolean)
-    .join("\n");
-  const suggestedPreview = (Array.isArray(suggestedActions) ? suggestedActions : [])
-    .slice(0, 6)
-    .map((action) => `- ${chatActionLabel(action)}`)
-    .join("\n");
-  return [
-    `autopilot_turn=${turn}/${maxTurns}`,
-    allDeliverables.length > 0 ? `deliverables=${allDeliverables.join(" | ")}` : "deliverables=(none)",
-    doneSet.size > 0 ? `completed=${Array.from(doneSet).join(" | ")}` : "completed=(none)",
-    remaining.length > 0 ? `remaining=${remaining.join(" | ")}` : "remaining=(none)",
-    `last_results: ok=${okCount}, error=${errorCount}`,
-    followupHint ? `last_followup_hint=${followupHint}` : "",
-    outputPreview ? "last_outputs:\n" + outputPreview : "",
-    suggestedPreview ? "agent_suggested_actions:\n" + suggestedPreview : "",
-  ].filter(Boolean).join("\n");
+  return buildAutopilotProgressSummaryShared({
+    turn,
+    maxTurns,
+    deliverables,
+    completedDeliverables,
+    results,
+    outputs,
+    suggestedActions,
+    followupHint,
+    actionLabel: (action) => chatActionLabel(action),
+  });
 }
 
 function buildAutopilotFollowupMessage({
@@ -2806,61 +2618,18 @@ function buildAutopilotFollowupMessage({
   followupHint = "",
   suggestedActions = [],
 } = {}) {
-  const allDeliverables = normalizeDeliverableList(deliverables, { max: 24 });
-  const doneSet = new Set(
-    normalizeDeliverableList(completedDeliverables, { max: 24 }).map((row) => row.toLowerCase())
-  );
-  const remaining = allDeliverables.filter((row) => !doneSet.has(row.toLowerCase()));
-  const suggestedLines = (Array.isArray(suggestedActions) ? suggestedActions : [])
-    .slice(0, 5)
-    .map((action) => `- ${chatActionLabel(action)}`)
-    .join("\n");
-  return [
-    "자동 연속 실행 지시: 이전 턴 결과를 이어서 남은 산출물을 진행하라.",
-    `원 요청: ${String(originalUserText || "").trim()}`,
-    remaining.length > 0 ? `남은 deliverables: ${remaining.join(" | ")}` : "남은 deliverables 없음(완료 검증 필요)",
-    followupHint ? `followup_hint: ${followupHint}` : "",
-    suggestedLines ? `agent_suggested_actions:\n${suggestedLines}` : "",
-    "필요 시 연구->코드->검토 순으로 다음 step을 배치하라.",
-  ].filter(Boolean).join("\n");
+  return buildAutopilotFollowupMessageShared({
+    originalUserText,
+    deliverables,
+    completedDeliverables,
+    followupHint,
+    suggestedActions,
+    actionLabel: (action) => chatActionLabel(action),
+  });
 }
 
 function updateCompletedDeliverablesFromOutputs(deliverables = [], completed = [], outputs = []) {
-  const all = normalizeDeliverableList(deliverables, { max: 24 });
-  const done = new Set(
-    normalizeDeliverableList(completed, { max: 24 }).map((row) => row.toLowerCase())
-  );
-  const rows = Array.isArray(outputs) ? outputs : [];
-  const hasCoderOutput = rows.some((row) => String(row?.agentId || "").trim().toLowerCase() === "coder");
-  const hasResearchOutput = rows.some((row) => {
-    const agentId = String(row?.agentId || "").trim().toLowerCase();
-    return agentId === "researcher" || agentId === "planner";
-  });
-  const joinedText = rows.map((row) => String(row?.output || "")).join("\n").toLowerCase();
-
-  for (const item of all) {
-    const key = String(item || "").trim().toLowerCase();
-    if (!key || done.has(key)) continue;
-    if (/코드|ipynb|notebook|노트북|jupyter|실습|coding|python/.test(key)) {
-      if (hasCoderOutput || /```python|\.ipynb|jupyter|notebook|코드/.test(joinedText)) done.add(key);
-      continue;
-    }
-    if (/주제|아이디어|토픽|proposal|research|리서치/.test(key)) {
-      if (hasResearchOutput || /주제|아이디어|토픽|research/.test(joinedText)) done.add(key);
-      continue;
-    }
-    if (/과제|assignment|문항|quiz|연습문제/.test(key)) {
-      if (/과제|assignment|문항|quiz|문제/.test(joinedText)) done.add(key);
-      continue;
-    }
-  }
-
-  const out = [];
-  for (const item of all) {
-    const key = String(item || "").trim().toLowerCase();
-    if (done.has(key)) out.push(item);
-  }
-  return normalizeDeliverableList(out, { max: 24 });
+  return updateCompletedDeliverablesFromOutputsShared(deliverables, completed, outputs);
 }
 
 function sanitizeSupervisorRoutePlan(
@@ -3509,44 +3278,13 @@ function markMutatingActionsConfirmed(actions = []) {
 }
 
 function inferApprovalPreviewReason(pending = {}) {
-  const explicit = String(pending?.preview_reason || pending?.reason || "").trim();
-  if (explicit) return explicit;
-  const type = String(pending?.action?.type || "").trim().toLowerCase();
-  if ([
-    "create_agent",
-    "update_agent",
-    "propose_agent",
-    "enable_agent",
-    "disable_agent",
-    "enable_tool",
-    "disable_tool",
-  ].includes(type)) return "agent/tool 설정 변경";
-  if (["publish_agent", "install_agent_blueprint"].includes(type)) return "publish/install";
-  return "외부 상태 변경 가능성";
+  return inferApprovalPreviewReasonShared(pending);
 }
 
 function buildApprovalActionSummaryLines(pending = {}) {
-  if (Array.isArray(pending?.actions_summary) && pending.actions_summary.length > 0) {
-    return pending.actions_summary
-      .map((row) => String(row || "").trim())
-      .filter(Boolean)
-      .slice(0, 8)
-      .map((row) => row.startsWith("- ") ? row : `- ${row}`);
-  }
-  if (Array.isArray(pending?.preview_lines) && pending.preview_lines.length > 0) {
-    return pending.preview_lines
-      .map((row) => String(row || "").trim())
-      .filter(Boolean)
-      .slice(0, 8)
-      .map((row) => row.startsWith("- ") ? row : `- ${row}`);
-  }
-  const remaining = Array.isArray(pending?.remaining_actions) ? pending.remaining_actions : [];
-  if (remaining.length > 0) {
-    return remaining
-      .slice(0, 8)
-      .map((action) => `- ${chatActionLabel(action)}`);
-  }
-  return [`- ${chatActionLabel(pending?.action)}`];
+  return buildApprovalActionSummaryLinesShared(pending, {
+    actionLabel: (action) => chatActionLabel(action),
+  });
 }
 
 function buildPendingApprovalPrompt(pending = {}) {
@@ -3633,129 +3371,12 @@ function sanitizeChatRoutePlan(routePlan, message) {
   };
 }
 
-function pickPrimaryChatOutput(outputs) {
-  const rows = Array.isArray(outputs) ? outputs : [];
-  for (let i = rows.length - 1; i >= 0; i -= 1) {
-    if (rows[i]?.agentId === "researcher") return String(rows[i]?.output || "").trim();
-  }
-  for (let i = rows.length - 1; i >= 0; i -= 1) {
-    if (String(rows[i]?.provider || "").trim().toLowerCase() === "gemini") return String(rows[i]?.output || "").trim();
-  }
-  for (let i = rows.length - 1; i >= 0; i -= 1) {
-    const out = String(rows[i]?.output || "").trim();
-    if (out) return out;
-  }
-  return "";
-}
-
 function summarizeSpecialChatOutputs(outputs) {
-  const rows = Array.isArray(outputs) ? outputs : [];
-  const searchRows = rows.filter((row) => String(row?.mode || "") === "public_search");
-  const installRows = rows.filter((row) => String(row?.mode || "") === "install_agent_blueprint");
-  const publishRows = rows.filter((row) => String(row?.mode || "") === "publish_agent_request");
-  const selectionRows = rows.filter((row) => String(row?.mode || "") === "job_config_selection");
-  const statusRows = rows.filter((row) => String(row?.mode || "") === "get_status");
-  const interruptRows = rows.filter((row) => String(row?.mode || "") === "interrupt");
-  const agentWriteRows = rows.filter((row) => {
-    const mode = String(row?.mode || "");
-    return mode === "create_agent" || mode === "update_agent";
-  });
-  const spawnRows = rows.filter((row) => String(row?.mode || "") === "spawn_agents");
-  const listRows = rows.filter((row) => {
-    const mode = String(row?.mode || "");
-    return mode === "list_agents" || mode === "list_tools";
-  });
-  const lines = [];
-
-  for (const row of searchRows) {
-    const items = Array.isArray(row?.items) ? row.items : [];
-    lines.push("Public agent 검색 결과");
-    if (items.length === 0) {
-      lines.push("- 검색 결과가 없습니다.");
-      continue;
-    }
-    for (const item of items.slice(0, 6)) {
-      const agentId = String(item?.agent_id || "").trim();
-      const title = String(item?.title || "").trim() || String(item?.blueprint_id || "").trim();
-      const blueprintId = String(item?.blueprint_id || "").trim();
-      const tags = Array.isArray(item?.tags) && item.tags.length > 0 ? ` tags=${item.tags.join(",")}` : "";
-      lines.push(`- ${title} (${agentId ? `@${agentId}` : "agent:n/a"}, blueprint=${blueprintId || "n/a"})${tags}`);
-    }
-  }
-
-  for (const row of installRows) {
-    const agentId = String(row?.installed_agent_id || "").trim().toLowerCase();
-    if (agentId) {
-      lines.push(`설치 완료: @${agentId}`);
-      lines.push(`이제 @${agentId} 로 사용 가능`);
-    } else {
-      lines.push("설치 완료");
-    }
-  }
-
-  for (const row of publishRows) {
-    const requestId = String(row?.request_id || "").trim();
-    if (requestId) {
-      lines.push(`공개 요청 접수됨: request_id=${requestId}`);
-    } else {
-      lines.push("공개 요청이 생성되었습니다.");
-    }
-    lines.push("관리자 승인 후 public library에 반영됩니다.");
-  }
-
-  for (const row of selectionRows) {
-    const text = String(row?.output || "").trim();
-    if (text) lines.push(text);
-  }
-
-  for (const row of statusRows) {
-    const text = String(row?.output || "").trim();
-    if (text) lines.push(text);
-  }
-
-  for (const row of interruptRows) {
-    const text = String(row?.output || "").trim();
-    if (text) lines.push(text);
-  }
-
-  for (const row of agentWriteRows) {
-    const text = String(row?.output || "").trim();
-    if (text) lines.push(text);
-  }
-
-  for (const row of spawnRows) {
-    const text = String(row?.output || "").trim();
-    if (text) lines.push(text);
-  }
-
-  for (const row of listRows) {
-    const text = String(row?.output || "").trim();
-    if (text) lines.push(text);
-  }
-
-  return lines.join("\n").trim();
+  return summarizeSpecialChatOutputsShared(outputs);
 }
 
 function buildChatSynthesisFallback(message, execution = {}) {
-  const special = summarizeSpecialChatOutputs(execution.outputs);
-  if (special) return special;
-  const primary = pickPrimaryChatOutput(execution.outputs);
-  if (primary) return clip(primary, 3600);
-
-  const errors = (Array.isArray(execution.results) ? execution.results : [])
-    .filter((row) => row?.status === "error")
-    .map((row) => String(row?.note || "").trim())
-    .filter(Boolean);
-  if (errors.length > 0) {
-    return `요청을 처리하는 중 오류가 발생했습니다.\n${errors.map((row) => `- ${row}`).join("\n")}`;
-  }
-  const oks = (Array.isArray(execution.results) ? execution.results : [])
-    .filter((row) => row?.status === "ok")
-    .map((row) => `${row?.label || "action"}${row?.note ? ` (${row.note})` : ""}`);
-  if (oks.length > 0) {
-    return `요청을 처리했습니다.\n${oks.map((row) => `- ${row}`).join("\n")}`;
-  }
-  return `요청: ${clip(String(message || ""), 300)}\n응답을 생성하지 못했습니다. 같은 요청을 다시 보내주세요.`;
+  return buildChatSynthesisFallbackShared(message, execution);
 }
 
 async function synthesizeChatReply(message, routePlan, execution = {}) {
@@ -7540,22 +7161,15 @@ async function runSupervisorChat(
       mergedResults = [...mergedResults, ...turnResults];
       mergedOutputs = [...mergedOutputs, ...turnOutputs];
 
-      if (
-        executionGraph
-        && typeof executionGraph.markStepSkipped === "function"
-        && turnRemainingActions.length > 0
-        && !execution.pendingApproval
-      ) {
-        const interruptedByReplan = turnResults.some((row) => {
-          const label = String(row?.label || "").trim().toLowerCase();
-          const note = String(row?.note || "").trim().toLowerCase();
-          return label === "interrupt" || note.includes("replan requested");
+      const interruptedByReplan = wasInterruptedByReplan({
+        results: turnResults,
+        remainingActions: turnRemainingActions,
+        pendingApproval: execution.pendingApproval,
+      });
+      if (turnRemainingActions.length > 0 && !execution.pendingApproval) {
+        await markActionsSkipped(executionGraph, turnRemainingActions, {
+          reason: interruptedByReplan ? "superseded_by_replan" : "superseded",
         });
-        for (const action of turnRemainingActions) {
-          await executionGraph.markStepSkipped(action, {
-            reason: interruptedByReplan ? "superseded_by_replan" : "superseded",
-          });
-        }
       }
 
       const suggestedFromTurn = collectSuggestedActionsFromOutputs(turnOutputs);
@@ -7583,16 +7197,12 @@ async function runSupervisorChat(
       ].join("\n"));
 
       if (execution.pendingApproval) {
-        if (executionGraph && typeof executionGraph.markStepSkipped === "function") {
-          const pendingRows = Array.isArray(execution?.remaining_actions)
-            ? execution.remaining_actions
-            : [];
-          for (const action of pendingRows) {
-            await executionGraph.markStepSkipped(action, {
-              reason: "awaiting_approval",
-            });
-          }
-        }
+        const pendingRows = Array.isArray(execution?.remaining_actions)
+          ? execution.remaining_actions
+          : [];
+        await markActionsSkipped(executionGraph, pendingRows, {
+          reason: "awaiting_approval",
+        });
         stopReason = "pending_approval";
         break;
       }
@@ -8153,10 +7763,9 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
   if (runtimeTeamSnapshot && Array.isArray(runtimeTeamSnapshot.runtime_agents) && runtimeTeamSnapshot.runtime_agents.length > 0) {
     tracking.append(jobId, "decisions.md", [
       "## Runtime team snapshot",
-      `- action_source: ${String(route?.action_source || "unknown")}`,
-      `- source: ${String(runtimeTeamSnapshot.source || "team_builder")}`,
-      `- generated_at: ${String(runtimeTeamSnapshot.generated_at || "")}`,
-      `- roles: ${runtimeTeamSnapshot.runtime_agents.map((agent) => `${agent.role_label || "role"}:${agent.template_id || "ephemeral"}`).join(", ")}`,
+      ...summarizeRuntimeTeamSnapshotLines(runtimeTeamSnapshot, {
+        actionSource: String(route?.action_source || "unknown"),
+      }),
     ].join("\n"));
   }
 
