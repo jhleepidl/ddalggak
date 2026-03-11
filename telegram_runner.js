@@ -7898,7 +7898,6 @@ async function sendTextWithOptionalGocButton(
     browserLink,
     miniAppLabel,
     browserLabel,
-    isHttps,
     isTelegramWebAppHttpsError,
   });
 }
