@@ -1,3 +1,7 @@
+import { normalizeSkillAttachmentList, summarizeSkillLoadLevels } from "../domain/skill_attachment.js";
+import { normalizeContextPackList } from "../domain/context_pack.js";
+import { normalizeSkillUsageEvent, summarizeSkillUsageEvents } from "./skill_feedback.js";
+
 function asObject(value) {
   return value && typeof value === "object" ? value : {};
 }
@@ -6,6 +10,40 @@ function normalizeTagList(value) {
   return Array.isArray(value)
     ? value.map((tag) => String(tag || "").trim().toLowerCase()).filter(Boolean)
     : [];
+}
+
+function normalizeStringList(value, { lower = true } = {}) {
+  const rows = Array.isArray(value) ? value : [];
+  const out = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const text = String(row || "").trim();
+    if (!text) continue;
+    const normalized = lower ? text.toLowerCase() : text;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function normalizeSkillLoadLevelsMap(value = {}) {
+  const row = asObject(value);
+  const out = {};
+  for (const [key, entry] of Object.entries(row)) {
+    const mapKey = String(key || "").trim();
+    if (!mapKey) continue;
+    const entryObj = asObject(entry);
+    const normalized = {};
+    for (const [skillId, loadLevel] of Object.entries(entryObj)) {
+      const cleanSkillId = String(skillId || "").trim().toLowerCase();
+      const cleanLoadLevel = String(loadLevel || "").trim().toLowerCase();
+      if (!cleanSkillId || !cleanLoadLevel) continue;
+      normalized[cleanSkillId] = cleanLoadLevel;
+    }
+    if (Object.keys(normalized).length > 0) out[mapKey] = normalized;
+  }
+  return out;
 }
 
 export const ACTION_SOURCE_VALUES = Object.freeze([
@@ -61,10 +99,19 @@ export function normalizeRuntimeAgent(agent = {}, { defaultStatus = "ready" } = 
     provider: String(row.provider || "").trim().toLowerCase() || undefined,
     model: String(row.model || "").trim() || undefined,
     assigned_goal: String(row.assigned_goal || row.assignedGoal || "").trim() || undefined,
+    run_id: String(row.run_id || row.runId || "").trim() || undefined,
+    attached_skills: normalizeSkillAttachmentList(row.attached_skills ?? row.attachedSkills ?? []),
+    context_pack_id: String(row.context_pack_id || row.contextPackId || "").trim() || undefined,
+    provider_binding: row.provider_binding && typeof row.provider_binding === "object"
+      ? row.provider_binding
+      : (row.providerBinding && typeof row.providerBinding === "object" ? row.providerBinding : undefined),
     capability_tags: normalizeTagList(row.capability_tags ?? row.capabilityTags),
     lens_spec: row.lens_spec && typeof row.lens_spec === "object"
       ? row.lens_spec
       : (row.lensSpec && typeof row.lensSpec === "object" ? row.lensSpec : undefined),
+    execution_budget: row.execution_budget && typeof row.execution_budget === "object"
+      ? row.execution_budget
+      : (row.executionBudget && typeof row.executionBudget === "object" ? row.executionBudget : undefined),
     status: String(statusRaw || defaultStatus).trim().toLowerCase() || defaultStatus,
     ephemeral: row.ephemeral === true,
     fallback: row.fallback === true,
@@ -77,6 +124,16 @@ function hasSnapshotFields(row = {}) {
     || row.teamPlan
     || Array.isArray(row.runtime_agents)
     || Array.isArray(row.runtimeAgents)
+    || Array.isArray(row.context_packs)
+    || Array.isArray(row.contextPacks)
+    || Array.isArray(row.selected_skill_ids)
+    || Array.isArray(row.selectedSkillIds)
+    || row.skill_load_levels
+    || row.skillLoadLevels
+    || row.selection_reason_summary
+    || row.selectionReasonSummary
+    || Array.isArray(row.skill_usage_events)
+    || Array.isArray(row.skillUsageEvents)
     || row.generated_at
     || row.generatedAt
     || row.source
@@ -106,12 +163,49 @@ export function normalizeRuntimeTeamSnapshot(input = null, {
   const runtimeAgents = runtimeAgentsRaw
     .map((agent) => normalizeRuntimeAgent(agent))
     .filter((agent) => agent.instance_id || agent.template_id || agent.role_label);
+  const contextPacks = normalizeContextPackList(
+    row.context_packs
+    ?? row.contextPacks
+    ?? []
+  );
+  const selectedSkillIds = normalizeStringList(
+    row.selected_skill_ids
+    ?? row.selectedSkillIds
+    ?? [],
+    { lower: true }
+  );
+  const skillLoadLevels = normalizeSkillLoadLevelsMap(
+    row.skill_load_levels
+    ?? row.skillLoadLevels
+    ?? {}
+  );
+  const selectionReasonSummary = row.selection_reason_summary && typeof row.selection_reason_summary === "object"
+    ? row.selection_reason_summary
+    : (row.selectionReasonSummary && typeof row.selectionReasonSummary === "object"
+      ? row.selectionReasonSummary
+      : {});
+  const skillUsageEvents = (Array.isArray(row.skill_usage_events)
+    ? row.skill_usage_events
+    : (Array.isArray(row.skillUsageEvents) ? row.skillUsageEvents : []))
+    .map((entry) => normalizeSkillUsageEvent(entry))
+    .filter(Boolean);
+  const skillUsageSummary = row.skill_usage_summary && typeof row.skill_usage_summary === "object"
+    ? row.skill_usage_summary
+    : (row.skillUsageSummary && typeof row.skillUsageSummary === "object"
+      ? row.skillUsageSummary
+      : summarizeSkillUsageEvents(skillUsageEvents));
 
   return {
     team_plan: row.team_plan && typeof row.team_plan === "object"
       ? row.team_plan
       : (row.teamPlan && typeof row.teamPlan === "object" ? row.teamPlan : null),
     runtime_agents: runtimeAgents,
+    context_packs: contextPacks,
+    selected_skill_ids: selectedSkillIds,
+    skill_load_levels: skillLoadLevels,
+    selection_reason_summary: selectionReasonSummary,
+    skill_usage_events: skillUsageEvents,
+    skill_usage_summary: skillUsageSummary,
     generated_at: String(row.generated_at || row.generatedAt || defaultGeneratedAt || new Date().toISOString()),
     source: String(row.source || defaultSource || "team_builder").trim() || "team_builder",
   };
@@ -124,6 +218,18 @@ export function createRuntimeTeamSnapshot({
   generatedAt = new Date().toISOString(),
   team_plan = undefined,
   runtime_agents = undefined,
+  contextPacks = undefined,
+  context_packs = undefined,
+  selectedSkillIds = undefined,
+  selected_skill_ids = undefined,
+  skillLoadLevels = undefined,
+  skill_load_levels = undefined,
+  selectionReasonSummary = undefined,
+  selection_reason_summary = undefined,
+  skillUsageEvents = undefined,
+  skill_usage_events = undefined,
+  skillUsageSummary = undefined,
+  skill_usage_summary = undefined,
   generated_at = undefined,
   runtime_team_snapshot = undefined,
   runtimeTeamSnapshot = undefined,
@@ -138,6 +244,12 @@ export function createRuntimeTeamSnapshot({
   return normalizeRuntimeTeamSnapshot({
     team_plan: team_plan ?? teamPlan,
     runtime_agents: runtime_agents ?? runtimeAgents,
+    context_packs: context_packs ?? contextPacks,
+    selected_skill_ids: selected_skill_ids ?? selectedSkillIds,
+    skill_load_levels: skill_load_levels ?? skillLoadLevels,
+    selection_reason_summary: selection_reason_summary ?? selectionReasonSummary,
+    skill_usage_events: skill_usage_events ?? skillUsageEvents,
+    skill_usage_summary: skill_usage_summary ?? skillUsageSummary,
     generated_at: generated_at ?? generatedAt,
     source,
   }, {
@@ -160,6 +272,12 @@ export function normalizeRuntimeMetadataEnvelope(input = {}) {
     runtime_team_snapshot: snapshot || null,
     team_plan: snapshot?.team_plan || null,
     runtime_agents: snapshot?.runtime_agents || [],
+    context_packs: snapshot?.context_packs || [],
+    selected_skill_ids: snapshot?.selected_skill_ids || [],
+    skill_load_levels: snapshot?.skill_load_levels || {},
+    selection_reason_summary: snapshot?.selection_reason_summary || {},
+    skill_usage_events: snapshot?.skill_usage_events || [],
+    skill_usage_summary: snapshot?.skill_usage_summary || {},
     generated_at: snapshot?.generated_at || undefined,
     source: snapshot?.source || undefined,
     action_source: actionSource || undefined,
@@ -182,6 +300,12 @@ export function mergeRuntimeMetadataEnvelope(base = null, patch = null) {
     runtime_team_snapshot: snapshot,
     team_plan: snapshot?.team_plan || null,
     runtime_agents: snapshot?.runtime_agents || [],
+    context_packs: snapshot?.context_packs || [],
+    selected_skill_ids: snapshot?.selected_skill_ids || [],
+    skill_load_levels: snapshot?.skill_load_levels || {},
+    selection_reason_summary: snapshot?.selection_reason_summary || {},
+    skill_usage_events: snapshot?.skill_usage_events || [],
+    skill_usage_summary: snapshot?.skill_usage_summary || {},
     generated_at: snapshot?.generated_at || undefined,
     source: snapshot?.source || undefined,
     action_source: actionSource || undefined,
@@ -205,6 +329,24 @@ export function buildRuntimeMetadataPatch(metadata = null, {
     runtime_agents: Array.isArray(snapshot?.runtime_agents) && snapshot.runtime_agents.length > 0
       ? snapshot.runtime_agents
       : undefined,
+    context_packs: Array.isArray(snapshot?.context_packs) && snapshot.context_packs.length > 0
+      ? snapshot.context_packs
+      : undefined,
+    selected_skill_ids: Array.isArray(snapshot?.selected_skill_ids) && snapshot.selected_skill_ids.length > 0
+      ? snapshot.selected_skill_ids
+      : undefined,
+    skill_load_levels: snapshot?.skill_load_levels && Object.keys(snapshot.skill_load_levels).length > 0
+      ? snapshot.skill_load_levels
+      : undefined,
+    selection_reason_summary: snapshot?.selection_reason_summary && Object.keys(snapshot.selection_reason_summary).length > 0
+      ? snapshot.selection_reason_summary
+      : undefined,
+    skill_usage_events: Array.isArray(snapshot?.skill_usage_events) && snapshot.skill_usage_events.length > 0
+      ? snapshot.skill_usage_events
+      : undefined,
+    skill_usage_summary: snapshot?.skill_usage_summary && Object.keys(snapshot.skill_usage_summary).length > 0
+      ? snapshot.skill_usage_summary
+      : undefined,
     generated_at: snapshot?.generated_at || undefined,
     source: snapshot?.source || undefined,
   };
@@ -217,9 +359,16 @@ export function buildRuntimeRolePayload(runtimeAgent = null) {
     role_label: agent.role_label || undefined,
     runtime_instance_id: agent.instance_id || undefined,
     template_id: agent.template_id || undefined,
+    run_id: agent.run_id || undefined,
     provider: agent.provider || undefined,
     model: agent.model || undefined,
     capability_tags: Array.isArray(agent.capability_tags) ? agent.capability_tags : [],
+    attached_skills: agent.attached_skills || [],
+    selected_skill_ids: normalizeSkillAttachmentList(agent.attached_skills || []).map((row) => row.skill_id),
+    skill_load_levels: summarizeSkillLoadLevels(agent.attached_skills || []),
+    context_pack_id: agent.context_pack_id || undefined,
+    provider_binding: agent.provider_binding || undefined,
+    execution_budget: agent.execution_budget || undefined,
     runtime_status: agent.status || undefined,
     ephemeral: agent.ephemeral === true,
     fallback: agent.fallback === true,

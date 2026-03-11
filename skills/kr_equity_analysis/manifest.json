@@ -1,0 +1,39 @@
+{
+  "id": "skill.kr_equity_analysis.v1",
+  "slug": "kr_equity_analysis",
+  "name": "KR Equity Analysis",
+  "version": "1.0.0",
+  "description": "Korean equity analysis workflow covering thesis, catalysts, risks, valuation, and report template output.",
+  "category": "finance",
+  "capability_tags": ["kr_equity", "valuation", "financial_analysis", "risk_review"],
+  "trigger_terms": ["korea stock", "kr equity", "kospi", "valuation", "주식", "종목 분석"],
+  "compatible_roles": ["researcher", "reviewer", "messenger"],
+  "input_contract": {
+    "required": ["ticker_or_company", "analysis_horizon"],
+    "optional": ["comparison_peers", "risk_focus"]
+  },
+  "output_contract": {
+    "required": ["thesis", "catalysts", "risks", "valuation_view"],
+    "optional": ["telegram_briefing"]
+  },
+  "instructions_ref": "SKILL.md",
+  "resource_refs": ["checklist.md", "output_template.md"],
+  "utility_refs": [],
+  "default_context_policy": {
+    "include": ["recent_market_context", "company_specific_notes"]
+  },
+  "validation_policy": {
+    "require_risk_section": true,
+    "require_assumption_disclosure": true
+  },
+  "safety_policy": {
+    "no_investment_advice_claim": true
+  },
+  "ranking_metadata": {
+    "success_rate": 0.61,
+    "usage_count": 5,
+    "risk": "medium"
+  },
+  "visibility": "internal",
+  "status": "active"
+}

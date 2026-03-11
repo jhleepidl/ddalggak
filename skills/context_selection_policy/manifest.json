@@ -1,0 +1,37 @@
+{
+  "id": "skill.context_selection_policy.v1",
+  "slug": "context_selection_policy",
+  "name": "Context Selection Policy",
+  "version": "1.0.0",
+  "description": "Build selected/excluded/missing/conflicting context sets for role execution.",
+  "category": "context",
+  "capability_tags": ["context", "selection", "exclusion", "conflict"],
+  "trigger_terms": ["context", "missing", "conflict", "exclude", "selection"],
+  "compatible_roles": ["context_curator", "planner", "researcher"],
+  "input_contract": {
+    "required": ["goal", "candidate_context_items"],
+    "optional": ["token_budget", "role_constraints"]
+  },
+  "output_contract": {
+    "required": ["selected_items", "excluded_items", "missing_items", "conflicts"]
+  },
+  "instructions_ref": "SKILL.md",
+  "resource_refs": [],
+  "utility_refs": [],
+  "default_context_policy": {
+    "prioritize": ["goal_relevance", "freshness", "source_reliability"]
+  },
+  "validation_policy": {
+    "explain_selection_reason": true
+  },
+  "safety_policy": {
+    "avoid_data_leakage": true
+  },
+  "ranking_metadata": {
+    "success_rate": 0.7,
+    "usage_count": 11,
+    "risk": "low"
+  },
+  "visibility": "internal",
+  "status": "active"
+}

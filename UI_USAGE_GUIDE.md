@@ -14,6 +14,7 @@
 ## 2) Thread Team 이란?
 
 - Thread Team은 현재 대화 스레드에서 사용 가능한 agent 멤버십입니다.
+- Agent는 역할(role) 단위 실행 주체이며, Skill은 해당 role에 붙는 재사용 절차 패키지입니다.
 - `add/remove/enable/disable` 액션은 이 Thread Team 구성에 영향을 줍니다.
 - 같은 agent라도 conversation membership 상태에 따라 실행 가능 여부가 달라질 수 있습니다.
 - 멤버십 변경 확인은 canonical target(`thread_id + conversation_id`) 기준으로 수행됩니다.
@@ -27,9 +28,19 @@
   - `runtime_team_snapshot`
   - `team_plan`
   - `runtime_agents`
+  - `context_packs`
+  - `selected_skill_ids`
+  - `skill_load_levels`
+  - `selection_reason_summary`
+  - `skill_usage_events`
   - `action_source`
 
 이 메타데이터로 "실제로 어떤 팀 구성이 선택되어 실행되었는지"를 사후 점검할 수 있습니다.
+
+추가로 각 runtime role은 `attached_skills`를 가지며, skill 로딩 레벨은 다음 중 하나입니다:
+- `metadata_only`
+- `instructions`
+- `resources`
 
 ## 4) 승인(Approval) 처리
 

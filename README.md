@@ -16,7 +16,15 @@
 - `src/domain/route_plan.js`: route plan/action 정규화 및 sanitize
 - `src/domain/agent_templates.js`: `AgentTemplate`, `RuntimeAgentInstance` 정규화/생성
 - `src/domain/team_plan.js`: `TeamPlan` 정규화/검증
+- `src/domain/skill_packages.js`: `SkillPackage` 정규화
+- `src/domain/skill_attachment.js`: role/agent `attached_skills` 정규화
+- `src/domain/context_pack.js`: `ContextPack` 정규화
 - `src/application/team_builder.js`: 목표 기반 runtime role 구성
+- `src/application/skill_registry.js`: `skills/*/manifest.json` 파일 기반 registry
+- `src/application/skill_resolver.js`: role/task 기준 skill 선택(heuristic, top 0-2)
+- `src/application/skill_loader.js`: progressive load(`metadata_only`/`instructions`/`resources`)
+- `src/application/context_pack_builder.js`: shared/role/skill context pack 생성
+- `src/application/skill_feedback.js`: skill usage event 기록(JSON payload/JSONL)
 - `src/application/orchestrator.js`: route + team 조합
 - `src/application/runtime_metadata.js`: runtime team snapshot 표준 구조
 - `src/application/job_runtime.js`: job lifecycle(중단/컨트롤러) 헬퍼
@@ -26,14 +34,26 @@
 - `src/adapters/telegram/commands.js`: Telegram 명령 디스패치
 - `src/adapters/telegram/callbacks.js`: Telegram callback_query 디스패치
 
-### Internal Runtime Concepts
+### Internal Runtime Concepts (Role + Skill)
 
 - `AgentTemplate`
   - `{ id, name, role_type, description, capability_tags, provider, model, prompt, tools, meta }`
 - `RuntimeAgentInstance`
-  - `{ instance_id, template_id, role_label, assigned_goal, capability_tags, provider, model, lens_spec, status }`
+  - `{ instance_id, run_id, template_id, role_label, assigned_goal, attached_skills, context_pack_id, provider_binding, status, ephemeral, fallback, execution_budget, ... }`
 - `TeamPlan`
-  - `{ mode, roles, dependencies, execution_order, reason, budget }`
+  - `{ mode, roles[], dependencies, execution_order, reason, budget }`
+  - role 확장 필드: `attached_skills`, `depends_on`, `context_policy`, `ephemeral`, `fallback`, `status`
+- `SkillPackage`
+  - `{ id, slug, name, version, description, category, capability_tags, trigger_terms, compatible_roles, input_contract, output_contract, instructions_ref, resource_refs, utility_refs, default_context_policy, validation_policy, safety_policy, ranking_metadata, visibility, status }`
+- `ContextPack`
+  - `{ id, run_id, scope, target_runtime_agent_instance_id, shared_items, role_specific_items, skill_items[{skill_id,load_level}], excluded_items, missing_items, conflicts, token_budget }`
+
+핵심 모델:
+- Agent = role/responsibility
+- Skill = 재사용 가능한 절차 지식 패키지
+- TeamPlan = role + attached skills + 실행 정책
+- RuntimeAgentInstance = 실제 실행 단위(role + attached skills)
+- ContextPack = shared + role + skill 로딩 계획
 
 기존 `agents.json` / `src/agents.js` / `src/agent_registry.js`는 그대로 사용 가능하며, 내부적으로 `AgentTemplate`로 정규화됩니다.
 
@@ -42,6 +62,17 @@
 - 명시적 route plan(`actions`)이 있으면 그것이 우선입니다.
 - team builder는 route를 덮어쓰는 것이 아니라 `team_plan/runtime_agents/runtime_team_snapshot`으로 보강합니다.
 - team-generated actions는 명시적 route action이 비어있거나 fallback-only일 때만 사용됩니다.
+- skill 레이어는 위 precedence를 깨지 않고 additive하게 붙습니다.
+  - `team_builder -> skill_resolver -> context_pack_builder -> runtime snapshot`
+  - skill 미선택 시 기존 동작과 동일하게 실행됩니다.
+
+### Progressive Skill Loading
+
+- `metadata_only`: 기본값. skill 식별/설명/태그/contract만 사용
+- `instructions`: 실행 직전 `SKILL.md` 로딩
+- `resources`: 체크리스트/템플릿/유틸 스크립트 참조 로딩
+
+기본은 lightweight metadata이며, role/action 필요도에 따라 load level을 올립니다.
 
 ### Team Reconfiguration Behavior
 
@@ -75,6 +106,11 @@
   "runtime_team_snapshot": {
     "team_plan": {},
     "runtime_agents": [],
+    "context_packs": [],
+    "selected_skill_ids": [],
+    "skill_load_levels": {},
+    "selection_reason_summary": {},
+    "skill_usage_events": [],
     "generated_at": "2026-03-10T00:00:00.000Z",
     "source": "team_builder"
   },
@@ -89,6 +125,10 @@ step payload의 runtime role 필드는 아래 canonical 키를 사용합니다:
 - `provider`
 - `model`
 - `capability_tags`
+- `attached_skills`
+- `selected_skill_ids`
+- `skill_load_levels`
+- `context_pack_id`
 - `runtime_status`
 - `ephemeral`
 - `fallback`
@@ -108,8 +148,22 @@ membership 진단 로그에는 최소 아래 정보가 포함됩니다(가산형
 - `runtime_team_snapshot`(권장 canonical)과 `runtimeTeamSnapshot`(legacy/camelCase) 모두 허용
 - `action_source`와 `actionSource` 모두 허용
 - downstream은 `runtime_team_snapshot`과 canonical `action_source` enum을 우선 사용 권장
+- skill 관련 확장 키(`context_packs`, `selected_skill_ids`, `skill_load_levels`, `selection_reason_summary`, `skill_usage_events`)는 additive 필드입니다.
 
 그래서 graph-of-context-ui/control-plane에서 실제 런타임 팀 구성과 action 생성 출처를 사후 조회할 수 있습니다.
+
+### Skills Directory
+
+- 기본 registry 경로: `skills/`
+- 초기 skill 패키지:
+  - `skill.thread_team_reconciliation.v1`
+  - `skill.claim_evidence_audit.v1`
+  - `skill.context_selection_policy.v1`
+  - `skill.telegram_briefing.v1`
+  - `skill.run_trace_debugging.v1`
+  - `skill.kr_equity_analysis.v1`
+
+새 skill 작성 방법은 [`SKILL_AUTHORING_GUIDE.md`](./SKILL_AUTHORING_GUIDE.md)를 참고하세요.
 
 외부 Telegram 명령 UX(`/run`, `/continue`, `/gptprompt`, `/gptapply`, `/gptdone`, `/commit`, `/context`, `/agents`, `/memory`)은 그대로 유지됩니다.
 

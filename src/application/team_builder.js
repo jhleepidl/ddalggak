@@ -148,6 +148,8 @@ export function buildTeamFromTemplates({
       });
       runtimeAgents.push({
         ...instance,
+        attached_skills: [],
+        context_pack_id: undefined,
         ephemeral: false,
         fallback: false,
       });
@@ -160,8 +162,12 @@ export function buildTeamFromTemplates({
         template_id: matched.id,
         provider: matched.provider,
         model: matched.model,
+        attached_skills: [],
+        depends_on: [],
+        context_policy: {},
         ephemeral: false,
         fallback: false,
+        status: "ready",
       });
       continue;
     }
@@ -184,6 +190,8 @@ export function buildTeamFromTemplates({
       const isFallback = !!fallbackTemplate;
       runtimeAgents.push({
         ...instance,
+        attached_skills: [],
+        context_pack_id: undefined,
         ephemeral: true,
         fallback: isFallback,
       });
@@ -196,8 +204,12 @@ export function buildTeamFromTemplates({
         template_id: fallbackTemplate?.id || undefined,
         provider: instance.provider,
         model: instance.model,
+        attached_skills: [],
+        depends_on: [],
+        context_policy: {},
         ephemeral: true,
         fallback: isFallback,
+        status: "ready",
       });
       continue;
     }

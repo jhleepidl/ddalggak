@@ -1,4 +1,5 @@
 import { normalizeStringList } from "../shared/normalize.js";
+import { normalizeSkillAttachmentList } from "./skill_attachment.js";
 
 export const DEFAULT_RUNTIME_ROLES = [
   "planner",
@@ -12,6 +13,12 @@ export const DEFAULT_RUNTIME_ROLES = [
 
 function asArray(raw) {
   return Array.isArray(raw) ? raw : [];
+}
+
+function normalizeRoleStatus(raw = "") {
+  const value = String(raw || "").trim().toLowerCase();
+  if (["ready", "running", "done", "error", "disabled", "planned"].includes(value)) return value;
+  return "ready";
 }
 
 export function normalizeRuntimeTeamRole(raw = {}) {
@@ -28,6 +35,14 @@ export function normalizeRuntimeTeamRole(raw = {}) {
     template_id: String(row.template_id || row.templateId || "").trim().toLowerCase() || undefined,
     provider: String(row.provider || "").trim().toLowerCase() || undefined,
     model: String(row.model || "").trim() || undefined,
+    attached_skills: normalizeSkillAttachmentList(row.attached_skills ?? row.attachedSkills ?? []),
+    depends_on: normalizeStringList(row.depends_on ?? row.dependsOn ?? [], { max: 16, lower: true }),
+    context_policy: row.context_policy && typeof row.context_policy === "object"
+      ? row.context_policy
+      : (row.contextPolicy && typeof row.contextPolicy === "object" ? row.contextPolicy : {}),
+    ephemeral: row.ephemeral === true,
+    fallback: row.fallback === true,
+    status: normalizeRoleStatus(row.status),
     required: row.required !== false,
     optional: row.required === false || row.optional === true,
   };

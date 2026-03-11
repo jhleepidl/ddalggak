@@ -40,6 +40,16 @@ function sampleRuntimeSnapshot() {
         instance_id: "inst_coder_1",
         template_id: "coder",
         role_label: "coder",
+        attached_skills: [
+          {
+            skill_id: "skill.run_trace_debugging.v1",
+            selected_by: "skill_resolver",
+            selection_reason: "debug support",
+            load_level: "instructions",
+            status: "selected",
+          },
+        ],
+        context_pack_id: "ctxp_coder_1",
         provider: "codex",
         model: "gpt-5-codex",
         capability_tags: ["coding"],
@@ -48,6 +58,32 @@ function sampleRuntimeSnapshot() {
         fallback: false,
       },
     ],
+    context_packs: [
+      {
+        id: "ctxp_coder_1",
+        run_id: "run_1",
+        scope: "role",
+        target_runtime_agent_instance_id: "inst_coder_1",
+        shared_items: [],
+        role_specific_items: [],
+        skill_items: [
+          {
+            skill_id: "skill.run_trace_debugging.v1",
+            load_level: "instructions",
+          },
+        ],
+        excluded_items: [],
+        missing_items: [],
+        conflicts: [],
+        token_budget: { soft_limit: 1200, hard_limit: 2000 },
+      },
+    ],
+    selected_skill_ids: ["skill.run_trace_debugging.v1"],
+    skill_load_levels: {
+      inst_coder_1: {
+        "skill.run_trace_debugging.v1": "instructions",
+      },
+    },
     generated_at: "2026-03-10T00:00:00.000Z",
     source: "team_builder",
   };
@@ -78,6 +114,7 @@ test("runtime_team_snapshot is persisted on GOC Run payloads", async () => {
   assert.equal(runNode.body.payload_json.action_source, "generated_team_actions");
   assert.equal(runNode.body.payload_json.runtime_team_snapshot.source, "team_builder");
   assert.equal(runNode.body.payload_json.runtime_agents[0].template_id, "coder");
+  assert.ok(runNode.body.payload_json.selected_skill_ids.includes("skill.run_trace_debugging.v1"));
 });
 
 test("step payloads include additive runtime role metadata and update run metadata", async () => {
@@ -120,6 +157,8 @@ test("step payloads include additive runtime role metadata and update run metada
   assert.equal(stepNode.body.payload_json.template_id, "coder");
   assert.equal(stepNode.body.payload_json.runtime_role.role_label, "coder");
   assert.equal(stepNode.body.payload_json.runtime_role.runtime_status, "ready");
+  assert.ok(stepNode.body.payload_json.runtime_role.selected_skill_ids.includes("skill.run_trace_debugging.v1"));
+  assert.equal(stepNode.body.payload_json.context_pack_id, "ctxp_coder_1");
   assert.equal(stepNode.body.payload_json.action_source, "explicit_route_plan");
 });
 

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { normalizeLensSpec } from "./lens.js";
 import { normalizeProviderName, normalizeStringList } from "../shared/normalize.js";
+import { normalizeSkillAttachmentList } from "./skill_attachment.js";
 
 const DEFAULT_ROLE_BY_ID = {
   planner: "planner",
@@ -124,6 +125,7 @@ export function normalizeAgentRegistryToTemplates(registry = {}) {
 export function createRuntimeAgentInstance({
   template = null,
   templateId = "",
+  runId = "",
   roleLabel = "",
   assignedGoal = "",
   lensSpec = null,
@@ -131,6 +133,12 @@ export function createRuntimeAgentInstance({
   capabilityTags = [],
   provider = "",
   model = "",
+  attachedSkills = [],
+  contextPackId = "",
+  providerBinding = null,
+  ephemeral = false,
+  fallback = false,
+  executionBudget = null,
 } = {}) {
   const tpl = template && typeof template === "object" ? template : null;
   const cleanTemplateId = String(templateId || tpl?.id || "").trim().toLowerCase();
@@ -149,13 +157,24 @@ export function createRuntimeAgentInstance({
 
   return {
     instance_id: `inst_${Date.now().toString(36)}_${crypto.randomBytes(4).toString("hex")}`,
+    run_id: String(runId || "").trim() || undefined,
     template_id: cleanTemplateId,
     role_label: cleanRoleLabel,
     assigned_goal: String(assignedGoal || "").trim() || undefined,
+    attached_skills: normalizeSkillAttachmentList(attachedSkills),
+    context_pack_id: String(contextPackId || "").trim() || undefined,
+    provider_binding: providerBinding && typeof providerBinding === "object"
+      ? providerBinding
+      : undefined,
     capability_tags: cleanCapabilityTags,
     provider: cleanProvider,
     model: cleanModel,
     lens_spec: normalizeLensSpec(lensSpec || {}),
     status: instanceStatus,
+    ephemeral: ephemeral === true,
+    fallback: fallback === true,
+    execution_budget: executionBudget && typeof executionBudget === "object"
+      ? executionBudget
+      : undefined,
   };
 }

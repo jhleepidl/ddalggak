@@ -1,0 +1,38 @@
+{
+  "id": "skill.run_trace_debugging.v1",
+  "slug": "run_trace_debugging",
+  "name": "Run Trace Debugging",
+  "version": "1.0.0",
+  "description": "Diagnose stalled runs, stale queued steps, reroute loops, and team membership mismatches.",
+  "category": "operations",
+  "capability_tags": ["debugging", "run_trace", "stalled_run", "reroute"],
+  "trigger_terms": ["stalled", "queued", "reroute", "debug", "trace", "membership mismatch"],
+  "compatible_roles": ["reviewer", "verifier", "context_curator"],
+  "input_contract": {
+    "required": ["run_graph", "step_statuses"],
+    "optional": ["membership_diagnostics"]
+  },
+  "output_contract": {
+    "required": ["root_cause_hypotheses", "next_debug_actions"],
+    "optional": ["stale_step_cleanup_targets"]
+  },
+  "instructions_ref": "SKILL.md",
+  "resource_refs": [],
+  "utility_refs": [],
+  "default_context_policy": {
+    "include": ["runtime_team_snapshot", "step_payloads", "membership_logs"]
+  },
+  "validation_policy": {
+    "require_hypothesis_evidence_link": true
+  },
+  "safety_policy": {
+    "prefer_non_destructive_recovery": true
+  },
+  "ranking_metadata": {
+    "success_rate": 0.66,
+    "usage_count": 7,
+    "risk": "medium"
+  },
+  "visibility": "internal",
+  "status": "active"
+}

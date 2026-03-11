@@ -1,0 +1,41 @@
+{
+  "id": "skill.thread_team_reconciliation.v1",
+  "slug": "thread_team_reconciliation",
+  "name": "Thread Team Reconciliation",
+  "version": "1.0.0",
+  "description": "Reconcile thread team membership changes with readback confirmation and safe reroute guards.",
+  "category": "orchestration",
+  "capability_tags": ["team", "membership", "reconciliation", "safety"],
+  "trigger_terms": ["team", "membership", "add agent", "remove agent", "enable", "disable", "reroute"],
+  "compatible_roles": ["planner", "context_curator", "reviewer"],
+  "input_contract": {
+    "required": ["requested_mutations", "membership_target", "conversation_readback"],
+    "optional": ["explicit_team_intent", "work_like_hint"]
+  },
+  "output_contract": {
+    "required": ["confirmed_mutations", "mismatch_report", "reroute_gate_decision"],
+    "optional": ["operator_hint"]
+  },
+  "instructions_ref": "SKILL.md",
+  "resource_refs": ["checklist.md"],
+  "utility_refs": ["confirm_membership.py"],
+  "default_context_policy": {
+    "include": ["team_plan", "runtime_team_snapshot", "membership_readback"],
+    "exclude": ["irrelevant_tool_logs"]
+  },
+  "validation_policy": {
+    "require_readback_confirmation": true,
+    "fail_fast_on_mismatch": true
+  },
+  "safety_policy": {
+    "reroute_after_confirmed_mutation_only": true,
+    "require_human_confirmation_for_destructive_changes": true
+  },
+  "ranking_metadata": {
+    "success_rate": 0.72,
+    "usage_count": 12,
+    "risk": "low"
+  },
+  "visibility": "internal",
+  "status": "active"
+}

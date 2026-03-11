@@ -1,0 +1,38 @@
+{
+  "id": "skill.claim_evidence_audit.v1",
+  "slug": "claim_evidence_audit",
+  "name": "Claim Evidence Audit",
+  "version": "1.0.0",
+  "description": "Audit claims against available evidence and surface unsupported or conflicting statements.",
+  "category": "quality",
+  "capability_tags": ["evidence", "audit", "fact_check", "conflict_detection"],
+  "trigger_terms": ["evidence", "claim", "unsupported", "conflict", "citation", "fact check"],
+  "compatible_roles": ["researcher", "reviewer", "verifier"],
+  "input_contract": {
+    "required": ["claims", "evidence_set"],
+    "optional": ["source_priority_rules"]
+  },
+  "output_contract": {
+    "required": ["supported_claims", "unsupported_claims", "conflicts"],
+    "optional": ["followup_questions"]
+  },
+  "instructions_ref": "SKILL.md",
+  "resource_refs": ["audit_rules.md"],
+  "utility_refs": [],
+  "default_context_policy": {
+    "include": ["research_notes", "tool_results", "citations"]
+  },
+  "validation_policy": {
+    "require_evidence_reference": true
+  },
+  "safety_policy": {
+    "ban_unverified_facts": true
+  },
+  "ranking_metadata": {
+    "success_rate": 0.68,
+    "usage_count": 9,
+    "risk": "low"
+  },
+  "visibility": "internal",
+  "status": "active"
+}

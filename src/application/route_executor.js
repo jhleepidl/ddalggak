@@ -50,6 +50,7 @@ export async function executeRunCommand({
         signal: controller.signal,
       });
       const runtimeTeamSnapshot = createRuntimeTeamSnapshot({
+        runtime_team_snapshot: route?.runtime_team_snapshot || route?.runtimeTeamSnapshot || null,
         teamPlan: route?.team_plan || null,
         runtimeAgents: route?.runtime_agents || [],
         source: "team_builder",
@@ -60,6 +61,8 @@ export async function executeRunCommand({
         `- reason: ${route.reason}`,
         `- action_source: ${String(route.action_source || "unknown")}`,
         `- team_roles: ${Array.isArray(route?.team_plan?.roles) ? route.team_plan.roles.map((role) => role.id || role.role_label || role.role_type).join(", ") : "(none)"}`,
+        `- selected_skill_ids: ${Array.isArray(runtimeTeamSnapshot?.selected_skill_ids) && runtimeTeamSnapshot.selected_skill_ids.length > 0 ? runtimeTeamSnapshot.selected_skill_ids.join(", ") : "(none)"}`,
+        `- context_packs: ${Array.isArray(runtimeTeamSnapshot?.context_packs) ? runtimeTeamSnapshot.context_packs.length : 0}`,
         `- actions: ${route.actions.map((a) => actionLabel(a)).join(" -> ")}`,
       ].join("\n"));
       await bot.sendMessage(chatId, `🧭 Multi-Agent 라우팅\n${route.actions.map((a) => `- ${actionLabel(a)}`).join("\n")}`);
@@ -144,6 +147,7 @@ export async function executeContinueCommand({
       signal: controller.signal,
     });
     const runtimeTeamSnapshot = createRuntimeTeamSnapshot({
+      runtime_team_snapshot: route?.runtime_team_snapshot || route?.runtimeTeamSnapshot || null,
       teamPlan: route?.team_plan || null,
       runtimeAgents: route?.runtime_agents || [],
       source: "team_builder",
@@ -154,6 +158,8 @@ export async function executeContinueCommand({
       `- reason: ${route.reason}`,
       `- action_source: ${String(route.action_source || "unknown")}`,
       `- team_roles: ${Array.isArray(route?.team_plan?.roles) ? route.team_plan.roles.map((role) => role.id || role.role_label || role.role_type).join(", ") : "(none)"}`,
+      `- selected_skill_ids: ${Array.isArray(runtimeTeamSnapshot?.selected_skill_ids) && runtimeTeamSnapshot.selected_skill_ids.length > 0 ? runtimeTeamSnapshot.selected_skill_ids.join(", ") : "(none)"}`,
+      `- context_packs: ${Array.isArray(runtimeTeamSnapshot?.context_packs) ? runtimeTeamSnapshot.context_packs.length : 0}`,
       `- actions: ${route.actions.map((a) => actionLabel(a)).join(" -> ")}`,
     ].join("\n"));
     await bot.sendMessage(chatId, `🧭 Multi-Agent 라우팅\n${route.actions.map((a) => `- ${actionLabel(a)}`).join("\n")}`);

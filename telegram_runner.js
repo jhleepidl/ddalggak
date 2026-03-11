@@ -1914,6 +1914,10 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
       preferredRoles: [],
       maxAgents: 6,
       resolveAgentId,
+      runId: `route_${String(jobId || "").trim()}_${Date.now().toString(36)}`,
+      jobId: String(jobId || "").trim(),
+      runsDir: jobs.runsDir,
+      persistSkillEvents: true,
     });
     return {
       actions: Array.isArray(orchestration?.route_plan?.actions) && orchestration.route_plan.actions.length > 0
@@ -1936,6 +1940,10 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
       preferredRoles: [],
       maxAgents: 6,
       resolveAgentId,
+      runId: `route_${String(jobId || "").trim()}_${Date.now().toString(36)}`,
+      jobId: String(jobId || "").trim(),
+      runsDir: jobs.runsDir,
+      persistSkillEvents: true,
     });
     return {
       actions: Array.isArray(orchestration?.route_plan?.actions) && orchestration.route_plan.actions.length > 0

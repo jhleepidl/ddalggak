@@ -1,0 +1,38 @@
+{
+  "id": "skill.telegram_briefing.v1",
+  "slug": "telegram_briefing",
+  "name": "Telegram Briefing",
+  "version": "1.0.0",
+  "description": "Format concise but informative Telegram-facing summaries with stable labels.",
+  "category": "communication",
+  "capability_tags": ["telegram", "summary", "briefing", "operator_ux"],
+  "trigger_terms": ["telegram", "brief", "summary", "status update"],
+  "compatible_roles": ["messenger", "planner"],
+  "input_contract": {
+    "required": ["run_status", "key_results"],
+    "optional": ["next_steps", "risks"]
+  },
+  "output_contract": {
+    "required": ["telegram_message"],
+    "optional": ["operator_actions"]
+  },
+  "instructions_ref": "SKILL.md",
+  "resource_refs": [],
+  "utility_refs": [],
+  "default_context_policy": {
+    "prefer_latest_run_metadata": true
+  },
+  "validation_policy": {
+    "max_lines": 12
+  },
+  "safety_policy": {
+    "avoid_sensitive_secrets": true
+  },
+  "ranking_metadata": {
+    "success_rate": 0.74,
+    "usage_count": 14,
+    "risk": "low"
+  },
+  "visibility": "internal",
+  "status": "active"
+}
