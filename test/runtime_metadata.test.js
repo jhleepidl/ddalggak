@@ -5,6 +5,8 @@ import {
   normalizeRuntimeTeamSnapshot,
   normalizeRuntimeMetadataEnvelope,
   normalizeActionSource,
+  normalizeRuntimeAuthority,
+  buildRuntimeMetadataPatch,
   buildRuntimeRolePayload,
 } from "../src/application/runtime_metadata.js";
 
@@ -93,6 +95,51 @@ test("runtime metadata envelope normalizes camelCase keys to canonical shape", (
   assert.equal(envelope.action_source, "generated_team_actions");
   assert.ok(envelope.runtime_team_snapshot);
   assert.equal(envelope.runtime_team_snapshot.runtime_agents.length, 1);
+});
+
+test("runtime authority normalization emits canonical capability source fields", () => {
+  const authority = normalizeRuntimeAuthority({
+    mode: "LOCAL",
+    planSource: "local_fallback",
+    contextSource: "goc",
+    agentCatalogSource: "goc",
+    conversationTeamSource: "local",
+    skillCatalogSource: "mixed",
+    degradedMode: true,
+    fallbackReason: "goc init failed",
+  });
+
+  assert.ok(authority);
+  assert.equal(authority.mode, "standalone");
+  assert.equal(authority.plan_source, "local_fallback");
+  assert.equal(authority.context_source, "goc");
+  assert.equal(authority.agent_catalog_source, "goc");
+  assert.equal(authority.conversation_team_source, "local");
+  assert.equal(authority.skill_catalog_source, "mixed");
+  assert.equal(authority.degraded_mode, true);
+  assert.equal(authority.fallback_reason, "goc init failed");
+});
+
+test("runtime metadata patch carries runtime authority fields additively", () => {
+  const patch = buildRuntimeMetadataPatch({
+    runtime_authority: {
+      mode: "goc",
+      plan_source: "local",
+      context_source: "goc",
+      agent_catalog_source: "goc",
+      conversation_team_source: "goc",
+      skill_catalog_source: "mixed",
+      degraded_mode: false,
+      fallback_reason: null,
+    },
+  });
+
+  assert.ok(patch.runtime_authority);
+  assert.equal(patch.mode, "goc");
+  assert.equal(patch.plan_source, "local");
+  assert.equal(patch.context_source, "goc");
+  assert.equal(patch.skill_catalog_source, "mixed");
+  assert.equal(patch.degraded_mode, false);
 });
 
 test("runtime role payload builder emits canonical runtime_role and flattened fields", () => {

@@ -5,6 +5,7 @@ import {
 } from "../domain/lens.js";
 import {
   normalizeRuntimeTeamSnapshot,
+  normalizeRuntimeAuthority,
   normalizeActionSource,
   buildRuntimeMetadataPatch,
 } from "../application/runtime_metadata.js";
@@ -504,10 +505,13 @@ export class GocContextEngine extends ContextEngineBase {
     const stepNodeId = String(runMeta.stepNodeId || runMeta.step_node_id || "").trim();
     const runNodeId = String(runMeta.runNodeId || runMeta.run_node_id || "").trim();
     const runtimeTeamSnapshot = normalizeRuntimeTeamSnapshot(runMeta);
+    const runtimeAuthority = normalizeRuntimeAuthority(runMeta);
     const actionSource = normalizeActionSource(runMeta.action_source || runMeta.actionSource || "");
     const runtimeMetadataPatch = buildRuntimeMetadataPatch({
       runtime_team_snapshot: runtimeTeamSnapshot,
+      runtime_authority: runtimeAuthority || undefined,
       action_source: actionSource || undefined,
+      ...(runtimeAuthority || {}),
     }, {
       includeFlattened: true,
     });

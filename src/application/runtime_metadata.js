@@ -52,6 +52,12 @@ export const ACTION_SOURCE_VALUES = Object.freeze([
   "default_fallback_route",
 ]);
 
+export const PLAN_SOURCE_VALUES = Object.freeze([
+  "local",
+  "goc",
+  "local_fallback",
+]);
+
 const ACTION_SOURCE_ALIAS_MAP = {
   explicit: "explicit_route_plan",
   explicit_route: "explicit_route_plan",
@@ -76,6 +82,135 @@ export function normalizeActionSource(value = "", { fallback = "" } = {}) {
   const fallbackRaw = String(fallback || "").trim().toLowerCase();
   if (!fallbackRaw || fallbackRaw === raw) return "";
   return normalizeActionSource(fallbackRaw);
+}
+
+function normalizeSourceMode(value = "", { fallback = "standalone" } = {}) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "goc") return "goc";
+  if (raw === "standalone" || raw === "local") return "standalone";
+  return fallback;
+}
+
+function normalizeCapabilitySource(value = "", { fallback = "local" } = {}) {
+  return String(value || "").trim().toLowerCase() === "goc" ? "goc" : fallback;
+}
+
+function normalizeSkillCatalogSource(value = "", { fallback = "local" } = {}) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "goc") return "goc";
+  if (raw === "mixed") return "mixed";
+  return fallback;
+}
+
+export function normalizePlanSource(value = "", { fallback = "local" } = {}) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (PLAN_SOURCE_VALUES.includes(raw)) return raw;
+  const fallbackRaw = String(fallback || "").trim().toLowerCase();
+  if (PLAN_SOURCE_VALUES.includes(fallbackRaw)) return fallbackRaw;
+  return "local";
+}
+
+function hasRuntimeAuthorityFields(row = {}) {
+  return !!(
+    row.runtime_authority
+    || row.runtimeAuthority
+    || row.mode
+    || row.plan_source
+    || row.planSource
+    || row.context_source
+    || row.contextSource
+    || row.agent_catalog_source
+    || row.agentCatalogSource
+    || row.conversation_team_source
+    || row.conversationTeamSource
+    || row.skill_catalog_source
+    || row.skillCatalogSource
+    || Object.prototype.hasOwnProperty.call(row, "degraded_mode")
+    || Object.prototype.hasOwnProperty.call(row, "degradedMode")
+    || Object.prototype.hasOwnProperty.call(row, "fallback_reason")
+    || Object.prototype.hasOwnProperty.call(row, "fallbackReason")
+  );
+}
+
+export function normalizeRuntimeAuthority(input = null, { fallback = null } = {}) {
+  if (!input || typeof input !== "object") {
+    return fallback && typeof fallback === "object" ? normalizeRuntimeAuthority(fallback) : null;
+  }
+  const row = asObject(input);
+  const nested = row.runtime_authority ?? row.runtimeAuthority;
+  const src = nested && typeof nested === "object" ? asObject(nested) : row;
+  const fallbackRow = fallback && typeof fallback === "object" ? asObject(fallback) : {};
+  if (!hasRuntimeAuthorityFields(src) && !hasRuntimeAuthorityFields(fallbackRow)) return null;
+
+  const mode = normalizeSourceMode(
+    src.mode
+    ?? fallbackRow.mode
+    ?? "standalone",
+    { fallback: "standalone" }
+  );
+  const planSource = normalizePlanSource(
+    src.plan_source
+    ?? src.planSource
+    ?? fallbackRow.plan_source
+    ?? fallbackRow.planSource
+    ?? (mode === "goc" ? "goc" : "local"),
+    { fallback: mode === "goc" ? "goc" : "local" }
+  );
+  const contextSource = normalizeCapabilitySource(
+    src.context_source
+    ?? src.contextSource
+    ?? fallbackRow.context_source
+    ?? fallbackRow.contextSource
+    ?? (mode === "goc" ? "goc" : "local"),
+    { fallback: mode === "goc" ? "goc" : "local" }
+  );
+  const agentCatalogSource = normalizeCapabilitySource(
+    src.agent_catalog_source
+    ?? src.agentCatalogSource
+    ?? fallbackRow.agent_catalog_source
+    ?? fallbackRow.agentCatalogSource
+    ?? (mode === "goc" ? "goc" : "local"),
+    { fallback: mode === "goc" ? "goc" : "local" }
+  );
+  const conversationTeamSource = normalizeCapabilitySource(
+    src.conversation_team_source
+    ?? src.conversationTeamSource
+    ?? fallbackRow.conversation_team_source
+    ?? fallbackRow.conversationTeamSource
+    ?? (mode === "goc" ? "goc" : "local"),
+    { fallback: mode === "goc" ? "goc" : "local" }
+  );
+  const skillCatalogSource = normalizeSkillCatalogSource(
+    src.skill_catalog_source
+    ?? src.skillCatalogSource
+    ?? fallbackRow.skill_catalog_source
+    ?? fallbackRow.skillCatalogSource
+    ?? (mode === "goc" ? "mixed" : "local"),
+    { fallback: mode === "goc" ? "mixed" : "local" }
+  );
+  const degradedMode = src.degraded_mode === true
+    || src.degradedMode === true
+    || fallbackRow.degraded_mode === true
+    || fallbackRow.degradedMode === true;
+  const fallbackReasonRaw = (
+    Object.prototype.hasOwnProperty.call(src, "fallback_reason")
+      ? src.fallback_reason
+      : (Object.prototype.hasOwnProperty.call(src, "fallbackReason")
+        ? src.fallbackReason
+        : (Object.prototype.hasOwnProperty.call(fallbackRow, "fallback_reason")
+          ? fallbackRow.fallback_reason
+          : fallbackRow.fallbackReason))
+  );
+  return {
+    mode,
+    plan_source: planSource,
+    context_source: contextSource,
+    agent_catalog_source: agentCatalogSource,
+    conversation_team_source: conversationTeamSource,
+    skill_catalog_source: skillCatalogSource,
+    degraded_mode: degradedMode,
+    fallback_reason: fallbackReasonRaw == null ? null : String(fallbackReasonRaw),
+  };
 }
 
 export function normalizeRuntimeAgent(agent = {}, { defaultStatus = "ready" } = {}) {
@@ -267,9 +402,11 @@ export function normalizeRuntimeMetadataEnvelope(input = {}) {
   const row = asObject(input);
   const snapshot = normalizeRuntimeTeamSnapshot(row);
   const actionSource = normalizeActionSource(row.action_source || row.actionSource || "");
-  if (!snapshot && !actionSource) return null;
+  const runtimeAuthority = normalizeRuntimeAuthority(row);
+  if (!snapshot && !actionSource && !runtimeAuthority) return null;
   return {
     runtime_team_snapshot: snapshot || null,
+    runtime_authority: runtimeAuthority || null,
     team_plan: snapshot?.team_plan || null,
     runtime_agents: snapshot?.runtime_agents || [],
     context_packs: snapshot?.context_packs || [],
@@ -280,6 +417,14 @@ export function normalizeRuntimeMetadataEnvelope(input = {}) {
     skill_usage_summary: snapshot?.skill_usage_summary || {},
     generated_at: snapshot?.generated_at || undefined,
     source: snapshot?.source || undefined,
+    mode: runtimeAuthority?.mode || undefined,
+    plan_source: runtimeAuthority?.plan_source || undefined,
+    context_source: runtimeAuthority?.context_source || undefined,
+    agent_catalog_source: runtimeAuthority?.agent_catalog_source || undefined,
+    conversation_team_source: runtimeAuthority?.conversation_team_source || undefined,
+    skill_catalog_source: runtimeAuthority?.skill_catalog_source || undefined,
+    degraded_mode: runtimeAuthority ? runtimeAuthority.degraded_mode === true : undefined,
+    fallback_reason: runtimeAuthority ? runtimeAuthority.fallback_reason : undefined,
     action_source: actionSource || undefined,
   };
 }
@@ -290,14 +435,21 @@ export function mergeRuntimeMetadataEnvelope(base = null, patch = null) {
   const snapshot = patchNormalized?.runtime_team_snapshot
     || baseNormalized?.runtime_team_snapshot
     || null;
+  const runtimeAuthority = normalizeRuntimeAuthority(
+    patchNormalized?.runtime_authority || null,
+    {
+      fallback: baseNormalized?.runtime_authority || null,
+    }
+  ) || null;
   const actionSource = normalizeActionSource(
     patchNormalized?.action_source
     || baseNormalized?.action_source
     || ""
   );
-  if (!snapshot && !actionSource) return null;
+  if (!snapshot && !actionSource && !runtimeAuthority) return null;
   return {
     runtime_team_snapshot: snapshot,
+    runtime_authority: runtimeAuthority,
     team_plan: snapshot?.team_plan || null,
     runtime_agents: snapshot?.runtime_agents || [],
     context_packs: snapshot?.context_packs || [],
@@ -308,6 +460,14 @@ export function mergeRuntimeMetadataEnvelope(base = null, patch = null) {
     skill_usage_summary: snapshot?.skill_usage_summary || {},
     generated_at: snapshot?.generated_at || undefined,
     source: snapshot?.source || undefined,
+    mode: runtimeAuthority?.mode || undefined,
+    plan_source: runtimeAuthority?.plan_source || undefined,
+    context_source: runtimeAuthority?.context_source || undefined,
+    agent_catalog_source: runtimeAuthority?.agent_catalog_source || undefined,
+    conversation_team_source: runtimeAuthority?.conversation_team_source || undefined,
+    skill_catalog_source: runtimeAuthority?.skill_catalog_source || undefined,
+    degraded_mode: runtimeAuthority ? runtimeAuthority.degraded_mode === true : undefined,
+    fallback_reason: runtimeAuthority ? runtimeAuthority.fallback_reason : undefined,
     action_source: actionSource || undefined,
   };
 }
@@ -318,8 +478,10 @@ export function buildRuntimeMetadataPatch(metadata = null, {
   const normalized = normalizeRuntimeMetadataEnvelope(metadata || {});
   if (!normalized) return {};
   const snapshot = normalized.runtime_team_snapshot;
+  const runtimeAuthority = normalized.runtime_authority;
   const patch = {
     runtime_team_snapshot: snapshot || undefined,
+    runtime_authority: runtimeAuthority || undefined,
     action_source: normalized.action_source || undefined,
   };
   if (!includeFlattened) return patch;
@@ -349,6 +511,14 @@ export function buildRuntimeMetadataPatch(metadata = null, {
       : undefined,
     generated_at: snapshot?.generated_at || undefined,
     source: snapshot?.source || undefined,
+    mode: runtimeAuthority?.mode || undefined,
+    plan_source: runtimeAuthority?.plan_source || undefined,
+    context_source: runtimeAuthority?.context_source || undefined,
+    agent_catalog_source: runtimeAuthority?.agent_catalog_source || undefined,
+    conversation_team_source: runtimeAuthority?.conversation_team_source || undefined,
+    skill_catalog_source: runtimeAuthority?.skill_catalog_source || undefined,
+    degraded_mode: runtimeAuthority ? runtimeAuthority.degraded_mode === true : undefined,
+    fallback_reason: runtimeAuthority ? runtimeAuthority.fallback_reason : undefined,
   };
 }
 

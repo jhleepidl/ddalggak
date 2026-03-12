@@ -4,6 +4,7 @@
 - **유료 LLM API(OpenAI/Gemini API)를 직접 호출하지 않고**
 - Telegram 메시지로 트리거 → Codex CLI + Gemini CLI 실행 → 결과/상태/승인을 Telegram에서 처리
 - 복잡한 판단은 **중앙 통제 AI(=ChatGPT)**에게 물어보고, 답을 붙여넣으면 자동 실행(액션 플랜 JSON)
+- ddalggak은 **standalone-first 실행 런타임**이며, GoC는 선택적 업그레이드 모드
 
 ## Architecture (v2 Runtime Refactor)
 
@@ -38,6 +39,13 @@
 - `src/adapters/telegram/status_messages.js`: Gemini retry/switch/fail 알림 포맷터
 - `src/adapters/telegram/commands.js`: Telegram 명령 디스패치
 - `src/adapters/telegram/callbacks.js`: Telegram callback_query 디스패치
+- `src/runtime_capabilities/context_store.js`: ContextStore capability 어댑터(local/goc)
+- `src/runtime_capabilities/agent_catalog.js`: AgentCatalog capability 어댑터(local/goc)
+- `src/runtime_capabilities/conversation_team_store.js`: ConversationTeamStore capability 어댑터(local filesystem/goc)
+- `src/runtime_capabilities/skill_catalog.js`: SkillCatalog capability 어댑터(local authority)
+- `src/runtime_capabilities/planner.js`: Planner capability(LocalPlanner + RemotePlanner placeholder)
+- `src/runtime_capabilities/run_event_sink.js`: RunEventSink capability(local/goc)
+- `src/runtime_capabilities/index.js`: capability composition + run authority metadata
 
 ### Internal Runtime Concepts (Role + Skill)
 
@@ -140,6 +148,7 @@
 
 runtime/GOC additive 메타데이터:
 - `runtime_team_snapshot`
+- `runtime_authority`
 - `selected_skill_ids`
 - `skill_load_levels`
 - `context_packs`
@@ -244,6 +253,24 @@ membership 진단 로그에는 최소 아래 정보가 포함됩니다(가산형
 - skill 관련 확장 키(`context_packs`, `selected_skill_ids`, `skill_load_levels`, `selection_reason_summary`, `skill_usage_events`)는 additive 필드입니다.
 
 그래서 graph-of-context-ui/control-plane에서 실제 런타임 팀 구성과 action 생성 출처를 사후 조회할 수 있습니다.
+
+### Capability Authority (Per Run)
+
+각 실행(run)마다 capability authority를 명시적으로 기록합니다. 동일 capability에 local/GoC가 동시에 authority가 되지 않도록 합니다.
+
+- `mode`: `standalone | goc`
+- `plan_source`: `local | goc | local_fallback`
+- `context_source`: `local | goc`
+- `agent_catalog_source`: `local | goc`
+- `conversation_team_source`: `local | goc`
+- `skill_catalog_source`: `local | goc | mixed`
+- `degraded_mode`: `boolean`
+- `fallback_reason`: `string | null`
+
+현재 정책:
+- standalone 모드: context/agent/team/planner/skill/event 모두 local authority
+- GoC 모드: context/agent/team/event는 GoC authority, planner는 기본 local, skill package content authority는 runtime(local; metadata는 `mixed` 가능)
+- GoC unavailable 시: degraded local fallback으로 전환하고 authority 메타데이터에 원인을 기록
 
 ### Skills Directory
 
@@ -439,10 +466,11 @@ sudo systemctl status telegram-orchestrator
 - `/memory md` : 원문 markdown 확인
 
 ### 8) MEMORY_MODE 동작
-- `local`: 기존 local 메모리 동작 유지
-- `goc`: 로컬 md는 계속 기록하되, 프롬프트 컨텍스트는 GoC `compiled_text`를 우선 사용
-- `goc` 모드에서 에이전트 호출 직전마다 `compiled_text`를 매번 새로 가져오므로, UI 편집/활성 토글/삭제가 다음 스텝부터 반영됨
-- GoC API/UI 실패 시 local 컨텍스트로 자동 폴백
+- `local`: standalone capability composition 사용 (local context + local agent catalog + local conversation team + local planner)
+- `goc`: GoC-enhanced capability composition 사용 (GoC context/agent/team/event + local planner + local/mixed skill catalog)
+- `goc` 모드에서도 planner는 기본 local이며, remote planner가 있을 때만 `plan_source=goc`로 전환
+- GoC API/UI 실패 시 degraded local fallback으로 전환되며 metadata에 `degraded_mode=true`, `fallback_reason`이 기록됨
+- standalone 모드에서도 `/agents add|remove|enable|disable`로 conversation team을 파일 기반으로 관리 가능
 
 ---
 

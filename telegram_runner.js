@@ -87,7 +87,6 @@ import {
   summarizeMembershipTarget,
 } from "./src/application/membership_target.js";
 import {
-  loadAgentsFromGoc,
   createAgentProfile,
   updateAgentProfile,
   listPublicBlueprints,
@@ -115,7 +114,7 @@ import { normalizeActionPlan } from "./src/chat/actions.js";
 import { expandDetailContext } from "./src/chat/unfold.js";
 import { ChatRunManager } from "./src/chat/run_manager.js";
 import { GocExecutionGraphRecorder } from "./src/chat/goc_execution_graph.js";
-import { makeContextEngine } from "./src/context_engine/index.js";
+import { composeRuntimeCapabilities } from "./src/runtime_capabilities/index.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) { console.error("Missing TELEGRAM_BOT_TOKEN"); process.exit(1); }
@@ -1223,12 +1222,15 @@ function refreshAgentRegistryLocal() {
 }
 
 async function refreshAgentRegistry({ preferGoc = true, includeCompiled = true } = {}) {
-  if (preferGoc && memoryModeWithFallback() === "goc") {
+  if (!preferGoc) return refreshAgentRegistryLocal();
+  const composition = composeCapabilitiesForRun();
+  const catalog = composition?.capabilities?.agentCatalog;
+  if (catalog && typeof catalog.load === "function") {
     try {
-      agentRegistry = await loadAgentsFromGoc({
-        client: requireGocClient(),
-        baseDir: jobs.baseDir,
+      agentRegistry = await catalog.load({
         includeCompiled,
+        refresh: true,
+        fallbackToLocal: true,
       });
       return agentRegistry;
     } catch (e) {
@@ -1279,6 +1281,57 @@ function requireGocClient() {
     throw new Error(reason);
   }
   return gocClient;
+}
+
+function composeCapabilitiesForRun({
+  jobId = "",
+  runtime = null,
+} = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  return composeRuntimeCapabilities({
+    requestedMode: MEMORY_MODE,
+    gocClient: gocReady && gocClient ? gocClient : null,
+    gocReady,
+    gocInitError,
+    jobs,
+    baseDir: jobs.baseDir,
+    runtime,
+    logger: cleanJobId
+      ? (line) => jobs.log(cleanJobId, line)
+      : null,
+    resolveMembershipTarget: resolveMembershipTargetForThread,
+    resolveAgentId,
+  });
+}
+
+function normalizeRuntimeAuthorityMetadata(authority = null) {
+  if (!authority || typeof authority !== "object") return null;
+  return {
+    mode: String(authority.mode || "").trim().toLowerCase() === "goc" ? "goc" : "standalone",
+    plan_source: String(authority.plan_source || "").trim().toLowerCase() || "local",
+    context_source: String(authority.context_source || "").trim().toLowerCase() === "goc" ? "goc" : "local",
+    agent_catalog_source: String(authority.agent_catalog_source || "").trim().toLowerCase() === "goc" ? "goc" : "local",
+    conversation_team_source: String(authority.conversation_team_source || "").trim().toLowerCase() === "goc" ? "goc" : "local",
+    skill_catalog_source: (() => {
+      const raw = String(authority.skill_catalog_source || "").trim().toLowerCase();
+      if (raw === "goc") return "goc";
+      if (raw === "mixed") return "mixed";
+      return "local";
+    })(),
+    degraded_mode: authority.degraded_mode === true,
+    fallback_reason: authority.fallback_reason == null ? null : String(authority.fallback_reason),
+  };
+}
+
+function buildRuntimeMetadataAuthority(runtime = null, overrides = {}) {
+  const base = normalizeRuntimeAuthorityMetadata(runtime?.runtimeAuthority || null)
+    || normalizeRuntimeAuthorityMetadata(runtime?.runtime_authority || null)
+    || null;
+  const merged = {
+    ...(base || {}),
+    ...((overrides && typeof overrides === "object") ? overrides : {}),
+  };
+  return normalizeRuntimeAuthorityMetadata(merged);
 }
 
 function setGocActingTelegramUser(telegramUserId) {
@@ -1454,6 +1507,7 @@ function buildChatStatusCard(chatId, runtime = null) {
   const manualApprovals = listPendingManualApprovals(currentJobId);
   const enabledAgents = runtime?.agentSelection?.enabled_ids || runtime?.enabledAgentIds || [];
   const enabledTools = runtime?.toolSelection?.enabled_ids || runtime?.enabledToolIds || [];
+  const runtimeAuthority = buildRuntimeMetadataAuthority(runtime);
 
   const lines = [
     "📋 현재 상태",
@@ -1483,6 +1537,18 @@ function buildChatStatusCard(chatId, runtime = null) {
   if (Array.isArray(enabledTools) && enabledTools.length > 0) {
     lines.push(`- enabled_tools: ${enabledTools.join(", ")}`);
   }
+  if (runtimeAuthority) {
+    lines.push(`- mode: ${runtimeAuthority.mode}`);
+    lines.push(`- plan_source: ${runtimeAuthority.plan_source}`);
+    lines.push(`- context_source: ${runtimeAuthority.context_source}`);
+    lines.push(`- agent_catalog_source: ${runtimeAuthority.agent_catalog_source}`);
+    lines.push(`- conversation_team_source: ${runtimeAuthority.conversation_team_source}`);
+    lines.push(`- skill_catalog_source: ${runtimeAuthority.skill_catalog_source}`);
+    lines.push(`- degraded_mode: ${runtimeAuthority.degraded_mode ? "true" : "false"}`);
+    if (runtimeAuthority.fallback_reason) {
+      lines.push(`- fallback_reason: ${clip(runtimeAuthority.fallback_reason, 180)}`);
+    }
+  }
   if (runtime?.jobConfigDebugSummary) {
     lines.push(`- job_config(debug): ${clip(String(runtime.jobConfigDebugSummary || ""), 240)}`);
   }
@@ -1500,6 +1566,7 @@ function buildChatStatusCard(chatId, runtime = null) {
       pending_user_messages: Array.isArray(session.pending_user_messages) ? session.pending_user_messages.length : 0,
       enabled_agents: Array.isArray(enabledAgents) ? enabledAgents : [],
       enabled_tools: Array.isArray(enabledTools) ? enabledTools : [],
+      runtime_authority: runtimeAuthority || undefined,
     },
   };
 }
@@ -1831,6 +1898,48 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
     convo,
   ].join("\n");
 
+  const capabilitiesPack = composeCapabilitiesForRun({ jobId });
+  const runtimeAuthority = normalizeRuntimeAuthorityMetadata(capabilitiesPack.authority);
+  const planner = capabilitiesPack?.capabilities?.planner;
+  const runPlanner = async (routePlanInput = null) => {
+    if (planner && typeof planner.plan === "function") {
+      return await planner.plan({
+        mode,
+        goal,
+        seedInstruction,
+        routePlan: routePlanInput,
+        registry: agentRegistry,
+        preferredRoles: [],
+        maxAgents: 6,
+        runId: `route_${String(jobId || "").trim()}_${Date.now().toString(36)}`,
+        jobId: String(jobId || "").trim(),
+        runsDir: jobs.runsDir,
+        persistSkillEvents: true,
+      });
+    }
+    const orchestration = buildRuntimeOrchestration({
+      mode,
+      goal,
+      seedInstruction,
+      routePlan: routePlanInput,
+      registry: agentRegistry,
+      preferredRoles: [],
+      maxAgents: 6,
+      resolveAgentId,
+      runId: `route_${String(jobId || "").trim()}_${Date.now().toString(36)}`,
+      jobId: String(jobId || "").trim(),
+      runsDir: jobs.runsDir,
+      persistSkillEvents: true,
+    });
+    return {
+      plan_source: runtimeAuthority?.plan_source || "local",
+      route_plan: orchestration?.route_plan || null,
+      team_plan: orchestration?.team_plan || null,
+      runtime_agents: orchestration?.runtime_agents || [],
+      runtime_team_snapshot: orchestration?.runtime_team_snapshot || null,
+    };
+  };
+
   try {
     const r = await enqueue(
       () => runGeminiPrompt({
@@ -1846,55 +1955,54 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
     const out = (r.stdout || r.stderr || "").trim();
     const planned = r.ok ? parseRouterPlan(out) : null;
     const fallbackRoute = defaultRouteFor(mode, goal, seedInstruction);
-    const orchestration = buildRuntimeOrchestration({
-      mode,
-      goal,
-      seedInstruction,
-      routePlan: planned || null,
-      registry: agentRegistry,
-      preferredRoles: [],
-      maxAgents: 6,
-      resolveAgentId,
-      runId: `route_${String(jobId || "").trim()}_${Date.now().toString(36)}`,
-      jobId: String(jobId || "").trim(),
-      runsDir: jobs.runsDir,
-      persistSkillEvents: true,
-    });
+    const planningResult = await runPlanner(planned || null);
+    const planSource = String(planningResult?.plan_source || runtimeAuthority?.plan_source || "local").trim().toLowerCase() || "local";
+    const routePlan = planningResult?.route_plan && typeof planningResult.route_plan === "object"
+      ? planningResult.route_plan
+      : {};
     return {
-      actions: Array.isArray(orchestration?.route_plan?.actions) && orchestration.route_plan.actions.length > 0
-        ? orchestration.route_plan.actions
+      actions: Array.isArray(routePlan?.actions) && routePlan.actions.length > 0
+        ? routePlan.actions
         : fallbackRoute.actions,
-      reason: String(orchestration?.route_plan?.reason || planned?.reason || fallbackRoute.reason || "router route").trim(),
-      action_source: String(orchestration?.route_plan?.action_source || "default_fallback_route").trim(),
-      team_plan: orchestration?.team_plan || null,
-      runtime_agents: orchestration?.runtime_agents || [],
-      runtime_team_snapshot: orchestration?.runtime_team_snapshot || null,
+      reason: String(routePlan?.reason || planned?.reason || fallbackRoute.reason || "router route").trim(),
+      action_source: String(routePlan?.action_source || "default_fallback_route").trim(),
+      runtime_authority: runtimeAuthority || undefined,
+      ...(runtimeAuthority || {}),
+      plan_source: planSource,
+      team_plan: planningResult?.team_plan || null,
+      runtime_agents: planningResult?.runtime_agents || [],
+      runtime_team_snapshot: planningResult?.runtime_team_snapshot || null,
     };
   } catch {
     const fallbackRoute = defaultRouteFor(mode, goal, seedInstruction);
-    const orchestration = buildRuntimeOrchestration({
-      mode,
-      goal,
-      seedInstruction,
-      routePlan: null,
-      registry: agentRegistry,
-      preferredRoles: [],
-      maxAgents: 6,
-      resolveAgentId,
-      runId: `route_${String(jobId || "").trim()}_${Date.now().toString(36)}`,
-      jobId: String(jobId || "").trim(),
-      runsDir: jobs.runsDir,
-      persistSkillEvents: true,
-    });
+    const planningResult = await runPlanner(null);
+    const routePlan = planningResult?.route_plan && typeof planningResult.route_plan === "object"
+      ? planningResult.route_plan
+      : {};
+    const planSourceBase = String(planningResult?.plan_source || runtimeAuthority?.plan_source || "local").trim().toLowerCase();
+    const planSource = planSourceBase === "goc" ? "local_fallback" : (planSourceBase || "local");
     return {
-      actions: Array.isArray(orchestration?.route_plan?.actions) && orchestration.route_plan.actions.length > 0
-        ? orchestration.route_plan.actions
+      actions: Array.isArray(routePlan?.actions) && routePlan.actions.length > 0
+        ? routePlan.actions
         : fallbackRoute.actions,
-      reason: String(orchestration?.route_plan?.reason || fallbackRoute.reason || "router fallback").trim(),
-      action_source: String(orchestration?.route_plan?.action_source || "default_fallback_route").trim(),
-      team_plan: orchestration?.team_plan || null,
-      runtime_agents: orchestration?.runtime_agents || [],
-      runtime_team_snapshot: orchestration?.runtime_team_snapshot || null,
+      reason: String(routePlan?.reason || fallbackRoute.reason || "router fallback").trim(),
+      action_source: String(routePlan?.action_source || "default_fallback_route").trim(),
+      plan_source: planSource,
+      runtime_authority: runtimeAuthority
+        ? {
+          ...runtimeAuthority,
+          plan_source: planSource,
+        }
+        : undefined,
+      ...(runtimeAuthority
+        ? {
+          ...runtimeAuthority,
+          plan_source: planSource,
+        }
+        : {}),
+      team_plan: planningResult?.team_plan || null,
+      runtime_agents: planningResult?.runtime_agents || [],
+      runtime_team_snapshot: planningResult?.runtime_team_snapshot || null,
     };
   }
 }
@@ -4163,43 +4271,108 @@ async function loadSupervisorRuntime(
   ).trim();
   const restoreActor = bindGocActor(effectiveTelegramUserId);
   try {
-    const reg = await refreshAgentRegistry({ includeCompiled: true });
+    const capabilitiesPack = composeCapabilitiesForRun({ jobId });
+    const runtimeAuthority = normalizeRuntimeAuthorityMetadata(capabilitiesPack.authority);
+    const capabilities = capabilitiesPack.capabilities || {};
+    const agentCatalog = capabilities.agentCatalog;
+    const teamStore = capabilities.conversationTeamStore;
+
+    let reg = null;
+    if (agentCatalog && typeof agentCatalog.load === "function") {
+      reg = await agentCatalog.load({
+        includeCompiled: true,
+        refresh: true,
+        fallbackToLocal: true,
+      });
+    } else {
+      reg = await refreshAgentRegistry({ includeCompiled: true });
+    }
+    agentRegistry = reg || agentRegistry;
+
     const fallbackNormalized = normalizeSupervisorJobConfig(
       { job_id: String(jobId || "").trim() },
-      { agentsCatalog: reg.agents, toolsCatalog: [] }
+      { agentsCatalog: reg?.agents || [], toolsCatalog: [] }
     );
-    const fallbackAgentSet = new Set(
-      (Array.isArray(fallbackNormalized.enabledAgentIds) ? fallbackNormalized.enabledAgentIds : [])
-        .map((id) => String(id || "").trim().toLowerCase())
-        .filter(Boolean)
-    );
-    const fallbackAgents = (Array.isArray(reg.agents) ? reg.agents : [])
-      .filter((row) => fallbackAgentSet.has(String(row?.id || "").trim().toLowerCase()));
-    if (memoryModeWithFallback() !== "goc") {
+    const fallbackAgentIds = Array.isArray(fallbackNormalized.enabledAgentIds)
+      ? fallbackNormalized.enabledAgentIds
+      : [];
+    const baselineAgentIds = fallbackAgentIds.length > 0
+      ? fallbackAgentIds
+      : pickBaselineConversationCatalogAgents(reg?.agents || []);
+
+    if (runtimeAuthority?.mode !== "goc") {
+      const teamResult = (teamStore && typeof teamStore.ensureTeam === "function")
+        ? await teamStore.ensureTeam({
+          jobId,
+          baselineAgentIds,
+        })
+        : {
+          target: {
+            thread_id: `local:${String(jobId || "").trim()}`,
+            conversation_id: `local:${String(jobId || "").trim()}`,
+            source: "local",
+          },
+          rows: baselineAgentIds.map((agentId) => ({ agent_id: agentId, enabled: true })),
+          warnings: [],
+        };
+      const conversationAgents = Array.isArray(teamResult?.rows) ? teamResult.rows : [];
+      const enabledConversationAgentIds = Array.from(new Set(
+        conversationAgents
+          .filter((row) => row?.enabled !== false)
+          .map((row) => String(row?.agent_id || "").trim().toLowerCase())
+          .filter(Boolean)
+      ));
+      const enabledAgentSet = new Set(enabledConversationAgentIds);
+      const enabledAgents = (Array.isArray(reg?.agents) ? reg.agents : [])
+        .filter((row) => enabledAgentSet.has(String(row?.id || "").trim().toLowerCase()));
+      const localThreadId = String(teamResult?.target?.thread_id || `local:${String(jobId || "").trim()}`).trim();
+      const localConversationId = String(teamResult?.target?.conversation_id || localThreadId).trim();
+
       return {
         mode: "local",
-        map: null,
+        runtime_mode: runtimeAuthority?.mode || "standalone",
+        runtime_authority: runtimeAuthority,
+        runtimeAuthority,
+        plan_source: runtimeAuthority?.plan_source || "local",
+        context_source: runtimeAuthority?.context_source || "local",
+        agent_catalog_source: runtimeAuthority?.agent_catalog_source || "local",
+        conversation_team_source: runtimeAuthority?.conversation_team_source || "local",
+        skill_catalog_source: runtimeAuthority?.skill_catalog_source || "local",
+        degraded_mode: runtimeAuthority?.degraded_mode === true,
+        fallback_reason: runtimeAuthority?.fallback_reason || null,
+        map: {
+          threadId: localThreadId,
+          ctxSharedId: "",
+        },
         agentsSlot: null,
         toolsSlot: null,
-        conversation: null,
-        conversationMembershipTarget: null,
-        conversationAgents: [],
-        conversationMembershipWarning: "",
+        conversation: {
+          id: localConversationId,
+          thread_id: localThreadId,
+        },
+        conversationMembershipTarget: summarizeMembershipTarget(teamResult?.target || {
+          thread_id: localThreadId,
+          conversation_id: localConversationId,
+          source: "local",
+        }),
+        conversationAgents,
+        conversationMembershipWarning: Array.isArray(teamResult?.warnings) ? teamResult.warnings.join(" | ") : "",
         jobConfig: fallbackNormalized.configNormalized,
         jobConfigDebugSummary: summarizeJobConfigDebug(fallbackNormalized.configNormalized),
         jobConfigNodeId: "",
-        agentsCatalog: reg.agents,
+        agentsCatalog: reg?.agents || [],
         toolsCatalog: [],
-        enabledAgentIds: fallbackNormalized.enabledAgentIds,
+        enabledAgentIds: enabledConversationAgentIds,
         enabledToolIds: fallbackNormalized.enabledToolIds,
-        agentSelection: summarizeSelectionState({ catalog: reg.agents, enabled: fallbackAgents }),
+        agentSelection: summarizeSelectionState({ catalog: reg?.agents || [], enabled: enabledAgents }),
         toolSelection: summarizeSelectionState({ catalog: [], enabled: [] }),
-        agents: fallbackAgents,
+        agents: enabledAgents,
         tools: [],
         recentArtifactNodeIds: [],
         sharedActiveTypeBreakdown: {},
         contextSummary: includeContext ? loadLocalContextDocs(jobId, TRACK_DOC_NAMES, 2200) : "",
         globalSummary: "",
+        capabilities,
       };
     }
 
@@ -4228,103 +4401,39 @@ async function loadSupervisorRuntime(
       if (jobId) jobs.log(jobId, line);
     };
 
-    const membershipTarget = await resolveMembershipTargetForThread(client, {
-      threadId: map.threadId,
-      jobId,
-      source: "load_supervisor_runtime",
-    });
-    let conversation = {
-      id: String(membershipTarget.conversation_id || "").trim(),
-      thread_id: String(membershipTarget.thread_id || map.threadId || "").trim(),
-    };
-    if (membershipTarget.ensure_error) {
+    const teamResult = (teamStore && typeof teamStore.ensureTeam === "function")
+      ? await teamStore.ensureTeam({
+        threadId: map.threadId,
+        jobId,
+        source: "load_supervisor_runtime",
+        baselineAgentIds: pickBaselineConversationCatalogAgents(reg?.agents || []),
+      })
+      : {
+        target: summarizeMembershipTarget({ thread_id: map.threadId, source: "goc" }),
+        rows: [],
+        warnings: ["conversation_team_store_unavailable"],
+      };
+    for (const warning of (Array.isArray(teamResult?.warnings) ? teamResult.warnings : [])) {
+      pushConversationWarning(warning);
+    }
+    const membershipTarget = teamResult?.target && typeof teamResult.target === "object"
+      ? teamResult.target
+      : summarizeMembershipTarget({ thread_id: map.threadId, source: "goc" });
+    if (membershipTarget?.ensure_error) {
       pushConversationWarning("ensure_conversation", membershipTarget.ensure_error);
     }
-    if (membershipTarget.ensured_thread_mismatch) {
+    if (membershipTarget?.ensured_thread_mismatch === true) {
       pushConversationWarning("ensure_conversation_thread_mismatch", null, {
         requested_thread_id: String(membershipTarget?.requested_target?.thread_id || map.threadId || "").trim() || "(none)",
         ensured_thread_id: String(membershipTarget?.ensured_target?.thread_id || "").trim() || "(none)",
         conversation_id: String(membershipTarget?.ensured_target?.conversation_id || "").trim() || "(none)",
       });
     }
-    if (typeof client.ensureConversation !== "function") {
-      pushConversationWarning("ensure_conversation_api_unavailable");
-    }
-
-    const listConversationAgentsStrict = async () => {
-      if (typeof client.listConversationAgents !== "function") {
-        throw new Error("listConversationAgents API unavailable");
-      }
-      const rows = await client.listConversationAgents(membershipTarget);
-      return Array.isArray(rows) ? rows : [];
+    const conversationAgents = Array.isArray(teamResult?.rows) ? teamResult.rows : [];
+    const conversation = {
+      id: String(membershipTarget?.conversation_id || "").trim(),
+      thread_id: String(membershipTarget?.thread_id || map.threadId || "").trim(),
     };
-
-    let conversationAgents = [];
-    try {
-      conversationAgents = await listConversationAgentsStrict();
-    } catch (e) {
-      pushConversationWarning("list_conversation_agents_initial", e);
-      conversationAgents = [];
-    }
-
-    if (conversationAgents.length === 0) {
-      if (typeof client.bootstrapDefaultAgents === "function") {
-        try {
-          await client.bootstrapDefaultAgents(membershipTarget.thread_id || map.threadId, { addToConversation: true });
-          conversationAgents = await listConversationAgentsStrict();
-        } catch (e) {
-          pushConversationWarning("bootstrap_default_agents", e);
-        }
-      } else {
-        pushConversationWarning("bootstrap_default_agents_api_unavailable");
-      }
-    }
-
-    if (conversationAgents.length === 0) {
-      const baselineAgentIds = pickBaselineConversationCatalogAgents(reg.agents || []);
-      if (baselineAgentIds.length === 0) {
-        pushConversationWarning("no_baseline_agent_ids_from_catalog");
-      } else if (typeof client.addConversationAgent !== "function") {
-        pushConversationWarning("add_conversation_agent_api_unavailable");
-      } else {
-        for (const baselineAgentId of baselineAgentIds) {
-          try {
-            await client.addConversationAgent(membershipTarget, baselineAgentId, true);
-          } catch (e) {
-            pushConversationWarning(`add_baseline_agent:${baselineAgentId}`, e);
-          }
-        }
-        try {
-          conversationAgents = await listConversationAgentsStrict();
-        } catch (e) {
-          pushConversationWarning("list_conversation_agents_after_baseline_add", e);
-        }
-      }
-    }
-
-    if (conversationAgents.length === 0) {
-      pushConversationWarning("membership_still_empty_after_bootstrap", null, {
-        after_bootstrap_count: 0,
-      });
-    } else {
-      const observedThreadIds = Array.from(new Set(
-        conversationAgents
-          .map((row) => String(row?.thread_id || row?.threadId || "").trim())
-          .filter(Boolean)
-      ));
-      if (
-        membershipTarget.thread_id
-        && observedThreadIds.length > 0
-        && !observedThreadIds.includes(String(membershipTarget.thread_id || "").trim())
-      ) {
-        pushConversationWarning("conversation_readback_thread_mismatch", null, {
-          target_thread_id: String(membershipTarget.thread_id || "").trim() || "(none)",
-          observed_thread_ids: observedThreadIds.slice(0, 6),
-          membership_target: summarizeMembershipTarget(membershipTarget),
-        });
-      }
-    }
-    const conversationMembershipWarning = warningLines.join(" | ");
 
     const latestJobNode = await listLatestResourceByKind(client, map.threadId, "job_config");
     const rawJobConfig = latestJobNode ? parseStructuredFromResource(latestJobNode, "job_config") : null;
@@ -4340,11 +4449,11 @@ async function loadSupervisorRuntime(
 
     const normalized = normalizeSupervisorJobConfig(
       rawJobConfig || { job_id: String(jobId || "").trim() },
-      { agentsCatalog: reg.agents, toolsCatalog }
+      { agentsCatalog: reg?.agents || [], toolsCatalog }
     );
 
     const enabledConversationAgentIds = Array.from(new Set(
-      (Array.isArray(conversationAgents) ? conversationAgents : [])
+      conversationAgents
         .filter((row) => row?.enabled !== false)
         .map((row) => String(row?.agent_id || "").trim().toLowerCase())
         .filter(Boolean)
@@ -4355,7 +4464,7 @@ async function loadSupervisorRuntime(
         .map((id) => String(id || "").trim().toLowerCase())
         .filter(Boolean)
     );
-    const enabledAgents = (Array.isArray(reg.agents) ? reg.agents : [])
+    const enabledAgents = (Array.isArray(reg?.agents) ? reg.agents : [])
       .filter((agent) => enabledAgentSet.has(String(agent?.id || "").trim().toLowerCase()));
     const enabledTools = toolsCatalog
       .filter((tool) => enabledToolSet.has(String(tool?.id || "").trim().toLowerCase()));
@@ -4395,21 +4504,31 @@ async function loadSupervisorRuntime(
 
     return {
       mode: "goc",
+      runtime_mode: runtimeAuthority?.mode || "goc",
+      runtime_authority: runtimeAuthority,
+      runtimeAuthority,
+      plan_source: runtimeAuthority?.plan_source || "local",
+      context_source: runtimeAuthority?.context_source || "goc",
+      agent_catalog_source: runtimeAuthority?.agent_catalog_source || "goc",
+      conversation_team_source: runtimeAuthority?.conversation_team_source || "goc",
+      skill_catalog_source: runtimeAuthority?.skill_catalog_source || "mixed",
+      degraded_mode: runtimeAuthority?.degraded_mode === true,
+      fallback_reason: runtimeAuthority?.fallback_reason || null,
       map,
       agentsSlot,
       toolsSlot,
       jobConfig: normalized.configNormalized,
       jobConfigDebugSummary: summarizeJobConfigDebug(rawJobConfig || normalized.configNormalized),
       jobConfigNodeId: String(latestJobNode?.id || "").trim(),
-      agentsCatalog: reg.agents,
+      agentsCatalog: reg?.agents || [],
       toolsCatalog,
       conversation,
       conversationMembershipTarget: summarizeMembershipTarget(membershipTarget),
-      conversationAgents: Array.isArray(conversationAgents) ? conversationAgents : [],
-      conversationMembershipWarning,
+      conversationAgents,
+      conversationMembershipWarning: warningLines.join(" | "),
       enabledAgentIds: enabledConversationAgentIds,
       enabledToolIds: normalized.enabledToolIds,
-      agentSelection: summarizeSelectionState({ catalog: reg.agents, enabled: enabledAgents }),
+      agentSelection: summarizeSelectionState({ catalog: reg?.agents || [], enabled: enabledAgents }),
       toolSelection: summarizeSelectionState({ catalog: toolsCatalog, enabled: enabledTools }),
       agents: enabledAgents,
       tools: enabledTools,
@@ -4417,6 +4536,7 @@ async function loadSupervisorRuntime(
       sharedActiveTypeBreakdown: {},
       contextSummary: contextSummary || "",
       globalSummary: globalSummary || "",
+      capabilities,
     };
   } finally {
     restoreActor();
@@ -4800,6 +4920,132 @@ function summarizeMembershipMutationResponse(raw = {}) {
     conversation_id: String(row.conversation_id || row.conversationId || "").trim() || undefined,
     agent_id: String(row.agent_id || row.agentId || "").trim().toLowerCase() || undefined,
     enabled: typeof row.enabled === "boolean" ? row.enabled : undefined,
+  };
+}
+
+function syncRuntimeConversationTeamState(runtime = {}, {
+  conversationRows = [],
+  membershipTarget = null,
+  warningLines = [],
+} = {}) {
+  const convRows = Array.isArray(conversationRows) ? conversationRows : [];
+  const enabled = Array.from(new Set(
+    convRows
+      .filter((row) => row?.enabled !== false)
+      .map((row) => String(row?.agent_id || "").trim().toLowerCase())
+      .filter(Boolean)
+  ));
+  const enabledSet = new Set(enabled);
+  runtime.conversationAgents = convRows;
+  runtime.enabledAgentIds = enabled;
+  if (membershipTarget && typeof membershipTarget === "object") {
+    runtime.conversationMembershipTarget = summarizeMembershipTarget(membershipTarget);
+    runtime.conversation = {
+      id: String(membershipTarget?.conversation_id || runtime?.conversation?.id || "").trim(),
+      thread_id: String(membershipTarget?.thread_id || runtime?.conversation?.thread_id || runtime?.map?.threadId || "").trim(),
+    };
+  }
+  runtime.conversationMembershipWarning = Array.isArray(warningLines)
+    ? warningLines.map((line) => String(line || "").trim()).filter(Boolean).join(" | ")
+    : "";
+  runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
+    .filter((agent) => enabledSet.has(String(agent?.id || "").trim().toLowerCase()));
+  runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
+  return {
+    conversationAgents: convRows,
+    enabledAgentIds: enabled,
+    membershipTarget: runtime.conversationMembershipTarget || null,
+  };
+}
+
+async function applyConversationAgentMutation({
+  runtime = null,
+  jobId = "",
+  actionType = "",
+  agentId = "",
+  source = "",
+  enabled = true,
+} = {}) {
+  const cleanActionType = String(actionType || "").trim().toLowerCase();
+  const cleanAgentId = String(agentId || "").trim().toLowerCase();
+  const cleanJobId = String(jobId || "").trim();
+  if (!runtime || typeof runtime !== "object") throw new Error("runtime is required");
+  if (!cleanJobId) throw new Error("jobId is required");
+  if (!cleanAgentId) throw new Error("agent_id is required");
+  if (!["add", "remove", "enable", "disable"].includes(cleanActionType)) {
+    throw new Error(`unsupported action type: ${cleanActionType}`);
+  }
+
+  const teamStore = runtime?.capabilities?.conversationTeamStore;
+  if (!teamStore) throw new Error("conversation team store is unavailable");
+  const threadId = String(runtime?.map?.threadId || runtime?.conversationMembershipTarget?.thread_id || "").trim();
+  const conversationId = String(runtime?.conversationMembershipTarget?.conversation_id || runtime?.conversation?.id || "").trim();
+  const options = {
+    jobId: cleanJobId,
+    threadId,
+    conversationId,
+    membershipTarget: runtime?.conversationMembershipTarget || null,
+    source: source || "conversation_team_mutation",
+    agentId: cleanAgentId,
+    enabled: enabled !== false,
+  };
+
+  let result = null;
+  if (cleanActionType === "add") {
+    result = await teamStore.addAgent(options);
+  } else if (cleanActionType === "remove") {
+    result = await teamStore.removeAgent(options);
+  } else if (cleanActionType === "enable") {
+    result = await teamStore.setAgentEnabled({
+      ...options,
+      enabled: true,
+    });
+  } else {
+    result = await teamStore.setAgentEnabled({
+      ...options,
+      enabled: false,
+    });
+  }
+  const convRows = Array.isArray(result?.rows) ? result.rows : [];
+  const target = result?.target && typeof result.target === "object"
+    ? result.target
+    : runtime?.conversationMembershipTarget
+      || { thread_id: threadId, conversation_id: conversationId, source: runtime?.mode === "goc" ? "goc" : "local" };
+  const verification = verifyConversationMembershipMutation({
+    actionType: cleanActionType === "add"
+      ? "add_agent_to_conversation"
+      : (cleanActionType === "remove" ? "remove_agent_from_conversation" : `${cleanActionType}_agent`),
+    threadId: String(target?.thread_id || threadId || "").trim(),
+    conversationId: String(target?.conversation_id || conversationId || "").trim(),
+    targetAgentId: cleanAgentId,
+    expectedPresent: cleanActionType !== "remove",
+    expectedEnabled: cleanActionType === "disable" ? false : true,
+    conversationRows: convRows,
+    source: source || "conversation_team_mutation",
+    extra: {
+      job_id: cleanJobId,
+      membership_target: summarizeMembershipTarget(target),
+      ensured_thread_mismatch: target?.ensured_thread_mismatch === true,
+      mutation_response: summarizeMembershipMutationResponse(result?.mutation_response),
+    },
+  });
+  if (!verification.confirmed) {
+    recordMembershipMutationDiagnostic(cleanJobId, verification, {
+      stage: "membership_confirmation_failed",
+    });
+    throw createMembershipConfirmationError(verification);
+  }
+  syncRuntimeConversationTeamState(runtime, {
+    conversationRows: convRows,
+    membershipTarget: target,
+    warningLines: Array.isArray(result?.warnings) ? result.warnings : [],
+  });
+  return {
+    convRows,
+    target,
+    verification,
+    mutationResponse: result?.mutation_response || null,
+    warnings: Array.isArray(result?.warnings) ? result.warnings : [],
   };
 }
 
@@ -5282,6 +5528,7 @@ function buildSupervisorExecutionCallbacks({
     const cleanDetail = String(detailContext || "").trim();
     const cleanStepNodeId = String(stepNodeId || "").trim();
     if (hasContextEngine) {
+      const runtimeAuthority = buildRuntimeMetadataAuthority(runtime);
       const prepared = await contextEngine.prepareStepContext({
         jobId,
         chatId: String(chatId || ""),
@@ -5304,6 +5551,8 @@ function buildSupervisorExecutionCallbacks({
           runtimeTeamSnapshot: runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
             ? runtime.runtimeTeamSnapshot
             : undefined,
+          runtime_authority: runtimeAuthority || undefined,
+          ...(runtimeAuthority || {}),
           jobConfig: runtime?.jobConfig && typeof runtime.jobConfig === "object"
             ? runtime.jobConfig
             : undefined,
@@ -5378,6 +5627,8 @@ function buildSupervisorExecutionCallbacks({
           runtimeTeamSnapshot: runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
             ? runtime.runtimeTeamSnapshot
             : undefined,
+          runtime_authority: runtimeAuthority || undefined,
+          ...(runtimeAuthority || {}),
         },
         meta,
       }).catch(() => {});
@@ -6213,66 +6464,21 @@ function buildSupervisorExecutionCallbacks({
         action,
         toolName: "add_agent_to_conversation",
         work: async () => {
-          if (memoryModeWithFallback() !== "goc") {
-            throw new Error("add_agent_to_conversation requires MEMORY_MODE=goc");
-          }
-          const threadId = String(runtime?.map?.threadId || "").trim();
-          if (!threadId) throw new Error("conversation thread is not ready");
           const agentId = String(action?.agent_id || "").trim().toLowerCase();
           if (!agentId) throw new Error("add_agent_to_conversation requires agent_id");
-          const { convRows, membershipTarget, mutationResponse } = await withBoundGocActor(async () => {
-            const client = requireGocClient();
-            const membershipTarget = await resolveMembershipTargetForThread(client, {
-              threadId,
-              jobId,
-              source: "chat_executor_add_agent",
-            });
-            const mutationResponse = await client.addConversationAgent(membershipTarget, agentId, action?.enabled !== false);
-            if (typeof client.listConversationAgents !== "function") {
-              throw new Error("listConversationAgents API unavailable");
-            }
-            const convRows = await client.listConversationAgents(membershipTarget);
-            return { convRows, membershipTarget, mutationResponse };
-          });
-          const enabled = Array.from(new Set(
-            convRows
-              .filter((row) => row?.enabled !== false)
-              .map((row) => String(row?.agent_id || "").trim().toLowerCase())
-              .filter(Boolean)
-          ));
-          const verification = verifyConversationMembershipMutation({
-            actionType: "add_agent_to_conversation",
-            threadId: membershipTarget.thread_id || threadId,
-            conversationId: membershipTarget.conversation_id || "",
-            targetAgentId: agentId,
-            expectedPresent: true,
-            expectedEnabled: action?.enabled !== false,
-            conversationRows: convRows,
-            source: "chat_executor_callback",
-            extra: {
-              job_id: String(jobId || "").trim(),
-              membership_target: summarizeMembershipTarget(membershipTarget),
-              ensured_thread_mismatch: membershipTarget.ensured_thread_mismatch === true,
-              mutation_response: summarizeMembershipMutationResponse(mutationResponse),
-            },
-          });
-          if (!verification.confirmed) {
-            recordMembershipMutationDiagnostic(jobId, verification, {
-              stage: "membership_confirmation_failed",
-            });
-            throw createMembershipConfirmationError(verification);
-          }
-          runtime.conversationAgents = convRows;
-          runtime.enabledAgentIds = enabled;
-          runtime.conversationMembershipTarget = summarizeMembershipTarget(membershipTarget);
-          runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
-            .filter((agent) => enabled.includes(String(agent?.id || "").trim().toLowerCase()));
-          runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
+          const mutation = await withBoundGocActor(async () => await applyConversationAgentMutation({
+            runtime,
+            jobId,
+            actionType: "add",
+            agentId,
+            enabled: action?.enabled !== false,
+            source: "chat_executor_add_agent",
+          }));
           const agentDisplay = formatRuntimeAgentDisplay(agentId);
           return {
             agent_id: agentId,
-            enabled_agents: enabled,
-            membership_change: verification,
+            enabled_agents: runtime?.enabledAgentIds || [],
+            membership_change: mutation?.verification || null,
             source: "conversation_agents",
             text: `✅ conversation에 ${agentDisplay} 추가 완료`,
           };
@@ -6284,66 +6490,20 @@ function buildSupervisorExecutionCallbacks({
         action,
         toolName: "remove_agent_from_conversation",
         work: async () => {
-          if (memoryModeWithFallback() !== "goc") {
-            throw new Error("remove_agent_from_conversation requires MEMORY_MODE=goc");
-          }
-          const threadId = String(runtime?.map?.threadId || "").trim();
-          if (!threadId) throw new Error("conversation thread is not ready");
           const agentId = String(action?.agent_id || "").trim().toLowerCase();
           if (!agentId) throw new Error("remove_agent_from_conversation requires agent_id");
-          const { convRows, membershipTarget, mutationResponse } = await withBoundGocActor(async () => {
-            const client = requireGocClient();
-            const membershipTarget = await resolveMembershipTargetForThread(client, {
-              threadId,
-              jobId,
-              source: "chat_executor_remove_agent",
-            });
-            const mutationResponse = await client.removeConversationAgent(membershipTarget, agentId);
-            if (typeof client.listConversationAgents !== "function") {
-              throw new Error("listConversationAgents API unavailable");
-            }
-            const convRows = await client.listConversationAgents(membershipTarget);
-            return { convRows, membershipTarget, mutationResponse };
-          });
-          const enabled = Array.from(new Set(
-            convRows
-              .filter((row) => row?.enabled !== false)
-              .map((row) => String(row?.agent_id || "").trim().toLowerCase())
-              .filter(Boolean)
-          ));
-          const verification = verifyConversationMembershipMutation({
-            actionType: "remove_agent_from_conversation",
-            threadId: membershipTarget.thread_id || threadId,
-            conversationId: membershipTarget.conversation_id || "",
-            targetAgentId: agentId,
-            expectedPresent: false,
-            expectedEnabled: false,
-            conversationRows: convRows,
-            source: "chat_executor_callback",
-            extra: {
-              job_id: String(jobId || "").trim(),
-              membership_target: summarizeMembershipTarget(membershipTarget),
-              ensured_thread_mismatch: membershipTarget.ensured_thread_mismatch === true,
-              mutation_response: summarizeMembershipMutationResponse(mutationResponse),
-            },
-          });
-          if (!verification.confirmed) {
-            recordMembershipMutationDiagnostic(jobId, verification, {
-              stage: "membership_confirmation_failed",
-            });
-            throw createMembershipConfirmationError(verification);
-          }
-          runtime.conversationAgents = convRows;
-          runtime.enabledAgentIds = enabled;
-          runtime.conversationMembershipTarget = summarizeMembershipTarget(membershipTarget);
-          runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
-            .filter((agent) => enabled.includes(String(agent?.id || "").trim().toLowerCase()));
-          runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
+          const mutation = await withBoundGocActor(async () => await applyConversationAgentMutation({
+            runtime,
+            jobId,
+            actionType: "remove",
+            agentId,
+            source: "chat_executor_remove_agent",
+          }));
           const agentDisplay = formatRuntimeAgentDisplay(agentId);
           return {
             agent_id: agentId,
-            enabled_agents: enabled,
-            membership_change: verification,
+            enabled_agents: runtime?.enabledAgentIds || [],
+            membership_change: mutation?.verification || null,
             source: "conversation_agents",
             text: `🛑 conversation에서 ${agentDisplay} 제거 완료`,
           };
@@ -6580,9 +6740,11 @@ function buildSupervisorExecutionCallbacks({
           const convRows = Array.isArray(runtime?.conversationAgents) ? runtime.conversationAgents : [];
           const enabled = normalizeCatalogIds(runtime?.enabledAgentIds || []);
           const members = normalizeCatalogIds(convRows.map((row) => row?.agent_id));
+          const available = normalizeCatalogIds(runtime?.agentsCatalog || []);
           const disabled = action?.include_disabled === false
             ? []
             : members.filter((id) => !enabled.includes(id));
+          const availableOnly = available.filter((id) => !members.includes(id));
           const lines = ["현재 conversation agent 상태"];
           lines.push(`- thread_id: ${String(runtime?.map?.threadId || "").trim() || "(none)"}`);
           lines.push(enabled.length > 0
@@ -6593,6 +6755,12 @@ function buildSupervisorExecutionCallbacks({
               ? `- disabled: ${disabled.map((id) => `@${id}`).join(", ")}`
               : "- disabled: (none)");
           }
+          lines.push(available.length > 0
+            ? `- available_catalog: ${available.slice(0, 40).map((id) => `@${id}`).join(", ")}`
+            : "- available_catalog: (none)");
+          lines.push(availableOnly.length > 0
+            ? `- not_in_team: ${availableOnly.slice(0, 40).map((id) => `@${id}`).join(", ")}`
+            : "- not_in_team: (none)");
           return { text: lines.join("\n") };
         },
       });
@@ -6624,8 +6792,32 @@ function buildSupervisorExecutionCallbacks({
         action,
         toolName: action?.type || "update_job_config_selection",
         work: async () => {
+          const cleanKind = String(kind || "").trim().toLowerCase();
+          const cleanOp = String(op || "").trim().toLowerCase();
+          const cleanId = String(id || "").trim().toLowerCase();
+          if (cleanKind === "agent" && ["enable", "disable"].includes(cleanOp) && cleanId) {
+            const mutation = await withBoundGocActor(async () => await applyConversationAgentMutation({
+              runtime,
+              jobId,
+              actionType: cleanOp,
+              agentId: cleanId,
+              source: "update_job_config_selection",
+            }));
+            return {
+              source: "conversation_agents",
+              op: cleanOp,
+              kind: cleanKind,
+              id: cleanId,
+              conversationAgents: mutation?.convRows || runtime.conversationAgents || [],
+              enabledAgentIds: runtime.enabledAgentIds || [],
+              membership_change: mutation?.verification || null,
+              enabled_agent_ids: runtime.enabledAgentIds || [],
+              enabled_tool_ids: runtime.enabledToolIds || [],
+            };
+          }
+
           if (memoryModeWithFallback() !== "goc") {
-            throw new Error("selection update requires MEMORY_MODE=goc");
+            throw new Error("tool selection update requires GoC mode");
           }
           const updated = await withBoundGocActor(async () => {
             return await updateJobConfigSelection(requireGocClient(), {
@@ -6638,43 +6830,32 @@ function buildSupervisorExecutionCallbacks({
               toolsCatalog: runtime.toolsCatalog || runtime.tools || [],
             });
           });
-          if (String(updated?.source || "").trim().toLowerCase() === "conversation_agents") {
-            const enabled = Array.isArray(updated?.enabledAgentIds)
-              ? updated.enabledAgentIds.map((entry) => String(entry || "").trim().toLowerCase()).filter(Boolean)
-              : [];
-            runtime.conversationAgents = Array.isArray(updated?.conversationAgents) ? updated.conversationAgents : [];
-            runtime.enabledAgentIds = enabled;
-            runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
-              .filter((agent) => enabled.includes(String(agent?.id || "").trim().toLowerCase()));
-            runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
-          } else {
-            const normalized = normalizeSupervisorJobConfig(
-              updated.config || {},
-              {
-                agentsCatalog: runtime.agentsCatalog || runtime.agents || [],
-                toolsCatalog: runtime.toolsCatalog || runtime.tools || [],
-              }
-            );
-            const enabledAgentSet = new Set(
-              (Array.isArray(normalized.enabledAgentIds) ? normalized.enabledAgentIds : [])
-                .map((entry) => String(entry || "").trim().toLowerCase())
-                .filter(Boolean)
-            );
-            const enabledToolSet = new Set(
-              (Array.isArray(normalized.enabledToolIds) ? normalized.enabledToolIds : [])
-                .map((entry) => String(entry || "").trim().toLowerCase())
-                .filter(Boolean)
-            );
-            runtime.jobConfig = normalized.configNormalized;
-            runtime.enabledAgentIds = normalized.enabledAgentIds;
-            runtime.enabledToolIds = normalized.enabledToolIds;
-            runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
-              .filter((agent) => enabledAgentSet.has(String(agent?.id || "").trim().toLowerCase()));
-            runtime.tools = (Array.isArray(runtime.toolsCatalog) ? runtime.toolsCatalog : [])
-              .filter((tool) => enabledToolSet.has(String(tool?.id || "").trim().toLowerCase()));
-            runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
-            runtime.toolSelection = summarizeSelectionState({ catalog: runtime.toolsCatalog || [], enabled: runtime.tools });
-          }
+          const normalized = normalizeSupervisorJobConfig(
+            updated.config || {},
+            {
+              agentsCatalog: runtime.agentsCatalog || runtime.agents || [],
+              toolsCatalog: runtime.toolsCatalog || runtime.tools || [],
+            }
+          );
+          const enabledAgentSet = new Set(
+            (Array.isArray(normalized.enabledAgentIds) ? normalized.enabledAgentIds : [])
+              .map((entry) => String(entry || "").trim().toLowerCase())
+              .filter(Boolean)
+          );
+          const enabledToolSet = new Set(
+            (Array.isArray(normalized.enabledToolIds) ? normalized.enabledToolIds : [])
+              .map((entry) => String(entry || "").trim().toLowerCase())
+              .filter(Boolean)
+          );
+          runtime.jobConfig = normalized.configNormalized;
+          runtime.enabledAgentIds = normalized.enabledAgentIds;
+          runtime.enabledToolIds = normalized.enabledToolIds;
+          runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
+            .filter((agent) => enabledAgentSet.has(String(agent?.id || "").trim().toLowerCase()));
+          runtime.tools = (Array.isArray(runtime.toolsCatalog) ? runtime.toolsCatalog : [])
+            .filter((tool) => enabledToolSet.has(String(tool?.id || "").trim().toLowerCase()));
+          runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
+          runtime.toolSelection = summarizeSelectionState({ catalog: runtime.toolsCatalog || [], enabled: runtime.tools });
           return {
             ...updated,
             enabled_agent_ids: runtime.enabledAgentIds,
@@ -6757,6 +6938,7 @@ async function runSupervisorChat(
   const controller = resetJobAbortController(currentJobId);
   activeJobByChat.set(chatKey, currentJobId);
   let executionGraph = null;
+  let runEventSink = null;
   let runtime = null;
   let contextEngine = null;
   let finalAssistantText = "";
@@ -6773,18 +6955,17 @@ async function runSupervisorChat(
       chatMeta: chatInfo,
       telegramUserId: userId,
     });
-    contextEngine = makeContextEngine({
-      memoryMode: memoryModeWithFallback(),
-      jobs,
-      gocClient: memoryModeWithFallback() === "goc" ? requireGocClient() : null,
-      runtime,
-      logger: (line) => jobs.log(currentJobId, line),
-    });
+    const runtimeCapabilities = runtime?.capabilities && typeof runtime.capabilities === "object"
+      ? runtime.capabilities
+      : composeCapabilitiesForRun({ jobId: currentJobId, runtime }).capabilities;
+    runtime.capabilities = runtimeCapabilities;
+    contextEngine = runtimeCapabilities?.contextStore || null;
     if (typeof contextEngine.setRuntime === "function") {
       contextEngine.setRuntime(runtime);
     }
+    const runtimeAuthority = buildRuntimeMetadataAuthority(runtime);
     executionGraph = (
-      memoryModeWithFallback() === "goc"
+      runtimeAuthority?.mode === "goc"
       && runtime?.map?.threadId
       && runtime?.map?.ctxSharedId
     )
@@ -6800,15 +6981,22 @@ async function runSupervisorChat(
         logger: (line) => jobs.log(currentJobId, line),
       })
       : null;
-    if (executionGraph) {
-      await executionGraph.startRun({
+    runEventSink = runtimeCapabilities?.createRunEventSink
+      ? runtimeCapabilities.createRunEventSink({ executionGraph })
+      : null;
+    if (runEventSink && typeof runEventSink.startRun === "function") {
+      await runEventSink.startRun({
         userMessageNodeId: String(userMessageGoc?.id || "").trim(),
         userText: message,
         metadata: {
           runtime_team_snapshot: runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
             ? runtime.runtimeTeamSnapshot
             : undefined,
+          runtime_authority: runtimeAuthority || undefined,
+          ...(runtimeAuthority || {}),
         },
+      }, {
+        jobId: currentJobId,
       });
     }
     const autopilotEnabled = AUTOPILOT_ENABLED;
@@ -6856,10 +7044,13 @@ async function runSupervisorChat(
 
     while (turn < maxTurns) {
       turn += 1;
+      const runtimeAuthority = buildRuntimeMetadataAuthority(runtime);
       const routerRunMeta = {
         runId: String(executionGraph?.runId || "").trim() || undefined,
         threadId: runThreadId,
         sharedContextSetId: sharedCtxId,
+        runtime_authority: runtimeAuthority || undefined,
+        ...(runtimeAuthority || {}),
       };
       let routerCtx = {
         contextText: String(runtime?.contextSummary || "").trim(),
@@ -7037,11 +7228,34 @@ async function runSupervisorChat(
       )
         ? "default_fallback_route"
         : "explicit_route_plan";
+      const routePlanSource = String(
+        routePlan?.plan_source
+        || runtime?.runtimeAuthority?.plan_source
+        || runtime?.runtime_authority?.plan_source
+        || "local"
+      ).trim().toLowerCase() || "local";
+      const routeRuntimeAuthority = buildRuntimeMetadataAuthority(runtime, {
+        plan_source: routePlanSource,
+      });
       runtime.runtimeTeamSnapshot = runtimeTeamSnapshot;
+      if (routeRuntimeAuthority) {
+        runtime.runtimeAuthority = routeRuntimeAuthority;
+        runtime.runtime_authority = routeRuntimeAuthority;
+        runtime.plan_source = routeRuntimeAuthority.plan_source;
+        runtime.context_source = routeRuntimeAuthority.context_source;
+        runtime.agent_catalog_source = routeRuntimeAuthority.agent_catalog_source;
+        runtime.conversation_team_source = routeRuntimeAuthority.conversation_team_source;
+        runtime.skill_catalog_source = routeRuntimeAuthority.skill_catalog_source;
+        runtime.degraded_mode = routeRuntimeAuthority.degraded_mode === true;
+        runtime.fallback_reason = routeRuntimeAuthority.fallback_reason || null;
+      }
       routePlan = {
         ...routePlan,
         runtime_team_snapshot: runtimeTeamSnapshot,
         action_source: routeActionSource,
+        runtime_authority: routeRuntimeAuthority || undefined,
+        ...(routeRuntimeAuthority || {}),
+        plan_source: routePlanSource,
       };
       followupHint = String(routePlan?.followup_hint || "").trim();
       deliverables = normalizeDeliverableList([
@@ -7065,12 +7279,18 @@ async function runSupervisorChat(
       }
       totalActions += planActions.length;
 
-      if (executionGraph) {
-        await executionGraph.queueMainSteps(planActions, {
+      if (runEventSink && typeof runEventSink.queueMainSteps === "function") {
+        const runtimeAuthority = buildRuntimeMetadataAuthority(runtime, {
+          plan_source: String(routePlan?.plan_source || runtime?.runtimeAuthority?.plan_source || "local"),
+        });
+        await runEventSink.queueMainSteps(planActions, {
           metadata: {
             runtime_team_snapshot: runtimeTeamSnapshot,
             action_source: routeActionSource,
+            runtime_authority: runtimeAuthority || undefined,
+            ...(runtimeAuthority || {}),
           },
+          jobId: currentJobId,
         });
       }
       const queuedAgentStatus = buildQueuedAgentStatusFromActions(planActions);
@@ -7081,8 +7301,10 @@ async function runSupervisorChat(
         last_route: {
           reason: routePlan.reason,
           action_source: routePlan.action_source || routeActionSource,
+          plan_source: routePlan.plan_source || runtime?.runtimeAuthority?.plan_source || "local",
           actions: planActions,
           runtime_team_snapshot: runtimeTeamSnapshot,
+          runtime_authority: routePlan.runtime_authority || runtime?.runtimeAuthority || undefined,
           done: routePlan.done === true,
           await_user: routePlan.await_user === true,
           deliverables,
@@ -7177,6 +7399,14 @@ async function runSupervisorChat(
         `- reason: ${routePlan.reason || "(none)"}`,
         `- runtime_team_source: ${String(routePlan?.runtime_team_snapshot?.source || "team_builder")}`,
         `- action_source: ${String(routePlan?.action_source || routeActionSource || "explicit_route_plan")}`,
+        `- plan_source: ${String(routePlan?.plan_source || runtime?.runtimeAuthority?.plan_source || "local")}`,
+        `- capability_mode: ${String(routePlan?.runtime_authority?.mode || runtime?.runtimeAuthority?.mode || "standalone")}`,
+        `- context_source: ${String(routePlan?.runtime_authority?.context_source || runtime?.runtimeAuthority?.context_source || "local")}`,
+        `- agent_catalog_source: ${String(routePlan?.runtime_authority?.agent_catalog_source || runtime?.runtimeAuthority?.agent_catalog_source || "local")}`,
+        `- conversation_team_source: ${String(routePlan?.runtime_authority?.conversation_team_source || runtime?.runtimeAuthority?.conversation_team_source || "local")}`,
+        `- skill_catalog_source: ${String(routePlan?.runtime_authority?.skill_catalog_source || runtime?.runtimeAuthority?.skill_catalog_source || "local")}`,
+        `- degraded_mode: ${(routePlan?.runtime_authority?.degraded_mode || runtime?.runtimeAuthority?.degraded_mode) ? "true" : "false"}`,
+        `- fallback_reason: ${String(routePlan?.runtime_authority?.fallback_reason || runtime?.runtimeAuthority?.fallback_reason || "(none)")}`,
         `- actions: ${planActions.map((row) => chatActionLabel(row)).join(" -> ") || "(none)"}`,
         `- mode: ${runtime.mode}`,
         `- pending_approval: ${execution.pendingApproval ? execution.pendingApproval.reason : "none"}`,
@@ -7290,9 +7520,11 @@ async function runSupervisorChat(
       const pendingApproval = {
         ...mergedExecution.pendingApproval,
         action_source: String(routePlan?.action_source || "explicit_route_plan").trim() || "explicit_route_plan",
+        plan_source: String(routePlan?.plan_source || runtime?.runtimeAuthority?.plan_source || "local").trim().toLowerCase() || "local",
         runtime_team_snapshot: routePlan?.runtime_team_snapshot && typeof routePlan.runtime_team_snapshot === "object"
           ? routePlan.runtime_team_snapshot
           : undefined,
+        runtime_authority: routePlan?.runtime_authority || buildRuntimeMetadataAuthority(runtime) || undefined,
         blocked_index: Number.isFinite(Number(mergedExecution.blocked_index))
           ? Number(mergedExecution.blocked_index)
           : Number(mergedExecution.pendingApproval?.blocked_index ?? -1),
@@ -7370,12 +7602,14 @@ async function runSupervisorChat(
       userId,
       replyTo: String(userMessageGoc?.id || "").trim(),
     });
-    if (executionGraph) {
-      await executionGraph.finishRun({
+    if (runEventSink && typeof runEventSink.finishRun === "function") {
+      await runEventSink.finishRun({
         status: (mergedExecution.pendingApproval || routePlan.await_user === true)
           ? "await_user"
           : "done",
         summary: clip(replyText, 900),
+      }, {
+        jobId: currentJobId,
       });
     }
     if (mergedExecution.pendingApproval?.id) {
@@ -7399,12 +7633,14 @@ async function runSupervisorChat(
     }).catch(() => null);
     return { routePlan, execution: mergedExecution, jobId: currentJobId };
   } catch (e) {
-    if (executionGraph) {
+    if (runEventSink && typeof runEventSink.finishRun === "function") {
       try {
-        await executionGraph.finishRun({
+        await runEventSink.finishRun({
           status: "error",
           error: String(e?.message ?? e),
           summary: "supervisor run failed",
+        }, {
+          jobId: currentJobId,
         });
       } catch {}
     } else if (memoryModeWithFallback() === "goc") {
@@ -7446,6 +7682,8 @@ async function runSupervisorChat(
               runtime_team_snapshot: runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
                 ? runtime.runtimeTeamSnapshot
                 : undefined,
+              runtime_authority: buildRuntimeMetadataAuthority(runtime) || undefined,
+              ...(buildRuntimeMetadataAuthority(runtime) || {}),
             },
           });
           await executionGraph.finishRun({
@@ -7474,6 +7712,8 @@ async function runSupervisorChat(
           runId: String(executionGraph?.runId || "").trim() || undefined,
           threadId: runThreadId,
           sharedContextSetId: sharedCtxId,
+          runtime_authority: buildRuntimeMetadataAuthority(runtime) || undefined,
+          ...(buildRuntimeMetadataAuthority(runtime) || {}),
         },
       }).catch(() => null);
     }
@@ -7736,6 +7976,12 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
   const runtime = opts?.runtime && typeof opts.runtime === "object" ? opts.runtime : null;
   const agentIndex = buildAgentDisplayIndexShared(agentRegistry, runtime);
   const telegramUserId = String(opts?.telegramUserId || "").trim();
+  const runtimeAuthority = normalizeRuntimeAuthorityMetadata(
+    route?.runtime_authority
+    || runtime?.runtimeAuthority
+    || runtime?.runtime_authority
+    || null
+  );
   const runtimeTeamSnapshot = route?.runtime_team_snapshot && typeof route.runtime_team_snapshot === "object"
     ? route.runtime_team_snapshot
     : (opts?.runtimeTeamSnapshot && typeof opts.runtimeTeamSnapshot === "object"
@@ -7796,7 +8042,12 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
     when: "run_end",
     replyToMessageId: getCurrentTurnReplyMessageId(chatId),
   }).catch(() => null);
-  return { askedChatGPT, runtime_team_snapshot: runtimeTeamSnapshot };
+  return {
+    askedChatGPT,
+    runtime_team_snapshot: runtimeTeamSnapshot,
+    runtime_authority: runtimeAuthority || undefined,
+    ...(runtimeAuthority || {}),
+  };
 }
 
 async function executeActions(bot, chatId, jobId, plan, signal = null, opts = {}) {
@@ -7941,12 +8192,22 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
   const restoreActor = bindGocActor(telegramUserId);
 
   try {
-    if (cleanKind === "agent" && memoryModeWithFallback() === "goc" && (sub === "registry" || sub === "public")) {
+    if (cleanKind === "agent" && (sub === "registry" || sub === "public")) {
+      const authority = composeCapabilitiesForRun({ jobId: currentJobId || "" }).authority || {};
+      const isGocAuthority = String(authority.mode || "").trim().toLowerCase() === "goc";
+      if (sub === "public" && !isGocAuthority) {
+        await bot.sendMessage(chatId, "❌ /agents public 는 GoC 모드에서만 지원됩니다.");
+        return;
+      }
       try {
-        const client = requireGocClient();
-        const scope = sub === "public" ? "public" : "my";
+        const scope = sub === "public" ? "public" : (isGocAuthority ? "my" : "local");
         const query = String(tokens.slice(1).join(" ") || "").trim().toLowerCase();
-        const rows = await client.listAgents(scope);
+        const localRegistry = isGocAuthority ? null : await refreshAgentRegistry({ includeCompiled: true });
+        const rows = isGocAuthority
+          ? await requireGocClient().listAgents(scope === "local" ? "my" : scope)
+          : (Array.isArray(localRegistry?.agents)
+            ? localRegistry.agents
+            : []);
         const filteredRows = query
           ? rows.filter((row) => {
             const id = String(row?.id || "").trim().toLowerCase();
@@ -7956,7 +8217,9 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
           })
           : rows;
         const lines = [
-          sub === "public" ? "GoC Public Agent Catalog" : "GoC My Agent Catalog",
+          sub === "public"
+            ? "GoC Public Agent Catalog"
+            : (isGocAuthority ? "GoC My Agent Catalog" : "Local Agent Catalog"),
           ...((Array.isArray(filteredRows) ? filteredRows : []).slice(0, 50).map((row) => {
             const id = String(row?.id || "").trim().toLowerCase();
             const provider = String(row?.provider || "gemini").trim().toLowerCase();
@@ -7977,7 +8240,6 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
 
     if (
       cleanKind === "agent"
-      && memoryModeWithFallback() === "goc"
       && ["add", "remove", "enable", "disable"].includes(sub)
     ) {
       if (!targetAgentId) {
@@ -7995,37 +8257,15 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
           includeGlobal: false,
           telegramUserId,
         });
-        const threadId = String(runtime?.map?.threadId || "").trim();
-        if (!threadId) throw new Error("threadId not ready");
-        const client = requireGocClient();
-        const membershipTarget = await resolveMembershipTargetForThread(client, {
-          threadId,
+        await applyConversationAgentMutation({
+          runtime,
           jobId: currentJobId,
+          actionType: sub,
+          agentId: targetAgentId,
+          enabled: sub !== "disable",
           source: "telegram_agents_command",
         });
-        let mutationResponse = null;
-        if (sub === "add") {
-          mutationResponse = await client.addConversationAgent(membershipTarget, targetAgentId, true);
-        } else if (sub === "remove") {
-          mutationResponse = await client.removeConversationAgent(membershipTarget, targetAgentId);
-        } else if (sub === "enable") {
-          await client.patchConversationAgent(membershipTarget, targetAgentId, { enabled: true }).then((row) => {
-            mutationResponse = row;
-          }).catch(async () => {
-            mutationResponse = await client.addConversationAgent(membershipTarget, targetAgentId, true);
-          });
-          if (!mutationResponse) {
-            mutationResponse = {
-              agent_id: targetAgentId,
-              enabled: true,
-              thread_id: membershipTarget.thread_id || "",
-              conversation_id: membershipTarget.conversation_id || "",
-            };
-          }
-        } else if (sub === "disable") {
-          mutationResponse = await client.patchConversationAgent(membershipTarget, targetAgentId, { enabled: false });
-        }
-        const updated = await client.listConversationAgents(membershipTarget);
+        const updated = Array.isArray(runtime?.conversationAgents) ? runtime.conversationAgents : [];
         const allAgentIds = Array.from(new Set(
           updated.map((row) => String(row?.agent_id || "").trim().toLowerCase()).filter(Boolean)
         ));
@@ -8036,30 +8276,6 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
             .filter(Boolean)
         ));
         const disabled = allAgentIds.filter((id) => !enabled.includes(id));
-        const verification = verifyConversationMembershipMutation({
-          actionType: sub === "add"
-            ? "add_agent_to_conversation"
-            : (sub === "remove" ? "remove_agent_from_conversation" : `${sub}_agent`),
-          threadId: membershipTarget.thread_id || threadId,
-          conversationId: membershipTarget.conversation_id || "",
-          targetAgentId,
-          expectedPresent: sub !== "remove",
-          expectedEnabled: sub === "disable" ? false : true,
-          conversationRows: updated,
-          source: "telegram_agents_command",
-          extra: {
-            job_id: String(currentJobId || "").trim(),
-            membership_target: summarizeMembershipTarget(membershipTarget),
-            ensured_thread_mismatch: membershipTarget.ensured_thread_mismatch === true,
-            mutation_response: summarizeMembershipMutationResponse(mutationResponse),
-          },
-        });
-        if (!verification.confirmed) {
-          recordMembershipMutationDiagnostic(currentJobId, verification, {
-            stage: "membership_confirmation_failed",
-          });
-          throw createMembershipConfirmationError(verification);
-        }
         let agentIndex = buildAgentDisplayIndex(agentRegistry, runtime);
         if (
           agentIndex.size === 0
@@ -8148,6 +8364,8 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
         convRows.map((row) => String(row?.agent_id || "").trim().toLowerCase()).filter(Boolean)
       ));
       const disabled = members.filter((id) => !enabled.includes(id));
+      const available = normalizeCatalogIds(runtime?.agentsCatalog || []);
+      const availableOnly = available.filter((id) => !members.includes(id));
       let agentIndex = buildAgentDisplayIndex(agentRegistry, runtime);
       if (
         agentIndex.size === 0
@@ -8167,10 +8385,18 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
         disabled.length > 0
           ? `- disabled: ${disabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
           : "- disabled: (none)",
+        available.length > 0
+          ? `- available_catalog: ${available.slice(0, 30).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
+          : "- available_catalog: (none)",
+        availableOnly.length > 0
+          ? `- not_in_team: ${availableOnly.slice(0, 30).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
+          : "- not_in_team: (none)",
         runtime?.conversationMembershipWarning
           ? `- warning: ${clip(String(runtime.conversationMembershipWarning || ""), 220)}`
           : "",
-        "명령: /agents registry | /agents public [query] | /agents add <id> | /agents remove <id> | /agents enable <id> | /agents disable <id>",
+        runtime?.runtimeAuthority?.mode === "goc"
+          ? "명령: /agents registry | /agents public [query] | /agents add <id> | /agents remove <id> | /agents enable <id> | /agents disable <id>"
+          : "명령: /agents registry | /agents add <id> | /agents remove <id> | /agents enable <id> | /agents disable <id>",
       ].filter(Boolean);
       await sendTextWithOptionalGocButton(bot, chatId, lines.join("\n"), {
         miniAppLink: threadTeamInfo?.miniAppLink || "",
