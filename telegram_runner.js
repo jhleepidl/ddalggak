@@ -87,6 +87,11 @@ import {
   summarizeMembershipTarget,
 } from "./src/application/membership_target.js";
 import {
+  applyValidatedConversationTeamMutation,
+  createConversationTeamMutationValidationError,
+  reconcileConversationTeamWithCatalog,
+} from "./src/application/conversation_team_mutation.js";
+import {
   createAgentProfile,
   updateAgentProfile,
   listPublicBlueprints,
@@ -4316,12 +4321,19 @@ async function loadSupervisorRuntime(
           warnings: [],
         };
       const conversationAgents = Array.isArray(teamResult?.rows) ? teamResult.rows : [];
+      const teamConsistency = reconcileConversationTeamWithCatalog({
+        conversationRows: conversationAgents,
+        catalogRows: reg?.agents || [],
+      });
       const enabledConversationAgentIds = Array.from(new Set(
-        conversationAgents
-          .filter((row) => row?.enabled !== false)
-          .map((row) => String(row?.agent_id || "").trim().toLowerCase())
-          .filter(Boolean)
+        (teamConsistency.catalog_agent_ids || []).length > 0
+          ? teamConsistency.active_enabled_agent_ids
+          : teamConsistency.enabled_member_agent_ids
       ));
+      const localWarningLines = Array.isArray(teamResult?.warnings) ? [...teamResult.warnings] : [];
+      if ((teamConsistency.unknown_member_agent_ids || []).length > 0) {
+        localWarningLines.push(`unknown_catalog_agents:${teamConsistency.unknown_member_agent_ids.join(",")}`);
+      }
       const enabledAgentSet = new Set(enabledConversationAgentIds);
       const enabledAgents = (Array.isArray(reg?.agents) ? reg.agents : [])
         .filter((row) => enabledAgentSet.has(String(row?.id || "").trim().toLowerCase()));
@@ -4356,7 +4368,8 @@ async function loadSupervisorRuntime(
           source: "local",
         }),
         conversationAgents,
-        conversationMembershipWarning: Array.isArray(teamResult?.warnings) ? teamResult.warnings.join(" | ") : "",
+        conversationMembershipWarning: localWarningLines.join(" | "),
+        unknownConversationAgentIds: teamConsistency.unknown_member_agent_ids || [],
         jobConfig: fallbackNormalized.configNormalized,
         jobConfigDebugSummary: summarizeJobConfigDebug(fallbackNormalized.configNormalized),
         jobConfigNodeId: "",
@@ -4452,12 +4465,20 @@ async function loadSupervisorRuntime(
       { agentsCatalog: reg?.agents || [], toolsCatalog }
     );
 
+    const teamConsistency = reconcileConversationTeamWithCatalog({
+      conversationRows: conversationAgents,
+      catalogRows: reg?.agents || [],
+    });
     const enabledConversationAgentIds = Array.from(new Set(
-      conversationAgents
-        .filter((row) => row?.enabled !== false)
-        .map((row) => String(row?.agent_id || "").trim().toLowerCase())
-        .filter(Boolean)
+      (teamConsistency.catalog_agent_ids || []).length > 0
+        ? teamConsistency.active_enabled_agent_ids
+        : teamConsistency.enabled_member_agent_ids
     ));
+    if ((teamConsistency.unknown_member_agent_ids || []).length > 0) {
+      pushConversationWarning("unknown_catalog_agents", null, {
+        unknown_agent_ids: teamConsistency.unknown_member_agent_ids,
+      });
+    }
     const enabledAgentSet = new Set(enabledConversationAgentIds);
     const enabledToolSet = new Set(
       (Array.isArray(normalized.enabledToolIds) ? normalized.enabledToolIds : [])
@@ -4526,6 +4547,7 @@ async function loadSupervisorRuntime(
       conversationMembershipTarget: summarizeMembershipTarget(membershipTarget),
       conversationAgents,
       conversationMembershipWarning: warningLines.join(" | "),
+      unknownConversationAgentIds: teamConsistency.unknown_member_agent_ids || [],
       enabledAgentIds: enabledConversationAgentIds,
       enabledToolIds: normalized.enabledToolIds,
       agentSelection: summarizeSelectionState({ catalog: reg?.agents || [], enabled: enabledAgents }),
@@ -4929,15 +4951,19 @@ function syncRuntimeConversationTeamState(runtime = {}, {
   warningLines = [],
 } = {}) {
   const convRows = Array.isArray(conversationRows) ? conversationRows : [];
+  const teamConsistency = reconcileConversationTeamWithCatalog({
+    conversationRows: convRows,
+    catalogRows: runtime?.agentsCatalog || [],
+  });
   const enabled = Array.from(new Set(
-    convRows
-      .filter((row) => row?.enabled !== false)
-      .map((row) => String(row?.agent_id || "").trim().toLowerCase())
-      .filter(Boolean)
+    (teamConsistency.catalog_agent_ids || []).length > 0
+      ? teamConsistency.active_enabled_agent_ids
+      : teamConsistency.enabled_member_agent_ids
   ));
   const enabledSet = new Set(enabled);
   runtime.conversationAgents = convRows;
   runtime.enabledAgentIds = enabled;
+  runtime.unknownConversationAgentIds = teamConsistency.unknown_member_agent_ids || [];
   if (membershipTarget && typeof membershipTarget === "object") {
     runtime.conversationMembershipTarget = summarizeMembershipTarget(membershipTarget);
     runtime.conversation = {
@@ -4945,9 +4971,13 @@ function syncRuntimeConversationTeamState(runtime = {}, {
       thread_id: String(membershipTarget?.thread_id || runtime?.conversation?.thread_id || runtime?.map?.threadId || "").trim(),
     };
   }
-  runtime.conversationMembershipWarning = Array.isArray(warningLines)
-    ? warningLines.map((line) => String(line || "").trim()).filter(Boolean).join(" | ")
-    : "";
+  const warnings = Array.isArray(warningLines)
+    ? warningLines.map((line) => String(line || "").trim()).filter(Boolean)
+    : [];
+  if ((teamConsistency.unknown_member_agent_ids || []).length > 0) {
+    warnings.push(`unknown_catalog_agents:${teamConsistency.unknown_member_agent_ids.join(",")}`);
+  }
+  runtime.conversationMembershipWarning = warnings.join(" | ");
   runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
     .filter((agent) => enabledSet.has(String(agent?.id || "").trim().toLowerCase()));
   runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
@@ -4956,6 +4986,25 @@ function syncRuntimeConversationTeamState(runtime = {}, {
     enabledAgentIds: enabled,
     membershipTarget: runtime.conversationMembershipTarget || null,
   };
+}
+
+async function ensureRuntimeAgentCatalogRows(runtime = {}) {
+  const existing = Array.isArray(runtime?.agentsCatalog) ? runtime.agentsCatalog : [];
+  if (existing.length > 0) return existing;
+  const catalog = runtime?.capabilities?.agentCatalog;
+  if (!catalog || typeof catalog.load !== "function") return existing;
+  try {
+    const loaded = await catalog.load({
+      includeCompiled: true,
+      refresh: false,
+      fallbackToLocal: true,
+    });
+    const rows = Array.isArray(loaded?.agents) ? loaded.agents : [];
+    if (rows.length > 0) runtime.agentsCatalog = rows;
+    return rows;
+  } catch {
+    return existing;
+  }
 }
 
 async function applyConversationAgentMutation({
@@ -4990,22 +5039,28 @@ async function applyConversationAgentMutation({
     enabled: enabled !== false,
   };
 
-  let result = null;
-  if (cleanActionType === "add") {
-    result = await teamStore.addAgent(options);
-  } else if (cleanActionType === "remove") {
-    result = await teamStore.removeAgent(options);
-  } else if (cleanActionType === "enable") {
-    result = await teamStore.setAgentEnabled({
-      ...options,
-      enabled: true,
-    });
-  } else {
-    result = await teamStore.setAgentEnabled({
-      ...options,
-      enabled: false,
-    });
+  const conversationTeamSource = String(
+    runtime?.runtimeAuthority?.conversation_team_source
+    || runtime?.conversation_team_source
+    || teamStore?.source
+    || ""
+  ).trim().toLowerCase() === "goc"
+    ? "goc"
+    : "local";
+  const mutation = await applyValidatedConversationTeamMutation({
+    teamStore,
+    actionType: cleanActionType,
+    agentId: cleanAgentId,
+    mutationOptions: options,
+    catalogRows: conversationTeamSource === "local"
+      ? await ensureRuntimeAgentCatalogRows(runtime)
+      : [],
+    requireCatalogValidation: conversationTeamSource === "local",
+  });
+  if (!mutation.ok) {
+    throw createConversationTeamMutationValidationError(mutation.validation);
   }
+  const result = mutation.result;
   const convRows = Array.isArray(result?.rows) ? result.rows : [];
   const target = result?.target && typeof result.target === "object"
     ? result.target
@@ -8363,8 +8418,10 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
       const members = Array.from(new Set(
         convRows.map((row) => String(row?.agent_id || "").trim().toLowerCase()).filter(Boolean)
       ));
-      const disabled = members.filter((id) => !enabled.includes(id));
       const available = normalizeCatalogIds(runtime?.agentsCatalog || []);
+      const availableSet = new Set(available);
+      const disabled = members.filter((id) => availableSet.has(id) && !enabled.includes(id));
+      const unknownMembers = members.filter((id) => !availableSet.has(id));
       const availableOnly = available.filter((id) => !members.includes(id));
       let agentIndex = buildAgentDisplayIndex(agentRegistry, runtime);
       if (
@@ -8385,6 +8442,9 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
         disabled.length > 0
           ? `- disabled: ${disabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
           : "- disabled: (none)",
+        unknownMembers.length > 0
+          ? `- unknown_catalog_members: ${unknownMembers.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
+          : "",
         available.length > 0
           ? `- available_catalog: ${available.slice(0, 30).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
           : "- available_catalog: (none)",
