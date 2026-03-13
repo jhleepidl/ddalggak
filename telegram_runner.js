@@ -30,7 +30,7 @@ import {
   resolveEffectiveLensSpec as resolveEffectiveLensSpecDomain,
   dedupeNodeIds as dedupeLensNodeIds,
 } from "./src/domain/lens.js";
-import { buildRuntimeOrchestration, createDefaultRunRoute } from "./src/application/orchestrator.js";
+import { createDefaultRunRoute } from "./src/application/orchestrator.js";
 import {
   sendLong as sendLongAdapter,
   sendTextWithOptionalGocButton as sendTextWithOptionalGocButtonAdapter,
@@ -75,6 +75,17 @@ import { summarizeRuntimeTeamSnapshotLines } from "./src/application/runtime_sna
 import { createRuntimeTeamSnapshot } from "./src/application/runtime_metadata.js";
 import { markActionsSkipped, wasInterruptedByReplan } from "./src/application/run_status_cleanup.js";
 import {
+  applyRunAuthority,
+  buildRunAuthority,
+  buildRunAuthorityPatch,
+  normalizeRunAuthority,
+} from "./src/application/run_authority.js";
+import {
+  createRuntimeComposer,
+  invokeRuntimePlanner,
+} from "./src/application/runtime_composer.js";
+import { createSupervisorRuntimeLoader } from "./src/application/supervisor_runtime_loader.js";
+import {
   isExplicitTeamConfigurationIntentMessage,
 } from "./src/application/team_intent.js";
 import { buildExplicitTeamReconfigurationActions } from "./src/application/team_config_diff.js";
@@ -87,10 +98,11 @@ import {
   summarizeMembershipTarget,
 } from "./src/application/membership_target.js";
 import {
-  applyValidatedConversationTeamMutation,
-  createConversationTeamMutationValidationError,
-  reconcileConversationTeamWithCatalog,
-} from "./src/application/conversation_team_mutation.js";
+  applyConversationAgentMutation,
+  runConversationAgentTeamCommand,
+  summarizeMembershipMutationResponse,
+  syncRuntimeConversationTeamState,
+} from "./src/application/agent_team_commands.js";
 import {
   createAgentProfile,
   updateAgentProfile,
@@ -119,7 +131,6 @@ import { normalizeActionPlan } from "./src/chat/actions.js";
 import { expandDetailContext } from "./src/chat/unfold.js";
 import { ChatRunManager } from "./src/chat/run_manager.js";
 import { GocExecutionGraphRecorder } from "./src/chat/goc_execution_graph.js";
-import { composeRuntimeCapabilities } from "./src/runtime_capabilities/index.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) { console.error("Missing TELEGRAM_BOT_TOKEN"); process.exit(1); }
@@ -1288,56 +1299,19 @@ function requireGocClient() {
   return gocClient;
 }
 
-function composeCapabilitiesForRun({
-  jobId = "",
-  runtime = null,
-} = {}) {
-  const cleanJobId = String(jobId || "").trim();
-  return composeRuntimeCapabilities({
-    requestedMode: MEMORY_MODE,
+const composeCapabilitiesForRun = createRuntimeComposer({
+  requestedMode: () => MEMORY_MODE,
+  getGocState: () => ({
     gocClient: gocReady && gocClient ? gocClient : null,
     gocReady,
     gocInitError,
-    jobs,
-    baseDir: jobs.baseDir,
-    runtime,
-    logger: cleanJobId
-      ? (line) => jobs.log(cleanJobId, line)
-      : null,
-    resolveMembershipTarget: resolveMembershipTargetForThread,
-    resolveAgentId,
-  });
-}
-
-function normalizeRuntimeAuthorityMetadata(authority = null) {
-  if (!authority || typeof authority !== "object") return null;
-  return {
-    mode: String(authority.mode || "").trim().toLowerCase() === "goc" ? "goc" : "standalone",
-    plan_source: String(authority.plan_source || "").trim().toLowerCase() || "local",
-    context_source: String(authority.context_source || "").trim().toLowerCase() === "goc" ? "goc" : "local",
-    agent_catalog_source: String(authority.agent_catalog_source || "").trim().toLowerCase() === "goc" ? "goc" : "local",
-    conversation_team_source: String(authority.conversation_team_source || "").trim().toLowerCase() === "goc" ? "goc" : "local",
-    skill_catalog_source: (() => {
-      const raw = String(authority.skill_catalog_source || "").trim().toLowerCase();
-      if (raw === "goc") return "goc";
-      if (raw === "mixed") return "mixed";
-      return "local";
-    })(),
-    degraded_mode: authority.degraded_mode === true,
-    fallback_reason: authority.fallback_reason == null ? null : String(authority.fallback_reason),
-  };
-}
-
-function buildRuntimeMetadataAuthority(runtime = null, overrides = {}) {
-  const base = normalizeRuntimeAuthorityMetadata(runtime?.runtimeAuthority || null)
-    || normalizeRuntimeAuthorityMetadata(runtime?.runtime_authority || null)
-    || null;
-  const merged = {
-    ...(base || {}),
-    ...((overrides && typeof overrides === "object") ? overrides : {}),
-  };
-  return normalizeRuntimeAuthorityMetadata(merged);
-}
+  }),
+  jobs,
+  baseDir: jobs.baseDir,
+  loggerFactory: (jobId = "") => (jobId ? (line) => jobs.log(jobId, line) : null),
+  resolveMembershipTarget: resolveMembershipTargetForThread,
+  resolveAgentId,
+});
 
 function setGocActingTelegramUser(telegramUserId) {
   if (memoryModeWithFallback() !== "goc") return;
@@ -1369,6 +1343,32 @@ function bindGocActor(telegramUserId = "") {
     return () => {};
   }
 }
+
+const loadSupervisorRuntime = createSupervisorRuntimeLoader({
+  composeCapabilitiesForRun,
+  bindActor: bindGocActor,
+  requireGocClient,
+  refreshAgentRegistry,
+  onRegistryLoaded: (registry = null) => {
+    if (registry) agentRegistry = registry;
+  },
+  normalizeSupervisorJobConfig,
+  pickBaselineConversationCatalogAgents,
+  summarizeJobConfigDebug,
+  summarizeSelectionState,
+  loadLocalContextDocs,
+  ensureJobThread,
+  ensureAgentsThread,
+  ensureToolsThread,
+  ensureGlobalThread,
+  listLatestResourceByKind,
+  parseStructuredFromResource,
+  sortResourcesByCreatedAt,
+  normalizeToolSpec,
+  trackedDocNames: TRACK_DOC_NAMES,
+  runDir,
+  jobs,
+});
 
 function installTrackingGocHook() {
   tracking.setAppendHook(async ({ jobId, docName, chunk }) => {
@@ -1512,7 +1512,7 @@ function buildChatStatusCard(chatId, runtime = null) {
   const manualApprovals = listPendingManualApprovals(currentJobId);
   const enabledAgents = runtime?.agentSelection?.enabled_ids || runtime?.enabledAgentIds || [];
   const enabledTools = runtime?.toolSelection?.enabled_ids || runtime?.enabledToolIds || [];
-  const runtimeAuthority = buildRuntimeMetadataAuthority(runtime);
+  const runtimeAuthority = buildRunAuthority(runtime);
 
   const lines = [
     "📋 현재 상태",
@@ -1903,47 +1903,9 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
     convo,
   ].join("\n");
 
-  const capabilitiesPack = composeCapabilitiesForRun({ jobId });
-  const runtimeAuthority = normalizeRuntimeAuthorityMetadata(capabilitiesPack.authority);
-  const planner = capabilitiesPack?.capabilities?.planner;
-  const runPlanner = async (routePlanInput = null) => {
-    if (planner && typeof planner.plan === "function") {
-      return await planner.plan({
-        mode,
-        goal,
-        seedInstruction,
-        routePlan: routePlanInput,
-        registry: agentRegistry,
-        preferredRoles: [],
-        maxAgents: 6,
-        runId: `route_${String(jobId || "").trim()}_${Date.now().toString(36)}`,
-        jobId: String(jobId || "").trim(),
-        runsDir: jobs.runsDir,
-        persistSkillEvents: true,
-      });
-    }
-    const orchestration = buildRuntimeOrchestration({
-      mode,
-      goal,
-      seedInstruction,
-      routePlan: routePlanInput,
-      registry: agentRegistry,
-      preferredRoles: [],
-      maxAgents: 6,
-      resolveAgentId,
-      runId: `route_${String(jobId || "").trim()}_${Date.now().toString(36)}`,
-      jobId: String(jobId || "").trim(),
-      runsDir: jobs.runsDir,
-      persistSkillEvents: true,
-    });
-    return {
-      plan_source: runtimeAuthority?.plan_source || "local",
-      route_plan: orchestration?.route_plan || null,
-      team_plan: orchestration?.team_plan || null,
-      runtime_agents: orchestration?.runtime_agents || [],
-      runtime_team_snapshot: orchestration?.runtime_team_snapshot || null,
-    };
-  };
+  const runtimeAuthority = normalizeRunAuthority(
+    composeCapabilitiesForRun({ jobId }).authority
+  );
 
   try {
     const r = await enqueue(
@@ -1960,7 +1922,20 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
     const out = (r.stdout || r.stderr || "").trim();
     const planned = r.ok ? parseRouterPlan(out) : null;
     const fallbackRoute = defaultRouteFor(mode, goal, seedInstruction);
-    const planningResult = await runPlanner(planned || null);
+    const planningResult = await invokeRuntimePlanner({
+      composeForRun: composeCapabilitiesForRun,
+      jobId,
+      mode,
+      goal,
+      seedInstruction,
+      routePlan: planned || null,
+      registry: agentRegistry,
+      preferredRoles: [],
+      maxAgents: 6,
+      resolveAgentId,
+      runsDir: jobs.runsDir,
+      persistSkillEvents: true,
+    });
     const planSource = String(planningResult?.plan_source || runtimeAuthority?.plan_source || "local").trim().toLowerCase() || "local";
     const routePlan = planningResult?.route_plan && typeof planningResult.route_plan === "object"
       ? planningResult.route_plan
@@ -1980,7 +1955,20 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
     };
   } catch {
     const fallbackRoute = defaultRouteFor(mode, goal, seedInstruction);
-    const planningResult = await runPlanner(null);
+    const planningResult = await invokeRuntimePlanner({
+      composeForRun: composeCapabilitiesForRun,
+      jobId,
+      mode,
+      goal,
+      seedInstruction,
+      routePlan: null,
+      registry: agentRegistry,
+      preferredRoles: [],
+      maxAgents: 6,
+      resolveAgentId,
+      runsDir: jobs.runsDir,
+      persistSkillEvents: true,
+    });
     const routePlan = planningResult?.route_plan && typeof planningResult.route_plan === "object"
       ? planningResult.route_plan
       : {};
@@ -4260,311 +4248,6 @@ async function findLatestAgentProfileNodeForPublish(client, agentsSlot, { agentN
   return null;
 }
 
-async function loadSupervisorRuntime(
-  jobId,
-  {
-    chatMeta = null,
-    includeContext = true,
-    includeGlobal = true,
-    telegramUserId = "",
-  } = {}
-) {
-  const effectiveTelegramUserId = String(
-    telegramUserId
-    || chatMeta?.telegram_user_id
-    || ""
-  ).trim();
-  const restoreActor = bindGocActor(effectiveTelegramUserId);
-  try {
-    const capabilitiesPack = composeCapabilitiesForRun({ jobId });
-    const runtimeAuthority = normalizeRuntimeAuthorityMetadata(capabilitiesPack.authority);
-    const capabilities = capabilitiesPack.capabilities || {};
-    const agentCatalog = capabilities.agentCatalog;
-    const teamStore = capabilities.conversationTeamStore;
-
-    let reg = null;
-    if (agentCatalog && typeof agentCatalog.load === "function") {
-      reg = await agentCatalog.load({
-        includeCompiled: true,
-        refresh: true,
-        fallbackToLocal: true,
-      });
-    } else {
-      reg = await refreshAgentRegistry({ includeCompiled: true });
-    }
-    agentRegistry = reg || agentRegistry;
-
-    const fallbackNormalized = normalizeSupervisorJobConfig(
-      { job_id: String(jobId || "").trim() },
-      { agentsCatalog: reg?.agents || [], toolsCatalog: [] }
-    );
-    const fallbackAgentIds = Array.isArray(fallbackNormalized.enabledAgentIds)
-      ? fallbackNormalized.enabledAgentIds
-      : [];
-    const baselineAgentIds = fallbackAgentIds.length > 0
-      ? fallbackAgentIds
-      : pickBaselineConversationCatalogAgents(reg?.agents || []);
-
-    if (runtimeAuthority?.mode !== "goc") {
-      const teamResult = (teamStore && typeof teamStore.ensureTeam === "function")
-        ? await teamStore.ensureTeam({
-          jobId,
-          baselineAgentIds,
-        })
-        : {
-          target: {
-            thread_id: `local:${String(jobId || "").trim()}`,
-            conversation_id: `local:${String(jobId || "").trim()}`,
-            source: "local",
-          },
-          rows: baselineAgentIds.map((agentId) => ({ agent_id: agentId, enabled: true })),
-          warnings: [],
-        };
-      const conversationAgents = Array.isArray(teamResult?.rows) ? teamResult.rows : [];
-      const teamConsistency = reconcileConversationTeamWithCatalog({
-        conversationRows: conversationAgents,
-        catalogRows: reg?.agents || [],
-      });
-      const enabledConversationAgentIds = Array.from(new Set(
-        (teamConsistency.catalog_agent_ids || []).length > 0
-          ? teamConsistency.active_enabled_agent_ids
-          : teamConsistency.enabled_member_agent_ids
-      ));
-      const localWarningLines = Array.isArray(teamResult?.warnings) ? [...teamResult.warnings] : [];
-      if ((teamConsistency.unknown_member_agent_ids || []).length > 0) {
-        localWarningLines.push(`unknown_catalog_agents:${teamConsistency.unknown_member_agent_ids.join(",")}`);
-      }
-      const enabledAgentSet = new Set(enabledConversationAgentIds);
-      const enabledAgents = (Array.isArray(reg?.agents) ? reg.agents : [])
-        .filter((row) => enabledAgentSet.has(String(row?.id || "").trim().toLowerCase()));
-      const localThreadId = String(teamResult?.target?.thread_id || `local:${String(jobId || "").trim()}`).trim();
-      const localConversationId = String(teamResult?.target?.conversation_id || localThreadId).trim();
-
-      return {
-        mode: "local",
-        runtime_mode: runtimeAuthority?.mode || "standalone",
-        runtime_authority: runtimeAuthority,
-        runtimeAuthority,
-        plan_source: runtimeAuthority?.plan_source || "local",
-        context_source: runtimeAuthority?.context_source || "local",
-        agent_catalog_source: runtimeAuthority?.agent_catalog_source || "local",
-        conversation_team_source: runtimeAuthority?.conversation_team_source || "local",
-        skill_catalog_source: runtimeAuthority?.skill_catalog_source || "local",
-        degraded_mode: runtimeAuthority?.degraded_mode === true,
-        fallback_reason: runtimeAuthority?.fallback_reason || null,
-        map: {
-          threadId: localThreadId,
-          ctxSharedId: "",
-        },
-        agentsSlot: null,
-        toolsSlot: null,
-        conversation: {
-          id: localConversationId,
-          thread_id: localThreadId,
-        },
-        conversationMembershipTarget: summarizeMembershipTarget(teamResult?.target || {
-          thread_id: localThreadId,
-          conversation_id: localConversationId,
-          source: "local",
-        }),
-        conversationAgents,
-        conversationMembershipWarning: localWarningLines.join(" | "),
-        unknownConversationAgentIds: teamConsistency.unknown_member_agent_ids || [],
-        jobConfig: fallbackNormalized.configNormalized,
-        jobConfigDebugSummary: summarizeJobConfigDebug(fallbackNormalized.configNormalized),
-        jobConfigNodeId: "",
-        agentsCatalog: reg?.agents || [],
-        toolsCatalog: [],
-        enabledAgentIds: enabledConversationAgentIds,
-        enabledToolIds: fallbackNormalized.enabledToolIds,
-        agentSelection: summarizeSelectionState({ catalog: reg?.agents || [], enabled: enabledAgents }),
-        toolSelection: summarizeSelectionState({ catalog: [], enabled: [] }),
-        agents: enabledAgents,
-        tools: [],
-        recentArtifactNodeIds: [],
-        sharedActiveTypeBreakdown: {},
-        contextSummary: includeContext ? loadLocalContextDocs(jobId, TRACK_DOC_NAMES, 2200) : "",
-        globalSummary: "",
-        capabilities,
-      };
-    }
-
-    const client = requireGocClient();
-    const map = await ensureJobThread(client, {
-      jobId,
-      jobDir: runDir(jobId),
-      title: `job:${jobId}`,
-      telegram: chatMeta,
-    });
-    const agentsSlot = await ensureAgentsThread(client, { baseDir: jobs.baseDir });
-    const toolsSlot = await ensureToolsThread(client, { baseDir: jobs.baseDir });
-
-    const warningLines = [];
-    const pushConversationWarning = (stage, error = null, extra = {}) => {
-      const payload = {
-        thread_id: String(map.threadId || "").trim() || "(none)",
-        context_set_id: String(map.ctxSharedId || "").trim() || "(none)",
-        user_id: effectiveTelegramUserId || "(none)",
-        stage: String(stage || "unknown"),
-        error: error ? String(error?.message ?? error) : "",
-        ...((extra && typeof extra === "object") ? extra : {}),
-      };
-      const line = `conversation_membership_warning ${JSON.stringify(payload)}`;
-      warningLines.push(line);
-      if (jobId) jobs.log(jobId, line);
-    };
-
-    const teamResult = (teamStore && typeof teamStore.ensureTeam === "function")
-      ? await teamStore.ensureTeam({
-        threadId: map.threadId,
-        jobId,
-        source: "load_supervisor_runtime",
-        baselineAgentIds: pickBaselineConversationCatalogAgents(reg?.agents || []),
-      })
-      : {
-        target: summarizeMembershipTarget({ thread_id: map.threadId, source: "goc" }),
-        rows: [],
-        warnings: ["conversation_team_store_unavailable"],
-      };
-    for (const warning of (Array.isArray(teamResult?.warnings) ? teamResult.warnings : [])) {
-      pushConversationWarning(warning);
-    }
-    const membershipTarget = teamResult?.target && typeof teamResult.target === "object"
-      ? teamResult.target
-      : summarizeMembershipTarget({ thread_id: map.threadId, source: "goc" });
-    if (membershipTarget?.ensure_error) {
-      pushConversationWarning("ensure_conversation", membershipTarget.ensure_error);
-    }
-    if (membershipTarget?.ensured_thread_mismatch === true) {
-      pushConversationWarning("ensure_conversation_thread_mismatch", null, {
-        requested_thread_id: String(membershipTarget?.requested_target?.thread_id || map.threadId || "").trim() || "(none)",
-        ensured_thread_id: String(membershipTarget?.ensured_target?.thread_id || "").trim() || "(none)",
-        conversation_id: String(membershipTarget?.ensured_target?.conversation_id || "").trim() || "(none)",
-      });
-    }
-    const conversationAgents = Array.isArray(teamResult?.rows) ? teamResult.rows : [];
-    const conversation = {
-      id: String(membershipTarget?.conversation_id || "").trim(),
-      thread_id: String(membershipTarget?.thread_id || map.threadId || "").trim(),
-    };
-
-    const latestJobNode = await listLatestResourceByKind(client, map.threadId, "job_config");
-    const rawJobConfig = latestJobNode ? parseStructuredFromResource(latestJobNode, "job_config") : null;
-
-    const toolRows = await client.listResources(toolsSlot.threadId, { resourceKind: "tool_spec" });
-    const latestToolSpecById = new Map();
-    for (const resource of sortResourcesByCreatedAt(toolRows)) {
-      const normalized = normalizeToolSpec(parseStructuredFromResource(resource, "tool_spec"));
-      if (!normalized) continue;
-      latestToolSpecById.set(String(normalized.id || "").trim().toLowerCase(), normalized);
-    }
-    const toolsCatalog = [...latestToolSpecById.values()];
-
-    const normalized = normalizeSupervisorJobConfig(
-      rawJobConfig || { job_id: String(jobId || "").trim() },
-      { agentsCatalog: reg?.agents || [], toolsCatalog }
-    );
-
-    const teamConsistency = reconcileConversationTeamWithCatalog({
-      conversationRows: conversationAgents,
-      catalogRows: reg?.agents || [],
-    });
-    const enabledConversationAgentIds = Array.from(new Set(
-      (teamConsistency.catalog_agent_ids || []).length > 0
-        ? teamConsistency.active_enabled_agent_ids
-        : teamConsistency.enabled_member_agent_ids
-    ));
-    if ((teamConsistency.unknown_member_agent_ids || []).length > 0) {
-      pushConversationWarning("unknown_catalog_agents", null, {
-        unknown_agent_ids: teamConsistency.unknown_member_agent_ids,
-      });
-    }
-    const enabledAgentSet = new Set(enabledConversationAgentIds);
-    const enabledToolSet = new Set(
-      (Array.isArray(normalized.enabledToolIds) ? normalized.enabledToolIds : [])
-        .map((id) => String(id || "").trim().toLowerCase())
-        .filter(Boolean)
-    );
-    const enabledAgents = (Array.isArray(reg?.agents) ? reg.agents : [])
-      .filter((agent) => enabledAgentSet.has(String(agent?.id || "").trim().toLowerCase()));
-    const enabledTools = toolsCatalog
-      .filter((tool) => enabledToolSet.has(String(tool?.id || "").trim().toLowerCase()));
-
-    let recentArtifactNodeIds = [];
-    try {
-      const artifacts = await client.listResources(map.threadId, {
-        resourceKind: "artifact",
-      });
-      recentArtifactNodeIds = sortResourcesByCreatedAt(artifacts)
-        .slice(-5)
-        .reverse()
-        .map((row) => String(row?.id || "").trim())
-        .filter(Boolean);
-    } catch {
-      recentArtifactNodeIds = [];
-    }
-
-    let contextSummary = "";
-    if (includeContext) {
-      try {
-        contextSummary = await client.getCompiledContext(map.ctxSharedId);
-      } catch {
-        contextSummary = loadLocalContextDocs(jobId, TRACK_DOC_NAMES, 2200);
-      }
-    }
-
-    let globalSummary = "";
-    if (includeGlobal) {
-      try {
-        const globalSlot = await ensureGlobalThread(client, { baseDir: jobs.baseDir, title: "global:shared" });
-        globalSummary = await client.getCompiledContext(globalSlot.ctxId);
-      } catch {
-        globalSummary = "";
-      }
-    }
-
-    return {
-      mode: "goc",
-      runtime_mode: runtimeAuthority?.mode || "goc",
-      runtime_authority: runtimeAuthority,
-      runtimeAuthority,
-      plan_source: runtimeAuthority?.plan_source || "local",
-      context_source: runtimeAuthority?.context_source || "goc",
-      agent_catalog_source: runtimeAuthority?.agent_catalog_source || "goc",
-      conversation_team_source: runtimeAuthority?.conversation_team_source || "goc",
-      skill_catalog_source: runtimeAuthority?.skill_catalog_source || "mixed",
-      degraded_mode: runtimeAuthority?.degraded_mode === true,
-      fallback_reason: runtimeAuthority?.fallback_reason || null,
-      map,
-      agentsSlot,
-      toolsSlot,
-      jobConfig: normalized.configNormalized,
-      jobConfigDebugSummary: summarizeJobConfigDebug(rawJobConfig || normalized.configNormalized),
-      jobConfigNodeId: String(latestJobNode?.id || "").trim(),
-      agentsCatalog: reg?.agents || [],
-      toolsCatalog,
-      conversation,
-      conversationMembershipTarget: summarizeMembershipTarget(membershipTarget),
-      conversationAgents,
-      conversationMembershipWarning: warningLines.join(" | "),
-      unknownConversationAgentIds: teamConsistency.unknown_member_agent_ids || [],
-      enabledAgentIds: enabledConversationAgentIds,
-      enabledToolIds: normalized.enabledToolIds,
-      agentSelection: summarizeSelectionState({ catalog: reg?.agents || [], enabled: enabledAgents }),
-      toolSelection: summarizeSelectionState({ catalog: toolsCatalog, enabled: enabledTools }),
-      agents: enabledAgents,
-      tools: enabledTools,
-      recentArtifactNodeIds,
-      sharedActiveTypeBreakdown: {},
-      contextSummary: contextSummary || "",
-      globalSummary: globalSummary || "",
-      capabilities,
-    };
-  } finally {
-    restoreActor();
-  }
-}
-
 function parseChatMessageWithFlags(rawArgs) {
   const tokens = String(rawArgs || "").split(/\s+/).filter(Boolean);
   const out = [];
@@ -4931,177 +4614,6 @@ async function resolveMembershipTargetForThread(client, {
     });
   }
   return target;
-}
-
-function summarizeMembershipMutationResponse(raw = {}) {
-  const row = raw && typeof raw === "object" ? raw : {};
-  return {
-    ok: row.ok === true ? true : undefined,
-    id: String(row.id || "").trim() || undefined,
-    thread_id: String(row.thread_id || row.threadId || "").trim() || undefined,
-    conversation_id: String(row.conversation_id || row.conversationId || "").trim() || undefined,
-    agent_id: String(row.agent_id || row.agentId || "").trim().toLowerCase() || undefined,
-    enabled: typeof row.enabled === "boolean" ? row.enabled : undefined,
-  };
-}
-
-function syncRuntimeConversationTeamState(runtime = {}, {
-  conversationRows = [],
-  membershipTarget = null,
-  warningLines = [],
-} = {}) {
-  const convRows = Array.isArray(conversationRows) ? conversationRows : [];
-  const teamConsistency = reconcileConversationTeamWithCatalog({
-    conversationRows: convRows,
-    catalogRows: runtime?.agentsCatalog || [],
-  });
-  const enabled = Array.from(new Set(
-    (teamConsistency.catalog_agent_ids || []).length > 0
-      ? teamConsistency.active_enabled_agent_ids
-      : teamConsistency.enabled_member_agent_ids
-  ));
-  const enabledSet = new Set(enabled);
-  runtime.conversationAgents = convRows;
-  runtime.enabledAgentIds = enabled;
-  runtime.unknownConversationAgentIds = teamConsistency.unknown_member_agent_ids || [];
-  if (membershipTarget && typeof membershipTarget === "object") {
-    runtime.conversationMembershipTarget = summarizeMembershipTarget(membershipTarget);
-    runtime.conversation = {
-      id: String(membershipTarget?.conversation_id || runtime?.conversation?.id || "").trim(),
-      thread_id: String(membershipTarget?.thread_id || runtime?.conversation?.thread_id || runtime?.map?.threadId || "").trim(),
-    };
-  }
-  const warnings = Array.isArray(warningLines)
-    ? warningLines.map((line) => String(line || "").trim()).filter(Boolean)
-    : [];
-  if ((teamConsistency.unknown_member_agent_ids || []).length > 0) {
-    warnings.push(`unknown_catalog_agents:${teamConsistency.unknown_member_agent_ids.join(",")}`);
-  }
-  runtime.conversationMembershipWarning = warnings.join(" | ");
-  runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
-    .filter((agent) => enabledSet.has(String(agent?.id || "").trim().toLowerCase()));
-  runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
-  return {
-    conversationAgents: convRows,
-    enabledAgentIds: enabled,
-    membershipTarget: runtime.conversationMembershipTarget || null,
-  };
-}
-
-async function ensureRuntimeAgentCatalogRows(runtime = {}) {
-  const existing = Array.isArray(runtime?.agentsCatalog) ? runtime.agentsCatalog : [];
-  if (existing.length > 0) return existing;
-  const catalog = runtime?.capabilities?.agentCatalog;
-  if (!catalog || typeof catalog.load !== "function") return existing;
-  try {
-    const loaded = await catalog.load({
-      includeCompiled: true,
-      refresh: false,
-      fallbackToLocal: true,
-    });
-    const rows = Array.isArray(loaded?.agents) ? loaded.agents : [];
-    if (rows.length > 0) runtime.agentsCatalog = rows;
-    return rows;
-  } catch {
-    return existing;
-  }
-}
-
-async function applyConversationAgentMutation({
-  runtime = null,
-  jobId = "",
-  actionType = "",
-  agentId = "",
-  source = "",
-  enabled = true,
-} = {}) {
-  const cleanActionType = String(actionType || "").trim().toLowerCase();
-  const cleanAgentId = String(agentId || "").trim().toLowerCase();
-  const cleanJobId = String(jobId || "").trim();
-  if (!runtime || typeof runtime !== "object") throw new Error("runtime is required");
-  if (!cleanJobId) throw new Error("jobId is required");
-  if (!cleanAgentId) throw new Error("agent_id is required");
-  if (!["add", "remove", "enable", "disable"].includes(cleanActionType)) {
-    throw new Error(`unsupported action type: ${cleanActionType}`);
-  }
-
-  const teamStore = runtime?.capabilities?.conversationTeamStore;
-  if (!teamStore) throw new Error("conversation team store is unavailable");
-  const threadId = String(runtime?.map?.threadId || runtime?.conversationMembershipTarget?.thread_id || "").trim();
-  const conversationId = String(runtime?.conversationMembershipTarget?.conversation_id || runtime?.conversation?.id || "").trim();
-  const options = {
-    jobId: cleanJobId,
-    threadId,
-    conversationId,
-    membershipTarget: runtime?.conversationMembershipTarget || null,
-    source: source || "conversation_team_mutation",
-    agentId: cleanAgentId,
-    enabled: enabled !== false,
-  };
-
-  const conversationTeamSource = String(
-    runtime?.runtimeAuthority?.conversation_team_source
-    || runtime?.conversation_team_source
-    || teamStore?.source
-    || ""
-  ).trim().toLowerCase() === "goc"
-    ? "goc"
-    : "local";
-  const mutation = await applyValidatedConversationTeamMutation({
-    teamStore,
-    actionType: cleanActionType,
-    agentId: cleanAgentId,
-    mutationOptions: options,
-    catalogRows: conversationTeamSource === "local"
-      ? await ensureRuntimeAgentCatalogRows(runtime)
-      : [],
-    requireCatalogValidation: conversationTeamSource === "local",
-  });
-  if (!mutation.ok) {
-    throw createConversationTeamMutationValidationError(mutation.validation);
-  }
-  const result = mutation.result;
-  const convRows = Array.isArray(result?.rows) ? result.rows : [];
-  const target = result?.target && typeof result.target === "object"
-    ? result.target
-    : runtime?.conversationMembershipTarget
-      || { thread_id: threadId, conversation_id: conversationId, source: runtime?.mode === "goc" ? "goc" : "local" };
-  const verification = verifyConversationMembershipMutation({
-    actionType: cleanActionType === "add"
-      ? "add_agent_to_conversation"
-      : (cleanActionType === "remove" ? "remove_agent_from_conversation" : `${cleanActionType}_agent`),
-    threadId: String(target?.thread_id || threadId || "").trim(),
-    conversationId: String(target?.conversation_id || conversationId || "").trim(),
-    targetAgentId: cleanAgentId,
-    expectedPresent: cleanActionType !== "remove",
-    expectedEnabled: cleanActionType === "disable" ? false : true,
-    conversationRows: convRows,
-    source: source || "conversation_team_mutation",
-    extra: {
-      job_id: cleanJobId,
-      membership_target: summarizeMembershipTarget(target),
-      ensured_thread_mismatch: target?.ensured_thread_mismatch === true,
-      mutation_response: summarizeMembershipMutationResponse(result?.mutation_response),
-    },
-  });
-  if (!verification.confirmed) {
-    recordMembershipMutationDiagnostic(cleanJobId, verification, {
-      stage: "membership_confirmation_failed",
-    });
-    throw createMembershipConfirmationError(verification);
-  }
-  syncRuntimeConversationTeamState(runtime, {
-    conversationRows: convRows,
-    membershipTarget: target,
-    warningLines: Array.isArray(result?.warnings) ? result.warnings : [],
-  });
-  return {
-    convRows,
-    target,
-    verification,
-    mutationResponse: result?.mutation_response || null,
-    warnings: Array.isArray(result?.warnings) ? result.warnings : [],
-  };
 }
 
 async function updateJobConfigSelection(client, {
@@ -5583,7 +5095,7 @@ function buildSupervisorExecutionCallbacks({
     const cleanDetail = String(detailContext || "").trim();
     const cleanStepNodeId = String(stepNodeId || "").trim();
     if (hasContextEngine) {
-      const runtimeAuthority = buildRuntimeMetadataAuthority(runtime);
+      const runtimeAuthority = buildRunAuthority(runtime);
       const prepared = await contextEngine.prepareStepContext({
         jobId,
         chatId: String(chatId || ""),
@@ -6442,20 +5954,11 @@ function buildSupervisorExecutionCallbacks({
             throw createMembershipConfirmationError(membershipChange);
           }
           if (Array.isArray(convRowsAfterAdd)) {
-            const enabled = Array.from(new Set(
-              convRowsAfterAdd
-                .filter((row) => row?.enabled !== false)
-                .map((row) => String(row?.agent_id || "").trim().toLowerCase())
-                .filter(Boolean)
-            ));
-            runtime.conversationAgents = convRowsAfterAdd;
-            runtime.enabledAgentIds = enabled;
-            if (membershipTarget) {
-              runtime.conversationMembershipTarget = summarizeMembershipTarget(membershipTarget);
-            }
-            runtime.agents = (Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : [])
-              .filter((agent) => enabled.includes(String(agent?.id || "").trim().toLowerCase()));
-            runtime.agentSelection = summarizeSelectionState({ catalog: runtime.agentsCatalog || [], enabled: runtime.agents });
+            syncRuntimeConversationTeamState(runtime, {
+              conversationRows: convRowsAfterAdd,
+              membershipTarget,
+              summarizeSelectionState,
+            });
           }
           await refreshAgentRegistry({ includeCompiled: true });
           const createdName = String(created?.name || spec.name || "").trim() || "(unnamed)";
@@ -6528,6 +6031,8 @@ function buildSupervisorExecutionCallbacks({
             agentId,
             enabled: action?.enabled !== false,
             source: "chat_executor_add_agent",
+            summarizeSelectionState,
+            recordDiagnostic: recordMembershipMutationDiagnostic,
           }));
           const agentDisplay = formatRuntimeAgentDisplay(agentId);
           return {
@@ -6553,6 +6058,8 @@ function buildSupervisorExecutionCallbacks({
             actionType: "remove",
             agentId,
             source: "chat_executor_remove_agent",
+            summarizeSelectionState,
+            recordDiagnostic: recordMembershipMutationDiagnostic,
           }));
           const agentDisplay = formatRuntimeAgentDisplay(agentId);
           return {
@@ -6857,6 +6364,8 @@ function buildSupervisorExecutionCallbacks({
               actionType: cleanOp,
               agentId: cleanId,
               source: "update_job_config_selection",
+              summarizeSelectionState,
+              recordDiagnostic: recordMembershipMutationDiagnostic,
             }));
             return {
               source: "conversation_agents",
@@ -7018,7 +6527,7 @@ async function runSupervisorChat(
     if (typeof contextEngine.setRuntime === "function") {
       contextEngine.setRuntime(runtime);
     }
-    const runtimeAuthority = buildRuntimeMetadataAuthority(runtime);
+    const runtimeAuthority = buildRunAuthority(runtime);
     executionGraph = (
       runtimeAuthority?.mode === "goc"
       && runtime?.map?.threadId
@@ -7099,7 +6608,7 @@ async function runSupervisorChat(
 
     while (turn < maxTurns) {
       turn += 1;
-      const runtimeAuthority = buildRuntimeMetadataAuthority(runtime);
+      const runtimeAuthority = buildRunAuthority(runtime);
       const routerRunMeta = {
         runId: String(executionGraph?.runId || "").trim() || undefined,
         threadId: runThreadId,
@@ -7289,27 +6798,15 @@ async function runSupervisorChat(
         || runtime?.runtime_authority?.plan_source
         || "local"
       ).trim().toLowerCase() || "local";
-      const routeRuntimeAuthority = buildRuntimeMetadataAuthority(runtime, {
+      applyRunAuthority(runtime, {
         plan_source: routePlanSource,
       });
       runtime.runtimeTeamSnapshot = runtimeTeamSnapshot;
-      if (routeRuntimeAuthority) {
-        runtime.runtimeAuthority = routeRuntimeAuthority;
-        runtime.runtime_authority = routeRuntimeAuthority;
-        runtime.plan_source = routeRuntimeAuthority.plan_source;
-        runtime.context_source = routeRuntimeAuthority.context_source;
-        runtime.agent_catalog_source = routeRuntimeAuthority.agent_catalog_source;
-        runtime.conversation_team_source = routeRuntimeAuthority.conversation_team_source;
-        runtime.skill_catalog_source = routeRuntimeAuthority.skill_catalog_source;
-        runtime.degraded_mode = routeRuntimeAuthority.degraded_mode === true;
-        runtime.fallback_reason = routeRuntimeAuthority.fallback_reason || null;
-      }
       routePlan = {
         ...routePlan,
         runtime_team_snapshot: runtimeTeamSnapshot,
         action_source: routeActionSource,
-        runtime_authority: routeRuntimeAuthority || undefined,
-        ...(routeRuntimeAuthority || {}),
+        ...buildRunAuthorityPatch(runtime),
         plan_source: routePlanSource,
       };
       followupHint = String(routePlan?.followup_hint || "").trim();
@@ -7335,15 +6832,14 @@ async function runSupervisorChat(
       totalActions += planActions.length;
 
       if (runEventSink && typeof runEventSink.queueMainSteps === "function") {
-        const runtimeAuthority = buildRuntimeMetadataAuthority(runtime, {
+        const runtimeAuthority = buildRunAuthority(runtime, {
           plan_source: String(routePlan?.plan_source || runtime?.runtimeAuthority?.plan_source || "local"),
         });
         await runEventSink.queueMainSteps(planActions, {
           metadata: {
             runtime_team_snapshot: runtimeTeamSnapshot,
             action_source: routeActionSource,
-            runtime_authority: runtimeAuthority || undefined,
-            ...(runtimeAuthority || {}),
+            ...buildRunAuthorityPatch({ runtime_authority: runtimeAuthority }),
           },
           jobId: currentJobId,
         });
@@ -7579,7 +7075,11 @@ async function runSupervisorChat(
         runtime_team_snapshot: routePlan?.runtime_team_snapshot && typeof routePlan.runtime_team_snapshot === "object"
           ? routePlan.runtime_team_snapshot
           : undefined,
-        runtime_authority: routePlan?.runtime_authority || buildRuntimeMetadataAuthority(runtime) || undefined,
+        ...buildRunAuthorityPatch(
+          routePlan?.runtime_authority
+            ? { runtime_authority: routePlan.runtime_authority }
+            : runtime
+        ),
         blocked_index: Number.isFinite(Number(mergedExecution.blocked_index))
           ? Number(mergedExecution.blocked_index)
           : Number(mergedExecution.pendingApproval?.blocked_index ?? -1),
@@ -7737,8 +7237,7 @@ async function runSupervisorChat(
               runtime_team_snapshot: runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
                 ? runtime.runtimeTeamSnapshot
                 : undefined,
-              runtime_authority: buildRuntimeMetadataAuthority(runtime) || undefined,
-              ...(buildRuntimeMetadataAuthority(runtime) || {}),
+              ...buildRunAuthorityPatch(runtime),
             },
           });
           await executionGraph.finishRun({
@@ -7767,8 +7266,7 @@ async function runSupervisorChat(
           runId: String(executionGraph?.runId || "").trim() || undefined,
           threadId: runThreadId,
           sharedContextSetId: sharedCtxId,
-          runtime_authority: buildRuntimeMetadataAuthority(runtime) || undefined,
-          ...(buildRuntimeMetadataAuthority(runtime) || {}),
+          ...buildRunAuthorityPatch(runtime),
         },
       }).catch(() => null);
     }
@@ -8031,12 +7529,6 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
   const runtime = opts?.runtime && typeof opts.runtime === "object" ? opts.runtime : null;
   const agentIndex = buildAgentDisplayIndexShared(agentRegistry, runtime);
   const telegramUserId = String(opts?.telegramUserId || "").trim();
-  const runtimeAuthority = normalizeRuntimeAuthorityMetadata(
-    route?.runtime_authority
-    || runtime?.runtimeAuthority
-    || runtime?.runtime_authority
-    || null
-  );
   const runtimeTeamSnapshot = route?.runtime_team_snapshot && typeof route.runtime_team_snapshot === "object"
     ? route.runtime_team_snapshot
     : (opts?.runtimeTeamSnapshot && typeof opts.runtimeTeamSnapshot === "object"
@@ -8312,47 +7804,20 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
           includeGlobal: false,
           telegramUserId,
         });
-        await applyConversationAgentMutation({
+        const result = await runConversationAgentTeamCommand({
+          command: sub,
           runtime,
           jobId: currentJobId,
-          actionType: sub,
           agentId: targetAgentId,
-          enabled: sub !== "disable",
           source: "telegram_agents_command",
+          agentRegistry,
+          buildAgentDisplayIndex,
+          formatAgentRef,
+          refreshAgentRegistry,
+          summarizeSelectionState,
+          recordDiagnostic: recordMembershipMutationDiagnostic,
         });
-        const updated = Array.isArray(runtime?.conversationAgents) ? runtime.conversationAgents : [];
-        const allAgentIds = Array.from(new Set(
-          updated.map((row) => String(row?.agent_id || "").trim().toLowerCase()).filter(Boolean)
-        ));
-        const enabled = Array.from(new Set(
-          updated
-            .filter((row) => row?.enabled !== false)
-            .map((row) => String(row?.agent_id || "").trim().toLowerCase())
-            .filter(Boolean)
-        ));
-        const disabled = allAgentIds.filter((id) => !enabled.includes(id));
-        let agentIndex = buildAgentDisplayIndex(agentRegistry, runtime);
-        if (
-          agentIndex.size === 0
-          || [targetAgentId, ...allAgentIds].some((id) => !agentIndex.has(String(id || "").trim().toLowerCase()))
-        ) {
-          const refreshedRegistry = await refreshAgentRegistry({ includeCompiled: true });
-          agentIndex = buildAgentDisplayIndex(refreshedRegistry, runtime);
-        }
-        const verb = sub === "add"
-          ? "추가"
-          : (sub === "remove" ? "제거" : (sub === "enable" ? "활성화" : "비활성화"));
-        await sendLong(bot, chatId, [
-          `✅ conversation agent ${verb} 완료`,
-          `- job_id: ${currentJobId}`,
-          `- agent: ${formatAgentRef(targetAgentId, agentIndex)}`,
-          enabled.length > 0
-            ? `- enabled: ${enabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
-            : "- enabled: (none)",
-          disabled.length > 0
-            ? `- disabled: ${disabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
-            : "- disabled: (none)",
-        ].join("\n"));
+        await sendLong(bot, chatId, result.message);
       } catch (e) {
         await bot.sendMessage(chatId, `❌ /agents ${sub} 실패: ${String(e?.message ?? e)}`);
       }
@@ -8413,52 +7878,19 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
       } catch {
         threadTeamInfo = null;
       }
-      const convRows = Array.isArray(runtime?.conversationAgents) ? runtime.conversationAgents : [];
-      const enabled = runtime?.enabledAgentIds || [];
-      const members = Array.from(new Set(
-        convRows.map((row) => String(row?.agent_id || "").trim().toLowerCase()).filter(Boolean)
-      ));
-      const available = normalizeCatalogIds(runtime?.agentsCatalog || []);
-      const availableSet = new Set(available);
-      const disabled = members.filter((id) => availableSet.has(id) && !enabled.includes(id));
-      const unknownMembers = members.filter((id) => !availableSet.has(id));
-      const availableOnly = available.filter((id) => !members.includes(id));
-      let agentIndex = buildAgentDisplayIndex(agentRegistry, runtime);
-      if (
-        agentIndex.size === 0
-        || [...enabled, ...members].some((id) => !agentIndex.has(String(id || "").trim().toLowerCase()))
-      ) {
-        const refreshedRegistry = await refreshAgentRegistry({ includeCompiled: true });
-        agentIndex = buildAgentDisplayIndex(refreshedRegistry, runtime);
-      }
-      const lines = [
-        "현재 conversation membership",
-        `- job_id: ${currentJobId}`,
-        `- thread_id: ${String(runtime?.map?.threadId || "").trim() || "(none)"}`,
-        `- conversation_id: ${String(runtime?.conversationMembershipTarget?.conversation_id || runtime?.conversation?.id || "").trim() || "(none)"}`,
-        enabled.length > 0
-          ? `- enabled: ${enabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
-          : "- enabled: (none)",
-        disabled.length > 0
-          ? `- disabled: ${disabled.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
-          : "- disabled: (none)",
-        unknownMembers.length > 0
-          ? `- unknown_catalog_members: ${unknownMembers.slice(0, 20).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
-          : "",
-        available.length > 0
-          ? `- available_catalog: ${available.slice(0, 30).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
-          : "- available_catalog: (none)",
-        availableOnly.length > 0
-          ? `- not_in_team: ${availableOnly.slice(0, 30).map((id) => formatAgentRef(id, agentIndex)).join(", ")}`
-          : "- not_in_team: (none)",
-        runtime?.conversationMembershipWarning
-          ? `- warning: ${clip(String(runtime.conversationMembershipWarning || ""), 220)}`
-          : "",
-        runtime?.runtimeAuthority?.mode === "goc"
-          ? "명령: /agents registry | /agents public [query] | /agents add <id> | /agents remove <id> | /agents enable <id> | /agents disable <id>"
-          : "명령: /agents registry | /agents add <id> | /agents remove <id> | /agents enable <id> | /agents disable <id>",
-      ].filter(Boolean);
-      await sendTextWithOptionalGocButton(bot, chatId, lines.join("\n"), {
+      const result = await runConversationAgentTeamCommand({
+        command: "list",
+        runtime,
+        jobId: currentJobId,
+        source: "telegram_agents_command",
+        agentRegistry,
+        buildAgentDisplayIndex,
+        formatAgentRef,
+        refreshAgentRegistry,
+        summarizeSelectionState,
+        recordDiagnostic: recordMembershipMutationDiagnostic,
+      });
+      await sendTextWithOptionalGocButton(bot, chatId, result.message, {
         miniAppLink: threadTeamInfo?.miniAppLink || "",
         browserLink: threadTeamInfo?.browserLink || threadTeamInfo?.link || "",
         miniAppLabel: "Open Thread Team",
