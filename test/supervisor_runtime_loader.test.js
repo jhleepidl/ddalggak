@@ -315,6 +315,10 @@ test("supervisor runtime loader keeps baseline defaults active when goc explicit
 });
 
 test("supervisor runtime loader dedupes logical default agents across public and installed copies", async () => {
+  const plannerPublicId = "planner_public_uuid_like";
+  const plannerPrivateId = "planner_private_uuid_like";
+  const coderPublicId = "coder_public_uuid_like";
+  const coderPrivateId = "coder_private_uuid_like";
   const loadSupervisorRuntime = createSupervisorRuntimeLoader({
     composeCapabilitiesForRun: () => ({
       authority: {
@@ -330,22 +334,46 @@ test("supervisor runtime loader dedupes logical default agents across public and
           async load() {
             return {
               agents: [
-                { id: "planner_public", name: "Planner", system_key: "planner", visibility: "public", published: true },
                 {
-                  id: "planner_private_12345678",
+                  id: plannerPublicId,
                   name: "Planner",
                   system_key: "planner",
-                  source_agent_id: "planner",
+                  source_agent_id: null,
+                  is_system_default: true,
+                  service_id: "public",
+                  visibility: "public",
+                  published: true,
+                },
+                {
+                  id: plannerPrivateId,
+                  name: "Planner",
+                  system_key: null,
+                  source_agent_id: plannerPublicId,
+                  is_system_default: false,
+                  owner_user_id: "user_1",
+                  service_id: "svc_1",
                   visibility: "private",
                   installed_from_public: true,
                   origin: { type: "public", public_node_id: "planner_node" },
                 },
-                { id: "coder_public", name: "Coder", system_key: "coder", visibility: "public", published: true },
                 {
-                  id: "coder_private_87654321",
+                  id: coderPublicId,
                   name: "Coder",
                   system_key: "coder",
-                  source_agent_id: "coder",
+                  source_agent_id: null,
+                  is_system_default: true,
+                  service_id: "public",
+                  visibility: "public",
+                  published: true,
+                },
+                {
+                  id: coderPrivateId,
+                  name: "Coder",
+                  system_key: null,
+                  source_agent_id: coderPublicId,
+                  is_system_default: false,
+                  owner_user_id: "user_1",
+                  service_id: "svc_1",
                   visibility: "private",
                   installed_from_public: true,
                   origin: { type: "public", public_node_id: "coder_node" },
@@ -364,7 +392,7 @@ test("supervisor runtime loader dedupes logical default agents across public and
               },
               rows: [],
               warnings: [],
-              baseline_agent_ids: ["planner_public", "coder_public"],
+              baseline_agent_ids: [plannerPublicId, coderPublicId],
             };
           },
         },
@@ -411,6 +439,6 @@ test("supervisor runtime loader dedupes logical default agents across public and
 
   assert.deepEqual(runtime.baselineDefaultAgentRefs, ["planner", "coder"]);
   assert.deepEqual(runtime.enabledAgentRefs, ["planner", "coder"]);
-  assert.deepEqual(runtime.enabledAgentIds, ["planner_private_12345678", "coder_private_87654321"]);
-  assert.deepEqual(runtime.agents.map((row) => row.id), ["planner_private_12345678", "coder_private_87654321"]);
+  assert.deepEqual(runtime.enabledAgentIds, [plannerPrivateId, coderPrivateId]);
+  assert.deepEqual(runtime.agents.map((row) => row.id), [plannerPrivateId, coderPrivateId]);
 });

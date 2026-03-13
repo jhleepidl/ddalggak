@@ -59,7 +59,9 @@ function normalizeVisibility(agent = {}) {
   return "";
 }
 
-function extractLogicalSignals(agent = {}) {
+function extractLogicalSignals(agent = {}, {
+  publicLineageBySourceId = null,
+} = {}) {
   const row = asObject(agent);
   const meta = asObject(row.meta);
   const raw = asObject(row.raw);
@@ -141,25 +143,58 @@ function extractLogicalSignals(agent = {}) {
     payload,
     payloadMeta,
   ], ["installed_from_public", "installedFromPublic"], false);
-  const logicalAgentId = sourceAgentId
-    || systemKey
+  const isSystemDefault = pickBooleanFromRows([
+    row,
+    meta,
+    raw,
+    rawMeta,
+    payload,
+    payloadMeta,
+  ], ["is_system_default", "isSystemDefault"], false);
+  const serviceId = pickStringFromRows([
+    row,
+    meta,
+    raw,
+    rawMeta,
+    payload,
+    payloadMeta,
+  ], ["service_id", "serviceId"]);
+  const ownerUserId = pickStringFromRows([
+    row,
+    meta,
+    raw,
+    rawMeta,
+    payload,
+    payloadMeta,
+  ], ["owner_user_id", "ownerUserId"]);
+  const resolvedSourceLogicalId = sourceAgentId
+    && publicLineageBySourceId instanceof Map
+    && publicLineageBySourceId.has(sourceAgentId)
+    ? cleanId(publicLineageBySourceId.get(sourceAgentId))
+    : "";
+  const logicalAgentId = systemKey
+    || resolvedSourceLogicalId
     || defaultRole
+    || sourceAgentId
     || (publicNodeId ? `public:${publicNodeId}` : "")
     || (blueprintId ? `blueprint:${blueprintId}` : "")
     || rawAgentId;
   const commandRef = systemKey
-    || sourceAgentId
+    || resolvedSourceLogicalId
     || defaultRole
+    || sourceAgentId
     || rawAgentId;
-  const identitySource = sourceAgentId
-    ? "source_agent_id"
-    : (systemKey
-      ? "system_key"
-      : (defaultRole
-        ? "default_role"
-        : (publicNodeId
-          ? "public_node_id"
-          : (blueprintId ? "blueprint_id" : "raw_id"))));
+  const identitySource = systemKey
+    ? "system_key"
+    : (resolvedSourceLogicalId
+      ? "public_default_lineage"
+      : (sourceAgentId
+        ? "source_agent_id"
+        : (defaultRole
+          ? "default_role"
+          : (publicNodeId
+            ? "public_node_id"
+            : (blueprintId ? "blueprint_id" : "raw_id")))));
 
   return {
     raw_agent_id: rawAgentId,
@@ -167,12 +202,16 @@ function extractLogicalSignals(agent = {}) {
     command_ref: commandRef || rawAgentId,
     system_key: systemKey,
     source_agent_id: sourceAgentId,
+    resolved_source_logical_id: resolvedSourceLogicalId,
     default_role: defaultRole,
     public_node_id: publicNodeId,
     blueprint_id: blueprintId,
     visibility,
     published,
     installed_from_public: installedFromPublic,
+    is_system_default: isSystemDefault,
+    service_id: serviceId,
+    owner_user_id: ownerUserId,
     identity_source: identitySource,
     aliases: uniqIds([
       rawAgentId,
@@ -180,6 +219,7 @@ function extractLogicalSignals(agent = {}) {
       commandRef,
       systemKey,
       sourceAgentId,
+      resolvedSourceLogicalId,
       defaultRole,
       publicNodeId,
       blueprintId,
@@ -188,10 +228,32 @@ function extractLogicalSignals(agent = {}) {
   };
 }
 
+function buildPublicDefaultLineageMap(catalogRows = []) {
+  const out = new Map();
+  for (const row of asArray(catalogRows)) {
+    const info = extractLogicalSignals(row);
+    if (!info.raw_agent_id || !info.system_key) continue;
+    const isPublicDefaultLike = info.is_system_default === true
+      || info.service_id === "public"
+      || info.visibility === "public"
+      || info.published === true;
+    if (!isPublicDefaultLike) continue;
+    out.set(info.raw_agent_id, info.system_key);
+  }
+  return out;
+}
+
+function describeLogicalSignals(agent = {}, options = {}) {
+  return extractLogicalSignals(agent, options);
+}
+
 function representativeScore(agent = {}, {
   preferredRawIds = [],
+  publicLineageBySourceId = null,
 } = {}) {
-  const info = extractLogicalSignals(agent);
+  const info = describeLogicalSignals(agent, {
+    publicLineageBySourceId,
+  });
   const preferred = new Set(uniqIds(preferredRawIds));
   const visibility = info.visibility;
   let score = 0;
@@ -214,15 +276,18 @@ function compareRepresentativeAgents(a = {}, b = {}, options = {}) {
 }
 
 export function describeLogicalAgent(agent = {}) {
-  return extractLogicalSignals(agent);
+  return describeLogicalSignals(agent);
 }
 
 export function buildLogicalAgentCatalogIndex(catalogRows = [], {
   preferredRawIds = [],
 } = {}) {
+  const publicLineageBySourceId = buildPublicDefaultLineageMap(catalogRows);
   const groups = new Map();
   for (const row of asArray(catalogRows)) {
-    const info = extractLogicalSignals(row);
+    const info = describeLogicalSignals(row, {
+      publicLineageBySourceId,
+    });
     if (!info.raw_agent_id) continue;
     const logicalId = info.logical_agent_id || info.raw_agent_id;
     if (!logicalId) continue;
@@ -253,9 +318,12 @@ export function buildLogicalAgentCatalogIndex(catalogRows = [], {
   for (const group of groups.values()) {
     const rows = [...group.rows].sort((a, b) => compareRepresentativeAgents(a, b, {
       preferredRawIds,
+      publicLineageBySourceId,
     }));
     const representative = rows[0];
-    const repInfo = extractLogicalSignals(representative);
+    const repInfo = describeLogicalSignals(representative, {
+      publicLineageBySourceId,
+    });
     const logicalAgent = {
       ...representative,
       logical_agent_id: group.logical_agent_id,
@@ -345,7 +413,6 @@ export function resolveLogicalAgentRef(agentRef = "", logicalCatalog = null) {
 }
 
 export function logicalAgentCommandRef(agent = {}) {
-  const info = extractLogicalSignals(agent);
+  const info = describeLogicalSignals(agent);
   return info.command_ref || info.raw_agent_id || "";
 }
-

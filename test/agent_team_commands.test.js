@@ -290,6 +290,10 @@ test("/agents list keeps baseline defaults visible when GoC explicit membership 
 });
 
 test("goc logical team view dedupes public/private defaults and disables baseline by logical ref", async () => {
+  const plannerPublicId = "planner_public_uuid_like";
+  const plannerPrivateId = "planner_private_uuid_like";
+  const researcherPublicId = "researcher_public_uuid_like";
+  const researcherPrivateId = "researcher_private_uuid_like";
   const state = [];
   const setCalls = [];
   const target = {
@@ -310,25 +314,49 @@ test("goc logical team view dedupes public/private defaults and disables baselin
     map: { threadId: "goc-thread" },
     conversation: { id: "goc-conversation", thread_id: "goc-thread" },
     conversationMembershipTarget: target,
-    baselineDefaultAgentIds: ["planner_public", "researcher_public"],
+    baselineDefaultAgentIds: [plannerPublicId, researcherPublicId],
     conversationAgents: [],
     agentsCatalog: [
-      { id: "planner_public", name: "Planner", system_key: "planner", visibility: "public", published: true },
       {
-        id: "planner_private_12345678",
+        id: plannerPublicId,
         name: "Planner",
         system_key: "planner",
-        source_agent_id: "planner",
+        source_agent_id: null,
+        is_system_default: true,
+        service_id: "public",
+        visibility: "public",
+        published: true,
+      },
+      {
+        id: plannerPrivateId,
+        name: "Planner",
+        system_key: null,
+        source_agent_id: plannerPublicId,
+        is_system_default: false,
+        owner_user_id: "user_1",
+        service_id: "svc_1",
         visibility: "private",
         installed_from_public: true,
         origin: { type: "public", public_node_id: "planner_node" },
       },
-      { id: "researcher_public", name: "Researcher", system_key: "researcher", visibility: "public", published: true },
       {
-        id: "researcher_private_87654321",
+        id: researcherPublicId,
         name: "Researcher",
         system_key: "researcher",
-        source_agent_id: "researcher",
+        source_agent_id: null,
+        is_system_default: true,
+        service_id: "public",
+        visibility: "public",
+        published: true,
+      },
+      {
+        id: researcherPrivateId,
+        name: "Researcher",
+        system_key: null,
+        source_agent_id: researcherPublicId,
+        is_system_default: false,
+        owner_user_id: "user_1",
+        service_id: "svc_1",
         visibility: "private",
         installed_from_public: true,
         origin: { type: "public", public_node_id: "researcher_node" },
@@ -371,7 +399,7 @@ test("goc logical team view dedupes public/private defaults and disables baselin
 
   assert.match(listed.message, /baseline_defaults: @planner, @researcher/);
   assert.match(listed.message, /available_catalog: @planner, @researcher/);
-  assert.doesNotMatch(listed.message, /planner_public|planner_private_12345678/);
+  assert.doesNotMatch(listed.message, /planner_public_uuid_like|planner_private_uuid_like/);
 
   const disabled = await runConversationAgentTeamCommand({
     command: "disable",
@@ -383,10 +411,10 @@ test("goc logical team view dedupes public/private defaults and disables baselin
     ...createFormatterDeps(),
   });
 
-  assert.deepEqual(setCalls, [{ agentId: "planner_private_12345678", enabled: false }]);
+  assert.deepEqual(setCalls, [{ agentId: plannerPrivateId, enabled: false }]);
   assert.match(disabled.message, /agent: @planner/);
   assert.deepEqual(runtime.enabledAgentRefs, ["researcher"]);
-  assert.deepEqual(runtime.enabledAgentIds, ["researcher_private_87654321"]);
+  assert.deepEqual(runtime.enabledAgentIds, [researcherPrivateId]);
 
   const relisted = await runConversationAgentTeamCommand({
     command: "list",
@@ -402,7 +430,9 @@ test("goc logical team view dedupes public/private defaults and disables baselin
 });
 
 test("goc logical remove removes explicit specialist regardless of underlying raw membership id", async () => {
-  const state = [{ agent_id: "reviewer_public", enabled: true }];
+  const reviewerPublicId = "reviewer_public_uuid_like";
+  const reviewerPrivateId = "reviewer_private_uuid_like";
+  const state = [{ agent_id: reviewerPublicId, enabled: true }];
   const removeCalls = [];
   const target = {
     thread_id: "goc-thread",
@@ -425,12 +455,24 @@ test("goc logical remove removes explicit specialist regardless of underlying ra
     baselineDefaultAgentIds: [],
     conversationAgents: state.map((row) => ({ ...row })),
     agentsCatalog: [
-      { id: "reviewer_public", name: "Reviewer", system_key: "reviewer", visibility: "public", published: true },
       {
-        id: "reviewer_private_abcdef12",
+        id: reviewerPublicId,
         name: "Reviewer",
         system_key: "reviewer",
-        source_agent_id: "reviewer",
+        source_agent_id: null,
+        is_system_default: true,
+        service_id: "public",
+        visibility: "public",
+        published: true,
+      },
+      {
+        id: reviewerPrivateId,
+        name: "Reviewer",
+        system_key: null,
+        source_agent_id: reviewerPublicId,
+        is_system_default: false,
+        owner_user_id: "user_1",
+        service_id: "svc_1",
         visibility: "private",
         installed_from_public: true,
         origin: { type: "public", public_node_id: "reviewer_node" },
@@ -471,7 +513,7 @@ test("goc logical remove removes explicit specialist regardless of underlying ra
     ...createFormatterDeps(),
   });
 
-  assert.deepEqual(removeCalls, ["reviewer_public"]);
+  assert.deepEqual(removeCalls, [reviewerPublicId]);
   assert.match(result.message, /agent: @reviewer/);
   assert.deepEqual(runtime.conversationAgents, []);
   assert.deepEqual(runtime.explicitConversationAgentRefs, []);
