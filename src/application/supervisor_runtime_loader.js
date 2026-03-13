@@ -2,7 +2,10 @@ import {
   reconcileConversationTeamWithCatalog,
 } from "./conversation_team_mutation.js";
 import { summarizeMembershipTarget } from "./membership_target.js";
-import { normalizeRunAuthority } from "./run_authority.js";
+import {
+  buildRunAuthorityEnvelope,
+  normalizeRunAuthority,
+} from "./run_authority.js";
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -210,16 +213,11 @@ export function createSupervisorRuntimeLoader({
 
         return {
           mode: "local",
-          runtime_mode: runtimeAuthority?.mode || "standalone",
-          runtime_authority: runtimeAuthority,
-          runtimeAuthority,
-          plan_source: runtimeAuthority?.plan_source || "local",
-          context_source: runtimeAuthority?.context_source || "local",
-          agent_catalog_source: runtimeAuthority?.agent_catalog_source || "local",
-          conversation_team_source: runtimeAuthority?.conversation_team_source || "local",
-          skill_catalog_source: runtimeAuthority?.skill_catalog_source || "local",
-          degraded_mode: runtimeAuthority?.degraded_mode === true,
-          fallback_reason: runtimeAuthority?.fallback_reason || null,
+          ...buildRunAuthorityEnvelope(
+            { runtime_authority: runtimeAuthority },
+            {},
+            { includeRuntimeMode: true }
+          ),
           map: {
             threadId: localThreadId,
             ctxSharedId: "",
@@ -443,16 +441,11 @@ export function createSupervisorRuntimeLoader({
 
       return {
         mode: "goc",
-        runtime_mode: runtimeAuthority?.mode || "goc",
-        runtime_authority: runtimeAuthority,
-        runtimeAuthority,
-        plan_source: runtimeAuthority?.plan_source || "local",
-        context_source: runtimeAuthority?.context_source || "goc",
-        agent_catalog_source: runtimeAuthority?.agent_catalog_source || "goc",
-        conversation_team_source: runtimeAuthority?.conversation_team_source || "goc",
-        skill_catalog_source: runtimeAuthority?.skill_catalog_source || "mixed",
-        degraded_mode: runtimeAuthority?.degraded_mode === true,
-        fallback_reason: runtimeAuthority?.fallback_reason || null,
+        ...buildRunAuthorityEnvelope(
+          { runtime_authority: runtimeAuthority },
+          {},
+          { includeRuntimeMode: true }
+        ),
         map,
         agentsSlot,
         toolsSlot,

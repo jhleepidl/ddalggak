@@ -1,5 +1,6 @@
 import { createRuntimeTeamSnapshot } from "./runtime_metadata.js";
 import { summarizeRuntimeTeamSnapshotLines } from "./runtime_snapshot_display.js";
+import { summarizeRunAuthorityLines } from "./run_authority.js";
 
 export async function executeRunCommand({
   bot,
@@ -60,12 +61,9 @@ export async function executeRunCommand({
         "## Multi-Agent routing",
         "- mode: run",
         `- reason: ${route.reason}`,
-        `- plan_source: ${String(route.plan_source || "local")}`,
-        `- context_source: ${String(route.context_source || runtimeForRoute?.runtimeAuthority?.context_source || "local")}`,
-        `- agent_catalog_source: ${String(route.agent_catalog_source || runtimeForRoute?.runtimeAuthority?.agent_catalog_source || "local")}`,
-        `- conversation_team_source: ${String(route.conversation_team_source || runtimeForRoute?.runtimeAuthority?.conversation_team_source || "local")}`,
-        `- skill_catalog_source: ${String(route.skill_catalog_source || runtimeForRoute?.runtimeAuthority?.skill_catalog_source || "local")}`,
-        `- degraded_mode: ${(route.degraded_mode === true || runtimeForRoute?.runtimeAuthority?.degraded_mode === true) ? "true" : "false"}`,
+        ...summarizeRunAuthorityLines(runtimeForRoute, route, {
+          includeMode: false,
+        }),
         ...summarizeRuntimeTeamSnapshotLines(runtimeTeamSnapshot, {
           actionSource: String(route.action_source || "unknown"),
         }),
@@ -162,12 +160,9 @@ export async function executeContinueCommand({
       "## Multi-Agent routing",
       "- mode: continue",
       `- reason: ${route.reason}`,
-      `- plan_source: ${String(route.plan_source || "local")}`,
-      `- context_source: ${String(route.context_source || runtimeForRoute?.runtimeAuthority?.context_source || "local")}`,
-      `- agent_catalog_source: ${String(route.agent_catalog_source || runtimeForRoute?.runtimeAuthority?.agent_catalog_source || "local")}`,
-      `- conversation_team_source: ${String(route.conversation_team_source || runtimeForRoute?.runtimeAuthority?.conversation_team_source || "local")}`,
-      `- skill_catalog_source: ${String(route.skill_catalog_source || runtimeForRoute?.runtimeAuthority?.skill_catalog_source || "local")}`,
-      `- degraded_mode: ${(route.degraded_mode === true || runtimeForRoute?.runtimeAuthority?.degraded_mode === true) ? "true" : "false"}`,
+      ...summarizeRunAuthorityLines(runtimeForRoute, route, {
+        includeMode: false,
+      }),
       ...summarizeRuntimeTeamSnapshotLines(runtimeTeamSnapshot, {
         actionSource: String(route.action_source || "unknown"),
       }),

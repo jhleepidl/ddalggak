@@ -5,6 +5,7 @@ import { LocalConversationTeamStore, GocConversationTeamStore } from "./conversa
 import { createSkillCatalog } from "./skill_catalog.js";
 import { LocalPlanner, RemotePlanner } from "./planner.js";
 import { LocalRunEventSink, GocRunEventSink } from "./run_event_sink.js";
+import { normalizeRunAuthority } from "../application/run_authority.js";
 
 function normalizeLogger(logger = null) {
   return typeof logger === "function" ? logger : null;
@@ -18,41 +19,6 @@ export function normalizePlanSource(raw = "", { fallback = "local" } = {}) {
   const key = String(raw || "").trim().toLowerCase();
   if (key === "local" || key === "goc" || key === "local_fallback") return key;
   return fallback;
-}
-
-export function normalizeRuntimeAuthority(raw = {}) {
-  const row = raw && typeof raw === "object" ? raw : {};
-  const modeRaw = String(row.mode || "").trim().toLowerCase();
-  const mode = modeRaw === "goc" ? "goc" : "standalone";
-  const contextSource = String(row.context_source || row.contextSource || "").trim().toLowerCase() === "goc"
-    ? "goc"
-    : "local";
-  const agentCatalogSource = String(row.agent_catalog_source || row.agentCatalogSource || "").trim().toLowerCase() === "goc"
-    ? "goc"
-    : "local";
-  const conversationTeamSource = String(row.conversation_team_source || row.conversationTeamSource || "").trim().toLowerCase() === "goc"
-    ? "goc"
-    : "local";
-  const skillCatalogRaw = String(row.skill_catalog_source || row.skillCatalogSource || "").trim().toLowerCase();
-  const skillCatalogSource = skillCatalogRaw === "goc"
-    ? "goc"
-    : (skillCatalogRaw === "mixed" ? "mixed" : "local");
-  const planSource = normalizePlanSource(
-    row.plan_source || row.planSource || "",
-    { fallback: "local" }
-  );
-  const degradedMode = row.degraded_mode === true || row.degradedMode === true;
-  const fallbackReasonRaw = row.fallback_reason ?? row.fallbackReason ?? null;
-  return {
-    mode,
-    plan_source: planSource,
-    context_source: contextSource,
-    agent_catalog_source: agentCatalogSource,
-    conversation_team_source: conversationTeamSource,
-    skill_catalog_source: skillCatalogSource,
-    degraded_mode: degradedMode,
-    fallback_reason: fallbackReasonRaw == null ? null : String(fallbackReasonRaw),
-  };
 }
 
 export function composeRuntimeCapabilities({
@@ -126,7 +92,7 @@ export function composeRuntimeCapabilities({
       source: degradedMode ? "local_fallback" : "local",
     });
 
-  const authority = normalizeRuntimeAuthority({
+  const authority = normalizeRunAuthority({
     mode: effectiveMode,
     plan_source: typeof remotePlannerRun === "function"
       ? "goc"
@@ -196,4 +162,3 @@ export {
   LocalRunEventSink,
   GocRunEventSink,
 } from "./run_event_sink.js";
-

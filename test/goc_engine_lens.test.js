@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { GocContextEngine } from "../src/context_engine/goc_engine.js";
+import {
+  buildRuntimeAuthorityMetadataFixture,
+  cloneRuntimeAuthorityFixture,
+} from "../test_fixtures/runtime_authority_contract.js";
 
 function createFakeClient() {
   const state = {
@@ -113,6 +117,7 @@ test("goc_engine recordMeta persists additive metadata to GOC when run/step info
       threadId: "thread_2",
       sharedContextSetId: "ctx_shared_2",
       stepNodeId: "step_node_1",
+      ...buildRuntimeAuthorityMetadataFixture("goc"),
       runtime_team_snapshot: {
         team_plan: { mode: "run", roles: [] },
         runtime_agents: [{
@@ -167,6 +172,12 @@ test("goc_engine recordMeta persists additive metadata to GOC when run/step info
   assert.equal(fakeClient.state.resources[0].threadId, "thread_2");
   assert.equal(fakeClient.state.resources[0].payload.resource_kind, "context_meta");
   assert.ok(fakeClient.state.resources[0].payload.payload_json.runtime_team_snapshot);
+  assert.deepEqual(
+    fakeClient.state.resources[0].payload.payload_json.runtime_authority,
+    cloneRuntimeAuthorityFixture("goc")
+  );
+  assert.equal(fakeClient.state.resources[0].payload.payload_json.plan_source, "local");
+  assert.equal(fakeClient.state.resources[0].payload.payload_json.context_source, "goc");
   assert.equal(fakeClient.state.resources[0].payload.payload_json.action_source, "generated_team_actions");
   assert.ok(fakeClient.state.resources[0].payload.payload_json.selected_skill_ids.includes("skill.claim_evidence_audit.v1"));
   assert.equal(
@@ -188,6 +199,16 @@ test("goc_engine recordMeta persists additive metadata to GOC when run/step info
       threadId: "thread_2",
       sharedContextSetId: "ctx_shared_2",
       stepNodeId: "step_node_2",
+      runtimeAuthority: {
+        mode: "LOCAL",
+        planSource: "local_fallback",
+        contextSource: "local",
+        agentCatalogSource: "local",
+        conversationTeamSource: "local",
+        skillCatalogSource: "local",
+        degradedMode: true,
+        fallbackReason: "goc unavailable",
+      },
       runtimeTeamSnapshot: {
         teamPlan: { mode: "run", roles: [] },
         runtimeAgents: [],
@@ -204,4 +225,11 @@ test("goc_engine recordMeta persists additive metadata to GOC when run/step info
 
   assert.equal(fakeClient.state.resources.length, 2);
   assert.equal(fakeClient.state.resources[1].payload.payload_json.action_source, "default_fallback_route");
+  assert.deepEqual(
+    fakeClient.state.resources[1].payload.payload_json.runtime_authority,
+    cloneRuntimeAuthorityFixture("local_fallback")
+  );
+  assert.equal(fakeClient.state.resources[1].payload.payload_json.plan_source, "local_fallback");
+  assert.equal(fakeClient.state.resources[1].payload.payload_json.degraded_mode, true);
+  assert.equal(fakeClient.state.resources[1].payload.payload_json.fallback_reason, "goc unavailable");
 });

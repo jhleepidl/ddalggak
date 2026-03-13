@@ -254,9 +254,9 @@ membership 진단 로그에는 최소 아래 정보가 포함됩니다(가산형
 
 그래서 graph-of-context-ui/control-plane에서 실제 런타임 팀 구성과 action 생성 출처를 사후 조회할 수 있습니다.
 
-### Capability Authority (Per Run)
+### Capability Authority (Runtime-to-GoC Contract)
 
-각 실행(run)마다 capability authority를 명시적으로 기록합니다. 동일 capability에 local/GoC가 동시에 authority가 되지 않도록 합니다.
+각 실행(run)마다 capability authority를 명시적으로 기록합니다. 이 필드들은 ddalggak이 GoC/backend projection으로 내보내는 canonical interoperability contract이며, `Run`/`Step` payload와 `context_meta` 리소스에서 동일한 shape로 소비할 수 있어야 합니다. 동일 capability에 local/GoC가 동시에 authority가 되지 않도록 합니다.
 
 - `mode`: `standalone | goc`
 - `plan_source`: `local | goc | local_fallback`
@@ -271,6 +271,18 @@ membership 진단 로그에는 최소 아래 정보가 포함됩니다(가산형
 - standalone 모드: context/agent/team/planner/skill/event 모두 local authority
 - GoC 모드: context/agent/team/event는 GoC authority, planner는 기본 local, skill package content authority는 runtime(local; metadata는 `mixed` 가능)
 - GoC unavailable 시: degraded local fallback으로 전환하고 authority 메타데이터에 원인을 기록
+
+emission 규칙:
+- canonical path는 항상 `runtime_authority` + flattened authority fields를 함께 emit합니다.
+- legacy/camelCase 입력(`runtimeAuthority`, `planSource` 등)은 내부적으로만 허용하고, outward payload는 canonical snake_case로 normalize합니다.
+- 같은 authority state에서는 run-level / step-level / context_meta payload가 서로 모순되지 않아야 합니다.
+- 실제 transition이 있는 경우에만 authority가 바뀔 수 있으며, 그때는 updated run payload와 이후 step/event payload가 동일한 normalized state를 공유해야 합니다.
+
+fallback semantics:
+- standalone run: `mode=standalone`, `plan_source=local`, `context_source=local`, `agent_catalog_source=local`, `conversation_team_source=local`, `skill_catalog_source=local`, `degraded_mode=false`
+- goc-enhanced run: `mode=goc`, `context_source=goc`, `agent_catalog_source=goc`, `conversation_team_source=goc`, planner authority는 실제 실행 주체에 맞게 `plan_source`에 기록
+- goc unavailable -> local fallback: actual runtime authority를 기준으로 `mode=standalone`, `plan_source=local_fallback`, capability source는 실제 fallback source로 normalize, `degraded_mode=true`, `fallback_reason` populated
+- goc runtime + local planner fallback: `mode=goc`를 유지하고 `plan_source=local_fallback`, `degraded_mode=true`, `fallback_reason`으로 planner fallback 원인을 기록
 
 ### Skills Directory
 

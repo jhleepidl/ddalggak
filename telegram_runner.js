@@ -79,6 +79,7 @@ import {
   buildRunAuthority,
   buildRunAuthorityPatch,
   normalizeRunAuthority,
+  summarizeRunAuthorityLines,
 } from "./src/application/run_authority.js";
 import {
   createRuntimeComposer,
@@ -1571,7 +1572,7 @@ function buildChatStatusCard(chatId, runtime = null) {
       pending_user_messages: Array.isArray(session.pending_user_messages) ? session.pending_user_messages.length : 0,
       enabled_agents: Array.isArray(enabledAgents) ? enabledAgents : [],
       enabled_tools: Array.isArray(enabledTools) ? enabledTools : [],
-      runtime_authority: runtimeAuthority || undefined,
+      ...buildRunAuthorityPatch({ runtime_authority: runtimeAuthority }),
     },
   };
 }
@@ -1946,9 +1947,10 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
         : fallbackRoute.actions,
       reason: String(routePlan?.reason || planned?.reason || fallbackRoute.reason || "router route").trim(),
       action_source: String(routePlan?.action_source || "default_fallback_route").trim(),
-      runtime_authority: runtimeAuthority || undefined,
-      ...(runtimeAuthority || {}),
-      plan_source: planSource,
+      ...buildRunAuthorityPatch(
+        { runtime_authority: runtimeAuthority },
+        { plan_source: planSource }
+      ),
       team_plan: planningResult?.team_plan || null,
       runtime_agents: planningResult?.runtime_agents || [],
       runtime_team_snapshot: planningResult?.runtime_team_snapshot || null,
@@ -1980,19 +1982,10 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
         : fallbackRoute.actions,
       reason: String(routePlan?.reason || fallbackRoute.reason || "router fallback").trim(),
       action_source: String(routePlan?.action_source || "default_fallback_route").trim(),
-      plan_source: planSource,
-      runtime_authority: runtimeAuthority
-        ? {
-          ...runtimeAuthority,
-          plan_source: planSource,
-        }
-        : undefined,
-      ...(runtimeAuthority
-        ? {
-          ...runtimeAuthority,
-          plan_source: planSource,
-        }
-        : {}),
+      ...buildRunAuthorityPatch(
+        { runtime_authority: runtimeAuthority },
+        { plan_source: planSource }
+      ),
       team_plan: planningResult?.team_plan || null,
       runtime_agents: planningResult?.runtime_agents || [],
       runtime_team_snapshot: planningResult?.runtime_team_snapshot || null,
@@ -5118,8 +5111,7 @@ function buildSupervisorExecutionCallbacks({
           runtimeTeamSnapshot: runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
             ? runtime.runtimeTeamSnapshot
             : undefined,
-          runtime_authority: runtimeAuthority || undefined,
-          ...(runtimeAuthority || {}),
+          ...buildRunAuthorityPatch({ runtime_authority: runtimeAuthority }),
           jobConfig: runtime?.jobConfig && typeof runtime.jobConfig === "object"
             ? runtime.jobConfig
             : undefined,
@@ -5194,8 +5186,7 @@ function buildSupervisorExecutionCallbacks({
           runtimeTeamSnapshot: runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
             ? runtime.runtimeTeamSnapshot
             : undefined,
-          runtime_authority: runtimeAuthority || undefined,
-          ...(runtimeAuthority || {}),
+          ...buildRunAuthorityPatch({ runtime_authority: runtimeAuthority }),
         },
         meta,
       }).catch(() => {});
@@ -6556,8 +6547,7 @@ async function runSupervisorChat(
           runtime_team_snapshot: runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
             ? runtime.runtimeTeamSnapshot
             : undefined,
-          runtime_authority: runtimeAuthority || undefined,
-          ...(runtimeAuthority || {}),
+          ...buildRunAuthorityPatch({ runtime_authority: runtimeAuthority }),
         },
       }, {
         jobId: currentJobId,
@@ -6613,8 +6603,7 @@ async function runSupervisorChat(
         runId: String(executionGraph?.runId || "").trim() || undefined,
         threadId: runThreadId,
         sharedContextSetId: sharedCtxId,
-        runtime_authority: runtimeAuthority || undefined,
-        ...(runtimeAuthority || {}),
+        ...buildRunAuthorityPatch({ runtime_authority: runtimeAuthority }),
       };
       let routerCtx = {
         contextText: String(runtime?.contextSummary || "").trim(),
@@ -6807,7 +6796,6 @@ async function runSupervisorChat(
         runtime_team_snapshot: runtimeTeamSnapshot,
         action_source: routeActionSource,
         ...buildRunAuthorityPatch(runtime),
-        plan_source: routePlanSource,
       };
       followupHint = String(routePlan?.followup_hint || "").trim();
       deliverables = normalizeDeliverableList([
@@ -6950,14 +6938,10 @@ async function runSupervisorChat(
         `- reason: ${routePlan.reason || "(none)"}`,
         `- runtime_team_source: ${String(routePlan?.runtime_team_snapshot?.source || "team_builder")}`,
         `- action_source: ${String(routePlan?.action_source || routeActionSource || "explicit_route_plan")}`,
-        `- plan_source: ${String(routePlan?.plan_source || runtime?.runtimeAuthority?.plan_source || "local")}`,
-        `- capability_mode: ${String(routePlan?.runtime_authority?.mode || runtime?.runtimeAuthority?.mode || "standalone")}`,
-        `- context_source: ${String(routePlan?.runtime_authority?.context_source || runtime?.runtimeAuthority?.context_source || "local")}`,
-        `- agent_catalog_source: ${String(routePlan?.runtime_authority?.agent_catalog_source || runtime?.runtimeAuthority?.agent_catalog_source || "local")}`,
-        `- conversation_team_source: ${String(routePlan?.runtime_authority?.conversation_team_source || runtime?.runtimeAuthority?.conversation_team_source || "local")}`,
-        `- skill_catalog_source: ${String(routePlan?.runtime_authority?.skill_catalog_source || runtime?.runtimeAuthority?.skill_catalog_source || "local")}`,
-        `- degraded_mode: ${(routePlan?.runtime_authority?.degraded_mode || runtime?.runtimeAuthority?.degraded_mode) ? "true" : "false"}`,
-        `- fallback_reason: ${String(routePlan?.runtime_authority?.fallback_reason || runtime?.runtimeAuthority?.fallback_reason || "(none)")}`,
+        ...summarizeRunAuthorityLines(runtime, routePlan, {
+          modeLabel: "capability_mode",
+          fallbackReasonEmpty: "(none)",
+        }),
         `- actions: ${planActions.map((row) => chatActionLabel(row)).join(" -> ") || "(none)"}`,
         `- mode: ${runtime.mode}`,
         `- pending_approval: ${execution.pendingApproval ? execution.pendingApproval.reason : "none"}`,
@@ -7592,8 +7576,7 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
   return {
     askedChatGPT,
     runtime_team_snapshot: runtimeTeamSnapshot,
-    runtime_authority: runtimeAuthority || undefined,
-    ...(runtimeAuthority || {}),
+    ...buildRunAuthorityPatch({ runtime_authority: runtimeAuthority }),
   };
 }
 

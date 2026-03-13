@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { GocExecutionGraphRecorder } from "../src/chat/goc_execution_graph.js";
+import {
+  buildRuntimeAuthorityMetadataFixture,
+  cloneRuntimeAuthorityFixture,
+} from "../test_fixtures/runtime_authority_contract.js";
 
 function createFakeGraphClient() {
   const state = {
@@ -168,6 +172,7 @@ test("runtime_team_snapshot is persisted on GOC Run payloads", async () => {
     userText: "hello",
     metadata: {
       runtimeTeamSnapshot: sampleRuntimeSnapshot(),
+      ...buildRuntimeAuthorityMetadataFixture("goc"),
       actionSource: "team_generated",
     },
   });
@@ -175,6 +180,12 @@ test("runtime_team_snapshot is persisted on GOC Run payloads", async () => {
   const runNode = client.state.createdNodes[0];
   assert.equal(runNode.body.node_type, "Run");
   assert.equal(runNode.body.payload_json.action_source, "generated_team_actions");
+  assert.deepEqual(
+    runNode.body.payload_json.runtime_authority,
+    cloneRuntimeAuthorityFixture("goc")
+  );
+  assert.equal(runNode.body.payload_json.plan_source, "local");
+  assert.equal(runNode.body.payload_json.context_source, "goc");
   assert.equal(runNode.body.payload_json.runtime_team_snapshot.source, "team_builder");
   assert.equal(runNode.body.payload_json.runtime_agents[0].template_id, "coder");
   assert.ok(runNode.body.payload_json.selected_skill_ids.includes("skill.run_trace_debugging.v1"));
@@ -230,6 +241,61 @@ test("step payloads include additive runtime role metadata and update run metada
   assert.equal(stepNode.body.payload_json.runtime_role.attached_skills.length, 1);
   assert.equal(stepNode.body.payload_json.context_pack_id, "ctxp_coder_1");
   assert.equal(stepNode.body.payload_json.action_source, "explicit_route_plan");
+});
+
+test("runtime authority transitions are updated on the run payload and reused by subsequent step payloads", async () => {
+  const client = createFakeGraphClient();
+  const recorder = new GocExecutionGraphRecorder({
+    client,
+    threadId: "thread_3",
+    contextSetId: "ctx_3",
+    sharedContextSetId: "ctx_3",
+    runId: "run_3",
+    chatId: "chat_3",
+    jobId: "job_3",
+  });
+
+  await recorder.startRun({
+    userText: "start",
+    metadata: buildRuntimeAuthorityMetadataFixture("goc"),
+  });
+  await recorder.queueMainSteps([
+    {
+      type: "run_agent",
+      agent_id: "coder",
+      goal: "fallback locally",
+      inputs: {
+        runtimeInstanceId: "inst_coder_1",
+      },
+    },
+  ], {
+    metadata: {
+      runtimeTeamSnapshot: sampleRuntimeSnapshot(),
+      actionSource: "explicit",
+      ...buildRuntimeAuthorityMetadataFixture("goc_planner_fallback"),
+    },
+  });
+
+  const runUpdate = client.state.updatedNodes[0];
+  const stepNode = client.state.createdNodes.find((row) => row.body.node_type === "Step");
+  assert.ok(runUpdate);
+  assert.ok(stepNode);
+  assert.deepEqual(
+    runUpdate.body.payload_json.runtime_authority,
+    cloneRuntimeAuthorityFixture("goc_planner_fallback")
+  );
+  assert.deepEqual(
+    stepNode.body.payload_json.runtime_authority,
+    cloneRuntimeAuthorityFixture("goc_planner_fallback")
+  );
+  assert.equal(runUpdate.body.payload_json.plan_source, "local_fallback");
+  assert.equal(stepNode.body.payload_json.plan_source, "local_fallback");
+  assert.equal(runUpdate.body.payload_json.context_source, "goc");
+  assert.equal(stepNode.body.payload_json.context_source, "goc");
+  assert.equal(runUpdate.body.payload_json.degraded_mode, true);
+  assert.equal(stepNode.body.payload_json.degraded_mode, true);
+  assert.equal(runUpdate.body.payload_json.fallback_reason, "remote planner timeout");
+  assert.equal(stepNode.body.payload_json.fallback_reason, "remote planner timeout");
 });
 
 test("non-GOC/no-recorder flow remains no-op safe", async () => {
