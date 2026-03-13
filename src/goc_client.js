@@ -294,6 +294,11 @@ function normalizeConversationAgent(entity, fallbackThreadId = "") {
     || fallbackThreadId
     || ""
   ).trim();
+  const conversationId = String(
+    pick(row, ["conversation_id", "conversationId"])
+    || pick(payload, ["conversation_id", "conversationId"])
+    || ""
+  ).trim();
   const agentId = String(
     pick(row, ["agent_id", "agentId"])
     || pick(rowAgent, ["id", "agent_id", "agentId"])
@@ -319,6 +324,7 @@ function normalizeConversationAgent(entity, fallbackThreadId = "") {
   return {
     id: String(pick(row, ["id", "membership_id", "membershipId"]) || `${threadId}:${agentId}`).trim(),
     thread_id: threadId,
+    conversation_id: conversationId,
     agent_id: agentId,
     enabled,
     order_index: orderIndex,
@@ -382,14 +388,99 @@ function extractConversationAgentsArray(data) {
     root,
     asObject(root.data),
     asObject(root.result),
+    asObject(root.team),
+    asObject(root.thread_team),
+    asObject(root.threadTeam),
   ];
   for (const row of roots) {
+    if (Array.isArray(row?.members)) return row.members;
+    if (Array.isArray(row?.team?.members)) return row.team.members;
+    if (Array.isArray(row?.team?.items)) return row.team.items;
     if (Array.isArray(row?.conversation?.agents)) return row.conversation.agents;
     if (Array.isArray(row?.conversation?.items)) return row.conversation.items;
     if (Array.isArray(row?.agents)) return row.agents;
     if (Array.isArray(row?.items)) return row.items;
   }
   return normalizeArrayResponse(data);
+}
+
+function buildCanonicalTeamListAttempts(target = {}) {
+  const tid = String(target.thread_id || "").trim();
+  const cid = String(target.conversation_id || "").trim();
+  return [
+    ...(tid ? [
+      { path: `/api/threads/${encodeURIComponent(tid)}/team` },
+      { path: `/threads/${encodeURIComponent(tid)}/team` },
+      { path: `/api/threads/${encodeURIComponent(tid)}/team/members` },
+      { path: `/threads/${encodeURIComponent(tid)}/team/members` },
+      { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents` },
+      { path: `/threads/${encodeURIComponent(tid)}/conversation/agents` },
+    ] : []),
+    ...(cid ? [
+      { path: `/api/conversations/${encodeURIComponent(cid)}/agents` },
+    ] : []),
+    { path: "/api/conversation_agents", query: buildConversationIdentityQuery(target) },
+    { path: "/api/conversation-agents", query: buildConversationIdentityQuery(target) },
+    { path: "/conversation_agents", query: buildConversationIdentityQuery(target) },
+  ];
+}
+
+function buildCanonicalTeamAddAttempts(target = {}, addBody = {}, body = {}) {
+  const tid = String(target.thread_id || "").trim();
+  const cid = String(target.conversation_id || "").trim();
+  return [
+    ...(tid ? [
+      { path: `/api/threads/${encodeURIComponent(tid)}/team/members`, body: addBody },
+      { path: `/threads/${encodeURIComponent(tid)}/team/members`, body: addBody },
+      { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents`, body: addBody },
+      { path: `/threads/${encodeURIComponent(tid)}/conversation/agents`, body: addBody },
+    ] : []),
+    ...(cid ? [
+      { path: `/api/conversations/${encodeURIComponent(cid)}/agents`, body: addBody },
+    ] : []),
+    { path: "/api/conversation_agents", body },
+    { path: "/api/conversation-agents", body },
+    { path: "/conversation_agents", body },
+  ];
+}
+
+function buildCanonicalTeamPatchAttempts(target = {}, agentId = "", patchBody = {}, patchBodyWithIdentity = {}) {
+  const tid = String(target.thread_id || "").trim();
+  const cid = String(target.conversation_id || "").trim();
+  const aid = String(agentId || "").trim().toLowerCase();
+  return [
+    ...(tid ? [
+      { path: `/api/threads/${encodeURIComponent(tid)}/team/members/${encodeURIComponent(aid)}`, body: patchBody },
+      { path: `/threads/${encodeURIComponent(tid)}/team/members/${encodeURIComponent(aid)}`, body: patchBody },
+      { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}`, body: patchBody },
+      { path: `/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}`, body: patchBody },
+    ] : []),
+    ...(cid ? [
+      { path: `/api/conversations/${encodeURIComponent(cid)}/agents/${encodeURIComponent(aid)}`, body: patchBody },
+    ] : []),
+    { path: "/api/conversation_agents", body: patchBodyWithIdentity },
+    { path: "/api/conversation-agents", body: patchBodyWithIdentity },
+  ];
+}
+
+function buildCanonicalTeamDeleteAttempts(target = {}, agentId = "", body = {}) {
+  const tid = String(target.thread_id || "").trim();
+  const cid = String(target.conversation_id || "").trim();
+  const aid = String(agentId || "").trim().toLowerCase();
+  return [
+    ...(tid ? [
+      { path: `/api/threads/${encodeURIComponent(tid)}/team/members/${encodeURIComponent(aid)}` },
+      { path: `/threads/${encodeURIComponent(tid)}/team/members/${encodeURIComponent(aid)}` },
+      { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}` },
+      { path: `/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}` },
+    ] : []),
+    ...(cid ? [
+      { path: `/api/conversations/${encodeURIComponent(cid)}/agents/${encodeURIComponent(aid)}` },
+    ] : []),
+    { path: "/api/conversation_agents", body },
+    { path: "/api/conversation-agents", body },
+    { path: "/conversation_agents", body },
+  ];
 }
 
 function normalizeCatalogAgent(entity) {
@@ -1643,33 +1734,21 @@ export class GocClient {
     });
   }
 
-  async listConversationAgents(threadTarget) {
+  async listTeamMembers(threadTarget) {
     const target = normalizeConversationTarget(threadTarget);
     const tid = String(target.thread_id || "").trim();
     const cid = String(target.conversation_id || "").trim();
     if (!tid && !cid) throw new Error("listConversationAgents requires threadId or conversationId");
-    const query = buildConversationIdentityQuery(target);
     const data = await this._requestAny({
       method: "GET",
-      attempts: [
-        ...(tid ? [
-          { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents` },
-          { path: `/threads/${encodeURIComponent(tid)}/conversation/agents` },
-        ] : []),
-        ...(cid ? [
-          { path: `/api/conversations/${encodeURIComponent(cid)}/agents` },
-        ] : []),
-        { path: "/api/conversation_agents", query },
-        { path: "/api/conversation-agents", query },
-        { path: "/conversation_agents", query },
-      ],
+      attempts: buildCanonicalTeamListAttempts(target),
     });
     return extractConversationAgentsArray(data)
       .map((row) => normalizeConversationAgent(row, tid))
       .filter((row) => row.agent_id);
   }
 
-  async addConversationAgent(threadTarget, agentId, enabled = true) {
+  async addTeamMember(threadTarget, agentId, enabled = true) {
     const target = normalizeConversationTarget(threadTarget);
     const tid = String(target.thread_id || "").trim();
     const cid = String(target.conversation_id || "").trim();
@@ -1683,18 +1762,7 @@ export class GocClient {
     const body = buildConversationIdentityPatchBody(addBody, target);
     const data = await this._requestAny({
       method: "POST",
-      attempts: [
-        ...(tid ? [
-          { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents`, body: addBody },
-          { path: `/threads/${encodeURIComponent(tid)}/conversation/agents`, body: addBody },
-        ] : []),
-        ...(cid ? [
-          { path: `/api/conversations/${encodeURIComponent(cid)}/agents`, body: addBody },
-        ] : []),
-        { path: "/api/conversation_agents", body },
-        { path: "/api/conversation-agents", body },
-        { path: "/conversation_agents", body },
-      ],
+      attempts: buildCanonicalTeamAddAttempts(target, addBody, body),
     });
     const rows = extractConversationAgentsArray(data)
       .map((entry) => normalizeConversationAgent(entry, tid))
@@ -1705,7 +1773,7 @@ export class GocClient {
     return normalizeConversationAgent(normalizeEntity(data, ["conversation_agent", "membership", "data"]), tid);
   }
 
-  async patchConversationAgent(threadTarget, agentId, patch = {}) {
+  async patchTeamMember(threadTarget, agentId, patch = {}) {
     const target = normalizeConversationTarget(threadTarget);
     const tid = String(target.thread_id || "").trim();
     const cid = String(target.conversation_id || "").trim();
@@ -1729,17 +1797,7 @@ export class GocClient {
     }, target);
     const data = await this._requestAny({
       method: "PATCH",
-      attempts: [
-        ...(tid ? [
-          { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}`, body: patchBody },
-          { path: `/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}`, body: patchBody },
-        ] : []),
-        ...(cid ? [
-          { path: `/api/conversations/${encodeURIComponent(cid)}/agents/${encodeURIComponent(aid)}`, body: patchBody },
-        ] : []),
-        { path: "/api/conversation_agents", body: patchBodyWithIdentity },
-        { path: "/api/conversation-agents", body: patchBodyWithIdentity },
-      ],
+      attempts: buildCanonicalTeamPatchAttempts(target, aid, patchBody, patchBodyWithIdentity),
     });
     const rows = extractConversationAgentsArray(data)
       .map((entry) => normalizeConversationAgent(entry, tid))
@@ -1764,7 +1822,7 @@ export class GocClient {
     };
   }
 
-  async removeConversationAgent(threadTarget, agentId) {
+  async removeTeamMember(threadTarget, agentId) {
     const target = normalizeConversationTarget(threadTarget);
     const tid = String(target.thread_id || "").trim();
     const cid = String(target.conversation_id || "").trim();
@@ -1776,18 +1834,7 @@ export class GocClient {
     }, target);
     await this._requestAny({
       method: "DELETE",
-      attempts: [
-        ...(tid ? [
-          { path: `/api/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}` },
-          { path: `/threads/${encodeURIComponent(tid)}/conversation/agents/${encodeURIComponent(aid)}` },
-        ] : []),
-        ...(cid ? [
-          { path: `/api/conversations/${encodeURIComponent(cid)}/agents/${encodeURIComponent(aid)}` },
-        ] : []),
-        { path: "/api/conversation_agents", body },
-        { path: "/api/conversation-agents", body },
-        { path: "/conversation_agents", body },
-      ],
+      attempts: buildCanonicalTeamDeleteAttempts(target, aid, body),
     });
     return {
       ok: true,
@@ -1795,6 +1842,22 @@ export class GocClient {
       conversation_id: cid,
       agent_id: aid,
     };
+  }
+
+  async listConversationAgents(threadTarget) {
+    return await this.listTeamMembers(threadTarget);
+  }
+
+  async addConversationAgent(threadTarget, agentId, enabled = true) {
+    return await this.addTeamMember(threadTarget, agentId, enabled);
+  }
+
+  async patchConversationAgent(threadTarget, agentId, patch = {}) {
+    return await this.patchTeamMember(threadTarget, agentId, patch);
+  }
+
+  async removeConversationAgent(threadTarget, agentId) {
+    return await this.removeTeamMember(threadTarget, agentId);
   }
 
   async listAgents(scope = "") {

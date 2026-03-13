@@ -83,9 +83,9 @@ test("runConversationAgentTeamCommand applies local mutation and formats the res
     ...createFormatterDeps(),
   });
 
-  assert.match(listed.message, /현재 conversation membership/);
-  assert.match(listed.message, /@planner, @coder/);
-  assert.match(listed.message, /@researcher/);
+  assert.match(listed.message, /현재 agent\/team 상태/);
+  assert.match(listed.message, /explicit_enabled: @planner, @coder/);
+  assert.match(listed.message, /optional_members: @researcher/);
 });
 
 test("applyConversationAgentMutation preserves local catalog validation", async () => {
@@ -185,4 +185,106 @@ test("applyConversationAgentMutation skips local catalog validation for goc auth
   assert.equal(mutation.verification.confirmed, true);
   assert.deepEqual(runtime.enabledAgentIds, ["ghost"]);
   assert.deepEqual(runtime.conversationAgents, [{ agent_id: "ghost", enabled: true }]);
+});
+
+test("/agents list separates baseline defaults, explicit membership, and last active run team", async () => {
+  const runtime = {
+    mode: "goc",
+    runtimeAuthority: {
+      mode: "goc",
+      plan_source: "local",
+      context_source: "goc",
+      agent_catalog_source: "goc",
+      conversation_team_source: "goc",
+      skill_catalog_source: "mixed",
+    },
+    map: { threadId: "goc-thread" },
+    conversation: { id: "goc-conversation", thread_id: "goc-thread" },
+    conversationMembershipTarget: {
+      thread_id: "goc-thread",
+      conversation_id: "goc-conversation",
+      source: "goc",
+    },
+    baselineDefaultAgentIds: ["planner", "coder"],
+    conversationAgents: [
+      { agent_id: "researcher", enabled: true },
+      { agent_id: "coder", enabled: false },
+    ],
+    agentsCatalog: [
+      { id: "planner" },
+      { id: "coder" },
+      { id: "researcher" },
+      { id: "reviewer" },
+    ],
+    runtimeTeamSnapshot: {
+      runtime_agents: [
+        { template_id: "reviewer" },
+        { template_id: "coder" },
+      ],
+    },
+  };
+
+  const result = await runConversationAgentTeamCommand({
+    command: "list",
+    runtime,
+    jobId: "job_team_4",
+    source: "test_agents_command",
+    agentRegistry: { agents: runtime.agentsCatalog },
+    ...createFormatterDeps(),
+  });
+
+  assert.match(result.message, /baseline_defaults: @planner, @coder/);
+  assert.match(result.message, /explicit_enabled: @researcher/);
+  assert.match(result.message, /explicit_disabled: @coder/);
+  assert.match(result.message, /effective_enabled: @planner, @researcher/);
+  assert.match(result.message, /optional_members: @reviewer/);
+  assert.match(result.message, /last_active_run_team: @reviewer, @coder/);
+  assert.deepEqual(result.baselineDefaultAgentIds, ["planner", "coder"]);
+  assert.deepEqual(result.explicitEnabledAgentIds, ["researcher"]);
+  assert.deepEqual(result.explicitDisabledAgentIds, ["coder"]);
+  assert.deepEqual(result.enabledAgentIds, ["planner", "researcher"]);
+});
+
+test("/agents list keeps baseline defaults visible when GoC explicit membership sync is degraded", async () => {
+  const runtime = {
+    mode: "goc",
+    runtimeAuthority: {
+      mode: "goc",
+      plan_source: "local",
+      context_source: "goc",
+      agent_catalog_source: "goc",
+      conversation_team_source: "goc",
+      skill_catalog_source: "mixed",
+    },
+    map: { threadId: "goc-thread" },
+    conversation: { id: "goc-conversation", thread_id: "goc-thread" },
+    conversationMembershipTarget: {
+      thread_id: "goc-thread",
+      conversation_id: "goc-conversation",
+      source: "goc",
+    },
+    baselineDefaultAgentIds: ["planner", "coder"],
+    conversationAgents: [],
+    conversationMembershipWarning: "team_sync:list_explicit_members:GoC API GET /api/threads/goc-thread/team failed (404)",
+    agentsCatalog: [
+      { id: "planner" },
+      { id: "coder" },
+      { id: "researcher" },
+    ],
+  };
+
+  const result = await runConversationAgentTeamCommand({
+    command: "list",
+    runtime,
+    jobId: "job_team_5",
+    source: "test_agents_command",
+    agentRegistry: { agents: runtime.agentsCatalog },
+    ...createFormatterDeps(),
+  });
+
+  assert.match(result.message, /baseline_defaults: @planner, @coder/);
+  assert.match(result.message, /explicit_enabled: \(none\)/);
+  assert.match(result.message, /effective_enabled: @planner, @coder/);
+  assert.match(result.message, /warnings: team_sync:list_explicit_members:/);
+  assert.doesNotMatch(result.message, /add_baseline_agent|bootstrap_default_agents/);
 });

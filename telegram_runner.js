@@ -6290,31 +6290,19 @@ function buildSupervisorExecutionCallbacks({
         action,
         toolName: "list_agents",
         work: async () => {
-          const convRows = Array.isArray(runtime?.conversationAgents) ? runtime.conversationAgents : [];
-          const enabled = normalizeCatalogIds(runtime?.enabledAgentIds || []);
-          const members = normalizeCatalogIds(convRows.map((row) => row?.agent_id));
-          const available = normalizeCatalogIds(runtime?.agentsCatalog || []);
-          const disabled = action?.include_disabled === false
-            ? []
-            : members.filter((id) => !enabled.includes(id));
-          const availableOnly = available.filter((id) => !members.includes(id));
-          const lines = ["현재 conversation agent 상태"];
-          lines.push(`- thread_id: ${String(runtime?.map?.threadId || "").trim() || "(none)"}`);
-          lines.push(enabled.length > 0
-            ? `- enabled: ${enabled.map((id) => `@${id}`).join(", ")}`
-            : "- enabled: (none)");
-          if (action?.include_disabled !== false) {
-            lines.push(disabled.length > 0
-              ? `- disabled: ${disabled.map((id) => `@${id}`).join(", ")}`
-              : "- disabled: (none)");
-          }
-          lines.push(available.length > 0
-            ? `- available_catalog: ${available.slice(0, 40).map((id) => `@${id}`).join(", ")}`
-            : "- available_catalog: (none)");
-          lines.push(availableOnly.length > 0
-            ? `- not_in_team: ${availableOnly.slice(0, 40).map((id) => `@${id}`).join(", ")}`
-            : "- not_in_team: (none)");
-          return { text: lines.join("\n") };
+          const result = await runConversationAgentTeamCommand({
+            command: "list",
+            runtime,
+            jobId,
+            source: "chat_executor_list_agents",
+            agentRegistry,
+            buildAgentDisplayIndex,
+            formatAgentRef,
+            refreshAgentRegistry,
+            summarizeSelectionState,
+            recordDiagnostic: recordMembershipMutationDiagnostic,
+          });
+          return { text: result.message };
         },
       });
     },

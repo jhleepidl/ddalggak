@@ -435,10 +435,15 @@ export class GocConversationTeamStore {
 
   async _listStrict(target = {}) {
     const client = this._requireClient();
-    if (typeof client.listConversationAgents !== "function") {
-      throw new Error("listConversationAgents API unavailable");
+    const listMembers = typeof client.listTeamMembers === "function"
+      ? client.listTeamMembers.bind(client)
+      : (typeof client.listConversationAgents === "function"
+        ? client.listConversationAgents.bind(client)
+        : null);
+    if (!listMembers) {
+      throw new Error("listTeamMembers API unavailable");
     }
-    const rows = await client.listConversationAgents(target);
+    const rows = await listMembers(target);
     return this._normalizeRows(rows, {
       threadId: target.thread_id,
       conversationId: target.conversation_id,
@@ -465,7 +470,7 @@ export class GocConversationTeamStore {
     try {
       rows = await this._listStrict(target);
     } catch (error) {
-      warnings.push(`list_conversation_agents:${String(error?.message ?? error)}`);
+      warnings.push(`team_sync:list_explicit_members:${String(error?.message ?? error)}`);
       rows = [];
     }
     return {
@@ -489,51 +494,19 @@ export class GocConversationTeamStore {
       jobId,
       source: source || "ensure_team",
     });
+    const baselineIds = uniqIds(baselineAgentIds);
     let rows = [];
 
     try {
       rows = await this._listStrict(target);
     } catch (error) {
-      warnings.push(`list_conversation_agents_initial:${String(error?.message ?? error)}`);
-    }
-
-    if (rows.length === 0) {
-      const client = this._requireClient();
-      if (typeof client.bootstrapDefaultAgents === "function") {
-        try {
-          await client.bootstrapDefaultAgents(target.thread_id, { addToConversation: true });
-          rows = await this._listStrict(target);
-        } catch (error) {
-          warnings.push(`bootstrap_default_agents:${String(error?.message ?? error)}`);
-        }
-      } else {
-        warnings.push("bootstrap_default_agents_api_unavailable");
-      }
-    }
-
-    if (rows.length === 0) {
-      const client = this._requireClient();
-      if (typeof client.addConversationAgent === "function") {
-        for (const agentId of uniqIds(baselineAgentIds)) {
-          try {
-            await client.addConversationAgent(target, agentId, true);
-          } catch (error) {
-            warnings.push(`add_baseline_agent:${agentId}:${String(error?.message ?? error)}`);
-          }
-        }
-        try {
-          rows = await this._listStrict(target);
-        } catch (error) {
-          warnings.push(`list_conversation_agents_after_baseline_add:${String(error?.message ?? error)}`);
-        }
-      } else {
-        warnings.push("add_conversation_agent_api_unavailable");
-      }
+      warnings.push(`team_sync:list_explicit_members:${String(error?.message ?? error)}`);
     }
 
     return {
       target,
       rows,
+      baseline_agent_ids: baselineIds,
       warnings: normalizeWarnings(warnings),
     };
   }
@@ -548,12 +521,18 @@ export class GocConversationTeamStore {
     enabled = true,
   } = {}) {
     const client = this._requireClient();
+    const addMember = typeof client.addTeamMember === "function"
+      ? client.addTeamMember.bind(client)
+      : (typeof client.addConversationAgent === "function"
+        ? client.addConversationAgent.bind(client)
+        : null);
     const target = membershipTarget
       ? summarizeTarget(membershipTarget, { source: "goc" })
       : await this._resolveTarget({ threadId, conversationId, jobId, source });
     const cleanAgentId = cleanId(agentId);
     if (!cleanAgentId) throw new Error("addAgent requires agentId");
-    const mutationResponse = await client.addConversationAgent(target, cleanAgentId, enabled !== false);
+    if (!addMember) throw new Error("addTeamMember API unavailable");
+    const mutationResponse = await addMember(target, cleanAgentId, enabled !== false);
     const rows = await this._listStrict(target);
     return {
       target,
@@ -576,12 +555,18 @@ export class GocConversationTeamStore {
     agentId = "",
   } = {}) {
     const client = this._requireClient();
+    const removeMember = typeof client.removeTeamMember === "function"
+      ? client.removeTeamMember.bind(client)
+      : (typeof client.removeConversationAgent === "function"
+        ? client.removeConversationAgent.bind(client)
+        : null);
     const target = membershipTarget
       ? summarizeTarget(membershipTarget, { source: "goc" })
       : await this._resolveTarget({ threadId, conversationId, jobId, source });
     const cleanAgentId = cleanId(agentId);
     if (!cleanAgentId) throw new Error("removeAgent requires agentId");
-    const mutationResponse = await client.removeConversationAgent(target, cleanAgentId);
+    if (!removeMember) throw new Error("removeTeamMember API unavailable");
+    const mutationResponse = await removeMember(target, cleanAgentId);
     const rows = await this._listStrict(target);
     return {
       target,
@@ -610,6 +595,16 @@ export class GocConversationTeamStore {
     enabled = true,
   } = {}) {
     const client = this._requireClient();
+    const patchMember = typeof client.patchTeamMember === "function"
+      ? client.patchTeamMember.bind(client)
+      : (typeof client.patchConversationAgent === "function"
+        ? client.patchConversationAgent.bind(client)
+        : null);
+    const addMember = typeof client.addTeamMember === "function"
+      ? client.addTeamMember.bind(client)
+      : (typeof client.addConversationAgent === "function"
+        ? client.addConversationAgent.bind(client)
+        : null);
     const target = membershipTarget
       ? summarizeTarget(membershipTarget, { source: "goc" })
       : await this._resolveTarget({ threadId, conversationId, jobId, source });
@@ -617,19 +612,19 @@ export class GocConversationTeamStore {
     if (!cleanAgentId) throw new Error("setAgentEnabled requires agentId");
 
     let mutationResponse = null;
-    if (typeof client.patchConversationAgent === "function") {
-      mutationResponse = await client.patchConversationAgent(target, cleanAgentId, {
+    if (patchMember) {
+      mutationResponse = await patchMember(target, cleanAgentId, {
         enabled: enabled !== false,
       }).catch(async () => {
-        if (typeof client.addConversationAgent === "function") {
-          return await client.addConversationAgent(target, cleanAgentId, enabled !== false);
+        if (addMember) {
+          return await addMember(target, cleanAgentId, enabled !== false);
         }
-        throw new Error("conversation agent patch is not supported");
+        throw new Error("team member patch is not supported");
       });
-    } else if (typeof client.addConversationAgent === "function") {
-      mutationResponse = await client.addConversationAgent(target, cleanAgentId, enabled !== false);
+    } else if (addMember) {
+      mutationResponse = await addMember(target, cleanAgentId, enabled !== false);
     } else {
-      throw new Error("conversation agent patch is not supported");
+      throw new Error("team member patch is not supported");
     }
     const rows = await this._listStrict(target);
     return {

@@ -18,6 +18,18 @@ function cleanId(raw = "") {
   return String(raw || "").trim().toLowerCase();
 }
 
+function uniqIds(values = []) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of asArray(values)) {
+    const id = cleanId(raw);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
 function actionVerb(actionType = "") {
   const type = cleanId(actionType);
   if (type === "add") return "추가";
@@ -50,6 +62,78 @@ function summarizeSelectionStateDefault({ catalog = [], enabled = [] } = {}) {
     catalog_ids: catalogIds,
     enabled_ids: enabledIds,
     disabled_ids: catalogIds.filter((id) => !enabledSet.has(id)),
+  };
+}
+
+function deriveLastActiveRunTeamAgentIds(runtime = {}) {
+  const snapshot = runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
+    ? runtime.runtimeTeamSnapshot
+    : (runtime?.runtime_team_snapshot && typeof runtime.runtime_team_snapshot === "object"
+      ? runtime.runtime_team_snapshot
+      : null);
+  const runtimeAgents = Array.isArray(snapshot?.runtime_agents)
+    ? snapshot.runtime_agents
+    : (Array.isArray(snapshot?.runtimeAgents) ? snapshot.runtimeAgents : []);
+  return uniqIds(runtimeAgents.map((row) => (
+    row?.template_id
+    || row?.templateId
+    || row?.agent_id
+    || row?.agentId
+    || row?.role_label
+    || row?.roleLabel
+  )));
+}
+
+export function deriveConversationTeamView(runtime = {}, {
+  conversationRows = null,
+  catalogRows = null,
+  baselineAgentIds = null,
+} = {}) {
+  const convRows = asArray(conversationRows ?? runtime?.conversationAgents);
+  const catalog = asArray(catalogRows ?? runtime?.agentsCatalog);
+  const teamConsistency = reconcileConversationTeamWithCatalog({
+    conversationRows: convRows,
+    catalogRows: catalog,
+  });
+  const explicitMemberAgentIds = uniqIds(teamConsistency.member_agent_ids);
+  const explicitEnabledAgentIds = uniqIds(teamConsistency.enabled_member_agent_ids);
+  const explicitDisabledSet = new Set(
+    explicitMemberAgentIds.filter((id) => !explicitEnabledAgentIds.includes(id))
+  );
+  const baselineDefaultAgentIds = uniqIds(
+    baselineAgentIds ?? runtime?.baselineDefaultAgentIds ?? []
+  );
+  const effectiveEnabledAgentIds = uniqIds([
+    ...baselineDefaultAgentIds,
+    ...enabledAgentIdsFromConsistency(teamConsistency),
+  ]).filter((id) => !explicitDisabledSet.has(id));
+  const availableCatalogAgentIds = uniqIds(
+    catalog.map((row) => row?.id || row?.agent_id || row?.agentId)
+  );
+  const availableCatalogSet = new Set(availableCatalogAgentIds);
+  const unknownExplicitMemberAgentIds = explicitMemberAgentIds.filter((id) => !availableCatalogSet.has(id));
+  const availableNotExplicitAgentIds = availableCatalogAgentIds.filter((id) => !explicitMemberAgentIds.includes(id));
+  const baselineDefaultSet = new Set(baselineDefaultAgentIds);
+  const optionalAgentIds = availableCatalogAgentIds.filter((id) => (
+    !baselineDefaultSet.has(id) && !explicitMemberAgentIds.includes(id)
+  ));
+  const effectiveEnabledSet = new Set(effectiveEnabledAgentIds);
+  const enabledAgents = catalog.filter((agent) => effectiveEnabledSet.has(cleanId(agent?.id || agent?.agent_id || agent?.agentId)));
+  const lastActiveRunTeamAgentIds = deriveLastActiveRunTeamAgentIds(runtime);
+
+  return {
+    teamConsistency,
+    baselineDefaultAgentIds,
+    explicitMemberAgentIds,
+    explicitEnabledAgentIds,
+    explicitDisabledAgentIds: explicitMemberAgentIds.filter((id) => explicitDisabledSet.has(id)),
+    effectiveEnabledAgentIds,
+    availableCatalogAgentIds,
+    availableNotExplicitAgentIds,
+    optionalAgentIds,
+    unknownExplicitMemberAgentIds,
+    lastActiveRunTeamAgentIds,
+    enabledAgents,
   };
 }
 
@@ -115,18 +199,19 @@ export function syncRuntimeConversationTeamState(runtime = {}, {
   summarizeSelectionState = null,
 } = {}) {
   const convRows = asArray(conversationRows);
-  const teamConsistency = reconcileConversationTeamWithCatalog({
-    conversationRows: convRows,
-    catalogRows: asArray(runtime?.agentsCatalog),
-  });
-  const enabledAgentIds = enabledAgentIdsFromConsistency(teamConsistency);
-  const enabledSet = new Set(enabledAgentIds);
   const summarizeSelection = typeof summarizeSelectionState === "function"
     ? summarizeSelectionState
     : summarizeSelectionStateDefault;
   runtime.conversationAgents = convRows;
-  runtime.enabledAgentIds = enabledAgentIds;
-  runtime.unknownConversationAgentIds = asArray(teamConsistency.unknown_member_agent_ids);
+  const view = deriveConversationTeamView(runtime, {
+    conversationRows: convRows,
+  });
+  runtime.baselineDefaultAgentIds = view.baselineDefaultAgentIds;
+  runtime.explicitConversationAgentIds = view.explicitMemberAgentIds;
+  runtime.explicitEnabledConversationAgentIds = view.explicitEnabledAgentIds;
+  runtime.explicitDisabledConversationAgentIds = view.explicitDisabledAgentIds;
+  runtime.enabledAgentIds = view.effectiveEnabledAgentIds;
+  runtime.unknownConversationAgentIds = view.unknownExplicitMemberAgentIds;
   if (membershipTarget && typeof membershipTarget === "object") {
     runtime.conversationMembershipTarget = summarizeMembershipTarget(membershipTarget);
     runtime.conversation = {
@@ -143,18 +228,19 @@ export function syncRuntimeConversationTeamState(runtime = {}, {
     .map((line) => String(line || "").trim())
     .filter(Boolean);
   if (runtime.unknownConversationAgentIds.length > 0) {
-    warnings.push(`unknown_catalog_agents:${runtime.unknownConversationAgentIds.join(",")}`);
+    warnings.push(`unknown_explicit_members:${runtime.unknownConversationAgentIds.join(",")}`);
   }
   runtime.conversationMembershipWarning = warnings.join(" | ");
-  runtime.agents = asArray(runtime?.agentsCatalog)
-    .filter((agent) => enabledSet.has(cleanId(agent?.id || "")));
+  runtime.agents = view.enabledAgents;
   runtime.agentSelection = summarizeSelection({
     catalog: asArray(runtime?.agentsCatalog),
     enabled: runtime.agents,
   });
   return {
     conversationAgents: convRows,
-    enabledAgentIds,
+    enabledAgentIds: view.effectiveEnabledAgentIds,
+    baselineDefaultAgentIds: view.baselineDefaultAgentIds,
+    explicitMemberAgentIds: view.explicitMemberAgentIds,
     membershipTarget: runtime.conversationMembershipTarget || null,
   };
 }
@@ -313,27 +399,22 @@ export async function runConversationAgentTeamCommand({
   }
 
   const updated = asArray(runtime?.conversationAgents);
-  const allAgentIds = Array.from(new Set(
-    updated.map((row) => cleanId(row?.agent_id || row?.agentId || "")).filter(Boolean)
-  ));
-  const enabledAgentIds = Array.from(new Set(
-    updated
-      .filter((row) => row?.enabled !== false)
-      .map((row) => cleanId(row?.agent_id || row?.agentId || ""))
-      .filter(Boolean)
-  ));
-  const disabledAgentIds = allAgentIds.filter((id) => !enabledAgentIds.includes(id));
-  const availableAgentIds = Array.from(new Set(
-    asArray(runtime?.agentsCatalog)
-      .map((row) => cleanId(row?.id || row?.agent_id || row?.agentId || ""))
-      .filter(Boolean)
-  ));
-  const availableSet = new Set(availableAgentIds);
-  const unknownMembers = allAgentIds.filter((id) => !availableSet.has(id));
-  const notInTeamAgentIds = availableAgentIds.filter((id) => !allAgentIds.includes(id));
+  const teamView = deriveConversationTeamView(runtime, {
+    conversationRows: updated,
+  });
   const targetAgentIds = cleanCommand === "list"
-    ? [...enabledAgentIds, ...allAgentIds, ...availableAgentIds]
-    : [agentId, ...enabledAgentIds, ...disabledAgentIds, ...availableAgentIds];
+    ? [
+      ...teamView.effectiveEnabledAgentIds,
+      ...teamView.explicitMemberAgentIds,
+      ...teamView.availableCatalogAgentIds,
+      ...teamView.lastActiveRunTeamAgentIds,
+    ]
+    : [
+      agentId,
+      ...teamView.effectiveEnabledAgentIds,
+      ...teamView.explicitMemberAgentIds,
+      ...teamView.availableCatalogAgentIds,
+    ];
   const { format } = await resolveAgentFormatter({
     runtime,
     agentRegistry,
@@ -350,37 +431,50 @@ export async function runConversationAgentTeamCommand({
       type: "list",
       command: cleanCommand,
       message: [
-        "현재 conversation membership",
+        "현재 agent/team 상태",
         `- job_id: ${cleanJobId}`,
         `- thread_id: ${String(runtime?.map?.threadId || "").trim() || "(none)"}`,
         `- conversation_id: ${String(runtime?.conversationMembershipTarget?.conversation_id || runtime?.conversation?.id || "").trim() || "(none)"}`,
-        enabledAgentIds.length > 0
-          ? `- enabled: ${enabledAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
-          : "- enabled: (none)",
-        disabledAgentIds.length > 0
-          ? `- disabled: ${disabledAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
-          : "- disabled: (none)",
-        unknownMembers.length > 0
-          ? `- unknown_catalog_members: ${unknownMembers.slice(0, 20).map((id) => format(id)).join(", ")}`
+        teamView.baselineDefaultAgentIds.length > 0
+          ? `- baseline_defaults: ${teamView.baselineDefaultAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
+          : "- baseline_defaults: (none)",
+        teamView.explicitEnabledAgentIds.length > 0
+          ? `- explicit_enabled: ${teamView.explicitEnabledAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
+          : "- explicit_enabled: (none)",
+        teamView.explicitDisabledAgentIds.length > 0
+          ? `- explicit_disabled: ${teamView.explicitDisabledAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
+          : "- explicit_disabled: (none)",
+        teamView.effectiveEnabledAgentIds.length > 0
+          ? `- effective_enabled: ${teamView.effectiveEnabledAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
+          : "- effective_enabled: (none)",
+        teamView.unknownExplicitMemberAgentIds.length > 0
+          ? `- unknown_explicit_members: ${teamView.unknownExplicitMemberAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
           : "",
-        availableAgentIds.length > 0
-          ? `- available_catalog: ${availableAgentIds.slice(0, 30).map((id) => format(id)).join(", ")}`
+        teamView.availableCatalogAgentIds.length > 0
+          ? `- available_catalog: ${teamView.availableCatalogAgentIds.slice(0, 30).map((id) => format(id)).join(", ")}`
           : "- available_catalog: (none)",
-        notInTeamAgentIds.length > 0
-          ? `- not_in_team: ${notInTeamAgentIds.slice(0, 30).map((id) => format(id)).join(", ")}`
-          : "- not_in_team: (none)",
+        teamView.optionalAgentIds.length > 0
+          ? `- optional_members: ${teamView.optionalAgentIds.slice(0, 30).map((id) => format(id)).join(", ")}`
+          : "- optional_members: (none)",
+        teamView.lastActiveRunTeamAgentIds.length > 0
+          ? `- last_active_run_team: ${teamView.lastActiveRunTeamAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
+          : "",
         runtime?.conversationMembershipWarning
-          ? `- warning: ${String(runtime.conversationMembershipWarning || "").trim()}`
+          ? `- warnings: ${String(runtime.conversationMembershipWarning || "").trim()}`
           : "",
         authority?.mode === "goc"
           ? "명령: /agents registry | /agents public [query] | /agents add <id> | /agents remove <id> | /agents enable <id> | /agents disable <id>"
           : "명령: /agents registry | /agents add <id> | /agents remove <id> | /agents enable <id> | /agents disable <id>",
       ].filter(Boolean).join("\n"),
-      enabledAgentIds,
-      disabledAgentIds,
-      availableAgentIds,
-      unknownMembers,
-      notInTeamAgentIds,
+      baselineDefaultAgentIds: teamView.baselineDefaultAgentIds,
+      enabledAgentIds: teamView.effectiveEnabledAgentIds,
+      explicitEnabledAgentIds: teamView.explicitEnabledAgentIds,
+      explicitDisabledAgentIds: teamView.explicitDisabledAgentIds,
+      availableAgentIds: teamView.availableCatalogAgentIds,
+      unknownMembers: teamView.unknownExplicitMemberAgentIds,
+      optionalAgentIds: teamView.optionalAgentIds,
+      notInTeamAgentIds: teamView.availableNotExplicitAgentIds,
+      lastActiveRunTeamAgentIds: teamView.lastActiveRunTeamAgentIds,
     };
   }
 
@@ -392,17 +486,20 @@ export async function runConversationAgentTeamCommand({
       `✅ conversation agent ${actionVerb(cleanCommand)} 완료`,
       `- job_id: ${cleanJobId}`,
       `- agent: ${format(agentId)}`,
-      enabledAgentIds.length > 0
-        ? `- enabled: ${enabledAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
-        : "- enabled: (none)",
-      disabledAgentIds.length > 0
-        ? `- disabled: ${disabledAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
-        : "- disabled: (none)",
+      teamView.effectiveEnabledAgentIds.length > 0
+        ? `- effective_enabled: ${teamView.effectiveEnabledAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
+        : "- effective_enabled: (none)",
+      teamView.explicitDisabledAgentIds.length > 0
+        ? `- explicit_disabled: ${teamView.explicitDisabledAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
+        : "- explicit_disabled: (none)",
     ].join("\n"),
-    enabledAgentIds,
-    disabledAgentIds,
-    availableAgentIds,
-    unknownMembers,
-    notInTeamAgentIds,
+    baselineDefaultAgentIds: teamView.baselineDefaultAgentIds,
+    enabledAgentIds: teamView.effectiveEnabledAgentIds,
+    explicitEnabledAgentIds: teamView.explicitEnabledAgentIds,
+    explicitDisabledAgentIds: teamView.explicitDisabledAgentIds,
+    availableAgentIds: teamView.availableCatalogAgentIds,
+    unknownMembers: teamView.unknownExplicitMemberAgentIds,
+    optionalAgentIds: teamView.optionalAgentIds,
+    notInTeamAgentIds: teamView.availableNotExplicitAgentIds,
   };
 }

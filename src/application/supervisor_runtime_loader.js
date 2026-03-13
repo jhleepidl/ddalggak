@@ -1,6 +1,6 @@
 import {
-  reconcileConversationTeamWithCatalog,
-} from "./conversation_team_mutation.js";
+  syncRuntimeConversationTeamState,
+} from "./agent_team_commands.js";
 import { summarizeMembershipTarget } from "./membership_target.js";
 import {
   buildRunAuthorityEnvelope,
@@ -17,20 +17,6 @@ function asObject(value) {
 
 function cleanId(raw = "") {
   return String(raw || "").trim().toLowerCase();
-}
-
-function enabledAgentIdsFromConsistency(teamConsistency = {}) {
-  const row = asObject(teamConsistency);
-  const sourceIds = asArray(row.catalog_agent_ids).length > 0
-    ? row.active_enabled_agent_ids
-    : row.enabled_member_agent_ids;
-  return Array.from(new Set(asArray(sourceIds).map((id) => cleanId(id)).filter(Boolean)));
-}
-
-function filterEnabledCatalogRows(rows = [], enabledIds = []) {
-  const enabledSet = new Set(asArray(enabledIds).map((id) => cleanId(id)).filter(Boolean));
-  return asArray(rows)
-    .filter((row) => enabledSet.has(cleanId(row?.id || row?.agent_id || row?.agentId)));
 }
 
 async function loadAgentRegistry({
@@ -179,10 +165,11 @@ export function createSupervisorRuntimeLoader({
       });
 
       if (runtimeAuthority?.mode !== "goc") {
+        const baselineDefaultAgentIds = asArray(localDeps.baselineAgentIds);
         const teamResult = (teamStore && typeof teamStore.ensureTeam === "function")
           ? await teamStore.ensureTeam({
             jobId: cleanJobId,
-            baselineAgentIds: localDeps.baselineAgentIds,
+            baselineAgentIds: baselineDefaultAgentIds,
           })
           : {
             target: {
@@ -190,20 +177,11 @@ export function createSupervisorRuntimeLoader({
               conversation_id: `local:${cleanJobId}`,
               source: "local",
             },
-            rows: localDeps.baselineAgentIds.map((agentId) => ({ agent_id: agentId, enabled: true })),
+            rows: baselineDefaultAgentIds.map((agentId) => ({ agent_id: agentId, enabled: true })),
             warnings: [],
           };
         const conversationAgents = asArray(teamResult?.rows);
-        const teamConsistency = reconcileConversationTeamWithCatalog({
-          conversationRows: conversationAgents,
-          catalogRows: asArray(registry?.agents),
-        });
-        const enabledAgentIds = enabledAgentIdsFromConsistency(teamConsistency);
         const localWarningLines = [...asArray(teamResult?.warnings)];
-        if (asArray(teamConsistency.unknown_member_agent_ids).length > 0) {
-          localWarningLines.push(`unknown_catalog_agents:${teamConsistency.unknown_member_agent_ids.join(",")}`);
-        }
-        const enabledAgents = filterEnabledCatalogRows(registry?.agents, enabledAgentIds);
         const localThreadId = String(
           teamResult?.target?.thread_id || `local:${cleanJobId}`
         ).trim();
@@ -211,7 +189,7 @@ export function createSupervisorRuntimeLoader({
           teamResult?.target?.conversation_id || localThreadId
         ).trim();
 
-        return {
+        const runtimeResult = {
           mode: "local",
           ...buildRunAuthorityEnvelope(
             { runtime_authority: runtimeAuthority },
@@ -234,21 +212,22 @@ export function createSupervisorRuntimeLoader({
             source: "local",
           }),
           conversationAgents,
-          conversationMembershipWarning: localWarningLines.join(" | "),
-          unknownConversationAgentIds: asArray(teamConsistency.unknown_member_agent_ids),
+          baselineDefaultAgentIds,
+          conversationMembershipWarning: "",
+          unknownConversationAgentIds: [],
           jobConfig: localDeps.fallbackNormalized.configNormalized,
           jobConfigDebugSummary: localDeps.summarizeJobConfigText(localDeps.fallbackNormalized.configNormalized),
           jobConfigNodeId: "",
           agentsCatalog: asArray(registry?.agents),
           toolsCatalog: [],
-          enabledAgentIds,
+          enabledAgentIds: [],
           enabledToolIds: localDeps.fallbackNormalized.enabledToolIds,
           agentSelection: localDeps.summarizeSelection({
             catalog: asArray(registry?.agents),
-            enabled: enabledAgents,
+            enabled: [],
           }),
           toolSelection: localDeps.summarizeSelection({ catalog: [], enabled: [] }),
-          agents: enabledAgents,
+          agents: [],
           tools: [],
           recentArtifactNodeIds: [],
           sharedActiveTypeBreakdown: {},
@@ -256,6 +235,17 @@ export function createSupervisorRuntimeLoader({
           globalSummary: "",
           capabilities,
         };
+        syncRuntimeConversationTeamState(runtimeResult, {
+          conversationRows: conversationAgents,
+          membershipTarget: teamResult?.target || {
+            thread_id: localThreadId,
+            conversation_id: localConversationId,
+            source: "local",
+          },
+          warningLines: localWarningLines,
+          summarizeSelectionState: localDeps.summarizeSelection,
+        });
+        return runtimeResult;
       }
 
       if (typeof requireGocClient !== "function") {
@@ -314,7 +304,16 @@ export function createSupervisorRuntimeLoader({
           target: summarizeMembershipTarget({ thread_id: map.threadId, source: "goc" }),
           rows: [],
           warnings: ["conversation_team_store_unavailable"],
+          baseline_agent_ids: typeof pickBaselineConversationCatalogAgents === "function"
+            ? pickBaselineConversationCatalogAgents(asArray(registry?.agents))
+            : [],
         };
+      const baselineDefaultAgentIds = asArray(
+        teamResult?.baseline_agent_ids
+        || (typeof pickBaselineConversationCatalogAgents === "function"
+          ? pickBaselineConversationCatalogAgents(asArray(registry?.agents))
+          : [])
+      );
       for (const warning of asArray(teamResult?.warnings)) {
         pushConversationWarning(warning);
       }
@@ -372,21 +371,10 @@ export function createSupervisorRuntimeLoader({
         { agentsCatalog: asArray(registry?.agents), toolsCatalog }
       );
 
-      const teamConsistency = reconcileConversationTeamWithCatalog({
-        conversationRows: conversationAgents,
-        catalogRows: asArray(registry?.agents),
-      });
-      const enabledAgentIds = enabledAgentIdsFromConsistency(teamConsistency);
-      if (asArray(teamConsistency.unknown_member_agent_ids).length > 0) {
-        pushConversationWarning("unknown_catalog_agents", null, {
-          unknown_agent_ids: teamConsistency.unknown_member_agent_ids,
-        });
-      }
       const enabledToolIds = asArray(normalized.enabledToolIds)
         .map((id) => cleanId(id))
         .filter(Boolean);
       const enabledToolSet = new Set(enabledToolIds);
-      const enabledAgents = filterEnabledCatalogRows(registry?.agents, enabledAgentIds);
       const enabledTools = toolsCatalog
         .filter((tool) => enabledToolSet.has(cleanId(tool?.id || tool?.tool_id || tool?.toolId)));
 
@@ -439,7 +427,7 @@ export function createSupervisorRuntimeLoader({
         ? summarizeJobConfigDebug
         : (() => "");
 
-      return {
+      const runtimeResult = {
         mode: "goc",
         ...buildRunAuthorityEnvelope(
           { runtime_authority: runtimeAuthority },
@@ -457,19 +445,20 @@ export function createSupervisorRuntimeLoader({
         conversation,
         conversationMembershipTarget: summarizeMembershipTarget(membershipTarget),
         conversationAgents,
-        conversationMembershipWarning: warningLines.join(" | "),
-        unknownConversationAgentIds: asArray(teamConsistency.unknown_member_agent_ids),
-        enabledAgentIds,
+        baselineDefaultAgentIds,
+        conversationMembershipWarning: "",
+        unknownConversationAgentIds: [],
+        enabledAgentIds: [],
         enabledToolIds,
         agentSelection: summarizeSelection({
           catalog: asArray(registry?.agents),
-          enabled: enabledAgents,
+          enabled: [],
         }),
         toolSelection: summarizeSelection({
           catalog: toolsCatalog,
           enabled: enabledTools,
         }),
-        agents: enabledAgents,
+        agents: [],
         tools: enabledTools,
         recentArtifactNodeIds,
         sharedActiveTypeBreakdown: {},
@@ -477,6 +466,13 @@ export function createSupervisorRuntimeLoader({
         globalSummary: globalSummary || "",
         capabilities,
       };
+      syncRuntimeConversationTeamState(runtimeResult, {
+        conversationRows: conversationAgents,
+        membershipTarget,
+        warningLines,
+        summarizeSelectionState: summarizeSelection,
+      });
+      return runtimeResult;
     } finally {
       restoreActor();
     }

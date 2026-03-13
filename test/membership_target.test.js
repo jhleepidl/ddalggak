@@ -70,7 +70,7 @@ test("summarizeConversationReadback exposes readback thread mismatch signal", ()
   assert.deepEqual(summary.readback_thread_ids, ["thread_other"]);
 });
 
-test("goc client listConversationAgents uses canonical conversation_id path", async () => {
+test("goc client listConversationAgents prefers canonical thread team routes", async () => {
   const client = new GocClient({
     apiBase: "https://example.invalid",
     serviceKey: "svc",
@@ -86,14 +86,15 @@ test("goc client listConversationAgents uses canonical conversation_id path", as
     conversation_id: "conv_1",
   });
   const paths = (captured?.attempts || []).map((attempt) => String(attempt.path || ""));
+  assert.equal(paths[0], "/api/threads/thread_1/team");
+  assert(paths.includes("/api/threads/thread_1/team/members"));
   assert(paths.includes("/api/conversations/conv_1/agents"));
-  assert(!paths.includes("/api/conversations/thread_1/agents"));
   const queryAttempt = (captured?.attempts || []).find((attempt) => String(attempt.path || "") === "/api/conversation_agents");
   assert.equal(queryAttempt?.query?.thread_id, "thread_1");
   assert.equal(queryAttempt?.query?.conversation_id, "conv_1");
 });
 
-test("goc client addConversationAgent uses canonical conversation_id path", async () => {
+test("goc client addConversationAgent prefers canonical thread team member routes", async () => {
   const client = new GocClient({
     apiBase: "https://example.invalid",
     serviceKey: "svc",
@@ -109,10 +110,52 @@ test("goc client addConversationAgent uses canonical conversation_id path", asyn
     conversation_id: "conv_1",
   }, "planner", true);
   const paths = (captured?.attempts || []).map((attempt) => String(attempt.path || ""));
+  assert.equal(paths[0], "/api/threads/thread_1/team/members");
   assert(paths.includes("/api/conversations/conv_1/agents"));
-  assert(!paths.includes("/api/conversations/thread_1/agents"));
   const bodyAttempt = (captured?.attempts || []).find((attempt) => String(attempt.path || "") === "/api/conversation_agents");
   assert.equal(bodyAttempt?.body?.thread_id, "thread_1");
   assert.equal(bodyAttempt?.body?.conversation_id, "conv_1");
   assert.equal(bodyAttempt?.body?.agent_id, "planner");
+});
+
+test("goc client patchConversationAgent prefers canonical thread team member routes", async () => {
+  const client = new GocClient({
+    apiBase: "https://example.invalid",
+    serviceKey: "svc",
+  });
+  let captured = null;
+  client._requestAny = async ({ method, attempts = [] }) => {
+    captured = { method, attempts };
+    return { id: "membership_1", thread_id: "thread_1", agent_id: "planner", enabled: false };
+  };
+
+  await client.patchConversationAgent({
+    thread_id: "thread_1",
+    conversation_id: "conv_1",
+  }, "planner", { enabled: false });
+  const paths = (captured?.attempts || []).map((attempt) => String(attempt.path || ""));
+  assert.equal(captured?.method, "PATCH");
+  assert.equal(paths[0], "/api/threads/thread_1/team/members/planner");
+  assert(paths.includes("/api/conversations/conv_1/agents/planner"));
+});
+
+test("goc client removeConversationAgent prefers canonical thread team member routes", async () => {
+  const client = new GocClient({
+    apiBase: "https://example.invalid",
+    serviceKey: "svc",
+  });
+  let captured = null;
+  client._requestAny = async ({ method, attempts = [] }) => {
+    captured = { method, attempts };
+    return { ok: true };
+  };
+
+  await client.removeConversationAgent({
+    thread_id: "thread_1",
+    conversation_id: "conv_1",
+  }, "planner");
+  const paths = (captured?.attempts || []).map((attempt) => String(attempt.path || ""));
+  assert.equal(captured?.method, "DELETE");
+  assert.equal(paths[0], "/api/threads/thread_1/team/members/planner");
+  assert(paths.includes("/api/conversations/conv_1/agents/planner"));
 });
