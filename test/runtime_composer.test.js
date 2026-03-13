@@ -89,7 +89,7 @@ test("invokeRuntimePlanner uses the composed planner when available", async () =
   assert.equal(result.route_plan.reason, "planner route");
 });
 
-test("invokeRuntimePlanner falls back to orchestration builder when planner is unavailable", async () => {
+test("invokeRuntimePlanner falls back through canonical LocalPlanner when planner is unavailable", async () => {
   const result = await invokeRuntimePlanner({
     composeForRun: () => ({
       authority: {
@@ -108,18 +108,13 @@ test("invokeRuntimePlanner falls back to orchestration builder when planner is u
     seedInstruction: "continue",
     registry: loadAgents(),
     resolveAgentId: (id) => String(id || "").trim().toLowerCase(),
-    orchestrationBuilder: (input) => ({
-      route_plan: {
-        reason: `fallback:${input.mode}`,
-        actions: [{ type: "git_summary" }],
-      },
-      team_plan: { mode: input.mode },
-      runtime_agents: [{ template_id: "planner", role_label: "planner", instance_id: "inst_planner_1" }],
-      runtime_team_snapshot: { source: "team_builder", runtime_agents: [] },
-    }),
   });
 
   assert.equal(result.plan_source, "local_fallback");
-  assert.equal(result.route_plan.reason, "fallback:continue");
+  assert.equal(result.planner_metadata.planner_type, "local");
+  assert.equal(result.interpreted_task.mode, "continue");
+  assert.equal(result.interpreted_task.job_id, "job_runtime_3");
+  assert.ok(Array.isArray(result.route_plan.actions));
+  assert.ok(result.route_plan.actions.length > 0);
   assert.equal(result.team_plan.mode, "continue");
 });

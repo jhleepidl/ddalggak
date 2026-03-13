@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { buildRuntimeOrchestration } from "./orchestrator.js";
+import { LocalPlanner } from "./local_planner.js";
 import { normalizeRunAuthority } from "./run_authority.js";
 import { composeRuntimeCapabilities } from "../runtime_capabilities/index.js";
 
@@ -78,12 +78,15 @@ export async function invokeRuntimePlanner({
   resolveAgentId = null,
   runsDir = "",
   persistSkillEvents = false,
-  orchestrationBuilder = buildRuntimeOrchestration,
 } = {}) {
   const compose = typeof composeForRun === "function" ? composeForRun : null;
   const capabilitiesPack = compose ? compose({ jobId, runtime }) : null;
   const runtimeAuthority = normalizeRunAuthority(capabilitiesPack?.authority || null);
-  const planner = capabilitiesPack?.capabilities?.planner;
+  const planner = capabilitiesPack?.capabilities?.planner
+    || new LocalPlanner({
+      resolveAgentId,
+      source: runtimeAuthority?.plan_source || "local",
+    });
   const planningInput = {
     mode,
     goal,
@@ -97,22 +100,8 @@ export async function invokeRuntimePlanner({
     runsDir: String(runsDir || "").trim(),
     persistSkillEvents: persistSkillEvents === true,
   };
-
-  if (planner && typeof planner.plan === "function") {
-    return await planner.plan(planningInput);
+  if (!planner || typeof planner.plan !== "function") {
+    throw new Error("planner.plan is unavailable");
   }
-
-  const orchestration = typeof orchestrationBuilder === "function"
-    ? orchestrationBuilder({
-      ...planningInput,
-      resolveAgentId,
-    })
-    : null;
-  return {
-    plan_source: runtimeAuthority?.plan_source || "local",
-    route_plan: orchestration?.route_plan || null,
-    team_plan: orchestration?.team_plan || null,
-    runtime_agents: Array.isArray(orchestration?.runtime_agents) ? orchestration.runtime_agents : [],
-    runtime_team_snapshot: orchestration?.runtime_team_snapshot || null,
-  };
+  return await planner.plan(planningInput);
 }

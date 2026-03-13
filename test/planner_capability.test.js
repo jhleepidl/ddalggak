@@ -20,9 +20,17 @@ test("local planner emits normalized planning metadata including plan_source", (
   });
 
   assert.equal(result.plan_source, "local");
+  assert.ok(result.interpreted_task);
+  assert.equal(result.interpreted_task.mode, "run");
+  assert.equal(result.interpreted_task.job_id, "job_plan_1");
+  assert.ok(result.route_summary);
+  assert.equal(result.route_summary.action_count, result.route_plan.actions.length);
+  assert.ok(result.planner_metadata);
+  assert.equal(result.planner_metadata.planner_type, "local");
   assert.ok(result.route_plan);
   assert.ok(Array.isArray(result.route_plan.actions));
   assert.ok(typeof result.route_plan.action_source === "string");
+  assert.ok(Array.isArray(result.context_packs));
+  assert.ok(Array.isArray(result.selected_skill_ids));
   assert.ok(result.runtime_team_snapshot && typeof result.runtime_team_snapshot === "object");
 });
-
