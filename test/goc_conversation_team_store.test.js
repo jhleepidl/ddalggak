@@ -14,6 +14,43 @@ function createStore(client = {}) {
   });
 }
 
+test("goc team store keeps list/ensure reads side-effect free while mutations still ensure conversation", async () => {
+  const ensureFlags = [];
+  const store = new GocConversationTeamStore({
+    client: {
+      async listTeamMembers() {
+        return [];
+      },
+      async addTeamMember(_target, agentId, enabled) {
+        return {
+          thread_id: "thread_1",
+          conversation_id: "conv_1",
+          agent_id: agentId,
+          enabled,
+        };
+      },
+    },
+    resolveMembershipTarget: async (_client, {
+      threadId = "",
+      conversationId = "",
+      ensureConversation = false,
+    } = {}) => {
+      ensureFlags.push(ensureConversation === true);
+      return {
+        thread_id: String(threadId || "").trim(),
+        conversation_id: String(conversationId || "conv_1").trim(),
+        source: "goc",
+      };
+    },
+  });
+
+  await store.listAgents({ threadId: "thread_1" });
+  await store.ensureTeam({ threadId: "thread_1", baselineAgentIds: ["planner"] });
+  await store.addAgent({ threadId: "thread_1", agentId: "planner", enabled: true });
+
+  assert.deepEqual(ensureFlags, [false, false, true]);
+});
+
 test("goc team store treats baseline defaults as policy and does not auto-persist them", async () => {
   let listCalls = 0;
   let addCalls = 0;

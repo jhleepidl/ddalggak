@@ -57,6 +57,7 @@ export async function resolveConversationMembershipTarget(client, {
   accountId = "",
   source = "",
   ensureConversation = true,
+  bootstrapDefaults = false,
 } = {}) {
   const requested = normalizeConversationMembershipTarget({
     thread_id: threadId,
@@ -73,7 +74,9 @@ export async function resolveConversationMembershipTarget(client, {
   let ensureError = null;
   if (ensureConversation !== false && typeof client?.ensureConversation === "function") {
     try {
-      ensuredConversation = await client.ensureConversation(requested.thread_id);
+      ensuredConversation = await client.ensureConversation(requested.thread_id, {
+        bootstrapDefaults: bootstrapDefaults === true,
+      });
     } catch (error) {
       ensureError = error;
     }

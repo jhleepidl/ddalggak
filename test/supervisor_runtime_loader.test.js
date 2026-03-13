@@ -313,3 +313,104 @@ test("supervisor runtime loader keeps baseline defaults active when goc explicit
   assert.match(runtime.conversationMembershipWarning, /team_sync:list_explicit_members:/);
   assert.doesNotMatch(runtime.conversationMembershipWarning, /add_baseline_agent|bootstrap_default_agents/);
 });
+
+test("supervisor runtime loader dedupes logical default agents across public and installed copies", async () => {
+  const loadSupervisorRuntime = createSupervisorRuntimeLoader({
+    composeCapabilitiesForRun: () => ({
+      authority: {
+        mode: "goc",
+        plan_source: "local",
+        context_source: "goc",
+        agent_catalog_source: "goc",
+        conversation_team_source: "goc",
+        skill_catalog_source: "mixed",
+      },
+      capabilities: {
+        agentCatalog: {
+          async load() {
+            return {
+              agents: [
+                { id: "planner_public", name: "Planner", system_key: "planner", visibility: "public", published: true },
+                {
+                  id: "planner_private_12345678",
+                  name: "Planner",
+                  system_key: "planner",
+                  source_agent_id: "planner",
+                  visibility: "private",
+                  installed_from_public: true,
+                  origin: { type: "public", public_node_id: "planner_node" },
+                },
+                { id: "coder_public", name: "Coder", system_key: "coder", visibility: "public", published: true },
+                {
+                  id: "coder_private_87654321",
+                  name: "Coder",
+                  system_key: "coder",
+                  source_agent_id: "coder",
+                  visibility: "private",
+                  installed_from_public: true,
+                  origin: { type: "public", public_node_id: "coder_node" },
+                },
+              ],
+            };
+          },
+        },
+        conversationTeamStore: {
+          async ensureTeam() {
+            return {
+              target: {
+                thread_id: "goc-thread",
+                conversation_id: "goc-conversation",
+                source: "goc",
+              },
+              rows: [],
+              warnings: [],
+              baseline_agent_ids: ["planner_public", "coder_public"],
+            };
+          },
+        },
+      },
+    }),
+    bindActor: () => () => {},
+    requireGocClient: () => ({
+      async listResources() {
+        return [];
+      },
+      async getCompiledContext() {
+        return "";
+      },
+    }),
+    normalizeSupervisorJobConfig: createNormalizeSupervisorJobConfig(),
+    pickBaselineConversationCatalogAgents: (rows) => rows.filter((row) => row.visibility === "public").map((row) => row.id),
+    summarizeJobConfigDebug: (config) => `job=${config.job_id}`,
+    summarizeSelectionState: ({ catalog = [], enabled = [] } = {}) => ({
+      catalog_ids: catalog.map((row) => row.id),
+      enabled_ids: enabled.map((row) => row.id),
+      disabled_ids: catalog
+        .map((row) => row.id)
+        .filter((id) => !enabled.map((row) => row.id).includes(id)),
+    }),
+    loadLocalContextDocs: () => "",
+    ensureJobThread: async () => ({
+      threadId: "goc-thread",
+      ctxSharedId: "shared-ctx",
+    }),
+    ensureAgentsThread: async () => ({ threadId: "agents-thread" }),
+    ensureToolsThread: async () => ({ threadId: "tools-thread" }),
+    parseStructuredFromResource: () => null,
+    trackedDocNames: [],
+    jobs: {
+      baseDir: "/tmp/ddalggak-loader",
+      log() {},
+    },
+  });
+
+  const runtime = await loadSupervisorRuntime("job_loader_4", {
+    includeContext: false,
+    includeGlobal: false,
+  });
+
+  assert.deepEqual(runtime.baselineDefaultAgentRefs, ["planner", "coder"]);
+  assert.deepEqual(runtime.enabledAgentRefs, ["planner", "coder"]);
+  assert.deepEqual(runtime.enabledAgentIds, ["planner_private_12345678", "coder_private_87654321"]);
+  assert.deepEqual(runtime.agents.map((row) => row.id), ["planner_private_12345678", "coder_private_87654321"]);
+});

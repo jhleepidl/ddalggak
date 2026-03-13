@@ -527,6 +527,12 @@ function normalizeCatalogAgent(entity) {
       || pick(payload, ["system_key", "systemKey"])
       || ""
     ).trim().toLowerCase(),
+    source_agent_id: String(
+      pick(row, ["source_agent_id", "sourceAgentId"])
+      || pick(payload, ["source_agent_id", "sourceAgentId"])
+      || pick(asObject(pick(payload, ["meta"])), ["source_agent_id", "sourceAgentId"])
+      || ""
+    ).trim().toLowerCase(),
     prompt: String(
       pick(row, ["prompt", "system_prompt", "systemPrompt", "base_prompt", "basePrompt", "instruction"])
       || pick(payload, ["prompt", "system_prompt", "systemPrompt", "base_prompt", "basePrompt", "instruction"])
@@ -556,6 +562,27 @@ function normalizeCatalogAgent(entity) {
       ?? pick(payload, ["published", "is_published", "isPublished", "public"]),
       false
     ),
+    installed_from_public: parseBooleanLike(
+      pick(row, ["installed_from_public", "installedFromPublic"])
+      ?? pick(payload, ["installed_from_public", "installedFromPublic"]),
+      false
+    ),
+    origin: asObject(
+      pick(row, ["origin"])
+      || pick(payload, ["origin"])
+    ),
+    public_node_id: String(
+      pick(row, ["public_node_id", "publicNodeId"])
+      || pick(payload, ["public_node_id", "publicNodeId"])
+      || pick(asObject(pick(row, ["origin"]) || pick(payload, ["origin"])), ["public_node_id", "publicNodeId"])
+      || ""
+    ).trim().toLowerCase(),
+    blueprint_id: String(
+      pick(row, ["blueprint_id", "blueprintId"])
+      || pick(payload, ["blueprint_id", "blueprintId"])
+      || pick(asObject(pick(row, ["origin"]) || pick(payload, ["origin"])), ["blueprint_id", "blueprintId"])
+      || ""
+    ).trim().toLowerCase(),
     created_at: String(pick(row, ["created_at", "createdAt", "ts", "timestamp"]) || ""),
     updated_at: String(pick(row, ["updated_at", "updatedAt", "ts", "timestamp"]) || ""),
     raw: row,
@@ -1685,13 +1712,15 @@ export class GocClient {
     };
   }
 
-  async ensureConversation(threadTarget) {
+  async ensureConversation(threadTarget, {
+    bootstrapDefaults = false,
+  } = {}) {
     const target = normalizeConversationTarget(threadTarget);
     const tid = String(target.thread_id || "").trim();
     if (!tid) throw new Error("ensureConversation requires threadId");
     const body = buildConversationIdentityPatchBody({
-      bootstrap_defaults: true,
-      bootstrapDefaults: true,
+      bootstrap_defaults: bootstrapDefaults === true,
+      bootstrapDefaults: bootstrapDefaults === true,
     }, target);
     const data = await this._requestAny({
       method: "POST",

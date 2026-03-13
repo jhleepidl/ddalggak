@@ -22,13 +22,17 @@ test("normalizeConversationMembershipTarget supports thread/conversation id alia
 });
 
 test("resolveConversationMembershipTarget keeps requested thread scope", async () => {
+  let capturedOptions = null;
   const client = {
-    ensureConversation: async () => ({
+    ensureConversation: async (_threadId, options = {}) => {
+      capturedOptions = options;
+      return ({
       id: "conv_123",
       thread_id: "thread_123",
       workspace_id: "ws_123",
       account_id: "acct_123",
-    }),
+      });
+    },
   };
   const target = await resolveConversationMembershipTarget(client, {
     threadId: "thread_123",
@@ -37,6 +41,27 @@ test("resolveConversationMembershipTarget keeps requested thread scope", async (
   assert.equal(target.thread_id, "thread_123");
   assert.equal(target.conversation_id, "conv_123");
   assert.equal(target.ensured_thread_mismatch, false);
+  assert.equal(capturedOptions?.bootstrapDefaults, false);
+});
+
+test("resolveConversationMembershipTarget can skip ensureConversation for passive reads", async () => {
+  let ensureCalls = 0;
+  const client = {
+    ensureConversation: async () => {
+      ensureCalls += 1;
+      return { id: "conv_ignored", thread_id: "thread_ignored" };
+    },
+  };
+  const target = await resolveConversationMembershipTarget(client, {
+    threadId: "thread_readonly",
+    conversationId: "conv_readonly",
+    source: "unit_test_readonly",
+    ensureConversation: false,
+  });
+  assert.equal(ensureCalls, 0);
+  assert.equal(target.thread_id, "thread_readonly");
+  assert.equal(target.conversation_id, "conv_readonly");
+  assert.equal(target.ensure_conversation_used, false);
 });
 
 test("resolveConversationMembershipTarget detects ensureConversation thread mismatch without switching", async () => {

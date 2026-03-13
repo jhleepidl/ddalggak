@@ -51,6 +51,20 @@ function normalizeAgent(raw) {
     || row.meta?.systemKey
     || ""
   ).trim().toLowerCase();
+  const sourceAgentId = String(
+    row.source_agent_id
+    || row.sourceAgentId
+    || row.meta?.source_agent_id
+    || row.meta?.sourceAgentId
+    || ""
+  ).trim().toLowerCase();
+  const visibility = String(
+    row.visibility
+    || row.scope
+    || row.meta?.visibility
+    || row.meta?.scope
+    || ""
+  ).trim().toLowerCase();
   return {
     id,
     name: String(row.name || row.title || id).trim(),
@@ -58,6 +72,26 @@ function normalizeAgent(raw) {
     provider,
     model,
     system_key: systemKey,
+    source_agent_id: sourceAgentId,
+    visibility,
+    scope: visibility,
+    published: row.published === true || row.meta?.published === true,
+    installed_from_public: row.installed_from_public === true || row.installedFromPublic === true,
+    origin: row.origin && typeof row.origin === "object" ? row.origin : undefined,
+    public_node_id: String(
+      row.public_node_id
+      || row.publicNodeId
+      || row.origin?.public_node_id
+      || row.origin?.publicNodeId
+      || ""
+    ).trim().toLowerCase() || undefined,
+    blueprint_id: String(
+      row.blueprint_id
+      || row.blueprintId
+      || row.origin?.blueprint_id
+      || row.origin?.blueprintId
+      || ""
+    ).trim().toLowerCase() || undefined,
     prompt: String(
       row.prompt
       || row.base_prompt

@@ -288,3 +288,192 @@ test("/agents list keeps baseline defaults visible when GoC explicit membership 
   assert.match(result.message, /warnings: team_sync:list_explicit_members:/);
   assert.doesNotMatch(result.message, /add_baseline_agent|bootstrap_default_agents/);
 });
+
+test("goc logical team view dedupes public/private defaults and disables baseline by logical ref", async () => {
+  const state = [];
+  const setCalls = [];
+  const target = {
+    thread_id: "goc-thread",
+    conversation_id: "goc-conversation",
+    source: "goc",
+  };
+  const runtime = {
+    mode: "goc",
+    runtimeAuthority: {
+      mode: "goc",
+      plan_source: "local",
+      context_source: "goc",
+      agent_catalog_source: "goc",
+      conversation_team_source: "goc",
+      skill_catalog_source: "mixed",
+    },
+    map: { threadId: "goc-thread" },
+    conversation: { id: "goc-conversation", thread_id: "goc-thread" },
+    conversationMembershipTarget: target,
+    baselineDefaultAgentIds: ["planner_public", "researcher_public"],
+    conversationAgents: [],
+    agentsCatalog: [
+      { id: "planner_public", name: "Planner", system_key: "planner", visibility: "public", published: true },
+      {
+        id: "planner_private_12345678",
+        name: "Planner",
+        system_key: "planner",
+        source_agent_id: "planner",
+        visibility: "private",
+        installed_from_public: true,
+        origin: { type: "public", public_node_id: "planner_node" },
+      },
+      { id: "researcher_public", name: "Researcher", system_key: "researcher", visibility: "public", published: true },
+      {
+        id: "researcher_private_87654321",
+        name: "Researcher",
+        system_key: "researcher",
+        source_agent_id: "researcher",
+        visibility: "private",
+        installed_from_public: true,
+        origin: { type: "public", public_node_id: "researcher_node" },
+      },
+    ],
+    capabilities: {
+      conversationTeamStore: {
+        source: "goc",
+        async listAgents() {
+          return {
+            target,
+            rows: state.map((row) => ({ ...row })),
+            warnings: [],
+          };
+        },
+        async setAgentEnabled({ agentId, enabled }) {
+          setCalls.push({ agentId, enabled });
+          const index = state.findIndex((row) => row.agent_id === agentId);
+          if (index >= 0) state[index] = { ...state[index], enabled };
+          else state.push({ agent_id: agentId, enabled });
+          return {
+            target,
+            rows: state.map((row) => ({ ...row })),
+            warnings: [],
+            mutation_response: { ok: true, agent_id: agentId, enabled },
+          };
+        },
+      },
+    },
+  };
+
+  const listed = await runConversationAgentTeamCommand({
+    command: "list",
+    runtime,
+    jobId: "job_team_6",
+    source: "test_agents_command",
+    agentRegistry: { agents: runtime.agentsCatalog },
+    ...createFormatterDeps(),
+  });
+
+  assert.match(listed.message, /baseline_defaults: @planner, @researcher/);
+  assert.match(listed.message, /available_catalog: @planner, @researcher/);
+  assert.doesNotMatch(listed.message, /planner_public|planner_private_12345678/);
+
+  const disabled = await runConversationAgentTeamCommand({
+    command: "disable",
+    runtime,
+    jobId: "job_team_6",
+    agentId: "planner",
+    source: "test_agents_command",
+    agentRegistry: { agents: runtime.agentsCatalog },
+    ...createFormatterDeps(),
+  });
+
+  assert.deepEqual(setCalls, [{ agentId: "planner_private_12345678", enabled: false }]);
+  assert.match(disabled.message, /agent: @planner/);
+  assert.deepEqual(runtime.enabledAgentRefs, ["researcher"]);
+  assert.deepEqual(runtime.enabledAgentIds, ["researcher_private_87654321"]);
+
+  const relisted = await runConversationAgentTeamCommand({
+    command: "list",
+    runtime,
+    jobId: "job_team_6",
+    source: "test_agents_command",
+    agentRegistry: { agents: runtime.agentsCatalog },
+    ...createFormatterDeps(),
+  });
+
+  assert.match(relisted.message, /explicit_disabled: @planner/);
+  assert.match(relisted.message, /effective_enabled: @researcher/);
+});
+
+test("goc logical remove removes explicit specialist regardless of underlying raw membership id", async () => {
+  const state = [{ agent_id: "reviewer_public", enabled: true }];
+  const removeCalls = [];
+  const target = {
+    thread_id: "goc-thread",
+    conversation_id: "goc-conversation",
+    source: "goc",
+  };
+  const runtime = {
+    mode: "goc",
+    runtimeAuthority: {
+      mode: "goc",
+      plan_source: "local",
+      context_source: "goc",
+      agent_catalog_source: "goc",
+      conversation_team_source: "goc",
+      skill_catalog_source: "mixed",
+    },
+    map: { threadId: "goc-thread" },
+    conversation: { id: "goc-conversation", thread_id: "goc-thread" },
+    conversationMembershipTarget: target,
+    baselineDefaultAgentIds: [],
+    conversationAgents: state.map((row) => ({ ...row })),
+    agentsCatalog: [
+      { id: "reviewer_public", name: "Reviewer", system_key: "reviewer", visibility: "public", published: true },
+      {
+        id: "reviewer_private_abcdef12",
+        name: "Reviewer",
+        system_key: "reviewer",
+        source_agent_id: "reviewer",
+        visibility: "private",
+        installed_from_public: true,
+        origin: { type: "public", public_node_id: "reviewer_node" },
+      },
+    ],
+    capabilities: {
+      conversationTeamStore: {
+        source: "goc",
+        async listAgents() {
+          return {
+            target,
+            rows: state.map((row) => ({ ...row })),
+            warnings: [],
+          };
+        },
+        async removeAgent({ agentId }) {
+          removeCalls.push(agentId);
+          const index = state.findIndex((row) => row.agent_id === agentId);
+          if (index >= 0) state.splice(index, 1);
+          return {
+            target,
+            rows: state.map((row) => ({ ...row })),
+            warnings: [],
+            mutation_response: { ok: true, agent_id: agentId },
+          };
+        },
+      },
+    },
+  };
+
+  const result = await runConversationAgentTeamCommand({
+    command: "remove",
+    runtime,
+    jobId: "job_team_7",
+    agentId: "reviewer",
+    source: "test_agents_command",
+    agentRegistry: { agents: runtime.agentsCatalog },
+    ...createFormatterDeps(),
+  });
+
+  assert.deepEqual(removeCalls, ["reviewer_public"]);
+  assert.match(result.message, /agent: @reviewer/);
+  assert.deepEqual(runtime.conversationAgents, []);
+  assert.deepEqual(runtime.explicitConversationAgentRefs, []);
+  assert.deepEqual(runtime.enabledAgentRefs, []);
+});

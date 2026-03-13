@@ -405,6 +405,7 @@ export class GocConversationTeamStore {
     conversationId = "",
     jobId = "",
     source = "",
+    ensureConversation = false,
   } = {}) {
     const cleanThreadId = String(threadId || "").trim();
     const cleanConversationId = String(conversationId || "").trim();
@@ -418,6 +419,7 @@ export class GocConversationTeamStore {
         conversationId: cleanConversationId,
         jobId: String(jobId || "").trim(),
         source: source || "goc_team_store",
+        ensureConversation: ensureConversation === true,
       });
       return summarizeTarget(resolved, {
         thread_id: cleanThreadId,
@@ -465,6 +467,7 @@ export class GocConversationTeamStore {
         conversationId,
         jobId,
         source,
+        ensureConversation: false,
       });
     let rows = [];
     try {
@@ -493,6 +496,7 @@ export class GocConversationTeamStore {
       conversationId,
       jobId,
       source: source || "ensure_team",
+      ensureConversation: false,
     });
     const baselineIds = uniqIds(baselineAgentIds);
     let rows = [];
@@ -528,7 +532,13 @@ export class GocConversationTeamStore {
         : null);
     const target = membershipTarget
       ? summarizeTarget(membershipTarget, { source: "goc" })
-      : await this._resolveTarget({ threadId, conversationId, jobId, source });
+      : await this._resolveTarget({
+        threadId,
+        conversationId,
+        jobId,
+        source,
+        ensureConversation: true,
+      });
     const cleanAgentId = cleanId(agentId);
     if (!cleanAgentId) throw new Error("addAgent requires agentId");
     if (!addMember) throw new Error("addTeamMember API unavailable");
@@ -562,7 +572,13 @@ export class GocConversationTeamStore {
         : null);
     const target = membershipTarget
       ? summarizeTarget(membershipTarget, { source: "goc" })
-      : await this._resolveTarget({ threadId, conversationId, jobId, source });
+      : await this._resolveTarget({
+        threadId,
+        conversationId,
+        jobId,
+        source,
+        ensureConversation: true,
+      });
     const cleanAgentId = cleanId(agentId);
     if (!cleanAgentId) throw new Error("removeAgent requires agentId");
     if (!removeMember) throw new Error("removeTeamMember API unavailable");
@@ -607,7 +623,13 @@ export class GocConversationTeamStore {
         : null);
     const target = membershipTarget
       ? summarizeTarget(membershipTarget, { source: "goc" })
-      : await this._resolveTarget({ threadId, conversationId, jobId, source });
+      : await this._resolveTarget({
+        threadId,
+        conversationId,
+        jobId,
+        source,
+        ensureConversation: true,
+      });
     const cleanAgentId = cleanId(agentId);
     if (!cleanAgentId) throw new Error("setAgentEnabled requires agentId");
 

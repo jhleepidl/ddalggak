@@ -4509,6 +4509,7 @@ async function appendParticipantToJobConfig(client, { jobId, agentId, actor = ""
       threadId: map.threadId,
       jobId,
       source: "append_participant_to_job_config",
+      ensureConversation: true,
     });
     const mutationResponse = await client.addConversationAgent(membershipTarget, cleanAgentId, true);
     const conversationAgents = await client.listConversationAgents(membershipTarget);
@@ -4577,11 +4578,13 @@ async function resolveMembershipTargetForThread(client, {
   conversationId = "",
   jobId = "",
   source = "",
+  ensureConversation = false,
 } = {}) {
   const target = await resolveConversationMembershipTarget(client, {
     threadId,
     conversationId,
     source: source || "membership_target_resolution",
+    ensureConversation: ensureConversation === true,
   });
   if (target.ensure_error) {
     recordMembershipMutationDiagnostic(jobId, {
@@ -4641,6 +4644,7 @@ async function updateJobConfigSelection(client, {
       threadId: map.threadId,
       jobId: cleanJobId,
       source: "update_job_config_selection",
+      ensureConversation: true,
     });
     let mutationResponse = null;
     if (cleanOp === "disable") {
@@ -5905,6 +5909,7 @@ function buildSupervisorExecutionCallbacks({
                 threadId: runtime.map.threadId,
                 jobId,
                 source: "create_agent_definition",
+                ensureConversation: true,
               });
               addMutationResponse = await client.addConversationAgent(membershipTarget, createdId, action?.enabled !== false);
               if (typeof client.listConversationAgents === "function") {
@@ -7761,7 +7766,7 @@ async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawArgs = "
       && ["add", "remove", "enable", "disable"].includes(sub)
     ) {
       if (!targetAgentId) {
-        await bot.sendMessage(chatId, "Usage: /agents add|remove|enable|disable <agent_id>");
+        await bot.sendMessage(chatId, "Usage: /agents add|remove|enable|disable <agent_ref>");
         return;
       }
       if (!currentJobId) {

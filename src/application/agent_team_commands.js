@@ -7,6 +7,11 @@ import {
   createMembershipConfirmationError,
   verifyConversationMembershipMutation,
 } from "./membership_confirmation.js";
+import {
+  buildLogicalAgentCatalogIndex,
+  logicalAgentCommandRef,
+  resolveLogicalAgentRef,
+} from "./logical_agents.js";
 import { summarizeMembershipTarget } from "./membership_target.js";
 import { buildRunAuthority } from "./run_authority.js";
 
@@ -65,6 +70,13 @@ function summarizeSelectionStateDefault({ catalog = [], enabled = [] } = {}) {
   };
 }
 
+function pushUniq(target = [], raw = "") {
+  const id = cleanId(raw);
+  if (!id || target.includes(id)) return target;
+  target.push(id);
+  return target;
+}
+
 function deriveLastActiveRunTeamAgentIds(runtime = {}) {
   const snapshot = runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
     ? runtime.runtimeTeamSnapshot
@@ -84,6 +96,179 @@ function deriveLastActiveRunTeamAgentIds(runtime = {}) {
   )));
 }
 
+function buildLogicalMembershipIndex(conversationRows = [], logicalCatalog = null) {
+  const catalog = logicalCatalog && typeof logicalCatalog === "object"
+    ? logicalCatalog
+    : buildLogicalAgentCatalogIndex([]);
+  const byLogicalId = new Map();
+  const unknownRawAgentIds = [];
+
+  for (const row of asArray(conversationRows)) {
+    const rawAgentId = cleanId(row?.agent_id || row?.agentId || row?.id);
+    if (!rawAgentId) continue;
+    const logicalAgentId = catalog.rawIdToLogicalId instanceof Map && catalog.rawIdToLogicalId.has(rawAgentId)
+      ? catalog.rawIdToLogicalId.get(rawAgentId)
+      : rawAgentId;
+    const logicalAgent = catalog.byLogicalId instanceof Map
+      ? (catalog.byLogicalId.get(logicalAgentId) || null)
+      : null;
+    if (!logicalAgent) pushUniq(unknownRawAgentIds, rawAgentId);
+    if (!byLogicalId.has(logicalAgentId)) {
+      byLogicalId.set(logicalAgentId, {
+        logical_agent_id: logicalAgentId,
+        command_ref: logicalAgent?.command_ref || rawAgentId,
+        representative_agent_id: logicalAgent?.representative_agent_id || rawAgentId,
+        member_agent_ids: [],
+        enabled_member_agent_ids: [],
+        disabled_member_agent_ids: [],
+        rows: [],
+        logical_agent: logicalAgent,
+      });
+    }
+    const entry = byLogicalId.get(logicalAgentId);
+    entry.rows.push(row);
+    pushUniq(entry.member_agent_ids, rawAgentId);
+    if (row?.enabled !== false) pushUniq(entry.enabled_member_agent_ids, rawAgentId);
+    else pushUniq(entry.disabled_member_agent_ids, rawAgentId);
+  }
+
+  return {
+    byLogicalId,
+    unknownRawAgentIds: uniqIds(unknownRawAgentIds),
+  };
+}
+
+function buildAddressableLogicalAgents(logicalCatalog = null, membershipIndex = null) {
+  const catalog = logicalCatalog && typeof logicalCatalog === "object"
+    ? logicalCatalog
+    : buildLogicalAgentCatalogIndex([]);
+  const membership = membershipIndex && typeof membershipIndex === "object"
+    ? membershipIndex
+    : buildLogicalMembershipIndex([], catalog);
+  const byLogicalId = new Map();
+  const aliasMap = new Map();
+
+  const registerEntry = (entry = {}) => {
+    const logicalAgentId = cleanId(entry.logical_agent_id);
+    if (!logicalAgentId) return;
+    if (!byLogicalId.has(logicalAgentId)) {
+      byLogicalId.set(logicalAgentId, {
+        logical_agent_id: logicalAgentId,
+        representative_agent_id: cleanId(entry.representative_agent_id || logicalAgentId),
+        command_ref: cleanId(entry.command_ref || entry.representative_agent_id || logicalAgentId),
+        aliases: uniqIds(entry.aliases),
+        raw_member_agent_ids: uniqIds(entry.raw_member_agent_ids),
+        logical_agent: entry.logical_agent || null,
+      });
+    }
+    const target = byLogicalId.get(logicalAgentId);
+    target.representative_agent_id = cleanId(
+      target.representative_agent_id
+      || entry.representative_agent_id
+      || logicalAgentId
+    );
+    target.command_ref = cleanId(
+      target.command_ref
+      || entry.command_ref
+      || target.representative_agent_id
+      || logicalAgentId
+    );
+    target.aliases = uniqIds([
+      ...target.aliases,
+      ...asArray(entry.aliases),
+      target.command_ref,
+      target.representative_agent_id,
+    ]);
+    target.raw_member_agent_ids = uniqIds([
+      ...target.raw_member_agent_ids,
+      ...asArray(entry.raw_member_agent_ids),
+    ]);
+    if (!target.logical_agent && entry.logical_agent) target.logical_agent = entry.logical_agent;
+  };
+
+  for (const logicalAgent of asArray(catalog.agents)) {
+    registerEntry({
+      logical_agent_id: logicalAgent.logical_agent_id,
+      representative_agent_id: logicalAgent.representative_agent_id || logicalAgent.id,
+      command_ref: logicalAgent.command_ref || logicalAgentCommandRef(logicalAgent),
+      aliases: logicalAgent.logical_aliases,
+      raw_member_agent_ids: logicalAgent.logical_member_agent_ids,
+      logical_agent: logicalAgent,
+    });
+  }
+
+  for (const membershipEntry of membership.byLogicalId instanceof Map
+    ? membership.byLogicalId.values()
+    : []) {
+    registerEntry({
+      logical_agent_id: membershipEntry.logical_agent_id,
+      representative_agent_id: membershipEntry.representative_agent_id,
+      command_ref: membershipEntry.command_ref,
+      aliases: [
+        membershipEntry.logical_agent_id,
+        membershipEntry.command_ref,
+        membershipEntry.representative_agent_id,
+        ...asArray(membershipEntry.member_agent_ids),
+        ...asArray(membershipEntry.member_agent_ids).map((id) => cleanId(id).slice(0, 8)),
+      ],
+      raw_member_agent_ids: membershipEntry.member_agent_ids,
+      logical_agent: membershipEntry.logical_agent || null,
+    });
+  }
+
+  for (const entry of byLogicalId.values()) {
+    for (const alias of uniqIds(entry.aliases)) {
+      if (!aliasMap.has(alias)) aliasMap.set(alias, new Set());
+      aliasMap.get(alias).add(entry.logical_agent_id);
+    }
+  }
+
+  return {
+    agents: [...byLogicalId.values()],
+    byLogicalId,
+    aliasMap,
+  };
+}
+
+function resolveAddressableLogicalAgent(agentRef = "", addressable = null) {
+  const row = addressable && typeof addressable === "object"
+    ? addressable
+    : buildAddressableLogicalAgents();
+  const query = cleanId(String(agentRef || "").replace(/^@+/, ""));
+  if (!query) return null;
+
+  const exactMatches = row.aliasMap instanceof Map && row.aliasMap.has(query)
+    ? [...row.aliasMap.get(query)]
+    : [];
+  if (exactMatches.length === 1) {
+    return row.byLogicalId.get(exactMatches[0]) || null;
+  }
+  if (exactMatches.length > 1) {
+    return {
+      ambiguous: true,
+      candidates: exactMatches
+        .map((logicalAgentId) => row.byLogicalId.get(logicalAgentId))
+        .filter(Boolean),
+    };
+  }
+
+  const resolved = resolveLogicalAgentRef(query, {
+    agents: asArray(row.agents),
+    byLogicalId: row.byLogicalId,
+    aliasMap: row.aliasMap,
+  });
+  if (resolved?.logical_agent) {
+    return row.byLogicalId.get(cleanId(resolved.logical_agent.logical_agent_id)) || null;
+  }
+  if (resolved?.ambiguous) {
+    return {
+      ambiguous: true,
+      candidates: asArray(resolved.candidates),
+    };
+  }
+  return null;
+}
+
 export function deriveConversationTeamView(runtime = {}, {
   conversationRows = null,
   catalogRows = null,
@@ -91,49 +276,124 @@ export function deriveConversationTeamView(runtime = {}, {
 } = {}) {
   const convRows = asArray(conversationRows ?? runtime?.conversationAgents);
   const catalog = asArray(catalogRows ?? runtime?.agentsCatalog);
+  const explicitMemberRawAgentIds = uniqIds(
+    convRows.map((row) => row?.agent_id || row?.agentId || row?.id)
+  );
+  const logicalCatalog = buildLogicalAgentCatalogIndex(catalog, {
+    preferredRawIds: explicitMemberRawAgentIds,
+  });
+  const membershipIndex = buildLogicalMembershipIndex(convRows, logicalCatalog);
   const teamConsistency = reconcileConversationTeamWithCatalog({
     conversationRows: convRows,
     catalogRows: catalog,
   });
-  const explicitMemberAgentIds = uniqIds(teamConsistency.member_agent_ids);
-  const explicitEnabledAgentIds = uniqIds(teamConsistency.enabled_member_agent_ids);
-  const explicitDisabledSet = new Set(
-    explicitMemberAgentIds.filter((id) => !explicitEnabledAgentIds.includes(id))
+  const availableCatalogLogicalIds = asArray(logicalCatalog.agents)
+    .map((agent) => cleanId(agent.logical_agent_id))
+    .filter(Boolean);
+  const availableCatalogLogicalSet = new Set(availableCatalogLogicalIds);
+  const baselineDefaultLogicalIds = uniqIds(
+    asArray(baselineAgentIds ?? runtime?.baselineDefaultAgentIds ?? [])
+      .map((rawId) => {
+        const cleanRawId = cleanId(rawId);
+        return (logicalCatalog.rawIdToLogicalId instanceof Map && logicalCatalog.rawIdToLogicalId.has(cleanRawId))
+          ? logicalCatalog.rawIdToLogicalId.get(cleanRawId)
+          : cleanRawId;
+      })
   );
-  const baselineDefaultAgentIds = uniqIds(
-    baselineAgentIds ?? runtime?.baselineDefaultAgentIds ?? []
+  const explicitMemberLogicalIds = uniqIds(
+    membershipIndex.byLogicalId instanceof Map
+      ? [...membershipIndex.byLogicalId.keys()]
+      : []
   );
-  const effectiveEnabledAgentIds = uniqIds([
-    ...baselineDefaultAgentIds,
-    ...enabledAgentIdsFromConsistency(teamConsistency),
-  ]).filter((id) => !explicitDisabledSet.has(id));
-  const availableCatalogAgentIds = uniqIds(
-    catalog.map((row) => row?.id || row?.agent_id || row?.agentId)
-  );
-  const availableCatalogSet = new Set(availableCatalogAgentIds);
-  const unknownExplicitMemberAgentIds = explicitMemberAgentIds.filter((id) => !availableCatalogSet.has(id));
-  const availableNotExplicitAgentIds = availableCatalogAgentIds.filter((id) => !explicitMemberAgentIds.includes(id));
-  const baselineDefaultSet = new Set(baselineDefaultAgentIds);
-  const optionalAgentIds = availableCatalogAgentIds.filter((id) => (
-    !baselineDefaultSet.has(id) && !explicitMemberAgentIds.includes(id)
+  const explicitEnabledLogicalIds = explicitMemberLogicalIds.filter((logicalAgentId) => (
+    asArray(membershipIndex.byLogicalId.get(logicalAgentId)?.enabled_member_agent_ids).length > 0
   ));
-  const effectiveEnabledSet = new Set(effectiveEnabledAgentIds);
-  const enabledAgents = catalog.filter((agent) => effectiveEnabledSet.has(cleanId(agent?.id || agent?.agent_id || agent?.agentId)));
-  const lastActiveRunTeamAgentIds = deriveLastActiveRunTeamAgentIds(runtime);
+  const explicitDisabledLogicalIds = explicitMemberLogicalIds.filter((logicalAgentId) => (
+    asArray(membershipIndex.byLogicalId.get(logicalAgentId)?.enabled_member_agent_ids).length === 0
+  ));
+  const explicitDisabledSet = new Set(explicitDisabledLogicalIds);
+  const activeExplicitLogicalIds = availableCatalogLogicalIds.length > 0
+    ? explicitEnabledLogicalIds.filter((logicalAgentId) => availableCatalogLogicalSet.has(logicalAgentId))
+    : explicitEnabledLogicalIds;
+
+  const logicalEntryFor = (logicalAgentId = "") => (
+    logicalCatalog.byLogicalId.get(cleanId(logicalAgentId))
+    || membershipIndex.byLogicalId.get(cleanId(logicalAgentId))
+    || null
+  );
+  const representativeIdFor = (logicalAgentId = "") => cleanId(
+    logicalEntryFor(logicalAgentId)?.representative_agent_id
+    || logicalAgentId
+  );
+  const commandRefFor = (logicalAgentId = "") => cleanId(
+    logicalEntryFor(logicalAgentId)?.command_ref
+    || representativeIdFor(logicalAgentId)
+    || logicalAgentId
+  );
+
+  const effectiveEnabledLogicalIds = uniqIds([
+    ...baselineDefaultLogicalIds,
+    ...activeExplicitLogicalIds,
+  ]).filter((logicalAgentId) => !explicitDisabledSet.has(logicalAgentId));
+  const effectiveEnabledAgentIds = uniqIds(
+    effectiveEnabledLogicalIds.map((logicalAgentId) => representativeIdFor(logicalAgentId))
+  );
+  const availableNotExplicitLogicalIds = availableCatalogLogicalIds.filter((logicalAgentId) => (
+    !explicitMemberLogicalIds.includes(logicalAgentId)
+  ));
+  const baselineDefaultSet = new Set(baselineDefaultLogicalIds);
+  const optionalLogicalIds = availableCatalogLogicalIds.filter((logicalAgentId) => (
+    !baselineDefaultSet.has(logicalAgentId) && !explicitMemberLogicalIds.includes(logicalAgentId)
+  ));
+  const enabledAgents = effectiveEnabledLogicalIds
+    .map((logicalAgentId) => logicalCatalog.byLogicalId.get(logicalAgentId))
+    .filter(Boolean);
+  const lastActiveRunTeamRawAgentIds = deriveLastActiveRunTeamAgentIds(runtime);
+  const lastActiveRunTeamLogicalIds = uniqIds(
+    lastActiveRunTeamRawAgentIds.map((rawAgentId) => {
+      const cleanRawId = cleanId(rawAgentId);
+      return (logicalCatalog.rawIdToLogicalId instanceof Map && logicalCatalog.rawIdToLogicalId.has(cleanRawId))
+        ? logicalCatalog.rawIdToLogicalId.get(cleanRawId)
+        : cleanRawId;
+    })
+  );
+  const addressableAgents = buildAddressableLogicalAgents(logicalCatalog, membershipIndex);
 
   return {
     teamConsistency,
-    baselineDefaultAgentIds,
-    explicitMemberAgentIds,
-    explicitEnabledAgentIds,
-    explicitDisabledAgentIds: explicitMemberAgentIds.filter((id) => explicitDisabledSet.has(id)),
+    logicalCatalog,
+    membershipIndex,
+    addressableAgents,
+    baselineDefaultLogicalIds,
+    baselineDefaultAgentIds: uniqIds(baselineDefaultLogicalIds.map((logicalAgentId) => representativeIdFor(logicalAgentId))),
+    baselineDefaultCommandRefs: uniqIds(baselineDefaultLogicalIds.map((logicalAgentId) => commandRefFor(logicalAgentId))),
+    explicitMemberLogicalIds,
+    explicitMemberAgentIds: uniqIds(explicitMemberLogicalIds.map((logicalAgentId) => representativeIdFor(logicalAgentId))),
+    explicitMemberCommandRefs: uniqIds(explicitMemberLogicalIds.map((logicalAgentId) => commandRefFor(logicalAgentId))),
+    explicitEnabledLogicalIds,
+    explicitEnabledAgentIds: uniqIds(explicitEnabledLogicalIds.map((logicalAgentId) => representativeIdFor(logicalAgentId))),
+    explicitEnabledCommandRefs: uniqIds(explicitEnabledLogicalIds.map((logicalAgentId) => commandRefFor(logicalAgentId))),
+    explicitDisabledLogicalIds,
+    explicitDisabledAgentIds: uniqIds(explicitDisabledLogicalIds.map((logicalAgentId) => representativeIdFor(logicalAgentId))),
+    explicitDisabledCommandRefs: uniqIds(explicitDisabledLogicalIds.map((logicalAgentId) => commandRefFor(logicalAgentId))),
     effectiveEnabledAgentIds,
-    availableCatalogAgentIds,
-    availableNotExplicitAgentIds,
-    optionalAgentIds,
-    unknownExplicitMemberAgentIds,
-    lastActiveRunTeamAgentIds,
+    effectiveEnabledLogicalIds,
+    effectiveEnabledCommandRefs: uniqIds(effectiveEnabledLogicalIds.map((logicalAgentId) => commandRefFor(logicalAgentId))),
+    availableCatalogLogicalIds,
+    availableCatalogAgentIds: uniqIds(availableCatalogLogicalIds.map((logicalAgentId) => representativeIdFor(logicalAgentId))),
+    availableCatalogCommandRefs: uniqIds(availableCatalogLogicalIds.map((logicalAgentId) => commandRefFor(logicalAgentId))),
+    availableNotExplicitLogicalIds,
+    availableNotExplicitAgentIds: uniqIds(availableNotExplicitLogicalIds.map((logicalAgentId) => representativeIdFor(logicalAgentId))),
+    optionalLogicalIds,
+    optionalAgentIds: uniqIds(optionalLogicalIds.map((logicalAgentId) => representativeIdFor(logicalAgentId))),
+    optionalCommandRefs: uniqIds(optionalLogicalIds.map((logicalAgentId) => commandRefFor(logicalAgentId))),
+    unknownExplicitMemberAgentIds: membershipIndex.unknownRawAgentIds,
+    explicitMemberRawAgentIds,
+    lastActiveRunTeamLogicalIds,
+    lastActiveRunTeamAgentIds: uniqIds(lastActiveRunTeamLogicalIds.map((logicalAgentId) => representativeIdFor(logicalAgentId))),
+    lastActiveRunTeamCommandRefs: uniqIds(lastActiveRunTeamLogicalIds.map((logicalAgentId) => commandRefFor(logicalAgentId))),
     enabledAgents,
+    logicalAgents: asArray(logicalCatalog.agents),
   };
 }
 
@@ -206,11 +466,22 @@ export function syncRuntimeConversationTeamState(runtime = {}, {
   const view = deriveConversationTeamView(runtime, {
     conversationRows: convRows,
   });
+  runtime.logicalAgents = view.logicalAgents;
+  runtime.baselineDefaultLogicalAgentIds = view.baselineDefaultLogicalIds;
   runtime.baselineDefaultAgentIds = view.baselineDefaultAgentIds;
+  runtime.baselineDefaultAgentRefs = view.baselineDefaultCommandRefs;
+  runtime.explicitConversationLogicalAgentIds = view.explicitMemberLogicalIds;
   runtime.explicitConversationAgentIds = view.explicitMemberAgentIds;
+  runtime.explicitConversationAgentRefs = view.explicitMemberCommandRefs;
+  runtime.explicitEnabledConversationLogicalAgentIds = view.explicitEnabledLogicalIds;
   runtime.explicitEnabledConversationAgentIds = view.explicitEnabledAgentIds;
+  runtime.explicitEnabledConversationAgentRefs = view.explicitEnabledCommandRefs;
+  runtime.explicitDisabledConversationLogicalAgentIds = view.explicitDisabledLogicalIds;
   runtime.explicitDisabledConversationAgentIds = view.explicitDisabledAgentIds;
+  runtime.explicitDisabledConversationAgentRefs = view.explicitDisabledCommandRefs;
+  runtime.enabledLogicalAgentIds = view.effectiveEnabledLogicalIds;
   runtime.enabledAgentIds = view.effectiveEnabledAgentIds;
+  runtime.enabledAgentRefs = view.effectiveEnabledCommandRefs;
   runtime.unknownConversationAgentIds = view.unknownExplicitMemberAgentIds;
   if (membershipTarget && typeof membershipTarget === "object") {
     runtime.conversationMembershipTarget = summarizeMembershipTarget(membershipTarget);
@@ -239,8 +510,11 @@ export function syncRuntimeConversationTeamState(runtime = {}, {
   return {
     conversationAgents: convRows,
     enabledAgentIds: view.effectiveEnabledAgentIds,
+    enabledAgentRefs: view.effectiveEnabledCommandRefs,
     baselineDefaultAgentIds: view.baselineDefaultAgentIds,
+    baselineDefaultAgentRefs: view.baselineDefaultCommandRefs,
     explicitMemberAgentIds: view.explicitMemberAgentIds,
+    explicitMemberAgentRefs: view.explicitMemberCommandRefs,
     membershipTarget: runtime.conversationMembershipTarget || null,
   };
 }
@@ -262,6 +536,255 @@ export async function ensureRuntimeAgentCatalogRows(runtime = {}) {
   } catch {
     return existing;
   }
+}
+
+function normalizeWarningLines(values = []) {
+  return asArray(values)
+    .map((line) => String(line || "").trim())
+    .filter(Boolean);
+}
+
+function formatAgentRefs(refs = [], { limit = 20 } = {}) {
+  const rows = uniqIds(refs).slice(0, Math.max(1, Number(limit) || 20));
+  return rows.map((ref) => `@${ref}`).join(", ");
+}
+
+function buildMutationOptions(runtime = null, {
+  jobId = "",
+  source = "",
+  agentId = "",
+  enabled = true,
+} = {}) {
+  const threadId = String(
+    runtime?.map?.threadId || runtime?.conversationMembershipTarget?.thread_id || ""
+  ).trim();
+  const conversationId = String(
+    runtime?.conversationMembershipTarget?.conversation_id || runtime?.conversation?.id || ""
+  ).trim();
+  return {
+    jobId: String(jobId || "").trim(),
+    threadId,
+    conversationId,
+    membershipTarget: runtime?.conversationMembershipTarget || null,
+    source: source || "conversation_team_mutation",
+    agentId: cleanId(agentId),
+    enabled: enabled !== false,
+  };
+}
+
+function resolveConversationTeamCommandTarget(agentRef = "", teamView = {}) {
+  const query = cleanId(String(agentRef || "").replace(/^@+/, ""));
+  if (!query) return null;
+  const resolved = resolveAddressableLogicalAgent(query, teamView.addressableAgents);
+  if (resolved?.ambiguous) {
+    const candidates = asArray(resolved.candidates)
+      .map((row) => `@${cleanId(row?.command_ref || row?.representative_agent_id || row?.logical_agent_id)}`)
+      .filter(Boolean);
+    throw new Error(
+      `Ambiguous agent ref: @${query}. Candidates: ${candidates.join(", ") || "(none)"}`
+    );
+  }
+  if (!resolved || typeof resolved !== "object") {
+    return {
+      logical_agent_id: query,
+      command_ref: query,
+      representative_agent_id: query,
+      explicit_member_agent_ids: [],
+      explicit_enabled_member_agent_ids: [],
+      explicit_disabled_member_agent_ids: [],
+      is_baseline: false,
+      in_catalog: false,
+    };
+  }
+  const logicalAgentId = cleanId(resolved.logical_agent_id);
+  const membershipEntry = teamView?.membershipIndex?.byLogicalId instanceof Map
+    ? (teamView.membershipIndex.byLogicalId.get(logicalAgentId) || null)
+    : null;
+  return {
+    logical_agent_id: logicalAgentId,
+    command_ref: cleanId(
+      resolved.command_ref
+      || membershipEntry?.command_ref
+      || query
+    ),
+    representative_agent_id: cleanId(
+      resolved.representative_agent_id
+      || membershipEntry?.representative_agent_id
+      || query
+    ),
+    explicit_member_agent_ids: uniqIds(membershipEntry?.member_agent_ids || []),
+    explicit_enabled_member_agent_ids: uniqIds(membershipEntry?.enabled_member_agent_ids || []),
+    explicit_disabled_member_agent_ids: uniqIds(membershipEntry?.disabled_member_agent_ids || []),
+    is_baseline: asArray(teamView?.baselineDefaultLogicalIds).includes(logicalAgentId),
+    in_catalog: asArray(teamView?.availableCatalogLogicalIds).includes(logicalAgentId),
+  };
+}
+
+async function applyLogicalConversationAgentMutation({
+  teamStore = null,
+  actionType = "",
+  logicalTarget = null,
+  mutationOptions = {},
+} = {}) {
+  if (!teamStore || typeof teamStore !== "object") {
+    throw new Error("teamStore is required");
+  }
+  const type = cleanId(actionType);
+  const target = logicalTarget && typeof logicalTarget === "object" ? logicalTarget : {};
+  const options = mutationOptions && typeof mutationOptions === "object" ? mutationOptions : {};
+  const representativeAgentId = cleanId(target.representative_agent_id || options.agentId);
+  const explicitMemberAgentIds = uniqIds(target.explicit_member_agent_ids || []);
+  const operations = [];
+
+  const runAdd = async (agentId, enabled = true) => {
+    if (!agentId) return null;
+    if (typeof teamStore.addAgent !== "function") {
+      throw new Error("teamStore.addAgent is unavailable");
+    }
+    const result = await teamStore.addAgent({
+      ...options,
+      agentId,
+      enabled,
+    });
+    operations.push(result);
+    return result;
+  };
+  const runRemove = async (agentId) => {
+    if (!agentId) return null;
+    if (typeof teamStore.removeAgent !== "function") {
+      throw new Error("teamStore.removeAgent is unavailable");
+    }
+    const result = await teamStore.removeAgent({
+      ...options,
+      agentId,
+    });
+    operations.push(result);
+    return result;
+  };
+  const runSetEnabled = async (agentId, enabled) => {
+    if (!agentId) return null;
+    if (typeof teamStore.setAgentEnabled !== "function") {
+      throw new Error("teamStore.setAgentEnabled is unavailable");
+    }
+    const result = await teamStore.setAgentEnabled({
+      ...options,
+      agentId,
+      enabled: enabled !== false,
+    });
+    operations.push(result);
+    return result;
+  };
+
+  if (type === "add") {
+    if (explicitMemberAgentIds.length > 0) {
+      for (const memberAgentId of explicitMemberAgentIds) {
+        await runSetEnabled(memberAgentId, true);
+      }
+    } else {
+      await runAdd(representativeAgentId, true);
+    }
+  } else if (type === "enable") {
+    if (explicitMemberAgentIds.length > 0) {
+      for (const memberAgentId of explicitMemberAgentIds) {
+        await runSetEnabled(memberAgentId, true);
+      }
+    } else if (!target.is_baseline) {
+      await runSetEnabled(representativeAgentId, true);
+    }
+  } else if (type === "disable") {
+    const disableTargets = explicitMemberAgentIds.length > 0
+      ? explicitMemberAgentIds
+      : [representativeAgentId];
+    for (const memberAgentId of disableTargets) {
+      await runSetEnabled(memberAgentId, false);
+    }
+  } else if (type === "remove") {
+    for (const memberAgentId of explicitMemberAgentIds) {
+      await runRemove(memberAgentId);
+    }
+  } else {
+    throw new Error(`unsupported action type: ${type}`);
+  }
+
+  const listed = typeof teamStore.listAgents === "function"
+    ? await teamStore.listAgents({
+      threadId: options.threadId,
+      conversationId: options.conversationId,
+      membershipTarget: options.membershipTarget,
+      jobId: options.jobId,
+      source: `${String(options.source || "conversation_team_mutation").trim() || "conversation_team_mutation"}_readback`,
+    })
+    : null;
+  const lastOperation = operations.length > 0 ? operations[operations.length - 1] : null;
+  return {
+    target: listed?.target || lastOperation?.target || options.membershipTarget || null,
+    rows: asArray(listed?.rows || lastOperation?.rows),
+    warnings: normalizeWarningLines([
+      ...normalizeWarningLines(listed?.warnings),
+      ...operations.flatMap((result) => normalizeWarningLines(result?.warnings)),
+    ]),
+    mutation_response: lastOperation?.mutation_response || {
+      ok: true,
+      agent_id: representativeAgentId || undefined,
+      no_op: operations.length === 0 ? true : undefined,
+    },
+    mutation_responses: operations
+      .map((result) => result?.mutation_response)
+      .filter(Boolean),
+    no_op: operations.length === 0,
+  };
+}
+
+function buildLogicalMutationVerification({
+  actionType = "",
+  logicalTarget = null,
+  teamView = {},
+  target = null,
+  source = "",
+  jobId = "",
+  mutationResponse = null,
+  mutationResponses = [],
+} = {}) {
+  const type = cleanId(actionType);
+  const logicalAgentId = cleanId(logicalTarget?.logical_agent_id);
+  const commandRef = cleanId(logicalTarget?.command_ref || logicalTarget?.representative_agent_id || logicalAgentId);
+  const explicitPresent = asArray(teamView?.explicitMemberLogicalIds).includes(logicalAgentId);
+  const explicitEnabled = asArray(teamView?.explicitEnabledLogicalIds).includes(logicalAgentId);
+  const explicitDisabled = asArray(teamView?.explicitDisabledLogicalIds).includes(logicalAgentId);
+  const effectiveEnabled = asArray(teamView?.effectiveEnabledLogicalIds).includes(logicalAgentId);
+
+  let confirmed = false;
+  if (type === "add") confirmed = explicitPresent && effectiveEnabled;
+  else if (type === "enable") confirmed = effectiveEnabled;
+  else if (type === "disable") confirmed = explicitDisabled && !effectiveEnabled;
+  else if (type === "remove") confirmed = !explicitPresent && (logicalTarget?.is_baseline === true ? true : !effectiveEnabled);
+
+  return {
+    action: type === "add"
+      ? "add_agent_to_conversation"
+      : (type === "remove" ? "remove_agent_from_conversation" : `${type}_agent`),
+    thread_id: String(target?.thread_id || "").trim(),
+    conversation_id: String(target?.conversation_id || "").trim(),
+    target_agent_id: commandRef,
+    target_logical_agent_id: logicalAgentId,
+    expected_present: type !== "remove",
+    expected_enabled: type === "disable" ? false : (type === "remove" ? null : true),
+    confirmed,
+    source: String(source || "").trim() || undefined,
+    readback: {
+      explicit_present: explicitPresent,
+      explicit_enabled: explicitEnabled,
+      explicit_disabled: explicitDisabled,
+      effective_enabled: effectiveEnabled,
+      explicit_member_refs: asArray(teamView?.explicitMemberCommandRefs),
+      effective_enabled_refs: asArray(teamView?.effectiveEnabledCommandRefs),
+    },
+    job_id: String(jobId || "").trim() || undefined,
+    membership_target: summarizeMembershipTarget(target || {}),
+    ensured_thread_mismatch: target?.ensured_thread_mismatch === true,
+    mutation_response: summarizeMembershipMutationResponse(mutationResponse),
+    mutation_responses: asArray(mutationResponses).map((row) => summarizeMembershipMutationResponse(row)),
+  };
 }
 
 export async function applyConversationAgentMutation({
@@ -286,34 +809,42 @@ export async function applyConversationAgentMutation({
 
   const teamStore = runtime?.capabilities?.conversationTeamStore;
   if (!teamStore) throw new Error("conversation team store is unavailable");
-  const threadId = String(
-    runtime?.map?.threadId || runtime?.conversationMembershipTarget?.thread_id || ""
-  ).trim();
-  const conversationId = String(
-    runtime?.conversationMembershipTarget?.conversation_id || runtime?.conversation?.id || ""
-  ).trim();
-  const options = {
-    jobId: cleanJobId,
-    threadId,
-    conversationId,
-    membershipTarget: runtime?.conversationMembershipTarget || null,
-    source: source || "conversation_team_mutation",
-    agentId: cleanAgentId,
-    enabled: enabled !== false,
-  };
-  const conversationTeamSource = detectConversationTeamAuthoritySource(runtime);
-  const mutation = await applyValidatedConversationTeamMutation({
-    teamStore,
-    actionType: cleanActionType,
-    agentId: cleanAgentId,
-    mutationOptions: options,
-    catalogRows: conversationTeamSource === "local"
-      ? await ensureRuntimeAgentCatalogRows(runtime)
-      : [],
-    requireCatalogValidation: conversationTeamSource === "local",
+  const catalogRows = await ensureRuntimeAgentCatalogRows(runtime);
+  const preMutationView = deriveConversationTeamView(runtime, {
+    conversationRows: asArray(runtime?.conversationAgents),
+    catalogRows,
   });
-  if (!mutation.ok) {
-    throw createConversationTeamMutationValidationError(mutation.validation);
+  const resolvedTarget = resolveConversationTeamCommandTarget(cleanAgentId, preMutationView);
+  const options = buildMutationOptions(runtime, {
+    jobId: cleanJobId,
+    source: source || "conversation_team_mutation",
+    agentId: resolvedTarget?.representative_agent_id || cleanAgentId,
+    enabled,
+  });
+  const conversationTeamSource = detectConversationTeamAuthoritySource(runtime);
+  let mutation = null;
+  if (conversationTeamSource === "local") {
+    mutation = await applyValidatedConversationTeamMutation({
+      teamStore,
+      actionType: cleanActionType,
+      agentId: resolvedTarget?.representative_agent_id || cleanAgentId,
+      mutationOptions: options,
+      catalogRows,
+      requireCatalogValidation: true,
+    });
+    if (!mutation.ok) {
+      throw createConversationTeamMutationValidationError(mutation.validation);
+    }
+  } else {
+    mutation = {
+      ok: true,
+      result: await applyLogicalConversationAgentMutation({
+        teamStore,
+        actionType: cleanActionType,
+        logicalTarget: resolvedTarget,
+        mutationOptions: options,
+      }),
+    };
   }
 
   const result = mutation.result;
@@ -322,28 +853,48 @@ export async function applyConversationAgentMutation({
     ? result.target
     : runtime?.conversationMembershipTarget
       || {
-        thread_id: threadId,
-        conversation_id: conversationId,
+        thread_id: options.threadId,
+        conversation_id: options.conversationId,
         source: runtime?.mode === "goc" ? "goc" : "local",
       };
-  const verification = verifyConversationMembershipMutation({
-    actionType: cleanActionType === "add"
-      ? "add_agent_to_conversation"
-      : (cleanActionType === "remove" ? "remove_agent_from_conversation" : `${cleanActionType}_agent`),
-    threadId: String(target?.thread_id || threadId || "").trim(),
-    conversationId: String(target?.conversation_id || conversationId || "").trim(),
-    targetAgentId: cleanAgentId,
-    expectedPresent: cleanActionType !== "remove",
-    expectedEnabled: cleanActionType === "disable" ? false : true,
+  const postMutationView = deriveConversationTeamView({
+    ...runtime,
+    agentsCatalog: catalogRows,
+    conversationAgents: convRows,
+  }, {
     conversationRows: convRows,
-    source: source || "conversation_team_mutation",
-    extra: {
-      job_id: cleanJobId,
-      membership_target: summarizeMembershipTarget(target),
-      ensured_thread_mismatch: target?.ensured_thread_mismatch === true,
-      mutation_response: summarizeMembershipMutationResponse(result?.mutation_response),
-    },
+    catalogRows,
+    baselineAgentIds: runtime?.baselineDefaultAgentIds || [],
   });
+  const verification = conversationTeamSource === "local"
+    ? verifyConversationMembershipMutation({
+      actionType: cleanActionType === "add"
+        ? "add_agent_to_conversation"
+        : (cleanActionType === "remove" ? "remove_agent_from_conversation" : `${cleanActionType}_agent`),
+      threadId: String(target?.thread_id || options.threadId || "").trim(),
+      conversationId: String(target?.conversation_id || options.conversationId || "").trim(),
+      targetAgentId: resolvedTarget?.representative_agent_id || cleanAgentId,
+      expectedPresent: cleanActionType !== "remove",
+      expectedEnabled: cleanActionType === "disable" ? false : true,
+      conversationRows: convRows,
+      source: source || "conversation_team_mutation",
+      extra: {
+        job_id: cleanJobId,
+        membership_target: summarizeMembershipTarget(target),
+        ensured_thread_mismatch: target?.ensured_thread_mismatch === true,
+        mutation_response: summarizeMembershipMutationResponse(result?.mutation_response),
+      },
+    })
+    : buildLogicalMutationVerification({
+      actionType: cleanActionType,
+      logicalTarget: resolvedTarget,
+      teamView: postMutationView,
+      target,
+      source: source || "conversation_team_mutation",
+      jobId: cleanJobId,
+      mutationResponse: result?.mutation_response,
+      mutationResponses: result?.mutation_responses,
+    });
   if (!verification.confirmed) {
     if (typeof recordDiagnostic === "function") {
       recordDiagnostic(cleanJobId, verification, {
@@ -365,6 +916,9 @@ export async function applyConversationAgentMutation({
     verification,
     mutationResponse: result?.mutation_response || null,
     warnings: asArray(result?.warnings),
+    agentRef: resolvedTarget?.command_ref || cleanAgentId,
+    agentId: resolvedTarget?.representative_agent_id || cleanAgentId,
+    teamView: postMutationView,
   };
 }
 
@@ -384,9 +938,10 @@ export async function runConversationAgentTeamCommand({
   const cleanCommand = cleanId(command) || "list";
   const cleanJobId = String(jobId || "").trim();
   if (!runtime || typeof runtime !== "object") throw new Error("runtime is required");
+  let mutationResult = null;
 
   if (["add", "remove", "enable", "disable"].includes(cleanCommand)) {
-    await applyConversationAgentMutation({
+    mutationResult = await applyConversationAgentMutation({
       runtime,
       jobId: cleanJobId,
       actionType: cleanCommand,
@@ -402,27 +957,7 @@ export async function runConversationAgentTeamCommand({
   const teamView = deriveConversationTeamView(runtime, {
     conversationRows: updated,
   });
-  const targetAgentIds = cleanCommand === "list"
-    ? [
-      ...teamView.effectiveEnabledAgentIds,
-      ...teamView.explicitMemberAgentIds,
-      ...teamView.availableCatalogAgentIds,
-      ...teamView.lastActiveRunTeamAgentIds,
-    ]
-    : [
-      agentId,
-      ...teamView.effectiveEnabledAgentIds,
-      ...teamView.explicitMemberAgentIds,
-      ...teamView.availableCatalogAgentIds,
-    ];
-  const { format } = await resolveAgentFormatter({
-    runtime,
-    agentRegistry,
-    targetAgentIds,
-    buildAgentDisplayIndex,
-    formatAgentRef,
-    refreshAgentRegistry,
-  });
+  const targetAgentRef = cleanId(mutationResult?.agentRef || agentId);
 
   if (cleanCommand === "list") {
     const authority = buildRunAuthority(runtime);
@@ -435,46 +970,53 @@ export async function runConversationAgentTeamCommand({
         `- job_id: ${cleanJobId}`,
         `- thread_id: ${String(runtime?.map?.threadId || "").trim() || "(none)"}`,
         `- conversation_id: ${String(runtime?.conversationMembershipTarget?.conversation_id || runtime?.conversation?.id || "").trim() || "(none)"}`,
-        teamView.baselineDefaultAgentIds.length > 0
-          ? `- baseline_defaults: ${teamView.baselineDefaultAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
+        teamView.baselineDefaultCommandRefs.length > 0
+          ? `- baseline_defaults: ${formatAgentRefs(teamView.baselineDefaultCommandRefs, { limit: 20 })}`
           : "- baseline_defaults: (none)",
-        teamView.explicitEnabledAgentIds.length > 0
-          ? `- explicit_enabled: ${teamView.explicitEnabledAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
+        teamView.explicitEnabledCommandRefs.length > 0
+          ? `- explicit_enabled: ${formatAgentRefs(teamView.explicitEnabledCommandRefs, { limit: 20 })}`
           : "- explicit_enabled: (none)",
-        teamView.explicitDisabledAgentIds.length > 0
-          ? `- explicit_disabled: ${teamView.explicitDisabledAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
+        teamView.explicitDisabledCommandRefs.length > 0
+          ? `- explicit_disabled: ${formatAgentRefs(teamView.explicitDisabledCommandRefs, { limit: 20 })}`
           : "- explicit_disabled: (none)",
-        teamView.effectiveEnabledAgentIds.length > 0
-          ? `- effective_enabled: ${teamView.effectiveEnabledAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
+        teamView.effectiveEnabledCommandRefs.length > 0
+          ? `- effective_enabled: ${formatAgentRefs(teamView.effectiveEnabledCommandRefs, { limit: 20 })}`
           : "- effective_enabled: (none)",
         teamView.unknownExplicitMemberAgentIds.length > 0
-          ? `- unknown_explicit_members: ${teamView.unknownExplicitMemberAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
+          ? `- unknown_explicit_members: ${formatAgentRefs(teamView.unknownExplicitMemberAgentIds, { limit: 20 })}`
           : "",
-        teamView.availableCatalogAgentIds.length > 0
-          ? `- available_catalog: ${teamView.availableCatalogAgentIds.slice(0, 30).map((id) => format(id)).join(", ")}`
+        teamView.availableCatalogCommandRefs.length > 0
+          ? `- available_catalog: ${formatAgentRefs(teamView.availableCatalogCommandRefs, { limit: 30 })}`
           : "- available_catalog: (none)",
-        teamView.optionalAgentIds.length > 0
-          ? `- optional_members: ${teamView.optionalAgentIds.slice(0, 30).map((id) => format(id)).join(", ")}`
+        teamView.optionalCommandRefs.length > 0
+          ? `- optional_members: ${formatAgentRefs(teamView.optionalCommandRefs, { limit: 30 })}`
           : "- optional_members: (none)",
-        teamView.lastActiveRunTeamAgentIds.length > 0
-          ? `- last_active_run_team: ${teamView.lastActiveRunTeamAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
+        teamView.lastActiveRunTeamCommandRefs.length > 0
+          ? `- last_active_run_team: ${formatAgentRefs(teamView.lastActiveRunTeamCommandRefs, { limit: 20 })}`
           : "",
         runtime?.conversationMembershipWarning
           ? `- warnings: ${String(runtime.conversationMembershipWarning || "").trim()}`
           : "",
         authority?.mode === "goc"
-          ? "명령: /agents registry | /agents public [query] | /agents add <id> | /agents remove <id> | /agents enable <id> | /agents disable <id>"
-          : "명령: /agents registry | /agents add <id> | /agents remove <id> | /agents enable <id> | /agents disable <id>",
+          ? "명령: /agents registry | /agents public [query] | /agents add <agent_ref> | /agents remove <agent_ref> | /agents enable <agent_ref> | /agents disable <agent_ref>"
+          : "명령: /agents registry | /agents add <agent_ref> | /agents remove <agent_ref> | /agents enable <agent_ref> | /agents disable <agent_ref>",
       ].filter(Boolean).join("\n"),
       baselineDefaultAgentIds: teamView.baselineDefaultAgentIds,
+      baselineDefaultAgentRefs: teamView.baselineDefaultCommandRefs,
       enabledAgentIds: teamView.effectiveEnabledAgentIds,
+      enabledAgentRefs: teamView.effectiveEnabledCommandRefs,
       explicitEnabledAgentIds: teamView.explicitEnabledAgentIds,
+      explicitEnabledAgentRefs: teamView.explicitEnabledCommandRefs,
       explicitDisabledAgentIds: teamView.explicitDisabledAgentIds,
+      explicitDisabledAgentRefs: teamView.explicitDisabledCommandRefs,
       availableAgentIds: teamView.availableCatalogAgentIds,
+      availableAgentRefs: teamView.availableCatalogCommandRefs,
       unknownMembers: teamView.unknownExplicitMemberAgentIds,
       optionalAgentIds: teamView.optionalAgentIds,
+      optionalAgentRefs: teamView.optionalCommandRefs,
       notInTeamAgentIds: teamView.availableNotExplicitAgentIds,
       lastActiveRunTeamAgentIds: teamView.lastActiveRunTeamAgentIds,
+      lastActiveRunTeamAgentRefs: teamView.lastActiveRunTeamCommandRefs,
     };
   }
 
@@ -485,21 +1027,27 @@ export async function runConversationAgentTeamCommand({
     message: [
       `✅ conversation agent ${actionVerb(cleanCommand)} 완료`,
       `- job_id: ${cleanJobId}`,
-      `- agent: ${format(agentId)}`,
-      teamView.effectiveEnabledAgentIds.length > 0
-        ? `- effective_enabled: ${teamView.effectiveEnabledAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
+      `- agent: @${targetAgentRef || cleanId(agentId) || "unknown"}`,
+      teamView.effectiveEnabledCommandRefs.length > 0
+        ? `- effective_enabled: ${formatAgentRefs(teamView.effectiveEnabledCommandRefs, { limit: 20 })}`
         : "- effective_enabled: (none)",
-      teamView.explicitDisabledAgentIds.length > 0
-        ? `- explicit_disabled: ${teamView.explicitDisabledAgentIds.slice(0, 20).map((id) => format(id)).join(", ")}`
+      teamView.explicitDisabledCommandRefs.length > 0
+        ? `- explicit_disabled: ${formatAgentRefs(teamView.explicitDisabledCommandRefs, { limit: 20 })}`
         : "- explicit_disabled: (none)",
     ].join("\n"),
     baselineDefaultAgentIds: teamView.baselineDefaultAgentIds,
+    baselineDefaultAgentRefs: teamView.baselineDefaultCommandRefs,
     enabledAgentIds: teamView.effectiveEnabledAgentIds,
+    enabledAgentRefs: teamView.effectiveEnabledCommandRefs,
     explicitEnabledAgentIds: teamView.explicitEnabledAgentIds,
+    explicitEnabledAgentRefs: teamView.explicitEnabledCommandRefs,
     explicitDisabledAgentIds: teamView.explicitDisabledAgentIds,
+    explicitDisabledAgentRefs: teamView.explicitDisabledCommandRefs,
     availableAgentIds: teamView.availableCatalogAgentIds,
+    availableAgentRefs: teamView.availableCatalogCommandRefs,
     unknownMembers: teamView.unknownExplicitMemberAgentIds,
     optionalAgentIds: teamView.optionalAgentIds,
+    optionalAgentRefs: teamView.optionalCommandRefs,
     notInTeamAgentIds: teamView.availableNotExplicitAgentIds,
   };
 }
