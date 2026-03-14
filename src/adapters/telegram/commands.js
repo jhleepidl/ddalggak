@@ -4,55 +4,65 @@ import {
 } from "../../application/route_executor.js";
 
 export function createTelegramCommandHandler(deps = {}) {
-  const {
-    bot,
-    sendLong,
-    formatRunningJobs,
-    getAwait,
-    clearAwait,
-    setAwait,
-    rememberLastChatJob,
-    resetChatSession,
-    activeJobByChat,
-    lastChatJobByChat,
-    cancelJobExecution,
-    chatSessionStore,
-    memory,
-    formatMemorySummary,
-    formatAgentMemorySummary,
-    sendChatStatus,
-    sendAgentOrToolListQuick,
-    resolveLiveJobIdForChat,
-    parseClampedInt,
-    collectWorkspaceFileEntries,
-    formatWorkspaceFileListText,
-    deliverWorkspaceOutputs,
-    OUTPUT_AUTO_SEND_MAX_FILES,
-    sendWorkspaceFileByRelativePath,
-    formatByteSize,
-    clip,
-    sendContextInfo,
-    parseChatMessageWithFlags,
-    sendRouterAckMessage,
-    chatRunManager,
-    runSupervisorChat,
-    createJob,
-    resetJobAbortController,
-    runWorkspaceDir,
-    loadSupervisorRuntime,
-    decideRunRoute,
-    tracking,
-    actionLabel,
-    executeRoutedPlan,
-    suggestNextPrompt,
-    isCancelledError,
-    getGoalFromResearch,
-    extractCodexInstruction,
-    sendChatGPTPrompt,
-    jobs,
-    approvals,
-    jobAbortControllers,
-  } = deps;
+  const telegramUi = deps.telegramUi || {};
+  const runtimeOps = deps.runtimeOps || {};
+  const jobOps = deps.jobOps || {};
+  const sessionOps = deps.sessionOps || {};
+  const fileOps = deps.fileOps || {};
+  const teamOps = deps.teamOps || {};
+
+  const bot = telegramUi.bot || deps.bot;
+  const sendLong = telegramUi.sendLong || deps.sendLong;
+  const sendContextInfo = telegramUi.sendContextInfo || deps.sendContextInfo;
+  const sendRouterAckMessage = telegramUi.sendRouterAckMessage || deps.sendRouterAckMessage;
+  const clip = telegramUi.clip || deps.clip;
+
+  const formatRunningJobs = jobOps.formatRunningJobs || deps.formatRunningJobs;
+  const cancelJobExecution = jobOps.cancelJobExecution || deps.cancelJobExecution;
+  const createJob = jobOps.createJob || deps.createJob;
+  const resetJobAbortController = jobOps.resetJobAbortController || deps.resetJobAbortController;
+  const tracking = jobOps.tracking || deps.tracking;
+  const jobs = jobOps.jobs || deps.jobs;
+  const approvals = jobOps.approvals || deps.approvals;
+  const isCancelledError = jobOps.isCancelledError || deps.isCancelledError;
+  const actionLabel = jobOps.actionLabel || deps.actionLabel;
+  const getGoalFromResearch = jobOps.getGoalFromResearch || deps.getGoalFromResearch;
+  const extractCodexInstruction = jobOps.extractCodexInstruction || deps.extractCodexInstruction;
+
+  const getAwait = sessionOps.getAwait || deps.getAwait;
+  const clearAwait = sessionOps.clearAwait || deps.clearAwait;
+  const setAwait = sessionOps.setAwait || deps.setAwait;
+  const rememberLastChatJob = sessionOps.rememberLastChatJob || deps.rememberLastChatJob;
+  const resetChatSession = sessionOps.resetChatSession || deps.resetChatSession;
+  const activeJobByChat = sessionOps.activeJobByChat || deps.activeJobByChat;
+  const lastChatJobByChat = sessionOps.lastChatJobByChat || deps.lastChatJobByChat;
+  const chatSessionStore = sessionOps.chatSessionStore || deps.chatSessionStore;
+  const chatRunManager = sessionOps.chatRunManager || deps.chatRunManager;
+  const jobAbortControllers = sessionOps.jobAbortControllers || deps.jobAbortControllers;
+
+  const resolveLiveJobIdForChat = fileOps.resolveLiveJobIdForChat || deps.resolveLiveJobIdForChat;
+  const parseClampedInt = fileOps.parseClampedInt || deps.parseClampedInt;
+  const collectWorkspaceFileEntries = fileOps.collectWorkspaceFileEntries || deps.collectWorkspaceFileEntries;
+  const formatWorkspaceFileListText = fileOps.formatWorkspaceFileListText || deps.formatWorkspaceFileListText;
+  const deliverWorkspaceOutputs = fileOps.deliverWorkspaceOutputs || deps.deliverWorkspaceOutputs;
+  const OUTPUT_AUTO_SEND_MAX_FILES = fileOps.OUTPUT_AUTO_SEND_MAX_FILES || deps.OUTPUT_AUTO_SEND_MAX_FILES;
+  const sendWorkspaceFileByRelativePath = fileOps.sendWorkspaceFileByRelativePath || deps.sendWorkspaceFileByRelativePath;
+  const formatByteSize = fileOps.formatByteSize || deps.formatByteSize;
+  const runWorkspaceDir = fileOps.runWorkspaceDir || deps.runWorkspaceDir;
+
+  const memory = runtimeOps.memory || deps.memory;
+  const formatMemorySummary = runtimeOps.formatMemorySummary || deps.formatMemorySummary;
+  const formatAgentMemorySummary = runtimeOps.formatAgentMemorySummary || deps.formatAgentMemorySummary;
+  const parseChatMessageWithFlags = runtimeOps.parseChatMessageWithFlags || deps.parseChatMessageWithFlags;
+  const runSupervisorChat = runtimeOps.runSupervisorChat || deps.runSupervisorChat;
+  const loadSupervisorRuntime = runtimeOps.loadSupervisorRuntime || deps.loadSupervisorRuntime;
+  const decideRunRoute = runtimeOps.decideRunRoute || deps.decideRunRoute;
+  const executeRoutedPlan = runtimeOps.executeRoutedPlan || deps.executeRoutedPlan;
+  const suggestNextPrompt = runtimeOps.suggestNextPrompt || deps.suggestNextPrompt;
+  const sendChatGPTPrompt = runtimeOps.sendChatGPTPrompt || deps.sendChatGPTPrompt;
+
+  const sendChatStatus = teamOps.sendChatStatus || deps.sendChatStatus;
+  const sendAgentOrToolListQuick = teamOps.sendAgentOrToolListQuick || deps.sendAgentOrToolListQuick;
 
   return async function handleTelegramCommand({ msg, text, chatId, userId }) {
     if (!String(text || "").startsWith("/")) return false;

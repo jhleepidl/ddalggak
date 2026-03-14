@@ -4,37 +4,46 @@ import {
 } from "../../application/approval_flow.js";
 
 export function createTelegramCallbackQueryHandler(deps = {}) {
-  const {
-    bot,
-    isAllowedChat,
-    isAllowedUser,
-    setGocActingTelegramUser,
-    bindGocActor,
-    clip,
-    openAgentsUiInfo,
-    memoryModeWithFallback,
-    requireGocClient,
-    findDraftByNodeId,
-    findLatestDraftByAgentId,
-    buildAgentProfileFromProposal,
-    resolveCurrentJobIdForChat,
-    createAgentProfile,
-    jobs,
-    appendParticipantToJobConfig,
-    tracking,
-    refreshAgentRegistry,
-    setAwait,
-    rememberLastChatJob,
-    approvals,
-    runWorkspaceDir,
-    runCommand,
-    FENCE,
-    sendLong,
-    suggestNextPrompt,
-    handleActionApproval,
-    // approval flow deps passthrough
-    actionApprovalDeps = {},
-  } = deps;
+  const telegramUi = deps.telegramUi || {};
+  const runtimeOps = deps.runtimeOps || {};
+  const jobOps = deps.jobOps || {};
+  const sessionOps = deps.sessionOps || {};
+  const fileOps = deps.fileOps || {};
+  const teamOps = deps.teamOps || {};
+
+  const bot = telegramUi.bot || deps.bot;
+  const clip = telegramUi.clip || deps.clip;
+  const FENCE = telegramUi.FENCE || deps.FENCE;
+  const sendLong = telegramUi.sendLong || deps.sendLong;
+
+  const isAllowedChat = teamOps.isAllowedChat || deps.isAllowedChat;
+  const isAllowedUser = teamOps.isAllowedUser || deps.isAllowedUser;
+  const setGocActingTelegramUser = teamOps.setGocActingTelegramUser || deps.setGocActingTelegramUser;
+  const bindGocActor = teamOps.bindGocActor || deps.bindGocActor;
+  const openAgentsUiInfo = teamOps.openAgentsUiInfo || deps.openAgentsUiInfo;
+  const findDraftByNodeId = teamOps.findDraftByNodeId || deps.findDraftByNodeId;
+  const findLatestDraftByAgentId = teamOps.findLatestDraftByAgentId || deps.findLatestDraftByAgentId;
+  const buildAgentProfileFromProposal = teamOps.buildAgentProfileFromProposal || deps.buildAgentProfileFromProposal;
+  const createAgentProfile = teamOps.createAgentProfile || deps.createAgentProfile;
+  const appendParticipantToJobConfig = teamOps.appendParticipantToJobConfig || deps.appendParticipantToJobConfig;
+  const refreshAgentRegistry = teamOps.refreshAgentRegistry || deps.refreshAgentRegistry;
+
+  const memoryModeWithFallback = runtimeOps.memoryModeWithFallback || deps.memoryModeWithFallback;
+  const requireGocClient = runtimeOps.requireGocClient || deps.requireGocClient;
+  const resolveCurrentJobIdForChat = runtimeOps.resolveCurrentJobIdForChat || deps.resolveCurrentJobIdForChat;
+  const suggestNextPrompt = runtimeOps.suggestNextPrompt || deps.suggestNextPrompt;
+  const handleActionApproval = runtimeOps.handleActionApproval || deps.handleActionApproval;
+  const actionApprovalDeps = runtimeOps.actionApprovalDeps || deps.actionApprovalDeps || {};
+
+  const jobs = jobOps.jobs || deps.jobs;
+  const tracking = jobOps.tracking || deps.tracking;
+  const approvals = jobOps.approvals || deps.approvals;
+  const runCommand = jobOps.runCommand || deps.runCommand;
+
+  const setAwait = sessionOps.setAwait || deps.setAwait;
+  const rememberLastChatJob = sessionOps.rememberLastChatJob || deps.rememberLastChatJob;
+
+  const runWorkspaceDir = fileOps.runWorkspaceDir || deps.runWorkspaceDir;
 
   return async function onCallbackQuery(q) {
     try {
