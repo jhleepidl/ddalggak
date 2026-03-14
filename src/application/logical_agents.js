@@ -10,6 +10,13 @@ function cleanId(raw = "") {
   return String(raw || "").trim().toLowerCase();
 }
 
+export function normalizeAgentLookupKey(raw = "") {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9가-힣]+/g, "");
+}
+
 function uniqIds(values = []) {
   const out = [];
   const seen = new Set();

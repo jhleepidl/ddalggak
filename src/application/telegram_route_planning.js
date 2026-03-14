@@ -83,6 +83,7 @@ import {
   isExplicitTeamConfigurationIntentMessage,
 } from "./team_intent.js";
 import { buildExplicitTeamReconfigurationActions } from "./team_config_diff.js";
+import { normalizeAgentLookupKey } from "./logical_agents.js";
 import {
   verifyConversationMembershipMutation,
   createMembershipConfirmationError,
@@ -1076,13 +1077,6 @@ const AGENT_DEDUPE_STOPWORDS = new Set([
   "해줘",
   "해주세요",
 ]);
-
-function normalizeAgentLookupKey(raw) {
-  return String(raw || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9가-힣]+/g, "");
-}
 
 function tokenizeAgentDedupeText(text, { maxTokens = 120 } = {}) {
   const tokens = String(text || "").toLowerCase().match(/[a-z0-9가-힣_]{2,}/g) || [];

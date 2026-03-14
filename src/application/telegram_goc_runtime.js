@@ -83,6 +83,7 @@ import {
   isExplicitTeamConfigurationIntentMessage,
 } from "./team_intent.js";
 import { buildExplicitTeamReconfigurationActions } from "./team_config_diff.js";
+import { normalizeAgentLookupKey } from "./logical_agents.js";
 import {
   verifyConversationMembershipMutation,
   createMembershipConfirmationError,
