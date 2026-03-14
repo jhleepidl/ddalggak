@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { buildAgentDisplayIndex } from "../src/shared/agent_labels.js";
 import {
   formatChatActionLabel,
   buildApprovalActionSummaryLines,
@@ -40,6 +41,9 @@ test("approval summary formatter reuses remaining actions with shared label call
 });
 
 test("routed dashboard formatter emits unified plan/status sections", () => {
+  const agentIndex = buildAgentDisplayIndex([
+    { id: "researcher", name: "KR Market Analyst" },
+  ]);
   const text = buildRoutedDashboardText({
     actions: [
       { type: "run_agent", agent_id: "researcher", goal: "시장 분석" },
@@ -47,10 +51,12 @@ test("routed dashboard formatter emits unified plan/status sections", () => {
     agentStatus: {
       researcher: { state: "running" },
     },
+    agentIndex,
   });
   assert.match(text, /🧭 분담/);
   assert.match(text, /📡 상태/);
-  assert.match(text, /@researcher/);
+  assert.match(text, /KR Market Analyst/);
+  assert.doesNotMatch(text, /@researcher/);
 });
 
 test("gemini retry notice formatter remains stable after extraction", () => {
@@ -58,7 +64,9 @@ test("gemini retry notice formatter remains stable after extraction", () => {
     retryCount: 2,
     maxRetries: 4,
     agentId: "researcher",
+    agentLabel: "KR Market Analyst",
   });
   assert.match(text, /2\/4/);
-  assert.match(text, /@researcher/);
+  assert.match(text, /KR Market Analyst/);
+  assert.doesNotMatch(text, /@researcher/);
 });

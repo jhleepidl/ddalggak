@@ -1,6 +1,6 @@
 import { clip } from "../../textutil.js";
 import {
-  formatAgentDisplayName,
+  formatChatAgentDisplayName,
   resolveActionAgentId,
   resolveActionAgentNameHint,
 } from "../../shared/agent_labels.js";
@@ -26,10 +26,7 @@ export function formatActionAgentLabel(action = {}, {
   const agentId = resolveActionAgentId(action);
   const nameHint = resolveActionAgentNameHint(action);
   if (!agentId && !nameHint) return fallback;
-  return formatAgentDisplayName(agentId || nameHint, index, {
-    nameHint,
-    includeShortId: true,
-  });
+  return formatChatAgentDisplayName(agentId || nameHint, index, { nameHint });
 }
 
 export function formatChatActionLabel(action = {}, {
@@ -134,8 +131,9 @@ export function buildQueuedAgentStatusFromActions(actions = []) {
   return out;
 }
 
-export function buildAgentStatusLines(agentStatusMap = {}) {
+export function buildAgentStatusLines(agentStatusMap = {}, { agentIndex = new Map() } = {}) {
   const map = agentStatusMap && typeof agentStatusMap === "object" ? agentStatusMap : {};
+  const index = asMap(agentIndex);
   const entries = Object.entries(map);
   if (entries.length === 0) return ["- (agent 없음)"];
   const stateEmoji = {
@@ -154,7 +152,8 @@ export function buildAgentStatusLines(agentStatusMap = {}) {
         ? state
         : "queued";
       const emoji = stateEmoji[normalizedState] || "⏳";
-      return `- @${agentId} ${emoji} ${normalizedState}`;
+      const agentDisplay = formatChatAgentDisplayName(agentId, index);
+      return `- ${agentDisplay} ${emoji} ${normalizedState}`;
     })
     .filter(Boolean);
 }
@@ -164,7 +163,7 @@ export function buildRoutedDashboardText({ actions = [], agentStatus = {}, actio
     actionLabel,
     agentIndex,
   });
-  const statusLines = buildAgentStatusLines(agentStatus);
+  const statusLines = buildAgentStatusLines(agentStatus, { agentIndex });
   return [
     "🧭 분담(아래) + 상태판(아래)",
     "🧭 분담",
@@ -381,19 +380,20 @@ export function summarizeSpecialChatOutputs(outputs = []) {
       continue;
     }
     for (const item of items.slice(0, 6)) {
-      const agentId = String(item?.agent_id || "").trim();
       const title = String(item?.title || "").trim() || String(item?.blueprint_id || "").trim();
       const blueprintId = String(item?.blueprint_id || "").trim();
       const tags = Array.isArray(item?.tags) && item.tags.length > 0 ? ` tags=${item.tags.join(",")}` : "";
-      lines.push(`- ${title} (${agentId ? `@${agentId}` : "agent:n/a"}, blueprint=${blueprintId || "n/a"})${tags}`);
+      lines.push(`- ${title}${blueprintId ? ` (blueprint=${blueprintId})` : ""}${tags}`);
     }
   }
 
   for (const row of installRows) {
     const agentId = String(row?.installed_agent_id || "").trim().toLowerCase();
-    if (agentId) {
-      lines.push(`설치 완료: @${agentId}`);
-      lines.push(`이제 @${agentId} 로 사용 가능`);
+    const agentLabel = String(row?.installed_agent_label || row?.installed_agent_name || "").trim();
+    if (agentLabel || agentId) {
+      const display = agentLabel || `@${agentId}`;
+      lines.push(`설치 완료: ${display}`);
+      lines.push(`이제 ${display} 로 사용 가능`);
     } else {
       lines.push("설치 완료");
     }
@@ -438,4 +438,3 @@ export function buildChatSynthesisFallback(message = "", execution = {}) {
   }
   return `요청: ${clip(String(message || ""), 300)}\n응답을 생성하지 못했습니다. 같은 요청을 다시 보내주세요.`;
 }
-

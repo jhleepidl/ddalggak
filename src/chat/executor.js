@@ -11,7 +11,7 @@ import {
 } from "./action_classification.js";
 import {
   buildAgentDisplayIndex,
-  formatAgentDisplayName,
+  formatChatAgentDisplayName,
 } from "../shared/agent_labels.js";
 import { formatChatActionLabel } from "../adapters/telegram/preview_formatting.js";
 
@@ -60,6 +60,26 @@ function looksLikeWorkRequest(text) {
   const src = String(text || "").toLowerCase();
   if (!src) return false;
   return /만들어줘|작성해줘|과제|리서치|분석|구현|코드|work|task|research|analy/i.test(src);
+}
+
+function escapeRegExp(text = "") {
+  return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function replaceAgentMentions(text = "", { agentIndex = new Map(), agentIds = [], nameHints = {} } = {}) {
+  let out = String(text || "");
+  const hints = nameHints && typeof nameHints === "object" ? nameHints : {};
+  const seen = new Set();
+  for (const agentIdRaw of agentIds) {
+    const agentId = String(agentIdRaw || "").trim().toLowerCase();
+    if (!agentId || seen.has(agentId)) continue;
+    seen.add(agentId);
+    const label = formatChatAgentDisplayName(agentId, agentIndex, {
+      nameHint: String(hints[agentId] || "").trim(),
+    });
+    out = out.replace(new RegExp(`@${escapeRegExp(agentId)}`, "gi"), label);
+  }
+  return out;
 }
 
 function mutatingPreviewLines(actions = [], { agentIndex = new Map() } = {}) {
@@ -401,18 +421,30 @@ export async function executeSupervisorActions({
           chatId,
           userId,
         });
+        const createdAgentId = String(created?.agent_id || action.agent?.id || "").trim().toLowerCase();
+        const createdAgentName = String(created?.name || action.agent?.name || "").trim();
+        const createdAgentLabel = createdAgentId
+          ? formatChatAgentDisplayName(createdAgentId, agentDisplayIndex, {
+            nameHint: createdAgentName,
+          })
+          : (createdAgentName || "");
+        const createdOutput = replaceAgentMentions(String(created?.text || created?.message || "").trim(), {
+          agentIndex: agentDisplayIndex,
+          agentIds: [createdAgentId],
+          nameHints: { [createdAgentId]: createdAgentName },
+        });
         outputs.push({
           agentId: "system",
           provider: "system",
           mode: "create_agent",
-          output: String(created?.text || created?.message || "").trim()
-            || `agent 생성 완료: @${String(created?.agent_id || action.agent?.id || "").trim()}`,
+          output: createdOutput
+            || (createdAgentLabel ? `agent 생성 완료: ${createdAgentLabel}` : "agent 생성 완료"),
           jobId: String(jobId || ""),
         });
         results.push({
           label,
           status: "ok",
-          note: String(created?.agent_id || action.agent?.id || "created"),
+          note: createdAgentLabel || "created",
         });
         usedActions += 1;
         continue;
@@ -428,18 +460,30 @@ export async function executeSupervisorActions({
           chatId,
           userId,
         });
+        const targetAgentId = String(updated?.agent_id || action.agentId || "").trim().toLowerCase();
+        const targetAgentName = String(updated?.name || action?.patch?.name || "").trim();
+        const targetAgentLabel = targetAgentId
+          ? formatChatAgentDisplayName(targetAgentId, agentDisplayIndex, {
+            nameHint: targetAgentName,
+          })
+          : (targetAgentName || "");
+        const updatedOutput = replaceAgentMentions(String(updated?.text || updated?.message || "").trim(), {
+          agentIndex: agentDisplayIndex,
+          agentIds: [targetAgentId],
+          nameHints: { [targetAgentId]: targetAgentName },
+        });
         outputs.push({
           agentId: "system",
           provider: "system",
           mode: "update_agent",
-          output: String(updated?.text || updated?.message || "").trim()
-            || `agent 수정 완료: @${String(updated?.agent_id || action.agentId || "").trim()}`,
+          output: updatedOutput
+            || (targetAgentLabel ? `agent 수정 완료: ${targetAgentLabel}` : "agent 수정 완료"),
           jobId: String(jobId || ""),
         });
         results.push({
           label,
           status: "ok",
-          note: String(updated?.agent_id || action.agentId || "updated"),
+          note: targetAgentLabel || "updated",
         });
         usedActions += 1;
         continue;
@@ -461,12 +505,27 @@ export async function executeSupervisorActions({
           || action?.agent_spec?.id
           || ""
         ).trim().toLowerCase();
+        const createdAgentName = String(
+          created?.name
+          || action?.agent_spec?.name
+          || ""
+        ).trim();
+        const createdAgentLabel = createdAgentId
+          ? formatChatAgentDisplayName(createdAgentId, agentDisplayIndex, {
+            nameHint: createdAgentName,
+          })
+          : (createdAgentName || "");
+        const createdOutput = replaceAgentMentions(String(created?.text || created?.message || "").trim(), {
+          agentIndex: agentDisplayIndex,
+          agentIds: [createdAgentId],
+          nameHints: { [createdAgentId]: createdAgentName },
+        });
         outputs.push({
           agentId: "system",
           provider: "system",
           mode: "create_agent_definition",
-          output: String(created?.text || created?.message || "").trim()
-            || `agent definition 생성 완료: @${createdAgentId || "unknown"}`,
+          output: createdOutput
+            || (createdAgentLabel ? `agent definition 생성 완료: ${createdAgentLabel}` : "agent definition 생성 완료"),
           agent_id: createdAgentId,
           created_node_id: String(created?.created_node_id || created?.node_id || "").trim() || undefined,
           added_to_conversation: created?.added_to_conversation === true,
@@ -475,7 +534,7 @@ export async function executeSupervisorActions({
         results.push({
           label,
           status: "ok",
-          note: createdAgentId ? `@${createdAgentId}` : "created",
+          note: createdAgentLabel || "created",
         });
         usedActions += 1;
         continue;
@@ -496,17 +555,29 @@ export async function executeSupervisorActions({
           || forked?.id
           || ""
         ).trim().toLowerCase();
+        const nextAgentName = String(forked?.name || "").trim();
+        const nextAgentLabel = nextId
+          ? formatChatAgentDisplayName(nextId, agentDisplayIndex, {
+            nameHint: nextAgentName,
+          })
+          : (nextAgentName || "");
+        const sourceAgentId = String(action.agent_id || "").trim().toLowerCase();
+        const forkedOutput = replaceAgentMentions(String(forked?.text || forked?.message || "").trim(), {
+          agentIndex: agentDisplayIndex,
+          agentIds: [sourceAgentId, nextId],
+          nameHints: { [nextId]: nextAgentName },
+        });
         outputs.push({
           agentId: "system",
           provider: "system",
           mode: "fork_agent",
-          output: String(forked?.text || forked?.message || "").trim()
-            || (nextId ? `agent fork 완료: @${nextId}` : "agent fork 완료"),
+          output: forkedOutput
+            || (nextAgentLabel ? `agent fork 완료: ${nextAgentLabel}` : "agent fork 완료"),
           agent_id: nextId || undefined,
-          source_agent_id: String(action.agent_id || "").trim().toLowerCase() || undefined,
+          source_agent_id: sourceAgentId || undefined,
           jobId: String(jobId || ""),
         });
-        results.push({ label, status: "ok", note: nextId || "forked" });
+        results.push({ label, status: "ok", note: nextAgentLabel || "forked" });
         usedActions += 1;
         continue;
       }
@@ -524,11 +595,10 @@ export async function executeSupervisorActions({
         const list = Array.isArray(found?.items) ? found.items : [];
         const lines = list.length > 0
           ? list.map((row, index) => {
-            const agentId = String(row?.agent_id || "").trim();
             const blueprintId = String(row?.blueprint_id || "").trim();
             const title = String(row?.title || "").trim();
             const tags = Array.isArray(row?.tags) && row.tags.length > 0 ? ` tags=${row.tags.join(",")}` : "";
-            return `${index + 1}. ${title || blueprintId || agentId} (${agentId ? `@${agentId}` : "agent:n/a"}, blueprint=${blueprintId || "n/a"})${tags}`;
+            return `${index + 1}. ${title || blueprintId || "agent"}${blueprintId ? ` (blueprint=${blueprintId})` : ""}${tags}`;
           }).join("\n")
           : "검색 결과가 없습니다.";
         outputs.push({
@@ -559,8 +629,19 @@ export async function executeSupervisorActions({
         });
         const agentId = String(installed?.agent_id || "").trim().toLowerCase();
         const blueprintId = String(installed?.blueprint_id || "").trim();
-        const line = agentId
-          ? `설치 완료: @${agentId}\n이제 @${agentId} 로 사용 가능`
+        const installedAgentName = String(
+          installed?.agent_name
+          || installed?.name
+          || installed?.title
+          || ""
+        ).trim();
+        const installedAgentLabel = agentId
+          ? formatChatAgentDisplayName(agentId, agentDisplayIndex, {
+            nameHint: installedAgentName,
+          })
+          : installedAgentName;
+        const line = installedAgentLabel
+          ? `설치 완료: ${installedAgentLabel}\n이제 ${installedAgentLabel} 로 사용 가능`
           : "설치 완료";
         outputs.push({
           agentId: "system",
@@ -568,12 +649,14 @@ export async function executeSupervisorActions({
           mode: "install_agent_blueprint",
           output: line,
           installed_agent_id: agentId,
+          installed_agent_name: installedAgentName || undefined,
+          installed_agent_label: installedAgentLabel || undefined,
           blueprint_id: blueprintId,
           public_node_id: String(installed?.public_node_id || "").trim(),
           node_id: String(installed?.node_id || installed?.created?.id || "").trim(),
           jobId: String(jobId || ""),
         });
-        results.push({ label, status: "ok", note: agentId ? `@${agentId}` : (blueprintId || "installed") });
+        results.push({ label, status: "ok", note: installedAgentLabel || blueprintId || "installed" });
         usedActions += 1;
         continue;
       }
@@ -622,14 +705,13 @@ export async function executeSupervisorActions({
         });
         const targetAgentId = String(action.agent_id || changed?.agent_id || "").trim().toLowerCase();
         const enabledAgents = Array.isArray(changed?.enabled_agents) ? changed.enabled_agents : [];
-        const targetAgentDisplay = formatAgentDisplayName(targetAgentId, agentDisplayIndex, {
-          includeShortId: true,
-        });
-        const enabledAgentDisplays = enabledAgents.map((id) => formatAgentDisplayName(id, agentDisplayIndex, {
-          includeShortId: true,
-        }));
+        const targetAgentDisplay = formatChatAgentDisplayName(targetAgentId, agentDisplayIndex);
+        const enabledAgentDisplays = enabledAgents.map((id) => formatChatAgentDisplayName(id, agentDisplayIndex));
         const baseOutput = `✅ conversation agent 추가: ${targetAgentDisplay}${enabledAgentDisplays.length > 0 ? `\nenabled=${enabledAgentDisplays.join(", ")}` : ""}`;
-        const changedOutput = String(changed?.text || "").trim();
+        const changedOutput = replaceAgentMentions(String(changed?.text || "").trim(), {
+          agentIndex: agentDisplayIndex,
+          agentIds: [targetAgentId, ...enabledAgents],
+        });
         outputs.push({
           agentId: "system",
           provider: "system",
@@ -661,14 +743,13 @@ export async function executeSupervisorActions({
         });
         const targetAgentId = String(action.agent_id || changed?.agent_id || "").trim().toLowerCase();
         const enabledAgents = Array.isArray(changed?.enabled_agents) ? changed.enabled_agents : [];
-        const targetAgentDisplay = formatAgentDisplayName(targetAgentId, agentDisplayIndex, {
-          includeShortId: true,
-        });
-        const enabledAgentDisplays = enabledAgents.map((id) => formatAgentDisplayName(id, agentDisplayIndex, {
-          includeShortId: true,
-        }));
+        const targetAgentDisplay = formatChatAgentDisplayName(targetAgentId, agentDisplayIndex);
+        const enabledAgentDisplays = enabledAgents.map((id) => formatChatAgentDisplayName(id, agentDisplayIndex));
         const baseOutput = `🛑 conversation agent 제거: ${targetAgentDisplay}${enabledAgentDisplays.length > 0 ? `\nenabled=${enabledAgentDisplays.join(", ")}` : ""}`;
-        const changedOutput = String(changed?.text || "").trim();
+        const changedOutput = replaceAgentMentions(String(changed?.text || "").trim(), {
+          agentIndex: agentDisplayIndex,
+          agentIds: [targetAgentId, ...enabledAgents],
+        });
         outputs.push({
           agentId: "system",
           provider: "system",
@@ -731,7 +812,7 @@ export async function executeSupervisorActions({
         });
         const marker = op === "enable" ? "✅" : "🚫";
         const targetDisplay = kind === "agent"
-          ? formatAgentDisplayName(targetId, agentDisplayIndex, { includeShortId: true })
+          ? formatChatAgentDisplayName(targetId, agentDisplayIndex)
           : targetId;
         const line = kind === "agent"
           ? `${marker} ${targetDisplay} ${op === "enable" ? "enabled" : "disabled"}`
@@ -781,7 +862,7 @@ export async function executeSupervisorActions({
             .map((row) => String(row?.id || "").trim().toLowerCase())
             .filter(Boolean);
           text = ids.length > 0
-            ? `현재 job에서 사용 가능한 agent:\n${ids.map((id) => `- @${id}`).join("\n")}`
+            ? `현재 job에서 사용 가능한 agent:\n${ids.map((id) => `- ${formatChatAgentDisplayName(id, agentDisplayIndex)}`).join("\n")}`
             : "현재 job에서 사용 가능한 agent가 없습니다.";
         }
         outputs.push({

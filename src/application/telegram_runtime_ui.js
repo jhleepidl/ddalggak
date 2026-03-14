@@ -7,7 +7,7 @@ import {
 import { isTelegramWebAppHttpsError } from "../adapters/telegram/context_links.js";
 import {
   buildAgentDisplayIndex as buildAgentDisplayIndexShared,
-  formatAgentDisplayName,
+  formatChatAgentDisplayName,
 } from "../shared/agent_labels.js";
 import { clip } from "../textutil.js";
 import {
@@ -71,9 +71,7 @@ function buildAgentDisplayIndex(registry = null, runtime = null) {
 }
 
 function formatAgentRef(agentId, agentIndex = new Map()) {
-  return formatAgentDisplayName(agentId, agentIndex, {
-    includeShortId: true,
-  });
+  return formatChatAgentDisplayName(agentId, agentIndex);
 }
 
 export function formatMemorySummary() {
@@ -200,6 +198,7 @@ export function buildChatStatusCard(chatId, runtime = null) {
   const enabledAgents = runtime?.agentSelection?.enabled_ids || runtime?.enabledAgentIds || [];
   const enabledTools = runtime?.toolSelection?.enabled_ids || runtime?.enabledToolIds || [];
   const runtimeAuthority = buildRunAuthority(runtime);
+  const agentIndex = buildAgentDisplayIndex(agentRegistry, runtime);
 
   const lines = [
     "📋 현재 상태",
@@ -224,7 +223,7 @@ export function buildChatStatusCard(chatId, runtime = null) {
     }
   }
   if (Array.isArray(enabledAgents) && enabledAgents.length > 0) {
-    lines.push(`- enabled_agents: ${enabledAgents.map((id) => `@${id}`).join(", ")}`);
+    lines.push(`- enabled_agents: ${enabledAgents.map((id) => formatAgentRef(id, agentIndex)).join(", ")}`);
   }
   if (Array.isArray(enabledTools) && enabledTools.length > 0) {
     lines.push(`- enabled_tools: ${enabledTools.join(", ")}`);

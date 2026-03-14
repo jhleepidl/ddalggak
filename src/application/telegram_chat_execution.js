@@ -117,7 +117,7 @@ import { routeWithSupervisor } from "../chat/supervisor_router.js";
 import { executeSupervisorActions, isMutatingAction } from "../chat/executor.js";
 import {
   buildAgentDisplayIndex as buildAgentDisplayIndexShared,
-  formatAgentDisplayName,
+  formatChatAgentDisplayName,
   resolveActionAgentId,
   resolveActionAgentNameHint,
 } from "../shared/agent_labels.js";
@@ -196,6 +196,9 @@ const {
   collectSuggestedActionsFromOutputs,
   updateCompletedDeliverablesFromOutputs,
   buildPendingApprovalPrompt,
+  sendGeminiRetryMessage,
+  sendGeminiModelSwitchMessage,
+  sendGeminiGiveUpMessage,
   sendAgentStatusTransitionMessage,
 } = routePlanning;
 const {
@@ -455,9 +458,7 @@ function buildSupervisorExecutionCallbacks({
 
   const formatRuntimeAgentDisplay = (agentId = "") => {
     const index = buildAgentDisplayIndexShared(agentRegistry, runtime);
-    return formatAgentDisplayName(agentId, index, {
-      includeShortId: true,
-    });
+    return formatChatAgentDisplayName(agentId, index);
   };
 
   function estimateTokens(text) {
@@ -1210,9 +1211,11 @@ function buildSupervisorExecutionCallbacks({
       .map((row) => String(row?.agent_id || "").trim().toLowerCase())
       .filter(Boolean);
     if (childAgentIds.length > 0) {
+      const parentAgentLabel = formatRuntimeAgentDisplay(parentAgentId);
+      const childAgentLabels = childAgentIds.map((id) => formatRuntimeAgentDisplay(id));
       await bot.sendMessage(
         chatId,
-        `📣 @${parentAgentId} → ${childAgentIds.map((id) => `@${id}`).join(", ")} (병렬)`,
+        `📣 ${parentAgentLabel} → ${childAgentLabels.join(", ")} (병렬)`,
         Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
           ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
           : undefined
@@ -1422,11 +1425,10 @@ function buildSupervisorExecutionCallbacks({
           });
           await refreshAgentRegistry({ includeCompiled: true });
           const createdId = String(profile.id || created?.created?.id || "").trim();
+          const createdLabel = createdId ? formatRuntimeAgentDisplay(createdId) : "";
           return {
             agent_id: createdId,
-            text: createdId
-              ? `✅ agent 생성 완료: @${createdId}`
-              : "✅ agent 생성 완료",
+            text: createdLabel ? `✅ agent 생성 완료: ${createdLabel}` : "✅ agent 생성 완료",
           };
         },
       });
@@ -1450,11 +1452,10 @@ function buildSupervisorExecutionCallbacks({
             });
           });
           await refreshAgentRegistry({ includeCompiled: true });
+          const updatedLabel = targetAgentId ? formatRuntimeAgentDisplay(targetAgentId) : "";
           return {
             agent_id: targetAgentId || String(updated?.created?.id || "").trim(),
-            text: targetAgentId
-              ? `✅ agent 수정 완료: @${targetAgentId}`
-              : "✅ agent 수정 완료",
+            text: updatedLabel ? `✅ agent 수정 완료: ${updatedLabel}` : "✅ agent 수정 완료",
           };
         },
       });
@@ -1540,6 +1541,7 @@ function buildSupervisorExecutionCallbacks({
           await refreshAgentRegistry({ includeCompiled: true });
           const createdName = String(created?.name || spec.name || "").trim() || "(unnamed)";
           const createdModel = String(created?.model || spec.model || "").trim() || "n/a";
+          const createdLabel = createdId ? formatRuntimeAgentDisplay(createdId) : createdName;
           const createdTools = Array.isArray(created?.tools) && created.tools.length > 0
             ? created.tools
             : (Array.isArray(spec.tools) ? spec.tools : []);
@@ -1555,7 +1557,7 @@ function buildSupervisorExecutionCallbacks({
             text: [
               "✅ agent definition 생성 완료",
               `- name: ${createdName}`,
-              `- agent_id: ${createdId || "unknown"}`,
+              `- agent: ${createdLabel || "unknown"}`,
               `- model: ${createdModel}`,
               `- tools: ${toolsText}`,
               `- conversation 추가: ${addedToConversation ? "yes" : "no"}`,
@@ -1583,13 +1585,15 @@ function buildSupervisorExecutionCallbacks({
           });
           const forkedId = String(forked?.id || "").trim().toLowerCase();
           await refreshAgentRegistry({ includeCompiled: true });
+          const sourceLabel = formatRuntimeAgentDisplay(sourceId);
+          const forkedLabel = forkedId ? formatRuntimeAgentDisplay(forkedId) : "";
           return {
             id: forkedId,
             agent_id: forkedId,
             source_agent_id: sourceId,
-            text: forkedId
-              ? `✅ agent fork 완료: @${sourceId} -> @${forkedId}`
-              : `✅ agent fork 요청 완료: @${sourceId}`,
+            text: forkedLabel
+              ? `✅ agent fork 완료: ${sourceLabel} -> ${forkedLabel}`
+              : `✅ agent fork 요청 완료: ${sourceLabel}`,
           };
         },
       });
@@ -2923,7 +2927,11 @@ async function executeChatActions(
         const chatKey = String(chatId);
         activeJobByChat.set(chatKey, targetJobId);
         rememberLastChatJob(chatId, targetJobId);
-        if (verbose) await bot.sendMessage(chatId, `🤖 ${agentId} 실행 중…`);
+        const agentDisplay = formatChatAgentDisplayName(
+          agentId,
+          buildAgentDisplayIndexShared(agentRegistry, runtime)
+        );
+        if (verbose) await bot.sendMessage(chatId, `🤖 ${agentDisplay} 실행 중…`);
 
         try {
           const result = await enqueue(
@@ -2941,7 +2949,7 @@ async function executeChatActions(
             ),
             { jobId: targetJobId, signal: controller.signal, label: `chat_agent_run_${agentId}` }
           );
-          if (verbose) await sendLong(bot, chatId, `🤖 ${agentId} 완료 (${result.mode})\n${clip(result.output, 3000)}`);
+          if (verbose) await sendLong(bot, chatId, `🤖 ${agentDisplay} 완료 (${result.mode})\n${clip(result.output, 3000)}`);
           outputs.push({
             agentId,
             provider: result.provider,
@@ -3116,7 +3124,7 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
     if (act.type === "agent_run") {
       const agentInfo = findAgentConfigInRuntime(act.agent, runtime) || findAgentConfig(act.agent);
       const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
-      const displayName = formatAgentDisplayName(act.agent, agentIndex, { includeShortId: true });
+      const displayName = formatChatAgentDisplayName(act.agent, agentIndex);
       await bot.sendMessage(chatId, `🤖 ${displayName} 실행 중… (${provider})`);
       const result = await enqueue(
         () => executeAgentRun(bot, chatId, jobId, act, {
@@ -3175,7 +3183,7 @@ async function executeActions(bot, chatId, jobId, plan, signal = null, opts = {}
     if (act.type === "agent_run") {
       const agentInfo = findAgentConfigInRuntime(act.agent, runtime) || findAgentConfig(act.agent);
       const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
-      const displayName = formatAgentDisplayName(act.agent, agentIndex, { includeShortId: true });
+      const displayName = formatChatAgentDisplayName(act.agent, agentIndex);
       await bot.sendMessage(chatId, `🤖 ${displayName} 실행 중… (${provider})`);
       const r = await enqueue(
         () => executeAgentRun(bot, chatId, jobId, act, {

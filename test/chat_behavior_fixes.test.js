@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildAgentDisplayIndex,
+  formatChatAgentDisplayName,
   formatAgentDisplayName,
 } from "../src/shared/agent_labels.js";
 import { buildExplicitTeamReconfigurationActions } from "../src/application/team_config_diff.js";
@@ -17,16 +18,18 @@ import {
 } from "../src/application/membership_confirmation.js";
 import { executeSupervisorActions } from "../src/chat/executor.js";
 
-test("agent display labels prefer human-readable name with short id suffix", () => {
+test("chat-facing agent display labels prefer human-readable names without id suffix", () => {
   const index = buildAgentDisplayIndex([
     {
       id: "00133bba-0f1a-47fe-a111-92fded8f0001",
       name: "시장 분석가",
     },
   ]);
+  const chatLabel = formatChatAgentDisplayName("00133bba-0f1a-47fe-a111-92fded8f0001", index);
   const label = formatAgentDisplayName("00133bba-0f1a-47fe-a111-92fded8f0001", index, {
     includeShortId: true,
   });
+  assert.equal(chatLabel, "시장 분석가");
   assert.equal(label, "시장 분석가 [00133bba]");
 });
 
@@ -258,6 +261,7 @@ test("executor membership mutation output prefers human-readable agent labels", 
   assert.equal(execution.results[0].status, "ok");
   assert.match(String(execution.results[0].note || ""), /KR Market Analyst/);
   assert.match(String(execution.outputs[0].output || ""), /KR Market Analyst/);
+  assert.doesNotMatch(String(execution.outputs[0].output || ""), /@researcher/);
 });
 
 test("approval preview summaries prefer agent names when known", async () => {
@@ -283,5 +287,7 @@ test("approval preview summaries prefer agent names when known", async () => {
     ? String(execution.pendingApproval.actions_summary[0] || "")
     : "";
   assert.match(summaryLine, /KR Market Analyst/);
+  assert.doesNotMatch(summaryLine, /@researcher/);
   assert.match(String(execution.pendingApproval.action_display_label || ""), /KR Market Analyst/);
+  assert.doesNotMatch(String(execution.pendingApproval.action_display_label || ""), /@researcher/);
 });

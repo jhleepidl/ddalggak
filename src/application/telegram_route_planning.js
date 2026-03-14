@@ -118,7 +118,7 @@ import { routeWithSupervisor } from "../chat/supervisor_router.js";
 import { executeSupervisorActions, isMutatingAction } from "../chat/executor.js";
 import {
   buildAgentDisplayIndex as buildAgentDisplayIndexShared,
-  formatAgentDisplayName,
+  formatChatAgentDisplayName,
   resolveActionAgentId,
   resolveActionAgentNameHint,
 } from "../shared/agent_labels.js";
@@ -483,9 +483,7 @@ function actionLabel(act) {
   if (!act || !act.type) return "(unknown)";
   const globalAgentIndex = buildAgentDisplayIndexShared(agentRegistry);
   if (act.type === "agent_run") {
-    const agentDisplay = formatAgentDisplayName(act.agent, globalAgentIndex, {
-      includeShortId: true,
-    });
+    const agentDisplay = formatChatAgentDisplayName(act.agent, globalAgentIndex);
     return `agent_run:${agentDisplay}`;
   }
   if (act.type === "chatgpt_prompt") return "chatgpt_prompt";
@@ -710,9 +708,10 @@ function shouldSendAgentStatusMessage(chatId, agentId, state) {
 
 function buildAgentTransitionText({ agentId = "", state = "", goal = "", error = "" } = {}) {
   const cleanAgentId = String(agentId || "").trim().toLowerCase() || "unknown";
-  const agentDisplay = formatAgentDisplayName(cleanAgentId, buildAgentDisplayIndexShared(agentRegistry), {
-    includeShortId: true,
-  });
+  const agentDisplay = formatChatAgentDisplayName(
+    cleanAgentId,
+    buildAgentDisplayIndexShared(agentRegistry)
+  );
   const cleanState = String(state || "").trim().toLowerCase();
   if (cleanState === "running") {
     return `▶️ ${agentDisplay} 시작: ${clip(String(goal || "").trim() || "(goal 없음)", 240)}`;
@@ -773,9 +772,12 @@ async function sendGeminiRetryMessage(
   const replyId = Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
     ? Number(replyToMessageId)
     : (Number.isFinite(Number(fallbackReply)) && Number(fallbackReply) > 0 ? Number(fallbackReply) : null);
+  const agentLabel = agentId
+    ? formatChatAgentDisplayName(agentId, buildAgentDisplayIndexShared(agentRegistry))
+    : "";
   await bot.sendMessage(
     chatId,
-    buildGeminiRetryNoticeTextShared({ retryCount, maxRetries, agentId }),
+    buildGeminiRetryNoticeTextShared({ retryCount, maxRetries, agentId, agentLabel }),
     replyId ? { reply_to_message_id: replyId } : undefined
   );
 }
@@ -793,9 +795,12 @@ async function sendGeminiModelSwitchMessage(
   const replyId = Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
     ? Number(replyToMessageId)
     : (Number.isFinite(Number(fallbackReply)) && Number(fallbackReply) > 0 ? Number(fallbackReply) : null);
+  const agentLabel = agentId
+    ? formatChatAgentDisplayName(agentId, buildAgentDisplayIndexShared(agentRegistry))
+    : "";
   await bot.sendMessage(
     chatId,
-    buildGeminiModelSwitchNoticeTextShared({ toModel, agentId }),
+    buildGeminiModelSwitchNoticeTextShared({ toModel, agentId, agentLabel }),
     replyId ? { reply_to_message_id: replyId } : undefined
   );
 }
@@ -813,9 +818,12 @@ async function sendGeminiGiveUpMessage(
   const replyId = Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
     ? Number(replyToMessageId)
     : (Number.isFinite(Number(fallbackReply)) && Number(fallbackReply) > 0 ? Number(fallbackReply) : null);
+  const agentLabel = agentId
+    ? formatChatAgentDisplayName(agentId, buildAgentDisplayIndexShared(agentRegistry))
+    : "";
   await bot.sendMessage(
     chatId,
-    buildGeminiGiveUpNoticeTextShared({ reason, agentId }),
+    buildGeminiGiveUpNoticeTextShared({ reason, agentId, agentLabel }),
     replyId ? { reply_to_message_id: replyId } : undefined
   );
 }

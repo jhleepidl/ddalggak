@@ -71,6 +71,15 @@ export function formatAgentDisplayName(agentId = "", agentIndex = new Map(), {
   return `${displayName} [${shortId}]`;
 }
 
+export function formatChatAgentDisplayName(agentId = "", agentIndex = new Map(), {
+  nameHint = "",
+} = {}) {
+  return formatAgentDisplayName(agentId, agentIndex, {
+    nameHint,
+    includeShortId: false,
+  });
+}
+
 export function resolveActionAgentId(action = {}) {
   const row = asObject(action);
   const type = String(row.type || "").trim().toLowerCase();
