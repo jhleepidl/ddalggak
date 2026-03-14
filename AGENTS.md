@@ -2,6 +2,7 @@
 
 - `telegram_runner.js` is the stable bootstrap shell only. Keep it limited to env/bootstrap, starting the Telegram app, and top-level fatal handling.
 - `src/adapters/telegram/app.js` is assembly-only. Keep it limited to bot configuration, grouped dependency assembly, handler wiring, lifecycle registration, and polling start.
+- `src/application/telegram_runtime_ops.js` is compatibility-only. Keep it as a re-export surface for existing callers, not an implementation file.
 - Telegram command logic belongs in `src/adapters/telegram/commands.js`.
 - Telegram callback query logic belongs in `src/adapters/telegram/callbacks.js`.
 - Telegram message flow belongs in `src/adapters/telegram/messages.js`.
@@ -10,4 +11,11 @@
 - Do not add new business logic, planner logic, mutation logic, runtime orchestration, or formatting helpers directly to `src/adapters/telegram/app.js`.
 - Transport behavior belongs in `src/adapters/telegram/messages.js`, `src/adapters/telegram/uploads.js`, `src/adapters/telegram/lifecycle.js`, `src/adapters/telegram/commands.js`, and `src/adapters/telegram/callbacks.js`.
 - Application/business logic belongs in `src/application/*`.
+- Put runtime state/session/job helpers in `src/application/telegram_runtime_state.js`.
+- Put workspace/context/file IO helpers in `src/application/telegram_runtime_io.js`.
+- Put routing, prompt suggestion, action parsing, and team recommendation logic in `src/application/telegram_route_planning.js`.
+- Put execution orchestration and action execution in `src/application/telegram_chat_execution.js`.
+- Put GoC runtime/resource/draft/membership logic in `src/application/telegram_goc_runtime.js`.
+- Keep user-facing Telegram runtime formatting in `src/application/telegram_runtime_ui.js`.
+- Do not add new implementations directly back into `src/application/telegram_runtime_ops.js`.
 - Do not add new business logic directly to `telegram_runner.js` unless it is true bootstrap code.
