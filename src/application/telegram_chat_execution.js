@@ -3101,8 +3101,22 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
     : (opts?.runtimeTeamSnapshot && typeof opts.runtimeTeamSnapshot === "object"
       ? opts.runtimeTeamSnapshot
       : createRuntimeTeamSnapshot({
+        taskInterpretation: route?.task_interpretation || null,
         teamPlan: route?.team_plan || null,
         runtimeAgents: route?.runtime_agents || [],
+        contextPacks: route?.context_packs || [],
+        collaborationCells: route?.collaboration_cells || [],
+        authorityGraph: route?.authority_graph || [],
+        checkpoints: route?.checkpoints || [],
+        executionGraph: route?.execution_graph || null,
+        selectionExplanations: route?.selection_explanations || [],
+        selectedSkillIds: route?.selected_skill_ids || [],
+        skillLoadLevels: route?.skill_load_levels || {},
+        selectionReasonSummary: route?.selection_reason_summary || {},
+        skillUsageEvents: route?.skill_usage_events || [],
+        skillUsageSummary: route?.skill_usage_summary || {},
+        supervisorRuntime: route?.supervisor_runtime || null,
+        runtimeAuthority,
         source: "team_builder",
       }));
   let askedChatGPT = false;

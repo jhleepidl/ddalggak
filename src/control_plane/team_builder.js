@@ -320,17 +320,26 @@ export function buildTeamFromTemplates({
     goal,
   });
   const executionGraph = buildExecutionGraph(slots);
+  const supervisorRuntime = createSupervisorRuntime({
+    coordination_mode: interpreted.control_mode || mode,
+    interaction_mode: interpreted.control_mode === "checkpointed"
+      ? "checkpointed_supervised"
+      : (interpreted.control_mode === "supervised" ? "manager_as_tool" : "passive_observer"),
+    planner_requested: false,
+    enabled: interpreted.control_mode !== "self_directed",
+    user_visible: interpreted.control_mode === "supervised",
+    max_parallel_workers: interpreted.parallelism_preference === "parallel" ? 4 : 2,
+    selection_reason: interpreted.control_mode || "worker team build",
+  });
   const collaborationCells = buildCollaborationCells({
     runtimeAgents: provisional.runtime_agents,
+    supervisorRuntime,
   });
   const checkpoints = buildExecutionCheckpoints({
     slots,
-  });
-  const supervisorRuntime = createSupervisorRuntime({
-    coordination_mode: interpreted.control_mode || mode,
-    planner_requested: false,
-    max_parallel_workers: interpreted.parallelism_preference === "parallel" ? 4 : 2,
-    selection_reason: interpreted.control_mode || "worker team build",
+    runtimeAgents: provisional.runtime_agents,
+    supervisorRuntime,
+    collaborationCells,
   });
 
   const teamPlan = normalizeTeamPlan({

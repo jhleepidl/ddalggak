@@ -31,6 +31,7 @@ test("runtime metadata patch exposes additive skill and context-pack fields", ()
       instance_id: "inst_coder_1",
       template_id: "coder",
       role_label: "coder",
+      authority_profile_id: "worker_publish_guarded",
       attached_skills: [{
         skill_id: "skill.run_trace_debugging.v1",
         selected_by: "skill_resolver",
@@ -75,6 +76,12 @@ test("runtime metadata patch exposes additive skill and context-pack fields", ()
       created_at: "2026-03-10T00:00:00.000Z",
     }],
     source: "team_builder",
+    supervisorRuntime: {
+      enabled: true,
+      instance_id: "supervisor_runtime",
+      interaction_mode: "manager_as_tool",
+      authority_profile_id: "supervisor_controlled",
+    },
   });
 
   const patch = buildRuntimeMetadataPatch({
@@ -93,6 +100,7 @@ test("runtime metadata patch exposes additive skill and context-pack fields", ()
   );
   assert.equal(patch.selection_reason_summary.coder.includes("run_trace_debugging"), true);
   assert.equal(patch.skill_usage_events.length, 1);
+  assert.equal(patch.supervisor_runtime.instance_id, "supervisor_runtime");
 
   const rolePayload = buildRuntimeRolePayload(snapshot.runtime_agents[0]);
   assert.equal(rolePayload.context_pack_id, "ctxp_1");
@@ -100,6 +108,7 @@ test("runtime metadata patch exposes additive skill and context-pack fields", ()
   assert.equal(rolePayload.skill_load_levels["skill.run_trace_debugging.v1"], "instructions");
   assert.equal(Array.isArray(rolePayload.attached_skills), true);
   assert.equal(rolePayload.attached_skills.length, 1);
+  assert.equal(Array.isArray(rolePayload.denied_actions), true);
 });
 
 test("runtime metadata patch stays compatible when no skills/context packs exist", () => {
@@ -118,6 +127,7 @@ test("runtime metadata patch stays compatible when no skills/context packs exist
       instance_id: "inst_coder_empty",
       template_id: "coder",
       role_label: "coder",
+      authority_profile_id: "worker_publish_guarded",
       status: "ready",
     }],
     source: "team_builder",

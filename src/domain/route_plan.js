@@ -11,11 +11,11 @@ export function normalizeRunRouteAction(raw, { resolveAgentId = null } = {}) {
   const resolver = typeof resolveAgentId === "function"
     ? resolveAgentId
     : (value) => String(value || "").trim().toLowerCase();
+  const inputs = raw?.inputs && typeof raw.inputs === "object" ? raw.inputs : {};
 
   if (type === "agent_run") {
     const agent = resolver(raw.agent || raw.agentId || raw.role);
     const prompt = String(raw.prompt || raw.task || raw.instruction || "").trim();
-    const inputs = raw.inputs && typeof raw.inputs === "object" ? raw.inputs : {};
     if (!agent || !prompt) return null;
     return { type: "agent_run", agent, prompt, inputs };
   }
@@ -43,6 +43,16 @@ export function normalizeRunRouteAction(raw, { resolveAgentId = null } = {}) {
     const prompt = String(raw.question || raw.prompt || raw.task || "").trim();
     if (!prompt) return null;
     return { type: "agent_run", agent: "planner", prompt, inputs: {} };
+  }
+
+  if (["spawn_parallel", "checkpoint", "pause_children", "cancel_child", "reroute_child", "supervisor_decision", "synthesize_final"].includes(type)) {
+    return {
+      type,
+      label: String(raw.label || raw.reason || raw.summary || "").trim() || undefined,
+      prompt: String(raw.prompt || raw.goal || raw.summary || "").trim() || undefined,
+      inputs,
+      metadata: raw?.metadata && typeof raw.metadata === "object" ? raw.metadata : undefined,
+    };
   }
 
   return null;
@@ -97,9 +107,18 @@ export function normalizeRoutePlan(routePlan, {
       ? parsed.parallel_groups
       : (Array.isArray(parsed.parallelGroups) ? parsed.parallelGroups : []),
     checkpoints: Array.isArray(parsed.checkpoints) ? parsed.checkpoints : [],
+    collaboration_cells: Array.isArray(parsed.collaboration_cells)
+      ? parsed.collaboration_cells
+      : (Array.isArray(parsed.collaborationCells) ? parsed.collaborationCells : []),
     supervisor_runtime: parsed.supervisor_runtime && typeof parsed.supervisor_runtime === "object"
       ? parsed.supervisor_runtime
       : (parsed.supervisorRuntime && typeof parsed.supervisorRuntime === "object" ? parsed.supervisorRuntime : undefined),
+    authority_graph: Array.isArray(parsed.authority_graph)
+      ? parsed.authority_graph
+      : (Array.isArray(parsed.authorityGraph) ? parsed.authorityGraph : []),
+    selection_explanations: Array.isArray(parsed.selection_explanations)
+      ? parsed.selection_explanations
+      : (Array.isArray(parsed.selectionExplanations) ? parsed.selectionExplanations : []),
   };
 }
 

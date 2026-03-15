@@ -9,7 +9,7 @@ import {
   normalizeRoleId,
   normalizeWorkerRoleId,
 } from "../compatibility/legacy_roles.js";
-import { pickDefaultAuthorityProfileId } from "../catalog/authority_registry.js";
+import { AuthorityRegistry, pickDefaultAuthorityProfileId } from "../catalog/authority_registry.js";
 
 export const DEFAULT_RUNTIME_ROLES = [...CANONICAL_WORKER_ROLE_IDS];
 
@@ -64,14 +64,45 @@ function normalizeSupervisorRuntime(row = {}, {
   reason = "",
 } = {}) {
   const src = asObject(row);
+  const interactionMode = normalizeText(
+    src.interaction_mode
+    || src.interactionMode
+    || src.coordination_mode
+    || src.coordinationMode
+    || (mode === "run" ? "manager_as_tool" : "passive_observer"),
+    { lower: true }
+  );
   return {
+    enabled: src.enabled !== false,
     runtime_id: normalizeText(src.runtime_id || src.runtimeId || "local_control_plane") || "local_control_plane",
+    instance_id: normalizeText(
+      src.instance_id || src.instanceId || src.runtime_id || src.runtimeId || "supervisor_runtime"
+    ) || "supervisor_runtime",
     coordination_mode: normalizeText(src.coordination_mode || src.coordinationMode || mode || "centralized")
       || "centralized",
+    interaction_mode: ["manager_as_tool", "checkpointed_supervised", "passive_observer"].includes(interactionMode)
+      ? interactionMode
+      : "manager_as_tool",
     planner_requested: src.planner_requested === true || src.plannerRequested === true || plannerRequested === true,
     max_parallel_workers: Number.isFinite(Number(src.max_parallel_workers ?? src.maxParallelWorkers))
       ? Math.max(1, Math.min(8, Math.floor(Number(src.max_parallel_workers ?? src.maxParallelWorkers))))
       : 3,
+    authority_profile_id: normalizeText(
+      src.authority_profile_id || src.authorityProfileId || "supervisor_controlled"
+    ).toLowerCase() || "supervisor_controlled",
+    user_visible: src.user_visible === true || src.userVisible === true,
+    control_actions: normalizeStringList(
+      src.control_actions ?? src.controlActions ?? [
+        "launch_children",
+        "receive_reports",
+        "request_human_approval",
+        "pause_children",
+        "cancel_child",
+        "reroute_child",
+        "emit_intermediate_summaries",
+      ],
+      { max: 16, lower: true }
+    ),
     selection_reason: normalizeText(src.selection_reason || src.selectionReason || reason) || undefined,
   };
 }
@@ -198,8 +229,14 @@ export function normalizeCapabilitySlotSpec(raw = {}, {
   };
 }
 
-function normalizeAuthorityGraph(raw = [], slots = []) {
+function normalizeAuthorityGraph(raw = [], slots = [], runtimeAgents = []) {
+  const registry = new AuthorityRegistry();
   const slotIds = new Set(slots.map((slot) => slot.slot_id));
+  const runtimeAgentsBySlot = new Map(
+    runtimeAgents
+      .map((agent) => [normalizeText(agent?.slot_id || agent?.slotId), agent])
+      .filter(([slotId]) => slotId)
+  );
   const normalized = asArray(raw).map((entry) => {
     const row = asObject(entry);
     const slotId = normalizeText(row.slot_id || row.slotId);
@@ -207,22 +244,71 @@ function normalizeAuthorityGraph(raw = [], slots = []) {
       row.authority_profile_id || row.authorityProfileId
     ).toLowerCase();
     if (!slotId || !authorityProfileId || !slotIds.has(slotId)) return null;
+    const profile = registry.resolve(authorityProfileId);
+    const runtimeAgent = runtimeAgentsBySlot.get(slotId);
+    const roleId = normalizeWorkerRoleId(
+      row.role_id || row.roleId || row.role_label || row.roleLabel || runtimeAgent?.role_id || runtimeAgent?.role_label
+    );
     return {
       slot_id: slotId,
       authority_profile_id: authorityProfileId,
+      instance_id: normalizeText(
+        row.instance_id || row.instanceId || runtimeAgent?.instance_id || runtimeAgent?.instanceId
+      ) || undefined,
+      role_id: roleId || undefined,
+      allowed_actions: normalizeStringList(
+        row.allowed_actions ?? row.allowedActions ?? profile?.allowed_actions ?? [],
+        { max: 32, lower: true }
+      ),
+      denied_actions: normalizeStringList(
+        row.denied_actions ?? row.deniedActions ?? profile?.denied_actions ?? [],
+        { max: 32, lower: true }
+      ),
+      approval_required_for: normalizeStringList(
+        row.approval_required_for ?? row.approvalRequiredFor ?? profile?.approval_required_for ?? [],
+        { max: 32, lower: true }
+      ),
+      tool_allowlist: normalizeStringList(
+        row.tool_allowlist ?? row.toolAllowlist ?? profile?.tool_allowlist ?? [],
+        { max: 32, lower: true }
+      ),
+      max_parallel_children: Number.isFinite(Number(
+        row.max_parallel_children ?? row.maxParallelChildren ?? profile?.max_parallel_children
+      ))
+        ? Math.max(0, Math.min(16, Math.floor(Number(
+          row.max_parallel_children ?? row.maxParallelChildren ?? profile?.max_parallel_children
+        ))))
+        : 0,
     };
   }).filter(Boolean);
   if (normalized.length > 0) return normalized;
-  return slots.map((slot) => ({
-    slot_id: slot.slot_id,
-    authority_profile_id: slot.authority_profile_id,
-  }));
+  return slots.map((slot) => {
+    const runtimeAgent = runtimeAgentsBySlot.get(slot.slot_id);
+    const profile = registry.resolve(slot.authority_profile_id);
+    return {
+      slot_id: slot.slot_id,
+      authority_profile_id: slot.authority_profile_id,
+      instance_id: normalizeText(runtimeAgent?.instance_id || runtimeAgent?.instanceId) || undefined,
+      role_id: slot.role_id,
+      allowed_actions: normalizeStringList(profile?.allowed_actions ?? [], { max: 32, lower: true }),
+      denied_actions: normalizeStringList(profile?.denied_actions ?? [], { max: 32, lower: true }),
+      approval_required_for: normalizeStringList(profile?.approval_required_for ?? [], { max: 32, lower: true }),
+      tool_allowlist: normalizeStringList(profile?.tool_allowlist ?? [], { max: 32, lower: true }),
+      max_parallel_children: Number.isFinite(Number(profile?.max_parallel_children))
+        ? Math.max(0, Math.min(16, Math.floor(Number(profile.max_parallel_children))))
+        : 0,
+    };
+  });
 }
 
 function normalizeExecutionGraph(raw = {}, {
   slots = [],
   dependencies = [],
   executionOrder = [],
+  runtimeAgents = [],
+  supervisorRuntime = null,
+  collaborationCells = [],
+  checkpoints = [],
 } = {}) {
   const row = asObject(raw);
   const slotIds = normalizeStringList(slots.map((slot) => slot.slot_id), { max: 64, lower: false });
@@ -321,6 +407,84 @@ function normalizeExecutionGraph(raw = {}, {
     })),
     edges: explicitEdges.length > 0 ? explicitEdges : fallbackEdges,
     order: normalizedOrder,
+    role_order: normalizeStringList(
+      asArray(row.role_order ?? row.roleOrder ?? executionOrder ?? []).map((entry) => normalizeWorkerRoleId(entry)).filter(Boolean),
+      { max: 32, lower: true }
+    ),
+    parallel_groups: (() => {
+      const explicitGroups = asArray(row.parallel_groups ?? row.parallelGroups).map((group, index) => {
+        const groupRow = asObject(group);
+        const slotGroup = normalizeStringList(
+          groupRow.slot_ids ?? groupRow.slotIds ?? [],
+          { max: 16, lower: false }
+        );
+        if (slotGroup.length === 0) return null;
+        return {
+          parallel_group_id: normalizeText(
+            groupRow.parallel_group_id || groupRow.parallelGroupId || `parallel_group_${index + 1}`
+          ) || `parallel_group_${index + 1}`,
+          slot_ids: slotGroup.filter((slotId) => slotIds.includes(slotId)),
+          role_ids: normalizeStringList(
+            groupRow.role_ids ?? groupRow.roleIds ?? slotGroup.map((slotId) => slotsById.get(slotId)?.role_id).filter(Boolean),
+            { max: 16, lower: true }
+          ),
+        };
+      }).filter((group) => group && group.slot_ids.length > 1);
+      if (explicitGroups.length > 0) return explicitGroups;
+      const layers = normalizedOrder
+        .map((slotId) => slotsById.get(slotId))
+        .filter(Boolean)
+        .reduce((groups, slot) => {
+          if (slot.parallelizable !== true) return groups;
+          const last = groups[groups.length - 1];
+          const hasDependencyTarget = (explicitEdges.length > 0 ? explicitEdges : fallbackEdges)
+            .some((edge) => edge.to_slot_id === slot.slot_id || edge.from_slot_id === slot.slot_id);
+          if (!last || hasDependencyTarget) {
+            groups.push([slot]);
+            return groups;
+          }
+          last.push(slot);
+          return groups;
+        }, []);
+      return layers
+        .filter((group) => group.length > 1)
+        .map((group, index) => ({
+          parallel_group_id: `parallel_group_${index + 1}`,
+          slot_ids: group.map((slot) => slot.slot_id),
+          role_ids: normalizeStringList(group.map((slot) => slot.role_id), { max: 16, lower: true }),
+        }));
+    })(),
+    supervisor_edges: (() => {
+      const explicit = asArray(row.supervisor_edges ?? row.supervisorEdges).map((edge) => {
+        const edgeRow = asObject(edge);
+        const slotIdsForEdge = normalizeStringList(
+          edgeRow.target_slot_ids ?? edgeRow.targetSlotIds ?? [],
+          { max: 16, lower: false }
+        ).filter((slotId) => slotIds.includes(slotId));
+        if (slotIdsForEdge.length === 0) return null;
+        return {
+          supervisor_instance_id: normalizeText(
+            edgeRow.supervisor_instance_id || edgeRow.supervisorInstanceId || supervisorRuntime?.instance_id
+          ) || undefined,
+          target_slot_ids: slotIdsForEdge,
+          relation: normalizeText(edgeRow.relation || "manages", { lower: true }) || "manages",
+          report_back: edgeRow.report_back !== false,
+        };
+      }).filter(Boolean);
+      if (explicit.length > 0) return explicit;
+      if (supervisorRuntime?.enabled !== true) return [];
+      return slots.map((slot) => ({
+        supervisor_instance_id: supervisorRuntime.instance_id,
+        target_slot_ids: [slot.slot_id],
+        relation: "manages",
+        report_back: true,
+      }));
+    })(),
+    collaboration_cells: normalizeCollaborationCellList(collaborationCells),
+    checkpoints: normalizeExecutionCheckpointList(checkpoints),
+    interrupt_ready: row.interrupt_ready === true
+      || row.interruptReady === true
+      || normalizeExecutionCheckpointList(checkpoints).some((checkpoint) => checkpoint.human_interrupt_allowed === true),
   };
 }
 
@@ -465,14 +629,36 @@ export function normalizeTeamPlan(raw = {}) {
   );
   const authorityGraph = normalizeAuthorityGraph(
     row.authority_graph ?? row.authorityGraph ?? [],
-    slots
+    slots,
+    runtimeAgents
   );
+  if (supervisorRuntime?.enabled === true) {
+    const registry = new AuthorityRegistry();
+    const profile = registry.resolve(supervisorRuntime.authority_profile_id);
+    authorityGraph.push({
+      slot_id: undefined,
+      authority_profile_id: supervisorRuntime.authority_profile_id,
+      instance_id: supervisorRuntime.instance_id,
+      role_id: "supervisor_runtime",
+      allowed_actions: normalizeStringList(profile?.allowed_actions ?? [], { max: 32, lower: true }),
+      denied_actions: normalizeStringList(profile?.denied_actions ?? [], { max: 32, lower: true }),
+      approval_required_for: normalizeStringList(profile?.approval_required_for ?? [], { max: 32, lower: true }),
+      tool_allowlist: normalizeStringList(profile?.tool_allowlist ?? [], { max: 32, lower: true }),
+      max_parallel_children: Number.isFinite(Number(profile?.max_parallel_children))
+        ? Math.max(0, Math.min(16, Math.floor(Number(profile.max_parallel_children))))
+        : 0,
+    });
+  }
   const executionGraph = normalizeExecutionGraph(
     row.execution_graph ?? row.executionGraph ?? {},
     {
       slots,
       dependencies,
       executionOrder,
+      runtimeAgents,
+      supervisorRuntime,
+      collaborationCells,
+      checkpoints: row.checkpoints ?? [],
     }
   );
   const checkpoints = normalizeExecutionCheckpointList(

@@ -269,8 +269,21 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
         { runtime_authority: runtimeAuthority },
         { plan_source: planSource }
       ),
+      task_interpretation: planningResult?.interpreted_task || null,
       team_plan: planningResult?.team_plan || null,
       runtime_agents: planningResult?.runtime_agents || [],
+      context_packs: planningResult?.context_packs || [],
+      collaboration_cells: planningResult?.team_plan?.collaboration_cells || routePlan?.collaboration_cells || [],
+      authority_graph: planningResult?.team_plan?.authority_graph || routePlan?.authority_graph || [],
+      checkpoints: planningResult?.team_plan?.checkpoints || routePlan?.checkpoints || [],
+      execution_graph: planningResult?.team_plan?.execution_graph || routePlan?.execution_graph || null,
+      selection_explanations: planningResult?.team_plan?.selection_explanations || routePlan?.selection_explanations || [],
+      selected_skill_ids: planningResult?.selected_skill_ids || [],
+      skill_load_levels: planningResult?.skill_load_levels || {},
+      selection_reason_summary: planningResult?.selection_reason_summary || {},
+      skill_usage_events: planningResult?.skill_usage_events || [],
+      skill_usage_summary: planningResult?.skill_usage_summary || {},
+      supervisor_runtime: planningResult?.team_plan?.supervisor_runtime || routePlan?.supervisor_runtime || null,
       runtime_team_snapshot: planningResult?.runtime_team_snapshot || null,
     };
   } catch {
@@ -304,8 +317,21 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
         { runtime_authority: runtimeAuthority },
         { plan_source: planSource }
       ),
+      task_interpretation: planningResult?.interpreted_task || null,
       team_plan: planningResult?.team_plan || null,
       runtime_agents: planningResult?.runtime_agents || [],
+      context_packs: planningResult?.context_packs || [],
+      collaboration_cells: planningResult?.team_plan?.collaboration_cells || routePlan?.collaboration_cells || [],
+      authority_graph: planningResult?.team_plan?.authority_graph || routePlan?.authority_graph || [],
+      checkpoints: planningResult?.team_plan?.checkpoints || routePlan?.checkpoints || [],
+      execution_graph: planningResult?.team_plan?.execution_graph || routePlan?.execution_graph || null,
+      selection_explanations: planningResult?.team_plan?.selection_explanations || routePlan?.selection_explanations || [],
+      selected_skill_ids: planningResult?.selected_skill_ids || [],
+      skill_load_levels: planningResult?.skill_load_levels || {},
+      selection_reason_summary: planningResult?.selection_reason_summary || {},
+      skill_usage_events: planningResult?.skill_usage_events || [],
+      skill_usage_summary: planningResult?.skill_usage_summary || {},
+      supervisor_runtime: planningResult?.team_plan?.supervisor_runtime || routePlan?.supervisor_runtime || null,
       runtime_team_snapshot: planningResult?.runtime_team_snapshot || null,
     };
   }

@@ -570,9 +570,16 @@ export function buildRuntimeOrchestration({
   });
   const skillUsageSummary = summarizeSkillUsageEvents(skillUsageEvents);
   const runtimeTeamSnapshot = createRuntimeTeamSnapshot({
+    taskInterpretation,
     teamPlan,
     runtimeAgents,
     contextPacks: contextPackResult.context_packs,
+    collaborationCells: teamPlan?.collaboration_cells,
+    authorityGraph: teamPlan?.authority_graph,
+    checkpoints: teamPlan?.checkpoints,
+    executionGraph: teamPlan?.execution_graph,
+    selectionExplanations: combinedSelectionExplanations,
+    supervisorRuntime: teamPlan?.supervisor_runtime,
     selectedSkillIds,
     skillLoadLevels: contextPackResult.skill_load_levels,
     selectionReasonSummary,
@@ -587,6 +594,12 @@ export function buildRuntimeOrchestration({
     skill_load_levels: contextPackResult.skill_load_levels,
     selection_reason_summary: selectionReasonSummary,
     context_packs: contextPackResult.context_packs,
+    task_interpretation: taskInterpretation,
+    collaboration_cells: teamPlan?.collaboration_cells,
+    authority_graph: teamPlan?.authority_graph,
+    checkpoints: teamPlan?.checkpoints,
+    execution_graph: teamPlan?.execution_graph,
+    supervisor_runtime: teamPlan?.supervisor_runtime,
     selection_explanations: combinedSelectionExplanations,
   }, runtimeTeamSnapshot);
   const missingRoles = normalizeStringList(

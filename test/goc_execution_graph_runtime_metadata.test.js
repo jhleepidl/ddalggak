@@ -31,6 +31,11 @@ function createFakeGraphClient() {
 
 function sampleRuntimeSnapshot() {
   return {
+    task_interpretation: {
+      task_type: "code_change",
+      task_summary: "implement feature safely",
+      deliverable_type: "patch",
+    },
     team_plan: {
       mode: "run",
       roles: [{ id: "coder", role_label: "coder" }],
@@ -90,6 +95,45 @@ function sampleRuntimeSnapshot() {
     },
     selection_reason_summary: {
       coder: "skill.run_trace_debugging.v1:debug support",
+    },
+    collaboration_cells: [
+      {
+        cell_id: "cell_builder_reviewer_reflection",
+        pattern: "reflection",
+        member_instance_ids: ["inst_coder_1"],
+        topology: "pair",
+        max_rounds: 2,
+        termination: { condition: "review_accepted" },
+      },
+    ],
+    authority_graph: [
+      {
+        slot_id: "slot_builder_1",
+        instance_id: "inst_coder_1",
+        role_id: "builder",
+        authority_profile_id: "worker_publish_guarded",
+      },
+    ],
+    checkpoints: [
+      {
+        checkpoint_id: "checkpoint_review_gate",
+        target_slot_ids: ["slot_builder_1"],
+        trigger_after_instances: ["inst_coder_1"],
+        human_interrupt_allowed: true,
+      },
+    ],
+    execution_graph: {
+      nodes: [{ slot_id: "slot_builder_1", role_id: "builder" }],
+      edges: [],
+      parallel_groups: [],
+      supervisor_edges: [{ supervisor_instance_id: "supervisor_runtime", target_slot_ids: ["slot_builder_1"] }],
+      interrupt_ready: true,
+    },
+    supervisor_runtime: {
+      enabled: true,
+      instance_id: "supervisor_runtime",
+      interaction_mode: "manager_as_tool",
+      authority_profile_id: "supervisor_controlled",
     },
     skill_usage_events: [
       {
@@ -187,7 +231,11 @@ test("runtime_team_snapshot is persisted on GOC Run payloads", async () => {
   assert.equal(runNode.body.payload_json.plan_source, "local");
   assert.equal(runNode.body.payload_json.context_source, "goc");
   assert.equal(runNode.body.payload_json.runtime_team_snapshot.source, "team_builder");
+  assert.equal(runNode.body.payload_json.runtime_team_snapshot.supervisor_runtime.instance_id, "supervisor_runtime");
+  assert.equal(runNode.body.payload_json.runtime_team_snapshot.execution_graph.interrupt_ready, true);
   assert.equal(runNode.body.payload_json.runtime_agents[0].template_id, "coder");
+  assert.equal(runNode.body.payload_json.collaboration_cells[0].pattern, "reflection");
+  assert.equal(runNode.body.payload_json.checkpoints[0].checkpoint_id, "checkpoint_review_gate");
   assert.ok(runNode.body.payload_json.selected_skill_ids.includes("skill.run_trace_debugging.v1"));
   assert.equal(runNode.body.payload_json.context_packs[0].id, "ctxp_coder_1");
   assert.equal(runNode.body.payload_json.skill_load_levels.inst_coder_1["skill.run_trace_debugging.v1"], "instructions");
@@ -215,6 +263,9 @@ test("step payloads include additive runtime role metadata and update run metada
       goal: "implement feature",
       inputs: {
         runtimeInstanceId: "inst_coder_1",
+        checkpoint_ids: ["checkpoint_review_gate"],
+        collaboration_cell_ids: ["cell_builder_reviewer_reflection"],
+        supervisor_instance_id: "supervisor_runtime",
       },
     },
   ], {
@@ -240,6 +291,9 @@ test("step payloads include additive runtime role metadata and update run metada
   assert.equal(Array.isArray(stepNode.body.payload_json.runtime_role.attached_skills), true);
   assert.equal(stepNode.body.payload_json.runtime_role.attached_skills.length, 1);
   assert.equal(stepNode.body.payload_json.context_pack_id, "ctxp_coder_1");
+  assert.deepEqual(stepNode.body.payload_json.checkpoint_ids, ["checkpoint_review_gate"]);
+  assert.deepEqual(stepNode.body.payload_json.collaboration_cell_ids, ["cell_builder_reviewer_reflection"]);
+  assert.equal(stepNode.body.payload_json.supervisor_instance_id, "supervisor_runtime");
   assert.equal(stepNode.body.payload_json.action_source, "explicit_route_plan");
 });
 

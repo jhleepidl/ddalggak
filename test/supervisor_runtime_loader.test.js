@@ -88,6 +88,8 @@ test("supervisor runtime loader builds standalone runtime from local capabilitie
   assert.deepEqual(runtime.runtime_authority, cloneRuntimeAuthorityFixture("standalone"));
   assert.equal(runtime.plan_source, "local");
   assert.equal(runtime.degraded_mode, false);
+  assert.equal(runtime.supervisorRuntime.instance_id, "supervisor_runtime");
+  assert.equal(runtime.runtimeTeamSnapshot.source, "load_supervisor_runtime");
   assert.equal(runtime.conversationMembershipTarget.thread_id, "local:job_loader_1");
   assert.deepEqual(runtime.enabledAgentIds, ["planner"]);
   assert.deepEqual(runtime.unknownConversationAgentIds, ["ghost"]);
@@ -217,6 +219,8 @@ test("supervisor runtime loader builds goc runtime with catalog, team, tools, an
   assert.equal(runtime.plan_source, "local");
   assert.equal(runtime.context_source, "goc");
   assert.equal(runtime.degraded_mode, false);
+  assert.equal(runtime.supervisorRuntime.instance_id, "supervisor_runtime");
+  assert.equal(runtime.runtimeTeamSnapshot.source, "load_supervisor_runtime");
   assert.equal(runtime.conversation.id, "goc-conversation");
   assert.deepEqual(runtime.enabledAgentIds, ["planner", "coder"]);
   assert.deepEqual(runtime.unknownConversationAgentIds, ["ghost"]);

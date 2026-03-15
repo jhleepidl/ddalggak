@@ -180,3 +180,113 @@ test("runtime role payload builder emits canonical runtime_role and flattened fi
   assert.equal(payload.role_label, "coder");
   assert.equal(payload.runtime_instance_id, "inst_1");
 });
+
+test("runtime snapshot normalization keeps supervisor, checkpoint, authority, and collaboration metadata", () => {
+  const snapshot = createRuntimeTeamSnapshot({
+    taskInterpretation: {
+      task_type: "analysis",
+      task_summary: "review market claims",
+      deliverable_type: "brief",
+    },
+    teamPlan: {
+      team_plan_id: "team_meta_1",
+      slots: [
+        { slot_id: "slot_research_1", role_id: "researcher", purpose: "collect evidence", authority_profile_id: "worker_readonly_research" },
+        { slot_id: "slot_review_1", role_id: "reviewer", purpose: "challenge claims", authority_profile_id: "worker_readonly_review" },
+      ],
+      runtime_agents: [
+        { instance_id: "inst_research_1", slot_id: "slot_research_1", role_id: "researcher", role_label: "researcher", authority_profile_id: "worker_readonly_research" },
+        { instance_id: "inst_review_1", slot_id: "slot_review_1", role_id: "reviewer", role_label: "reviewer", authority_profile_id: "worker_readonly_review" },
+      ],
+      collaboration_cells: [
+        {
+          cell_id: "cell_reflect",
+          pattern: "reflection",
+          member_instance_ids: ["inst_research_1", "inst_review_1"],
+          topology: "pair",
+          max_rounds: 2,
+          termination: { condition: "claims_validated" },
+        },
+      ],
+      checkpoints: [
+        {
+          checkpoint_id: "checkpoint_review_gate",
+          target_slot_ids: ["slot_review_1"],
+          trigger_after_instances: ["inst_review_1"],
+          human_interrupt_allowed: true,
+        },
+      ],
+      execution_graph: {
+        nodes: [{ slot_id: "slot_research_1" }, { slot_id: "slot_review_1" }],
+        edges: [{ from_slot_id: "slot_research_1", to_slot_id: "slot_review_1" }],
+        parallel_groups: [],
+      },
+      supervisor_runtime: {
+        enabled: true,
+        instance_id: "supervisor_runtime",
+        interaction_mode: "checkpointed_supervised",
+        authority_profile_id: "supervisor_controlled",
+      },
+      authority_graph: [
+        { slot_id: "slot_research_1", authority_profile_id: "worker_readonly_research" },
+        { slot_id: "slot_review_1", authority_profile_id: "worker_readonly_review" },
+      ],
+    },
+    runtimeAgents: [
+      { instance_id: "inst_research_1", slot_id: "slot_research_1", role_id: "researcher", role_label: "researcher", authority_profile_id: "worker_readonly_research" },
+      { instance_id: "inst_review_1", slot_id: "slot_review_1", role_id: "reviewer", role_label: "reviewer", authority_profile_id: "worker_readonly_review" },
+    ],
+    collaborationCells: [
+      {
+        cell_id: "cell_reflect",
+        pattern: "reflection",
+        member_instance_ids: ["inst_research_1", "inst_review_1"],
+        topology: "pair",
+        max_rounds: 2,
+        termination: { condition: "claims_validated" },
+      },
+    ],
+    authorityGraph: [
+      { slot_id: "slot_research_1", authority_profile_id: "worker_readonly_research" },
+      { slot_id: "slot_review_1", authority_profile_id: "worker_readonly_review" },
+    ],
+    checkpoints: [
+      {
+        checkpoint_id: "checkpoint_review_gate",
+        target_slot_ids: ["slot_review_1"],
+        trigger_after_instances: ["inst_review_1"],
+        human_interrupt_allowed: true,
+      },
+    ],
+    executionGraph: {
+      nodes: [{ slot_id: "slot_research_1" }, { slot_id: "slot_review_1" }],
+      edges: [{ from_slot_id: "slot_research_1", to_slot_id: "slot_review_1" }],
+      parallel_groups: [],
+      supervisor_edges: [{ supervisor_instance_id: "supervisor_runtime", target_slot_ids: ["slot_research_1", "slot_review_1"] }],
+      interrupt_ready: true,
+    },
+    selectionExplanations: [{ subject_id: "slot_review_1", reason: "claim-heavy task" }],
+    runtimeAuthority: buildRuntimeAuthorityMetadataFixture("goc").runtime_authority,
+    supervisorRuntime: {
+      enabled: true,
+      instance_id: "supervisor_runtime",
+      interaction_mode: "checkpointed_supervised",
+      authority_profile_id: "supervisor_controlled",
+    },
+    source: "control_plane",
+  });
+
+  assert.equal(snapshot.task_interpretation.task_type, "analysis");
+  assert.equal(snapshot.collaboration_cells[0].pattern, "reflection");
+  assert.equal(snapshot.checkpoints[0].checkpoint_id, "checkpoint_review_gate");
+  assert.equal(snapshot.execution_graph.supervisor_edges.length, 1);
+  assert.equal(snapshot.authority_graph.some((entry) => entry.role_id === "supervisor_runtime"), true);
+  assert.equal(snapshot.runtime_authority.mode, "goc");
+
+  const patch = buildRuntimeMetadataPatch({ runtime_team_snapshot: snapshot });
+  assert.equal(Array.isArray(patch.collaboration_cells), true);
+  assert.equal(Array.isArray(patch.checkpoints), true);
+  assert.equal(Array.isArray(patch.authority_graph), true);
+  assert.equal(patch.execution_graph.interrupt_ready, true);
+  assert.equal(patch.supervisor_runtime.instance_id, "supervisor_runtime");
+});

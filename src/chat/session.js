@@ -31,6 +31,18 @@ function normalizePendingApproval(raw) {
     mode_choice_required: row.mode_choice_required === true,
     preview_reason: String(row.preview_reason || row.reason || "").trim() || undefined,
     actions_summary: actionsSummary,
+    action_source: String(row.action_source || row.actionSource || "").trim() || undefined,
+    checkpoint_id: String(row.checkpoint_id || "").trim() || undefined,
+    checkpoint_ids: Array.isArray(row.checkpoint_ids)
+      ? row.checkpoint_ids.map((entry) => String(entry || "").trim()).filter(Boolean).slice(0, 16)
+      : [],
+    checkpoint_status: String(row.checkpoint_status || "").trim() || undefined,
+    supervisor_runtime: row.supervisor_runtime && typeof row.supervisor_runtime === "object"
+      ? row.supervisor_runtime
+      : (row.supervisorRuntime && typeof row.supervisorRuntime === "object" ? row.supervisorRuntime : undefined),
+    runtime_team_snapshot: row.runtime_team_snapshot && typeof row.runtime_team_snapshot === "object"
+      ? row.runtime_team_snapshot
+      : (row.runtimeTeamSnapshot && typeof row.runtimeTeamSnapshot === "object" ? row.runtimeTeamSnapshot : undefined),
     cancel_impact: String(row.cancel_impact || "").trim() || undefined,
     preview_lines: previewLines,
   };

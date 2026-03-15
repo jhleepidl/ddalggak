@@ -47,7 +47,8 @@ test("team plan v2 emits canonical slots, runtime agents, and supervisor runtime
   assert.equal(plan.roles.some((role) => role.id === "planner"), false);
   assert.deepEqual(plan.execution_graph.order, ["slot_builder_2", "slot_reviewer_3"]);
   assert.deepEqual(plan.execution_order, ["builder", "reviewer"]);
-  assert.equal(plan.authority_graph.length, 2);
+  assert.equal(plan.authority_graph.length, 3);
+  assert.equal(plan.execution_graph.supervisor_edges.length >= 1, true);
   assert.equal(plan.selection_explanations.some((row) => row.reason.includes("planner role normalized")), true);
 });
 

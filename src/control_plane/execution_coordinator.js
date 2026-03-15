@@ -269,6 +269,11 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
     list.push(edge.from_slot_id);
     dependencyMap.set(edge.to_slot_id, list);
   }
+  const collaborationCells = asArray(teamPlan?.collaboration_cells);
+  const checkpoints = asArray(teamPlan?.checkpoints);
+  const supervisorRuntime = teamPlan?.supervisor_runtime && typeof teamPlan.supervisor_runtime === "object"
+    ? teamPlan.supervisor_runtime
+    : null;
 
   const actions = [];
   for (const slotId of slotOrder) {
@@ -291,6 +296,14 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
       { lower: true }
     );
     if (!targetAgent) continue;
+    const slotCollaborationCells = collaborationCells.filter((cell) =>
+      asArray(cell?.member_instance_ids).includes(match.instance_id)
+    );
+    const slotCheckpointIds = checkpoints
+      .filter((checkpoint) => asArray(checkpoint?.target_slot_ids).includes(slotId))
+      .map((checkpoint) => checkpoint.checkpoint_id)
+      .filter(Boolean);
+    const managerCell = slotCollaborationCells.find((cell) => cell.pattern === "manager_as_tool");
     actions.push({
       type: "agent_run",
       agent: targetAgent,
@@ -302,6 +315,13 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
         slot_id: normalizeText(slotId) || undefined,
         parallel_group_id: parallelGroupBySlot.get(slotId) || undefined,
         dependency_slot_ids: asArray(dependencyMap.get(slotId)).filter(Boolean),
+        collaboration_cell_ids: slotCollaborationCells.map((cell) => cell.cell_id).filter(Boolean),
+        checkpoint_ids: slotCheckpointIds,
+        report_back_to_instance_ids: slotCollaborationCells
+          .map((cell) => cell.report_back_to_instance_id)
+          .filter(Boolean),
+        supervisor_instance_id: managerCell?.report_back_to_instance_id
+          || (supervisorRuntime?.enabled === true ? supervisorRuntime.instance_id : undefined),
         deliverable_type: normalizeText(slot?.deliverable_type || taskInterpretation?.deliverable_type) || undefined,
       },
     });
@@ -391,6 +411,8 @@ export function coordinateExecutionPlan({
         return normalizeRoleId(slot?.role_id || slot?.role_label);
       }).filter(Boolean),
     }));
+  const explicitParallelGroups = asArray(teamPlan?.execution_graph?.parallel_groups);
+  const effectiveParallelGroups = explicitParallelGroups.length > 0 ? explicitParallelGroups : parallelGroups;
 
   return {
     action_source: actionSource,
@@ -406,8 +428,11 @@ export function coordinateExecutionPlan({
           : (normalizedRoute.reason || "generated route")
       ) || "generated route",
       execution_graph: teamPlan?.execution_graph || undefined,
-      parallel_groups: parallelGroups,
+      parallel_groups: effectiveParallelGroups,
       checkpoints: teamPlan?.checkpoints || [],
+      collaboration_cells: teamPlan?.collaboration_cells || [],
+      authority_graph: teamPlan?.authority_graph || [],
+      selection_explanations: teamPlan?.selection_explanations || [],
       supervisor_runtime: teamPlan?.supervisor_runtime || undefined,
     },
   };

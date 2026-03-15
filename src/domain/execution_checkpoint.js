@@ -4,6 +4,14 @@ function normalizeText(raw = "") {
   return String(raw || "").trim();
 }
 
+function normalizeDecision(raw = "") {
+  const value = normalizeText(raw).toLowerCase();
+  if (["continue", "pause", "cancel", "reroute", "summarize", "required", "optional", "pending"].includes(value)) {
+    return value;
+  }
+  return value || undefined;
+}
+
 export function normalizeExecutionCheckpoint(raw = {}) {
   const row = raw && typeof raw === "object" ? raw : {};
   const checkpointId = normalizeText(
@@ -18,6 +26,20 @@ export function normalizeExecutionCheckpoint(raw = {}) {
       row.target_slot_ids ?? row.targetSlotIds ?? [],
       { max: 16, lower: false }
     ),
+    trigger_after_instances: normalizeStringList(
+      row.trigger_after_instances ?? row.triggerAfterInstances ?? [],
+      { max: 16, lower: false }
+    ),
+    supervisor_decision: row.supervisor_decision && typeof row.supervisor_decision === "object"
+      ? row.supervisor_decision
+      : (() => {
+        const value = normalizeDecision(row.supervisor_decision || row.supervisorDecision || row.decision);
+        return value ? { status: value } : undefined;
+      })(),
+    human_interrupt_allowed: row.human_interrupt_allowed === true
+      || row.humanInterruptAllowed === true
+      || row.approval_required === true
+      || row.approvalRequired === true,
     approval_required: row.approval_required === true || row.approvalRequired === true,
     completion_signal: row.completion_signal && typeof row.completion_signal === "object"
       ? row.completion_signal

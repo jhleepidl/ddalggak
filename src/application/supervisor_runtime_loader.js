@@ -6,6 +6,8 @@ import {
   buildRunAuthorityEnvelope,
   normalizeRunAuthority,
 } from "./run_authority.js";
+import { createRuntimeTeamSnapshot } from "./runtime_metadata.js";
+import { createSupervisorRuntime } from "../control_plane/supervisor_runtime.js";
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -189,6 +191,45 @@ export function createSupervisorRuntimeLoader({
           teamResult?.target?.conversation_id || localThreadId
         ).trim();
 
+        const supervisorRuntime = createSupervisorRuntime({
+          enabled: true,
+          interaction_mode: "manager_as_tool",
+          authority_profile_id: "supervisor_controlled",
+          user_visible: false,
+          selection_reason: "local runtime bootstrap",
+        });
+        const runtimeTeamSnapshot = createRuntimeTeamSnapshot({
+          taskInterpretation: null,
+          teamPlan: null,
+          runtimeAgents: [],
+          contextPacks: [],
+          collaborationCells: [],
+          authorityGraph: [{
+            instance_id: supervisorRuntime.instance_id,
+            role_id: "supervisor_runtime",
+            authority_profile_id: supervisorRuntime.authority_profile_id,
+          }],
+          checkpoints: [],
+          executionGraph: {
+            nodes: [],
+            edges: [],
+            order: [],
+            parallel_groups: [],
+            supervisor_edges: [],
+            collaboration_cells: [],
+            checkpoints: [],
+            interrupt_ready: false,
+          },
+          selectionExplanations: [],
+          selectedSkillIds: [],
+          skillLoadLevels: {},
+          selectionReasonSummary: {},
+          skillUsageEvents: [],
+          skillUsageSummary: {},
+          supervisorRuntime,
+          runtimeAuthority,
+          source: "load_supervisor_runtime",
+        });
         const runtimeResult = {
           mode: "local",
           ...buildRunAuthorityEnvelope(
@@ -234,6 +275,10 @@ export function createSupervisorRuntimeLoader({
           contextSummary: includeContext ? localDeps.localDocs(cleanJobId, trackedDocNames, 2200) : "",
           globalSummary: "",
           capabilities,
+          supervisorRuntime,
+          supervisor_runtime: supervisorRuntime,
+          runtimeTeamSnapshot,
+          runtime_team_snapshot: runtimeTeamSnapshot,
         };
         syncRuntimeConversationTeamState(runtimeResult, {
           conversationRows: conversationAgents,
@@ -426,6 +471,45 @@ export function createSupervisorRuntimeLoader({
       const summarizeJobConfigText = typeof summarizeJobConfigDebug === "function"
         ? summarizeJobConfigDebug
         : (() => "");
+      const supervisorRuntime = createSupervisorRuntime({
+        enabled: true,
+        interaction_mode: "manager_as_tool",
+        authority_profile_id: "supervisor_controlled",
+        user_visible: true,
+        selection_reason: "goc runtime bootstrap",
+      });
+      const runtimeTeamSnapshot = createRuntimeTeamSnapshot({
+        taskInterpretation: null,
+        teamPlan: null,
+        runtimeAgents: [],
+        contextPacks: [],
+        collaborationCells: [],
+        authorityGraph: [{
+          instance_id: supervisorRuntime.instance_id,
+          role_id: "supervisor_runtime",
+          authority_profile_id: supervisorRuntime.authority_profile_id,
+        }],
+        checkpoints: [],
+        executionGraph: {
+          nodes: [],
+          edges: [],
+          order: [],
+          parallel_groups: [],
+          supervisor_edges: [],
+          collaboration_cells: [],
+          checkpoints: [],
+          interrupt_ready: false,
+        },
+        selectionExplanations: [],
+        selectedSkillIds: [],
+        skillLoadLevels: {},
+        selectionReasonSummary: {},
+        skillUsageEvents: [],
+        skillUsageSummary: {},
+        supervisorRuntime,
+        runtimeAuthority,
+        source: "load_supervisor_runtime",
+      });
 
       const runtimeResult = {
         mode: "goc",
@@ -465,6 +549,10 @@ export function createSupervisorRuntimeLoader({
         contextSummary: contextSummary || "",
         globalSummary: globalSummary || "",
         capabilities,
+        supervisorRuntime,
+        supervisor_runtime: supervisorRuntime,
+        runtimeTeamSnapshot,
+        runtime_team_snapshot: runtimeTeamSnapshot,
       };
       syncRuntimeConversationTeamState(runtimeResult, {
         conversationRows: conversationAgents,

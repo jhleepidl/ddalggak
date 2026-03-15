@@ -319,6 +319,7 @@ export class GocExecutionGraphRecorder {
         action,
         this.runtimeMetadata?.runtime_team_snapshot || null
       ));
+      const inputs = asObject(action?.inputs);
       const payload = {
         run_id: this.runId,
         step_id: stepId,
@@ -334,6 +335,22 @@ export class GocExecutionGraphRecorder {
         lens_spec: action?.lens && typeof action.lens === "object"
           ? action.lens
           : { mode: "shared_only" },
+        parallel_group_id: String(inputs.parallel_group_id || inputs.parallelGroupId || "").trim() || undefined,
+        dependency_slot_ids: Array.isArray(inputs.dependency_slot_ids)
+          ? inputs.dependency_slot_ids
+          : (Array.isArray(inputs.dependencySlotIds) ? inputs.dependencySlotIds : undefined),
+        collaboration_cell_ids: Array.isArray(inputs.collaboration_cell_ids)
+          ? inputs.collaboration_cell_ids
+          : (Array.isArray(inputs.collaborationCellIds) ? inputs.collaborationCellIds : undefined),
+        checkpoint_ids: Array.isArray(inputs.checkpoint_ids)
+          ? inputs.checkpoint_ids
+          : undefined,
+        report_back_to_instance_ids: Array.isArray(inputs.report_back_to_instance_ids)
+          ? inputs.report_back_to_instance_ids
+          : (Array.isArray(inputs.reportBackToInstanceIds) ? inputs.reportBackToInstanceIds : undefined),
+        supervisor_instance_id: String(
+          inputs.supervisor_instance_id || inputs.supervisorInstanceId || ""
+        ).trim() || undefined,
         ...runtimeRolePatch,
         ...this._runtimeMetadataPatch(),
         ...this._sharedContextPayload(),
@@ -466,6 +483,7 @@ export class GocExecutionGraphRecorder {
         { type: "run_agent", agent_id: childAgentId, inputs: child.inputs || {} },
         this.runtimeMetadata?.runtime_team_snapshot || null
       ));
+      const childInputs = asObject(child.inputs);
       const payload = {
         run_id: this.runId,
         step_id: childStepId,
@@ -482,6 +500,22 @@ export class GocExecutionGraphRecorder {
         lens_spec: child.lens && typeof child.lens === "object"
           ? child.lens
           : { mode: "shared_only" },
+        parallel_group_id: String(childInputs.parallel_group_id || childInputs.parallelGroupId || "").trim() || undefined,
+        dependency_slot_ids: Array.isArray(childInputs.dependency_slot_ids)
+          ? childInputs.dependency_slot_ids
+          : (Array.isArray(childInputs.dependencySlotIds) ? childInputs.dependencySlotIds : undefined),
+        collaboration_cell_ids: Array.isArray(childInputs.collaboration_cell_ids)
+          ? childInputs.collaboration_cell_ids
+          : (Array.isArray(childInputs.collaborationCellIds) ? childInputs.collaborationCellIds : undefined),
+        checkpoint_ids: Array.isArray(childInputs.checkpoint_ids)
+          ? childInputs.checkpoint_ids
+          : undefined,
+        report_back_to_instance_ids: Array.isArray(childInputs.report_back_to_instance_ids)
+          ? childInputs.report_back_to_instance_ids
+          : (Array.isArray(childInputs.reportBackToInstanceIds) ? childInputs.reportBackToInstanceIds : undefined),
+        supervisor_instance_id: String(
+          childInputs.supervisor_instance_id || childInputs.supervisorInstanceId || ""
+        ).trim() || undefined,
         ...childRuntimeRolePatch,
         ...this._runtimeMetadataPatch(),
         ...this._sharedContextPayload(),

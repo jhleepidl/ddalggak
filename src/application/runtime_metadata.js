@@ -1,7 +1,12 @@
 import { normalizeSkillAttachmentList, summarizeSkillLoadLevels } from "../domain/skill_attachment.js";
 import { normalizeContextPackList } from "../domain/context_pack.js";
 import { normalizeRuntimeAgentInstance } from "../domain/runtime_agent.js";
+import { normalizeTaskInterpretation } from "../domain/task_interpretation.js";
+import { normalizeCollaborationCellList } from "../domain/collaboration_cell.js";
+import { normalizeExecutionCheckpointList } from "../domain/execution_checkpoint.js";
+import { normalizeTeamPlan } from "../domain/team_plan.js";
 import { normalizeSkillUsageEvent, summarizeSkillUsageEvents } from "./skill_feedback.js";
+import { AuthorityRegistry } from "../catalog/authority_registry.js";
 
 function asObject(value) {
   return value && typeof value === "object" ? value : {};
@@ -51,6 +56,121 @@ function omitUndefinedFields(value = {}) {
   return Object.fromEntries(
     Object.entries(asObject(value)).filter(([, entry]) => entry !== undefined)
   );
+}
+
+function normalizeSelectionExplanations(value = []) {
+  const rows = Array.isArray(value) ? value : [];
+  const out = [];
+  for (const row of rows) {
+    if (typeof row === "string") {
+      const reason = String(row || "").trim();
+      if (!reason) continue;
+      out.push({ subject_id: "team_plan", reason });
+      continue;
+    }
+    const entry = asObject(row);
+    const reason = String(entry.reason || entry.selection_reason || entry.selectionReason || "").trim();
+    if (!reason) continue;
+    out.push({
+      subject_id: String(entry.subject_id || entry.subjectId || "team_plan").trim() || "team_plan",
+      reason,
+    });
+  }
+  return out.slice(0, 64);
+}
+
+function normalizeExecutionGraphValue(value, { teamPlan = null } = {}) {
+  const row = asObject(value);
+  if (Object.keys(row).length > 0) return row;
+  return teamPlan?.execution_graph && typeof teamPlan.execution_graph === "object"
+    ? teamPlan.execution_graph
+    : {};
+}
+
+function normalizeAuthorityGraphValue(value = [], { teamPlan = null, runtimeAgents = [], supervisorRuntime = null } = {}) {
+  const rows = Array.isArray(value)
+    ? value
+    : (Array.isArray(teamPlan?.authority_graph) ? teamPlan.authority_graph : []);
+  const registry = new AuthorityRegistry();
+  const normalized = [];
+  for (const raw of rows) {
+    const row = asObject(raw);
+    const authorityProfileId = String(
+      row.authority_profile_id || row.authorityProfileId || ""
+    ).trim().toLowerCase();
+    const slotId = String(row.slot_id || row.slotId || "").trim();
+    const instanceId = String(
+      row.instance_id || row.instanceId || ""
+    ).trim() || undefined;
+    const roleId = String(row.role_id || row.roleId || "").trim().toLowerCase() || undefined;
+    if (!authorityProfileId && !slotId && !instanceId && !roleId) continue;
+    const profile = registry.resolve(authorityProfileId);
+    normalized.push({
+      slot_id: slotId || undefined,
+      instance_id: instanceId,
+      role_id: roleId,
+      authority_profile_id: authorityProfileId || undefined,
+      allowed_actions: normalizeStringList(
+        row.allowed_actions ?? row.allowedActions ?? profile?.allowed_actions ?? [],
+        { lower: true }
+      ),
+      denied_actions: normalizeStringList(
+        row.denied_actions ?? row.deniedActions ?? profile?.denied_actions ?? [],
+        { lower: true }
+      ),
+      approval_required_for: normalizeStringList(
+        row.approval_required_for ?? row.approvalRequiredFor ?? profile?.approval_required_for ?? [],
+        { lower: true }
+      ),
+      tool_allowlist: normalizeStringList(
+        row.tool_allowlist ?? row.toolAllowlist ?? profile?.tool_allowlist ?? [],
+        { lower: true }
+      ),
+      max_parallel_children: Number.isFinite(Number(
+        row.max_parallel_children ?? row.maxParallelChildren ?? profile?.max_parallel_children
+      ))
+        ? Math.max(0, Math.min(16, Math.floor(Number(
+          row.max_parallel_children ?? row.maxParallelChildren ?? profile?.max_parallel_children
+        ))))
+        : 0,
+    });
+  }
+  if (supervisorRuntime?.enabled === true && !normalized.some((entry) => String(entry.instance_id || "").trim() === String(supervisorRuntime.instance_id || "").trim())) {
+    const profile = registry.resolve(supervisorRuntime.authority_profile_id);
+    normalized.push({
+      instance_id: String(supervisorRuntime.instance_id || "").trim() || undefined,
+      role_id: "supervisor_runtime",
+      authority_profile_id: String(supervisorRuntime.authority_profile_id || "").trim().toLowerCase() || undefined,
+      allowed_actions: normalizeStringList(profile?.allowed_actions ?? [], { lower: true }),
+      denied_actions: normalizeStringList(profile?.denied_actions ?? [], { lower: true }),
+      approval_required_for: normalizeStringList(profile?.approval_required_for ?? [], { lower: true }),
+      tool_allowlist: normalizeStringList(profile?.tool_allowlist ?? [], { lower: true }),
+      max_parallel_children: Number.isFinite(Number(profile?.max_parallel_children))
+        ? Math.max(0, Math.min(16, Math.floor(Number(profile.max_parallel_children))))
+        : 0,
+    });
+  }
+  if (normalized.length > 0) return normalized;
+  return runtimeAgents
+    .map((agent) => {
+      const authorityProfileId = String(agent?.authority_profile_id || "").trim().toLowerCase();
+      if (!authorityProfileId) return null;
+      const profile = registry.resolve(authorityProfileId);
+      return {
+        slot_id: String(agent?.slot_id || "").trim() || undefined,
+        instance_id: String(agent?.instance_id || "").trim() || undefined,
+        role_id: String(agent?.role_id || agent?.role_label || "").trim().toLowerCase() || undefined,
+        authority_profile_id: authorityProfileId,
+        allowed_actions: normalizeStringList(profile?.allowed_actions ?? [], { lower: true }),
+        denied_actions: normalizeStringList(profile?.denied_actions ?? [], { lower: true }),
+        approval_required_for: normalizeStringList(profile?.approval_required_for ?? [], { lower: true }),
+        tool_allowlist: normalizeStringList(profile?.tool_allowlist ?? [], { lower: true }),
+        max_parallel_children: Number.isFinite(Number(profile?.max_parallel_children))
+          ? Math.max(0, Math.min(16, Math.floor(Number(profile.max_parallel_children))))
+          : 0,
+      };
+    })
+    .filter(Boolean);
 }
 
 export const ACTION_SOURCE_VALUES = Object.freeze([
@@ -233,10 +353,23 @@ function hasSnapshotFields(row = {}) {
   return !!(
     row.team_plan
     || row.teamPlan
+    || row.task_interpretation
+    || row.taskInterpretation
     || Array.isArray(row.runtime_agents)
     || Array.isArray(row.runtimeAgents)
     || Array.isArray(row.context_packs)
     || Array.isArray(row.contextPacks)
+    || Array.isArray(row.collaboration_cells)
+    || Array.isArray(row.collaborationCells)
+    || Array.isArray(row.authority_graph)
+    || Array.isArray(row.authorityGraph)
+    || Array.isArray(row.checkpoints)
+    || Array.isArray(row.selection_explanations)
+    || Array.isArray(row.selectionExplanations)
+    || row.execution_graph
+    || row.executionGraph
+    || row.runtime_authority
+    || row.runtimeAuthority
     || Array.isArray(row.selected_skill_ids)
     || Array.isArray(row.selectedSkillIds)
     || row.skill_load_levels
@@ -274,10 +407,63 @@ export function normalizeRuntimeTeamSnapshot(input = null, {
   const runtimeAgents = runtimeAgentsRaw
     .map((agent) => normalizeRuntimeAgent(agent))
     .filter((agent) => agent.instance_id || agent.template_id || agent.role_label);
+  const teamPlan = (() => {
+    const rawPlan = row.team_plan && typeof row.team_plan === "object"
+      ? row.team_plan
+      : (row.teamPlan && typeof row.teamPlan === "object" ? row.teamPlan : null);
+    return rawPlan ? normalizeTeamPlan(rawPlan) : null;
+  })();
+  const taskInterpretation = normalizeTaskInterpretation(
+    row.task_interpretation
+    ?? row.taskInterpretation
+    ?? teamPlan?.task_interpretation
+    ?? {}
+  );
   const contextPacks = normalizeContextPackList(
     row.context_packs
     ?? row.contextPacks
     ?? []
+  );
+  const supervisorRuntime = (
+    row.supervisor_runtime && typeof row.supervisor_runtime === "object"
+      ? row.supervisor_runtime
+      : (row.supervisorRuntime && typeof row.supervisorRuntime === "object" ? row.supervisorRuntime : teamPlan?.supervisor_runtime)
+  ) || null;
+  const collaborationCells = normalizeCollaborationCellList(
+    row.collaboration_cells
+    ?? row.collaborationCells
+    ?? teamPlan?.collaboration_cells
+    ?? []
+  );
+  const checkpoints = normalizeExecutionCheckpointList(
+    row.checkpoints
+    ?? teamPlan?.checkpoints
+    ?? []
+  );
+  const selectionExplanations = normalizeSelectionExplanations(
+    row.selection_explanations
+    ?? row.selectionExplanations
+    ?? teamPlan?.selection_explanations
+    ?? []
+  );
+  const runtimeAuthority = normalizeRuntimeAuthority(
+    row.runtime_authority
+    ?? row.runtimeAuthority
+    ?? null
+  );
+  const executionGraph = normalizeExecutionGraphValue(
+    row.execution_graph
+    ?? row.executionGraph
+    ?? teamPlan?.execution_graph
+    ?? {},
+    { teamPlan }
+  );
+  const authorityGraph = normalizeAuthorityGraphValue(
+    row.authority_graph
+    ?? row.authorityGraph
+    ?? teamPlan?.authority_graph
+    ?? [],
+    { teamPlan, runtimeAgents, supervisorRuntime }
   );
   const selectedSkillIds = normalizeStringList(
     row.selected_skill_ids
@@ -307,16 +493,22 @@ export function normalizeRuntimeTeamSnapshot(input = null, {
       : summarizeSkillUsageEvents(skillUsageEvents));
 
   return {
-    team_plan: row.team_plan && typeof row.team_plan === "object"
-      ? row.team_plan
-      : (row.teamPlan && typeof row.teamPlan === "object" ? row.teamPlan : null),
+    task_interpretation: taskInterpretation,
+    team_plan: teamPlan,
     runtime_agents: runtimeAgents,
     context_packs: contextPacks,
+    collaboration_cells: collaborationCells,
+    authority_graph: authorityGraph,
+    checkpoints,
+    execution_graph: executionGraph,
+    selection_explanations: selectionExplanations,
     selected_skill_ids: selectedSkillIds,
     skill_load_levels: skillLoadLevels,
     selection_reason_summary: selectionReasonSummary,
     skill_usage_events: skillUsageEvents,
     skill_usage_summary: skillUsageSummary,
+    supervisor_runtime: supervisorRuntime,
+    runtime_authority: runtimeAuthority,
     generated_at: String(row.generated_at || row.generatedAt || defaultGeneratedAt || new Date().toISOString()),
     source: String(row.source || defaultSource || "team_builder").trim() || "team_builder",
   };
@@ -341,6 +533,21 @@ export function createRuntimeTeamSnapshot({
   skill_usage_events = undefined,
   skillUsageSummary = undefined,
   skill_usage_summary = undefined,
+  taskInterpretation = undefined,
+  task_interpretation = undefined,
+  collaborationCells = undefined,
+  collaboration_cells = undefined,
+  authorityGraph = undefined,
+  authority_graph = undefined,
+  checkpoints = undefined,
+  executionGraph = undefined,
+  execution_graph = undefined,
+  selectionExplanations = undefined,
+  selection_explanations = undefined,
+  supervisorRuntime = undefined,
+  supervisor_runtime = undefined,
+  runtimeAuthority = undefined,
+  runtime_authority = undefined,
   generated_at = undefined,
   runtime_team_snapshot = undefined,
   runtimeTeamSnapshot = undefined,
@@ -353,14 +560,22 @@ export function createRuntimeTeamSnapshot({
   if (normalizedNested) return normalizedNested;
 
   return normalizeRuntimeTeamSnapshot({
+    task_interpretation: task_interpretation ?? taskInterpretation,
     team_plan: team_plan ?? teamPlan,
     runtime_agents: runtime_agents ?? runtimeAgents,
     context_packs: context_packs ?? contextPacks,
+    collaboration_cells: collaboration_cells ?? collaborationCells,
+    authority_graph: authority_graph ?? authorityGraph,
+    checkpoints,
+    execution_graph: execution_graph ?? executionGraph,
+    selection_explanations: selection_explanations ?? selectionExplanations,
     selected_skill_ids: selected_skill_ids ?? selectedSkillIds,
     skill_load_levels: skill_load_levels ?? skillLoadLevels,
     selection_reason_summary: selection_reason_summary ?? selectionReasonSummary,
     skill_usage_events: skill_usage_events ?? skillUsageEvents,
     skill_usage_summary: skill_usage_summary ?? skillUsageSummary,
+    supervisor_runtime: supervisor_runtime ?? supervisorRuntime,
+    runtime_authority: runtime_authority ?? runtimeAuthority,
     generated_at: generated_at ?? generatedAt,
     source,
   }, {
@@ -378,19 +593,29 @@ export function normalizeRuntimeMetadataEnvelope(input = {}) {
   const row = asObject(input);
   const snapshot = normalizeRuntimeTeamSnapshot(row);
   const actionSource = normalizeActionSource(row.action_source || row.actionSource || "");
-  const runtimeAuthority = normalizeRuntimeAuthority(row);
+  const runtimeAuthority = normalizeRuntimeAuthority(
+    row,
+    { fallback: snapshot?.runtime_authority || null }
+  ) || snapshot?.runtime_authority || null;
   if (!snapshot && !actionSource && !runtimeAuthority) return null;
   return {
     runtime_team_snapshot: snapshot || null,
     runtime_authority: runtimeAuthority || null,
+    task_interpretation: snapshot?.task_interpretation || null,
     team_plan: snapshot?.team_plan || null,
     runtime_agents: snapshot?.runtime_agents || [],
     context_packs: snapshot?.context_packs || [],
+    collaboration_cells: snapshot?.collaboration_cells || [],
+    authority_graph: snapshot?.authority_graph || [],
+    checkpoints: snapshot?.checkpoints || [],
+    execution_graph: snapshot?.execution_graph || {},
+    selection_explanations: snapshot?.selection_explanations || [],
     selected_skill_ids: snapshot?.selected_skill_ids || [],
     skill_load_levels: snapshot?.skill_load_levels || {},
     selection_reason_summary: snapshot?.selection_reason_summary || {},
     skill_usage_events: snapshot?.skill_usage_events || [],
     skill_usage_summary: snapshot?.skill_usage_summary || {},
+    supervisor_runtime: snapshot?.supervisor_runtime || undefined,
     generated_at: snapshot?.generated_at || undefined,
     source: snapshot?.source || undefined,
     mode: runtimeAuthority?.mode || undefined,
@@ -414,7 +639,10 @@ export function mergeRuntimeMetadataEnvelope(base = null, patch = null) {
   const runtimeAuthority = normalizeRuntimeAuthority(
     patchNormalized?.runtime_authority || null,
     {
-      fallback: baseNormalized?.runtime_authority || null,
+      fallback: patchNormalized?.runtime_team_snapshot?.runtime_authority
+        || baseNormalized?.runtime_authority
+        || baseNormalized?.runtime_team_snapshot?.runtime_authority
+        || null,
     }
   ) || null;
   const actionSource = normalizeActionSource(
@@ -426,14 +654,21 @@ export function mergeRuntimeMetadataEnvelope(base = null, patch = null) {
   return {
     runtime_team_snapshot: snapshot,
     runtime_authority: runtimeAuthority,
+    task_interpretation: snapshot?.task_interpretation || null,
     team_plan: snapshot?.team_plan || null,
     runtime_agents: snapshot?.runtime_agents || [],
     context_packs: snapshot?.context_packs || [],
+    collaboration_cells: snapshot?.collaboration_cells || [],
+    authority_graph: snapshot?.authority_graph || [],
+    checkpoints: snapshot?.checkpoints || [],
+    execution_graph: snapshot?.execution_graph || {},
+    selection_explanations: snapshot?.selection_explanations || [],
     selected_skill_ids: snapshot?.selected_skill_ids || [],
     skill_load_levels: snapshot?.skill_load_levels || {},
     selection_reason_summary: snapshot?.selection_reason_summary || {},
     skill_usage_events: snapshot?.skill_usage_events || [],
     skill_usage_summary: snapshot?.skill_usage_summary || {},
+    supervisor_runtime: snapshot?.supervisor_runtime || undefined,
     generated_at: snapshot?.generated_at || undefined,
     source: snapshot?.source || undefined,
     mode: runtimeAuthority?.mode || undefined,
@@ -463,12 +698,28 @@ export function buildRuntimeMetadataPatch(metadata = null, {
   if (!includeFlattened) return patch;
   return {
     ...patch,
+    task_interpretation: snapshot?.task_interpretation || undefined,
     team_plan: snapshot?.team_plan || undefined,
     runtime_agents: Array.isArray(snapshot?.runtime_agents) && snapshot.runtime_agents.length > 0
       ? snapshot.runtime_agents
       : undefined,
     context_packs: Array.isArray(snapshot?.context_packs) && snapshot.context_packs.length > 0
       ? snapshot.context_packs
+      : undefined,
+    collaboration_cells: Array.isArray(snapshot?.collaboration_cells) && snapshot.collaboration_cells.length > 0
+      ? snapshot.collaboration_cells
+      : undefined,
+    authority_graph: Array.isArray(snapshot?.authority_graph) && snapshot.authority_graph.length > 0
+      ? snapshot.authority_graph
+      : undefined,
+    checkpoints: Array.isArray(snapshot?.checkpoints) && snapshot.checkpoints.length > 0
+      ? snapshot.checkpoints
+      : undefined,
+    execution_graph: snapshot?.execution_graph && Object.keys(snapshot.execution_graph).length > 0
+      ? snapshot.execution_graph
+      : undefined,
+    selection_explanations: Array.isArray(snapshot?.selection_explanations) && snapshot.selection_explanations.length > 0
+      ? snapshot.selection_explanations
       : undefined,
     selected_skill_ids: Array.isArray(snapshot?.selected_skill_ids) && snapshot.selected_skill_ids.length > 0
       ? snapshot.selected_skill_ids
@@ -485,6 +736,7 @@ export function buildRuntimeMetadataPatch(metadata = null, {
     skill_usage_summary: snapshot?.skill_usage_summary && Object.keys(snapshot.skill_usage_summary).length > 0
       ? snapshot.skill_usage_summary
       : undefined,
+    supervisor_runtime: snapshot?.supervisor_runtime || undefined,
     generated_at: snapshot?.generated_at || undefined,
     source: snapshot?.source || undefined,
     mode: runtimeAuthority?.mode || undefined,
@@ -501,6 +753,8 @@ export function buildRuntimeMetadataPatch(metadata = null, {
 export function buildRuntimeRolePayload(runtimeAgent = null) {
   const agent = normalizeRuntimeAgent(runtimeAgent, { defaultStatus: "" });
   if (!agent.instance_id && !agent.template_id && !agent.role_label) return {};
+  const authorityRegistry = new AuthorityRegistry();
+  const authorityProfile = authorityRegistry.resolve(agent.authority_profile_id);
   const rolePayload = omitUndefinedFields({
     role_id: agent.role_id || undefined,
     role_label: agent.role_label || undefined,
@@ -519,6 +773,10 @@ export function buildRuntimeRolePayload(runtimeAgent = null) {
     skill_load_levels: summarizeSkillLoadLevels(agent.attached_skills || []),
     context_pack_id: agent.context_pack_id || undefined,
     authority_profile_id: agent.authority_profile_id || undefined,
+    allowed_actions: authorityProfile?.allowed_actions || undefined,
+    denied_actions: authorityProfile?.denied_actions || undefined,
+    approval_required_for: authorityProfile?.approval_required_for || undefined,
+    tool_allowlist: authorityProfile?.tool_allowlist || undefined,
     selection_reason: agent.selection_reason || undefined,
     synthesized: agent.synthesized === true,
     provider_binding: agent.provider_binding || undefined,
@@ -547,6 +805,13 @@ export function resolveRuntimeAgentForAction(action = {}, runtimeSnapshot = null
     || actionRow.runtimeInstanceId
     || ""
   ).trim();
+  const slotId = String(
+    actionInputs.slot_id
+    || actionInputs.slotId
+    || actionRow.slot_id
+    || actionRow.slotId
+    || ""
+  ).trim();
   const roleLabel = String(
     actionInputs.role_label
     || actionInputs.roleLabel
@@ -566,6 +831,10 @@ export function resolveRuntimeAgentForAction(action = {}, runtimeSnapshot = null
   if (runtimeInstanceId) {
     const byInstance = agents.find((agent) => String(agent.instance_id || "").trim() === runtimeInstanceId);
     if (byInstance) return byInstance;
+  }
+  if (slotId) {
+    const bySlot = agents.find((agent) => String(agent.slot_id || "").trim() === slotId);
+    if (bySlot) return bySlot;
   }
   if (roleLabel) {
     const byRole = agents.find((agent) => String(agent.role_label || "").trim().toLowerCase() === roleLabel);

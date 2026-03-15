@@ -689,6 +689,16 @@ export async function handleActionApprovalCallback({
         pending_approval: {
           ...resumedExecution.pendingApproval,
           action_source: resumeActionSource,
+          checkpoint_id: resumedExecution.pendingApproval?.checkpoint_id || undefined,
+          checkpoint_ids: Array.isArray(resumedExecution.pendingApproval?.checkpoint_ids)
+            ? resumedExecution.pendingApproval.checkpoint_ids
+            : (Array.isArray(resumeRuntimeTeamSnapshot?.checkpoints)
+              ? resumeRuntimeTeamSnapshot.checkpoints.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean)
+              : []),
+          checkpoint_status: resumedExecution.pendingApproval?.checkpoint_status || undefined,
+          supervisor_runtime: resumedExecution.pendingApproval?.supervisor_runtime
+            || resumeRuntimeTeamSnapshot?.supervisor_runtime
+            || undefined,
           runtime_team_snapshot: resumeRuntimeTeamSnapshot || undefined,
           blocked_index: Number.isFinite(Number(resumedExecution.blocked_index))
             ? Number(resumedExecution.blocked_index)

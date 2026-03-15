@@ -45,6 +45,7 @@ import {
   buildRunAuthority,
   buildRunAuthorityPatch,
 } from "./run_authority.js";
+import { summarizeRuntimeTeamSnapshotLines } from "./runtime_snapshot_display.js";
 
 async function sendTextWithOptionalGocButton(
   bot,
@@ -199,6 +200,11 @@ export function buildChatStatusCard(chatId, runtime = null) {
   const enabledTools = runtime?.toolSelection?.enabled_ids || runtime?.enabledToolIds || [];
   const runtimeAuthority = buildRunAuthority(runtime);
   const agentIndex = buildAgentDisplayIndex(agentRegistry, runtime);
+  const runtimeTeamSnapshot = runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
+    ? runtime.runtimeTeamSnapshot
+    : (runtime?.runtime_team_snapshot && typeof runtime.runtime_team_snapshot === "object"
+      ? runtime.runtime_team_snapshot
+      : null);
 
   const lines = [
     "📋 현재 상태",
@@ -238,6 +244,14 @@ export function buildChatStatusCard(chatId, runtime = null) {
     lines.push(`- degraded_mode: ${runtimeAuthority.degraded_mode ? "true" : "false"}`);
     if (runtimeAuthority.fallback_reason) {
       lines.push(`- fallback_reason: ${clip(runtimeAuthority.fallback_reason, 180)}`);
+    }
+  }
+  if (runtimeTeamSnapshot) {
+    const snapshotLines = summarizeRuntimeTeamSnapshotLines(runtimeTeamSnapshot, {
+      actionSource: session?.last_route?.action_source || "",
+    });
+    for (const line of snapshotLines.slice(0, 7)) {
+      lines.push(line);
     }
   }
   if (runtime?.jobConfigDebugSummary) {
