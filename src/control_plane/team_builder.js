@@ -190,6 +190,100 @@ function buildSlotSpec({
   };
 }
 
+function reviewerCategory(slot = {}) {
+  const purposeText = normalizeText(slot?.purpose, { lower: true });
+  const reasonText = normalizeText(slot?.selection_reason, { lower: true });
+  const skillText = [
+    ...(slot?.required_skill_ids || []),
+    ...(slot?.preferred_skill_ids || []),
+  ].map((entry) => normalizeText(entry, { lower: true })).filter(Boolean).join(" ");
+  const text = [purposeText, reasonText, skillText].filter(Boolean).join(" ");
+  const hasExplicitClaimAuditSignal = (
+    text.includes("evidence")
+    || text.includes("citation")
+    || text.includes("fact check")
+    || text.includes("fact-check")
+    || text.includes("claim check")
+    || text.includes("claim-check")
+    || text.includes("claim audit")
+    || text.includes("evidence audit")
+    || (text.includes("claim") && (
+      text.includes("audit")
+      || text.includes("verify")
+      || text.includes("validate")
+      || text.includes("supporting evidence")
+    ))
+    || skillText.includes("claim_evidence")
+    || skillText.includes("citation")
+    || skillText.includes("fact_check")
+  );
+
+  if (text.includes("security") || text.includes("threat") || text.includes("vuln")) return "security";
+  if (hasExplicitClaimAuditSignal) return "claim_evidence";
+  if (text.includes("compliance") || text.includes("policy") || text.includes("regulatory")) return "compliance";
+  if (text.includes("skeptical") || text.includes("adversarial") || text.includes("red-team") || text.includes("red team")) {
+    return "adversarial";
+  }
+  return "generic";
+}
+
+function mergeStringLists(...lists) {
+  return normalizeStringList(lists.flat(), { max: 24, lower: true });
+}
+
+function deduplicateReviewerSlots(slots = [], taskInterpretation = {}) {
+  const reviewerSlots = asArray(slots).filter((slot) => slot.role_id === "reviewer");
+  if (reviewerSlots.length <= 1) return asArray(slots);
+
+  const nonReviewers = asArray(slots).filter((slot) => slot.role_id !== "reviewer");
+  const mergedByCategory = new Map();
+  for (const reviewer of reviewerSlots) {
+    const category = reviewerCategory(reviewer);
+    const allowSeparate = category !== "generic";
+    if (!allowSeparate && mergedByCategory.has(category)) {
+      const existing = mergedByCategory.get(category);
+      mergedByCategory.set(category, {
+        ...existing,
+        purpose: normalizeText([existing.purpose, reviewer.purpose].filter(Boolean).join(" / ")) || existing.purpose,
+        required_skill_ids: mergeStringLists(existing.required_skill_ids, reviewer.required_skill_ids),
+        preferred_skill_ids: mergeStringLists(existing.preferred_skill_ids, reviewer.preferred_skill_ids),
+        forbidden_skill_ids: mergeStringLists(existing.forbidden_skill_ids, reviewer.forbidden_skill_ids),
+        required_context_types: mergeStringLists(existing.required_context_types, reviewer.required_context_types),
+        required_tool_ids: mergeStringLists(existing.required_tool_ids, reviewer.required_tool_ids),
+        parallelizable: false,
+        selection_reason: normalizeText([existing.selection_reason, reviewer.selection_reason].filter(Boolean).join("; "))
+          || existing.selection_reason,
+      });
+      continue;
+    }
+    mergedByCategory.set(allowSeparate ? `${category}:${normalizeText(reviewer.purpose, { lower: true })}` : category, reviewer);
+  }
+
+  const mergedReviewers = [...mergedByCategory.values()];
+  if (taskInterpretation?.task_type === "code_change") {
+    const genericReviewers = mergedReviewers.filter((slot) => reviewerCategory(slot) === "generic");
+    if (genericReviewers.length > 1) {
+      const [primary, ...rest] = genericReviewers;
+      const combined = rest.reduce((acc, slot) => ({
+        ...acc,
+        purpose: normalizeText([acc.purpose, slot.purpose].filter(Boolean).join(" / ")) || acc.purpose,
+        required_skill_ids: mergeStringLists(acc.required_skill_ids, slot.required_skill_ids),
+        preferred_skill_ids: mergeStringLists(acc.preferred_skill_ids, slot.preferred_skill_ids),
+        required_context_types: mergeStringLists(acc.required_context_types, slot.required_context_types),
+        selection_reason: normalizeText([acc.selection_reason, slot.selection_reason].filter(Boolean).join("; "))
+          || acc.selection_reason,
+      }), primary);
+      return [
+        ...nonReviewers,
+        combined,
+        ...mergedReviewers.filter((slot) => reviewerCategory(slot) !== "generic"),
+      ];
+    }
+  }
+
+  return [...nonReviewers, ...mergedReviewers];
+}
+
 function buildCandidateSlots(taskInterpretation = {}, {
   preferredRoles = [],
   maxAgents = 6,
@@ -213,8 +307,9 @@ function buildCandidateSlots(taskInterpretation = {}, {
     }));
   }
 
+  const deduplicated = deduplicateReviewerSlots(candidateSlots, taskInterpretation);
   const ordered = DEFAULT_ROLE_ORDER.flatMap((roleId) =>
-    candidateSlots.filter((slot) => slot.role_id === roleId)
+    deduplicated.filter((slot) => slot.role_id === roleId)
   );
   return ordered.slice(0, Math.max(1, Math.floor(Number(maxAgents) || 6)));
 }

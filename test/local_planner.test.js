@@ -79,10 +79,17 @@ test("LocalPlanner returns canonical normalized planning result", () => {
   assert.ok(result.team_plan.slots.length > 0);
   assert.ok(Array.isArray(result.runtime_agents));
   assert.equal(result.runtime_agents.some((agent) => agent.role_id === "deprecated_control_plane_only"), false);
+  assert.equal(result.runtime_agents.some((agent) => ["coder", "messenger", "planner"].includes(agent.role_id)), false);
   assert.ok(Array.isArray(result.context_packs));
   assert.ok(Array.isArray(result.selected_skill_ids));
   assert.ok(typeof result.skill_load_levels === "object");
   assert.ok(result.runtime_team_snapshot && typeof result.runtime_team_snapshot === "object");
+  assert.equal(
+    result.route_plan.actions
+      .filter((action) => action.type === "agent_run" || action.type === "synthesize_final")
+      .every((action) => !["coder", "messenger", "planner"].includes(String(action.agent || "").trim().toLowerCase())),
+    true
+  );
 });
 
 test("LocalPlanner preserves key orchestration behavior while remaining the canonical entry", () => {

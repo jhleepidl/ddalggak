@@ -283,6 +283,99 @@ function buildParallelGroups(teamPlan = {}, runtimeAgents = []) {
     }));
 }
 
+function slotParallelSignature(slot = {}) {
+  return [
+    normalizeText(slot?.role_id || slot?.role_label, { lower: true }),
+    ...asArray(slot?.required_skill_ids).map((entry) => normalizeText(entry, { lower: true })),
+    ...asArray(slot?.preferred_skill_ids).map((entry) => normalizeText(entry, { lower: true })),
+    ...asArray(slot?.required_context_types).map((entry) => normalizeText(entry, { lower: true })),
+    ...asArray(slot?.required_tool_ids).map((entry) => normalizeText(entry, { lower: true })),
+    normalizeText(slot?.purpose, { lower: true }),
+  ].filter(Boolean).join("|");
+}
+
+function decideParallelCompilation({
+  slots = [],
+  edges = [],
+  taskInterpretation = {},
+} = {}) {
+  const preference = normalizeText(taskInterpretation?.parallelism_preference, { lower: true }) || "hybrid";
+  const slotIds = new Set(asArray(slots).map((slot) => normalizeText(slot?.slot_id)).filter(Boolean));
+  const hasIntraGroupDependency = asArray(edges).some((edge) =>
+    slotIds.has(normalizeText(edge?.from_slot_id || edge?.fromSlotId))
+    && slotIds.has(normalizeText(edge?.to_slot_id || edge?.toSlotId))
+  );
+  const independent = slots.length > 1
+    && slots.every((slot) => slot?.parallelizable === true)
+    && !hasIntraGroupDependency;
+  const distinctSignatures = new Set(slots.map((slot) => slotParallelSignature(slot))).size;
+  const multiSourceHint = slots.some((slot) => {
+    const purpose = normalizeText(slot?.purpose, { lower: true });
+    const reason = normalizeText(slot?.selection_reason || slot?.selectionReason, { lower: true });
+    return purpose.includes("independent")
+      || purpose.includes("filing")
+      || purpose.includes("news")
+      || reason.includes("multi-source")
+      || reason.includes("multi source");
+  });
+
+  if (!independent) {
+    return {
+      allowed: false,
+      override_reason: "",
+    };
+  }
+  if (preference === "sequential") {
+    if (distinctSignatures > 1 || multiSourceHint) {
+      return {
+        allowed: true,
+        override_reason: "parallelism_preference=sequential overridden for differentiated independent slots",
+      };
+    }
+    return {
+      allowed: false,
+      override_reason: "",
+    };
+  }
+  if (preference === "parallel") {
+    return {
+      allowed: true,
+      override_reason: "",
+    };
+  }
+  return {
+    allowed: distinctSignatures > 1 || multiSourceHint,
+    override_reason: "",
+  };
+}
+
+export function deriveParallelGroupsFromRouteActions(actions = []) {
+  const groups = [];
+  for (const action of asArray(actions)) {
+    if (normalizeText(action?.type, { lower: true }) !== "spawn_parallel") continue;
+    const children = asArray(action?.agents);
+    if (children.length < 2) continue;
+    const instanceIds = children
+      .map((child) => normalizeText(child?.inputs?.runtime_instance_id || child?.inputs?.runtimeInstanceId))
+      .filter(Boolean);
+    const slotIds = children
+      .map((child) => normalizeText(child?.inputs?.slot_id || child?.inputs?.slotId))
+      .filter(Boolean);
+    const roleIds = children
+      .map((child) => normalizeRoleId(child?.inputs?.role_id || child?.inputs?.roleId || child?.agent))
+      .filter(Boolean);
+    groups.push({
+      parallel_group_id: normalizeText(
+        action?.inputs?.parallel_group_id || action?.parallel_group_id || `parallel_group_${groups.length + 1}`
+      ) || `parallel_group_${groups.length + 1}`,
+      slot_ids: slotIds,
+      role_ids: roleIds,
+      instance_ids: instanceIds,
+    });
+  }
+  return groups;
+}
+
 function createDependencyMap(teamPlan = {}, runtimeAgents = []) {
   const dependencyMap = new Map();
   for (const edge of normalizeEdges(teamPlan, runtimeAgents)) {
@@ -379,7 +472,7 @@ function buildSlotActionInputs({
       runtimeAgent?.authority_profile_id || slot?.authority_profile_id,
       { lower: true }
     ) || undefined,
-    transport_agent_id: normalizeText(
+    legacy_transport_agent_id: normalizeText(
       runtimeAgent?.template_id || getTransportRoleId(roleId),
       { lower: true }
     ) || undefined,
@@ -532,6 +625,7 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
   const supervisorRuntime = teamPlan?.supervisor_runtime && typeof teamPlan.supervisor_runtime === "object"
     ? teamPlan.supervisor_runtime
     : null;
+  const edges = normalizeEdges(teamPlan, runtimeAgents);
   const parallelGroups = buildParallelGroups(teamPlan, runtimeAgents);
   const parallelGroupBySlot = new Map();
   for (const group of parallelGroups) {
@@ -555,8 +649,13 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
       runnableSlots.map((slot) => slot.slot_id),
       checkpointLookup
     );
+    const parallelDecision = decideParallelCompilation({
+      slots: runnableSlots,
+      edges,
+      taskInterpretation,
+    });
 
-    if (runnableSlots.length > 1) {
+    if (runnableSlots.length > 1 && parallelDecision.allowed) {
       const children = runnableSlots
         .map((slot) => {
           const runtimeAgent = findRuntimeAgentForSlot(slot, runtimeAgents);
@@ -591,6 +690,9 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
             supervisor_instance_id: normalizeText(supervisorRuntime?.instance_id || supervisorRuntime?.instanceId) || undefined,
           },
           agents: children,
+          metadata: parallelDecision.override_reason
+            ? { parallelism_override_reason: parallelDecision.override_reason }
+            : undefined,
         });
         for (const checkpoint of levelCheckpointList) {
           const checkpointId = normalizeText(checkpoint?.checkpoint_id);
@@ -766,9 +868,7 @@ export function coordinateExecutionPlan({
     useTeamActions,
     explicitActions,
   });
-  const effectiveParallelGroups = asArray(teamPlan?.execution_graph?.parallel_groups).length > 0
-    ? asArray(teamPlan?.execution_graph?.parallel_groups)
-    : buildParallelGroups(teamPlan, runtimeAgents);
+  const effectiveParallelGroups = deriveParallelGroupsFromRouteActions(effectiveActions);
 
   return {
     action_source: actionSource,

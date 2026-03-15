@@ -67,6 +67,17 @@ test("runtime orchestration attaches skills and context packs additively", () =>
   assert.ok(typeof firstAgentRun.inputs.skill_load_levels === "object");
   assert.ok(String(firstAgentRun.inputs.context_pack_id || "").trim());
   assert.ok(orchestration.route_plan.execution_graph && typeof orchestration.route_plan.execution_graph === "object");
+  const parallelAction = orchestration.route_plan.actions.find((action) => action.type === "spawn_parallel");
+  if (parallelAction) {
+    const matchingGroup = orchestration.team_plan.execution_graph.parallel_groups.find((group) =>
+      group.parallel_group_id === parallelAction.inputs.parallel_group_id
+    );
+    assert.ok(matchingGroup);
+    assert.deepEqual(
+      [...matchingGroup.instance_ids].sort(),
+      parallelAction.agents.map((child) => child.inputs.runtime_instance_id).sort()
+    );
+  }
 });
 
 test("orchestration remains compatible when no skills are available", () => {

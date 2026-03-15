@@ -125,7 +125,12 @@ function sampleRuntimeSnapshot() {
     execution_graph: {
       nodes: [{ slot_id: "slot_builder_1", role_id: "builder" }],
       edges: [],
-      parallel_groups: [],
+      parallel_groups: [{
+        parallel_group_id: "parallel_group_1",
+        slot_ids: ["slot_builder_1"],
+        role_ids: ["builder"],
+        instance_ids: ["inst_coder_1"],
+      }],
       supervisor_edges: [{ supervisor_instance_id: "supervisor_runtime", target_slot_ids: ["slot_builder_1"] }],
       interrupt_ready: true,
     },
@@ -233,6 +238,7 @@ test("runtime_team_snapshot is persisted on GOC Run payloads", async () => {
   assert.equal(runNode.body.payload_json.runtime_team_snapshot.source, "team_builder");
   assert.equal(runNode.body.payload_json.runtime_team_snapshot.supervisor_runtime.instance_id, "supervisor_runtime");
   assert.equal(runNode.body.payload_json.runtime_team_snapshot.execution_graph.interrupt_ready, true);
+  assert.equal(runNode.body.payload_json.runtime_team_snapshot.execution_graph.parallel_groups[0].instance_ids[0], "inst_coder_1");
   assert.equal(runNode.body.payload_json.runtime_agents[0].template_id, "coder");
   assert.equal(runNode.body.payload_json.collaboration_cells[0].pattern, "reflection");
   assert.equal(runNode.body.payload_json.checkpoints[0].checkpoint_id, "checkpoint_review_gate");

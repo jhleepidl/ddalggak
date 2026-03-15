@@ -26,6 +26,7 @@ import { buildExecutionCheckpoints } from "../control_plane/checkpoint_policy.js
 import {
   coordinateExecutionPlan,
   createDefaultRunRoute as createDefaultRunRouteV2,
+  deriveParallelGroupsFromRouteActions,
   mapTeamPlanToRouteActions as mapTeamPlanToRouteActionsV2,
   shouldUseGeneratedTeamActions as shouldUseGeneratedTeamActionsV2,
 } from "../control_plane/execution_coordinator.js";
@@ -607,7 +608,7 @@ export function buildRuntimeOrchestration({
     throw new Error(`invalid_team_plan_runtime:${validation.errors.join(",")}`);
   }
 
-  const finalizedCoordination = coordinateExecutionPlan({
+  let finalizedCoordination = coordinateExecutionPlan({
     mode,
     goal: effectiveGoal,
     seedInstruction,
@@ -616,6 +617,53 @@ export function buildRuntimeOrchestration({
     runtimeAgents,
     taskInterpretation,
   });
+  const alignedParallelGroups = deriveParallelGroupsFromRouteActions(finalizedCoordination.route_plan.actions);
+  const parallelismExplanations = asArray(finalizedCoordination.route_plan.actions)
+    .filter((action) => normalizeText(action?.type, { lower: true }) === "spawn_parallel")
+    .map((action) => normalizeText(action?.metadata?.parallelism_override_reason))
+    .filter(Boolean)
+    .map((reason) => ({
+      subject_id: "execution_graph",
+      reason: `route_alignment:${reason}`,
+    }));
+
+  if (
+    JSON.stringify(asArray(teamPlan?.execution_graph?.parallel_groups)) !== JSON.stringify(alignedParallelGroups)
+    || parallelismExplanations.length > 0
+  ) {
+    combinedSelectionExplanations = [
+      ...combinedSelectionExplanations,
+      ...parallelismExplanations.filter((entry) =>
+        !combinedSelectionExplanations.some((existing) =>
+          normalizeText(existing?.subject_id || existing?.subjectId) === entry.subject_id
+          && normalizeText(existing?.reason) === entry.reason
+        )
+      ),
+    ];
+    teamPlan = reconcileTeamPlanRuntimeBindings({
+      ...teamPlan,
+      execution_graph: {
+        ...(teamPlan?.execution_graph || {}),
+        parallel_groups: alignedParallelGroups,
+      },
+      selection_explanations: combinedSelectionExplanations,
+    }, {
+      runtimeAgents,
+    });
+    const alignmentValidation = validateNormalizedTeamPlan(teamPlan);
+    if (!alignmentValidation.ok) {
+      throw new Error(`invalid_team_plan_route_alignment:${alignmentValidation.errors.join(",")}`);
+    }
+    finalizedCoordination = coordinateExecutionPlan({
+      mode,
+      goal: effectiveGoal,
+      seedInstruction,
+      routePlan: normalizedRoute,
+      teamPlan,
+      runtimeAgents,
+      taskInterpretation,
+    });
+  }
 
   const selectedSkillIds = normalizeStringList(
     contextPackResult.selected_skill_ids || skillResolution.selected_skill_ids || [],

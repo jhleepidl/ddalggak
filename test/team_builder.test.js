@@ -54,6 +54,7 @@ test("buildTeamFromTemplates selects known roles first", () => {
   assert.equal(roleIds.includes("planner"), false);
   assert.ok(roleIds.includes("builder"));
   assert.ok(roleIds.includes("reviewer"));
+  assert.equal(built.team_plan.slots.filter((slot) => slot.role_id === "reviewer").length, 1);
   const builder = built.runtime_agents.find((agent) => agent.role_id === "builder");
   assert.ok(builder);
   assert.equal(builder.template_id, "coder");
