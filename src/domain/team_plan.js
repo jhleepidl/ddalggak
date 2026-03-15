@@ -560,6 +560,496 @@ function normalizeConversationPreferences(raw = undefined) {
   return raw;
 }
 
+function buildRuntimeAgentIndexes(runtimeAgents = []) {
+  const byInstanceId = new Map();
+  const bySlotId = new Map();
+  const byRoleId = new Map();
+  const byPresetId = new Map();
+  const byTemplateId = new Map();
+
+  for (const agent of asArray(runtimeAgents)) {
+    const instanceId = normalizeText(agent?.instance_id || agent?.instanceId);
+    const slotId = normalizeText(agent?.slot_id || agent?.slotId);
+    const roleId = normalizeWorkerRoleId(agent?.role_id || agent?.role_label);
+    const presetId = normalizeText(agent?.preset_id || agent?.presetId, { lower: true });
+    const templateId = normalizeText(agent?.template_id || agent?.templateId, { lower: true });
+
+    if (instanceId) byInstanceId.set(instanceId, agent);
+    if (slotId && !bySlotId.has(slotId)) bySlotId.set(slotId, agent);
+    if (roleId) {
+      const roleList = byRoleId.get(roleId) || [];
+      roleList.push(agent);
+      byRoleId.set(roleId, roleList);
+    }
+    if (presetId) {
+      const presetList = byPresetId.get(presetId) || [];
+      presetList.push(agent);
+      byPresetId.set(presetId, presetList);
+    }
+    if (templateId) {
+      const templateList = byTemplateId.get(templateId) || [];
+      templateList.push(agent);
+      byTemplateId.set(templateId, templateList);
+    }
+  }
+
+  return {
+    byInstanceId,
+    bySlotId,
+    byRoleId,
+    byPresetId,
+    byTemplateId,
+  };
+}
+
+function pickUniqueAgent(list = []) {
+  return Array.isArray(list) && list.length === 1 ? list[0] : null;
+}
+
+function findRuntimeAgentMatch(raw = {}, indexes = {}) {
+  const row = asObject(raw);
+  const instanceId = normalizeText(row.instance_id || row.instanceId);
+  if (instanceId && indexes.byInstanceId?.has(instanceId)) return indexes.byInstanceId.get(instanceId);
+
+  const slotId = normalizeText(row.slot_id || row.slotId);
+  if (slotId && indexes.bySlotId?.has(slotId)) return indexes.bySlotId.get(slotId);
+
+  const presetId = normalizeText(row.preset_id || row.presetId, { lower: true });
+  if (presetId) {
+    const presetMatch = pickUniqueAgent(indexes.byPresetId?.get(presetId));
+    if (presetMatch) return presetMatch;
+  }
+
+  const templateId = normalizeText(row.template_id || row.templateId, { lower: true });
+  if (templateId) {
+    const templateMatch = pickUniqueAgent(indexes.byTemplateId?.get(templateId));
+    if (templateMatch) return templateMatch;
+  }
+
+  const roleId = normalizeWorkerRoleId(row.role_id || row.roleId || row.role_label || row.roleLabel);
+  if (roleId) {
+    const roleMatch = pickUniqueAgent(indexes.byRoleId?.get(roleId));
+    if (roleMatch) return roleMatch;
+  }
+
+  return null;
+}
+
+function buildRuntimeInstanceIdMap(preliminaryRuntimeAgents = [], finalRuntimeAgents = []) {
+  const indexes = buildRuntimeAgentIndexes(finalRuntimeAgents);
+  const instanceIdMap = new Map();
+
+  for (const preliminary of asArray(preliminaryRuntimeAgents)) {
+    const existingInstanceId = normalizeText(preliminary?.instance_id || preliminary?.instanceId);
+    if (existingInstanceId && indexes.byInstanceId.has(existingInstanceId)) {
+      instanceIdMap.set(existingInstanceId, existingInstanceId);
+      continue;
+    }
+    const match = findRuntimeAgentMatch(preliminary, indexes);
+    if (!match) continue;
+    if (existingInstanceId) {
+      instanceIdMap.set(existingInstanceId, normalizeText(match.instance_id || match.instanceId));
+    }
+  }
+
+  return instanceIdMap;
+}
+
+function remapInstanceId(rawInstanceId = "", {
+  instanceIdMap = new Map(),
+  validInstanceIds = new Set(),
+  supervisorInstanceId = "",
+} = {}) {
+  const instanceId = normalizeText(rawInstanceId);
+  if (!instanceId) return undefined;
+  if (instanceId === supervisorInstanceId) return supervisorInstanceId;
+  if (validInstanceIds.has(instanceId)) return instanceId;
+  const mapped = normalizeText(instanceIdMap.get(instanceId));
+  if (mapped && validInstanceIds.has(mapped)) return mapped;
+  return undefined;
+}
+
+function buildAuthorityEntry({
+  slot = null,
+  runtimeAgent = null,
+  existing = null,
+  registry = null,
+} = {}) {
+  const roleId = normalizeWorkerRoleId(
+    runtimeAgent?.role_id
+    || runtimeAgent?.role_label
+    || slot?.role_id
+    || slot?.role_label
+  );
+  const authorityProfileId = normalizeText(
+    existing?.authority_profile_id
+    || existing?.authorityProfileId
+    || runtimeAgent?.authority_profile_id
+    || runtimeAgent?.authorityProfileId
+    || slot?.authority_profile_id
+    || slot?.authorityProfileId
+    || pickDefaultAuthorityProfileId(roleId),
+    { lower: true }
+  ) || pickDefaultAuthorityProfileId(roleId);
+  const profile = registry?.resolve(authorityProfileId);
+
+  return {
+    slot_id: normalizeText(slot?.slot_id || slot?.slotId) || undefined,
+    authority_profile_id: authorityProfileId,
+    instance_id: normalizeText(runtimeAgent?.instance_id || runtimeAgent?.instanceId) || undefined,
+    role_id: roleId || undefined,
+    allowed_actions: normalizeStringList(
+      existing?.allowed_actions ?? existing?.allowedActions ?? profile?.allowed_actions ?? [],
+      { max: 32, lower: true }
+    ),
+    denied_actions: normalizeStringList(
+      existing?.denied_actions ?? existing?.deniedActions ?? profile?.denied_actions ?? [],
+      { max: 32, lower: true }
+    ),
+    approval_required_for: normalizeStringList(
+      existing?.approval_required_for ?? existing?.approvalRequiredFor ?? profile?.approval_required_for ?? [],
+      { max: 32, lower: true }
+    ),
+    tool_allowlist: normalizeStringList(
+      existing?.tool_allowlist ?? existing?.toolAllowlist ?? profile?.tool_allowlist ?? [],
+      { max: 32, lower: true }
+    ),
+    max_parallel_children: Number.isFinite(Number(
+      existing?.max_parallel_children ?? existing?.maxParallelChildren ?? profile?.max_parallel_children
+    ))
+      ? Math.max(0, Math.min(16, Math.floor(Number(
+        existing?.max_parallel_children ?? existing?.maxParallelChildren ?? profile?.max_parallel_children
+      ))))
+      : 0,
+  };
+}
+
+export function reconcileTeamPlanRuntimeBindings(rawPlan = {}, {
+  runtimeAgents = null,
+} = {}) {
+  const plan = normalizeTeamPlan(rawPlan);
+  const finalRuntimeAgents = normalizeRuntimeAgentList(
+    runtimeAgents ?? plan.runtime_agents ?? []
+  ).filter((agent) => normalizeRoleId(agent.role_id || agent.role_label) !== "deprecated_control_plane_only");
+  const finalIndexes = buildRuntimeAgentIndexes(finalRuntimeAgents);
+  const instanceIdMap = buildRuntimeInstanceIdMap(plan.runtime_agents, finalRuntimeAgents);
+  const validInstanceIds = new Set(
+    finalRuntimeAgents.map((agent) => normalizeText(agent.instance_id || agent.instanceId)).filter(Boolean)
+  );
+  const supervisorRuntime = plan.supervisor_runtime && typeof plan.supervisor_runtime === "object"
+    ? plan.supervisor_runtime
+    : null;
+  const supervisorInstanceId = normalizeText(supervisorRuntime?.instance_id || supervisorRuntime?.instanceId);
+  const authorityRegistry = new AuthorityRegistry();
+  const existingAuthorityBySlot = new Map();
+  const existingAuthorityByInstance = new Map();
+  for (const entry of asArray(plan.authority_graph)) {
+    const slotId = normalizeText(entry?.slot_id || entry?.slotId);
+    const instanceId = normalizeText(entry?.instance_id || entry?.instanceId);
+    if (slotId && !existingAuthorityBySlot.has(slotId)) existingAuthorityBySlot.set(slotId, entry);
+    if (instanceId && !existingAuthorityByInstance.has(instanceId)) existingAuthorityByInstance.set(instanceId, entry);
+  }
+
+  const authorityGraph = plan.slots.map((slot) => {
+    const runtimeAgent = finalIndexes.bySlotId.get(slot.slot_id)
+      || pickUniqueAgent(finalIndexes.byRoleId.get(slot.role_id))
+      || null;
+    const existing = existingAuthorityBySlot.get(slot.slot_id)
+      || (runtimeAgent ? existingAuthorityByInstance.get(normalizeText(runtimeAgent.instance_id || runtimeAgent.instanceId)) : null)
+      || null;
+    return buildAuthorityEntry({
+      slot,
+      runtimeAgent,
+      existing,
+      registry: authorityRegistry,
+    });
+  });
+
+  if (supervisorRuntime?.enabled === true) {
+    const existingSupervisor = existingAuthorityByInstance.get(supervisorInstanceId)
+      || asArray(plan.authority_graph).find((entry) => normalizeText(entry?.role_id || entry?.roleId, { lower: true }) === "supervisor_runtime")
+      || null;
+    const profile = authorityRegistry.resolve(supervisorRuntime.authority_profile_id);
+    authorityGraph.push({
+      slot_id: undefined,
+      authority_profile_id: normalizeText(supervisorRuntime.authority_profile_id, { lower: true }) || "supervisor_controlled",
+      instance_id: supervisorInstanceId || undefined,
+      role_id: "supervisor_runtime",
+      allowed_actions: normalizeStringList(
+        existingSupervisor?.allowed_actions ?? existingSupervisor?.allowedActions ?? profile?.allowed_actions ?? [],
+        { max: 32, lower: true }
+      ),
+      denied_actions: normalizeStringList(
+        existingSupervisor?.denied_actions ?? existingSupervisor?.deniedActions ?? profile?.denied_actions ?? [],
+        { max: 32, lower: true }
+      ),
+      approval_required_for: normalizeStringList(
+        existingSupervisor?.approval_required_for ?? existingSupervisor?.approvalRequiredFor ?? profile?.approval_required_for ?? [],
+        { max: 32, lower: true }
+      ),
+      tool_allowlist: normalizeStringList(
+        existingSupervisor?.tool_allowlist ?? existingSupervisor?.toolAllowlist ?? profile?.tool_allowlist ?? [],
+        { max: 32, lower: true }
+      ),
+      max_parallel_children: Number.isFinite(Number(
+        existingSupervisor?.max_parallel_children ?? existingSupervisor?.maxParallelChildren ?? profile?.max_parallel_children
+      ))
+        ? Math.max(0, Math.min(16, Math.floor(Number(
+          existingSupervisor?.max_parallel_children ?? existingSupervisor?.maxParallelChildren ?? profile?.max_parallel_children
+        ))))
+        : 0,
+    });
+  }
+
+  const collaborationCells = normalizeCollaborationCellList(
+    asArray(plan.collaboration_cells).map((cell) => {
+      const remappedMembers = normalizeStringList(
+        asArray(cell?.member_instance_ids).map((instanceId) => remapInstanceId(instanceId, {
+          instanceIdMap,
+          validInstanceIds,
+          supervisorInstanceId,
+        })).filter(Boolean),
+        { max: 16, lower: false }
+      );
+      const remappedTargets = normalizeStringList(
+        asArray(cell?.target_instance_ids).map((instanceId) => remapInstanceId(instanceId, {
+          instanceIdMap,
+          validInstanceIds,
+          supervisorInstanceId,
+        })).filter(Boolean),
+        { max: 16, lower: false }
+      );
+      const reportBack = remapInstanceId(cell?.report_back_to_instance_id, {
+        instanceIdMap,
+        validInstanceIds,
+        supervisorInstanceId,
+      }) || (cell?.pattern === "manager_as_tool" ? supervisorInstanceId || undefined : undefined);
+      return {
+        ...cell,
+        member_instance_ids: remappedMembers,
+        target_instance_ids: remappedTargets,
+        report_back_to_instance_id: reportBack,
+      };
+    }).filter((cell) => asArray(cell.member_instance_ids).length > 0)
+  );
+
+  const checkpoints = normalizeExecutionCheckpointList(
+    asArray(plan.checkpoints).map((checkpoint) => ({
+      ...checkpoint,
+      target_slot_ids: normalizeStringList(
+        checkpoint?.target_slot_ids ?? checkpoint?.targetSlotIds ?? [],
+        { max: 16, lower: false }
+      ).filter((slotId) => plan.slots.some((slot) => slot.slot_id === slotId)),
+      trigger_after_instances: normalizeStringList(
+        asArray(checkpoint?.trigger_after_instances).map((instanceId) => remapInstanceId(instanceId, {
+          instanceIdMap,
+          validInstanceIds,
+          supervisorInstanceId,
+        })).filter(Boolean),
+        { max: 16, lower: false }
+      ),
+    }))
+  );
+
+  const executionGraphRow = asObject(plan.execution_graph);
+  const executionGraph = {
+    ...executionGraphRow,
+    nodes: asArray(executionGraphRow.nodes).map((node) => {
+      const slotId = normalizeText(node?.slot_id || node?.slotId);
+      const runtimeAgent = slotId ? finalIndexes.bySlotId.get(slotId) : null;
+      return {
+        ...node,
+        slot_id: slotId || undefined,
+        role_id: normalizeWorkerRoleId(node?.role_id || node?.roleId || runtimeAgent?.role_id || runtimeAgent?.role_label) || undefined,
+        instance_id: normalizeText(node?.instance_id || node?.instanceId || runtimeAgent?.instance_id || runtimeAgent?.instanceId) || undefined,
+      };
+    }),
+    parallel_groups: asArray(executionGraphRow.parallel_groups ?? executionGraphRow.parallelGroups).map((group, index) => {
+      const slotIds = normalizeStringList(
+        group?.slot_ids ?? group?.slotIds ?? [],
+        { max: 16, lower: false }
+      ).filter((slotId) => finalIndexes.bySlotId.has(slotId));
+      return {
+        parallel_group_id: normalizeText(
+          group?.parallel_group_id || group?.parallelGroupId || `parallel_group_${index + 1}`
+        ) || `parallel_group_${index + 1}`,
+        slot_ids: slotIds,
+        role_ids: normalizeStringList(
+          slotIds.map((slotId) => finalIndexes.bySlotId.get(slotId)?.role_id).filter(Boolean),
+          { max: 16, lower: true }
+        ),
+        instance_ids: normalizeStringList(
+          slotIds.map((slotId) => finalIndexes.bySlotId.get(slotId)?.instance_id).filter(Boolean),
+          { max: 16, lower: false }
+        ),
+      };
+    }).filter((group) => group.slot_ids.length > 1),
+    supervisor_edges: (() => {
+      const explicitEdges = asArray(executionGraphRow.supervisor_edges ?? executionGraphRow.supervisorEdges).map((edge) => {
+        const targetSlotIds = normalizeStringList(
+          edge?.target_slot_ids ?? edge?.targetSlotIds ?? [],
+          { max: 16, lower: false }
+        ).filter((slotId) => finalIndexes.bySlotId.has(slotId));
+        const targetInstanceIds = normalizeStringList([
+          ...targetSlotIds.map((slotId) => finalIndexes.bySlotId.get(slotId)?.instance_id),
+          ...asArray(edge?.target_instance_ids ?? edge?.targetInstanceIds).map((instanceId) => remapInstanceId(instanceId, {
+            instanceIdMap,
+            validInstanceIds,
+            supervisorInstanceId,
+          })),
+        ].filter(Boolean), { max: 16, lower: false });
+        return {
+          supervisor_instance_id: remapInstanceId(
+            edge?.supervisor_instance_id || edge?.supervisorInstanceId || supervisorInstanceId,
+            { instanceIdMap, validInstanceIds, supervisorInstanceId }
+          ) || supervisorInstanceId || undefined,
+          target_slot_ids: targetSlotIds,
+          target_instance_ids: targetInstanceIds,
+          relation: normalizeText(edge?.relation || "manages", { lower: true }) || "manages",
+          report_back: edge?.report_back !== false,
+        };
+      }).filter((edge) => edge.target_instance_ids.length > 0);
+      if (explicitEdges.length > 0) return explicitEdges;
+      if (supervisorRuntime?.enabled !== true || !supervisorInstanceId) return [];
+      return finalRuntimeAgents.map((agent) => ({
+        supervisor_instance_id: supervisorInstanceId,
+        target_slot_ids: normalizeText(agent.slot_id) ? [agent.slot_id] : [],
+        target_instance_ids: [agent.instance_id],
+        relation: "manages",
+        report_back: true,
+      }));
+    })(),
+  };
+
+  const roles = buildLegacyRoles({
+    slots: plan.slots,
+    runtimeAgents: finalRuntimeAgents,
+    dependencies: plan.dependencies,
+    taskGoal: plan.task_interpretation?.goal,
+  });
+
+  return {
+    ...plan,
+    runtime_agents: finalRuntimeAgents,
+    authority_graph: authorityGraph,
+    collaboration_cells: collaborationCells,
+    checkpoints,
+    execution_graph: executionGraph,
+    roles,
+    instance_id_map: Object.fromEntries(instanceIdMap),
+  };
+}
+
+export function validateNormalizedTeamPlan(rawPlan = {}, {
+  compatibilityMode = false,
+} = {}) {
+  const plan = normalizeTeamPlan(rawPlan);
+  const errors = [];
+  const warnings = [];
+  const runtimeAgents = asArray(plan.runtime_agents);
+  const runtimeInstanceIds = new Set(
+    runtimeAgents.map((agent) => normalizeText(agent?.instance_id || agent?.instanceId)).filter(Boolean)
+  );
+  const canonicalRoleIds = new Set(CANONICAL_WORKER_ROLE_IDS);
+  const supervisorInstanceId = normalizeText(plan?.supervisor_runtime?.instance_id || plan?.supervisor_runtime?.instanceId);
+
+  if (!Array.isArray(plan.slots) || plan.slots.length === 0) errors.push("slots_required");
+  if (!Array.isArray(plan.execution_order) || plan.execution_order.length === 0) errors.push("execution_order_required");
+
+  for (const slot of asArray(plan.slots)) {
+    const roleId = normalizeWorkerRoleId(slot?.role_id || slot?.role_label);
+    if (!roleId || !canonicalRoleIds.has(roleId)) {
+      const code = `invalid_slot_role:${normalizeText(slot?.slot_id || slot?.slotId || "unknown_slot")}`;
+      if (compatibilityMode) warnings.push(code);
+      else errors.push(code);
+    }
+    if (roleId === "deprecated_control_plane_only") {
+      errors.push("planner_not_allowed_as_slot_role");
+    }
+  }
+
+  for (const agent of runtimeAgents) {
+    const roleId = normalizeRoleId(agent?.role_id || agent?.role_label);
+    if (roleId === "deprecated_control_plane_only") {
+      errors.push("planner_not_allowed_as_runtime_worker");
+      continue;
+    }
+    if (!canonicalRoleIds.has(normalizeWorkerRoleId(roleId))) {
+      const code = `invalid_runtime_role:${normalizeText(agent?.instance_id || agent?.instanceId || "unknown_instance")}`;
+      if (compatibilityMode) warnings.push(code);
+      else errors.push(code);
+    }
+  }
+
+  for (const edge of asArray(plan.authority_graph)) {
+    const instanceId = normalizeText(edge?.instance_id || edge?.instanceId);
+    const roleId = normalizeText(edge?.role_id || edge?.roleId, { lower: true });
+    if (!instanceId) continue;
+    const isSupervisor = roleId === "supervisor_runtime" || instanceId === supervisorInstanceId;
+    if (!runtimeInstanceIds.has(instanceId) && !isSupervisor) {
+      const code = `authority_graph_unknown_instance:${instanceId}`;
+      if (compatibilityMode) warnings.push(code);
+      else errors.push(code);
+    }
+  }
+
+  for (const cell of asArray(plan.collaboration_cells)) {
+    for (const instanceId of asArray(cell?.member_instance_ids)) {
+      if (!runtimeInstanceIds.has(normalizeText(instanceId))) {
+        const code = `collaboration_cell_unknown_member:${normalizeText(cell?.cell_id)}:${normalizeText(instanceId)}`;
+        if (compatibilityMode) warnings.push(code);
+        else errors.push(code);
+      }
+    }
+    for (const instanceId of asArray(cell?.target_instance_ids)) {
+      if (!runtimeInstanceIds.has(normalizeText(instanceId))) {
+        const code = `collaboration_cell_unknown_target:${normalizeText(cell?.cell_id)}:${normalizeText(instanceId)}`;
+        if (compatibilityMode) warnings.push(code);
+        else errors.push(code);
+      }
+    }
+    const reportBack = normalizeText(cell?.report_back_to_instance_id || cell?.reportBackToInstanceId);
+    if (reportBack && !runtimeInstanceIds.has(reportBack) && reportBack !== supervisorInstanceId) {
+      const code = `collaboration_cell_unknown_report_back:${normalizeText(cell?.cell_id)}:${reportBack}`;
+      if (compatibilityMode) warnings.push(code);
+      else errors.push(code);
+    }
+  }
+
+  for (const checkpoint of asArray(plan.checkpoints)) {
+    for (const instanceId of asArray(checkpoint?.trigger_after_instances)) {
+      if (!runtimeInstanceIds.has(normalizeText(instanceId))) {
+        const code = `checkpoint_unknown_instance:${normalizeText(checkpoint?.checkpoint_id)}:${normalizeText(instanceId)}`;
+        if (compatibilityMode) warnings.push(code);
+        else errors.push(code);
+      }
+    }
+  }
+
+  for (const edge of asArray(plan?.execution_graph?.supervisor_edges)) {
+    const supervisorId = normalizeText(edge?.supervisor_instance_id || edge?.supervisorInstanceId);
+    if (supervisorId && supervisorId !== supervisorInstanceId && !runtimeInstanceIds.has(supervisorId)) {
+      const code = `supervisor_edge_unknown_supervisor:${supervisorId}`;
+      if (compatibilityMode) warnings.push(code);
+      else errors.push(code);
+    }
+    for (const instanceId of asArray(edge?.target_instance_ids ?? edge?.targetInstanceIds)) {
+      if (!runtimeInstanceIds.has(normalizeText(instanceId))) {
+        const code = `supervisor_edge_unknown_target:${normalizeText(instanceId)}`;
+        if (compatibilityMode) warnings.push(code);
+        else errors.push(code);
+      }
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    warnings,
+    team_plan: plan,
+  };
+}
+
 function collectLegacySlotsFromRoles(roles = [], fallbackGoal = "") {
   return asArray(roles)
     .map((role, index) => normalizeCapabilitySlotSpec(role, {
@@ -701,16 +1191,7 @@ export function normalizeTeamPlan(raw = {}) {
 }
 
 export function validateTeamPlan(raw = {}) {
-  const plan = normalizeTeamPlan(raw);
-  const errors = [];
-  if (!Array.isArray(plan.slots) || plan.slots.length === 0) errors.push("slots_required");
-  if (!Array.isArray(plan.execution_order) || plan.execution_order.length === 0) errors.push("execution_order_required");
-  if (plan.runtime_agents.some((agent) => agent.role_id === "deprecated_control_plane_only")) {
-    errors.push("planner_not_allowed_as_runtime_worker");
-  }
-  return {
-    ok: errors.length === 0,
-    errors,
-    team_plan: plan,
-  };
+  return validateNormalizedTeamPlan(normalizeTeamPlan(raw), {
+    compatibilityMode: false,
+  });
 }

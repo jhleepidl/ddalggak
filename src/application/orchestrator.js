@@ -1,6 +1,10 @@
-import { buildTeamFromRegistry } from "./team_builder.js";
+import { buildTeamFromRegistry, rerankResolvedTeamComposition } from "./team_builder.js";
 import { normalizeRoutePlan } from "../domain/route_plan.js";
-import { normalizeTeamPlan } from "../domain/team_plan.js";
+import {
+  normalizeTeamPlan,
+  reconcileTeamPlanRuntimeBindings,
+  validateNormalizedTeamPlan,
+} from "../domain/team_plan.js";
 import {
   createRuntimeTeamSnapshot,
   attachRuntimeTeamSnapshot,
@@ -17,6 +21,8 @@ import { ContextPackBuilder } from "./context_pack_builder.js";
 import { PresetRegistry } from "../catalog/preset_registry.js";
 import { PresetResolver } from "../control_plane/preset_resolver.js";
 import { interpretTask } from "../control_plane/task_interpreter.js";
+import { buildCollaborationCells } from "../control_plane/collaboration_policy.js";
+import { buildExecutionCheckpoints } from "../control_plane/checkpoint_policy.js";
 import {
   coordinateExecutionPlan,
   createDefaultRunRoute as createDefaultRunRouteV2,
@@ -206,7 +212,14 @@ function resolveRuntimeAgentForAction(action = {}, runtimeAgents = []) {
 function enrichRouteActionsWithRuntimeSkills(actions = [], runtimeAgents = []) {
   return asArray(actions).map((action) => {
     const row = action && typeof action === "object" ? action : {};
-    if (normalizeText(row.type, { lower: true }) !== "agent_run") return row;
+    const type = normalizeText(row.type, { lower: true });
+    if (type === "spawn_parallel") {
+      return {
+        ...row,
+        agents: asArray(row.agents).map((child) => enrichRouteActionsWithRuntimeSkills([child], runtimeAgents)[0] || child),
+      };
+    }
+    if (!["agent_run", "synthesize_final"].includes(type)) return row;
     const match = resolveRuntimeAgentForAction(row, runtimeAgents);
     if (!match) return row;
     const attachedSkills = normalizeSkillAttachmentList(match.attached_skills || []);
@@ -459,7 +472,7 @@ export function buildRuntimeOrchestration({
       missing_roles: teamBuild.missing_roles || [],
     };
 
-  const combinedSelectionExplanations = [
+  let combinedSelectionExplanations = [
     ...asArray(teamBuild.team_plan?.selection_explanations),
     ...asArray(presetResolution.selection_explanations),
   ];
@@ -555,6 +568,55 @@ export function buildRuntimeOrchestration({
   });
   runtimeAgents = asArray(contextPackResult.runtime_agents);
 
+  const rerankedTeam = rerankResolvedTeamComposition({
+    teamPlan,
+    runtimeAgents,
+    taskInterpretation,
+    scoredCandidatesBySlot: presetResolution.scored_candidates_by_slot || {},
+  });
+  combinedSelectionExplanations = [
+    ...combinedSelectionExplanations,
+    ...asArray(rerankedTeam.selection_explanations),
+  ];
+
+  const rebuiltCollaborationCells = buildCollaborationCells({
+    runtimeAgents,
+    supervisorRuntime: teamPlan?.supervisor_runtime,
+  });
+  const rebuiltCheckpoints = buildExecutionCheckpoints({
+    slots: teamPlan?.slots || [],
+    runtimeAgents,
+    supervisorRuntime: teamPlan?.supervisor_runtime,
+    collaborationCells: rebuiltCollaborationCells,
+  });
+
+  teamPlan = reconcileTeamPlanRuntimeBindings({
+    ...teamPlan,
+    collaboration_cells: rebuiltCollaborationCells,
+    checkpoints: rebuiltCheckpoints,
+    runtime_agents: runtimeAgents,
+    selection_explanations: combinedSelectionExplanations,
+    conversation_preferences: conversationPreferences || undefined,
+  }, {
+    runtimeAgents,
+  });
+  runtimeAgents = asArray(teamPlan.runtime_agents);
+
+  const validation = validateNormalizedTeamPlan(teamPlan);
+  if (!validation.ok) {
+    throw new Error(`invalid_team_plan_runtime:${validation.errors.join(",")}`);
+  }
+
+  const finalizedCoordination = coordinateExecutionPlan({
+    mode,
+    goal: effectiveGoal,
+    seedInstruction,
+    routePlan: normalizedRoute,
+    teamPlan,
+    runtimeAgents,
+    taskInterpretation,
+  });
+
   const selectedSkillIds = normalizeStringList(
     contextPackResult.selected_skill_ids || skillResolution.selected_skill_ids || [],
     { max: 128, lower: true }
@@ -593,8 +655,8 @@ export function buildRuntimeOrchestration({
     source: "control_plane",
   });
   const routePlanWithSkills = attachRuntimeTeamSnapshot({
-    ...coordinated.route_plan,
-    actions: enrichRouteActionsWithRuntimeSkills(coordinated.route_plan.actions, runtimeAgents),
+    ...finalizedCoordination.route_plan,
+    actions: enrichRouteActionsWithRuntimeSkills(finalizedCoordination.route_plan.actions, runtimeAgents),
     selected_skill_ids: selectedSkillIds,
     skill_load_levels: contextPackResult.skill_load_levels,
     selection_reason_summary: selectionReasonSummary,
@@ -619,7 +681,7 @@ export function buildRuntimeOrchestration({
     contextPacks: contextPackResult.context_packs,
     selectedSkillIds,
     missingRoles,
-    actionSource: coordinated.action_source,
+    actionSource: finalizedCoordination.action_source,
     planSource,
     plannerType,
   });

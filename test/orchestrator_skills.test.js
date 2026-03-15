@@ -45,10 +45,24 @@ test("runtime orchestration attaches skills and context packs additively", () =>
   assert.ok(Array.isArray(orchestration.runtime_team_snapshot.context_packs));
   assert.ok(Array.isArray(orchestration.runtime_team_snapshot.selected_skill_ids));
   assert.ok(typeof orchestration.runtime_team_snapshot.skill_load_levels === "object");
+  const runtimeInstanceIds = new Set(orchestration.runtime_agents.map((agent) => agent.instance_id));
+  assert.equal(
+    orchestration.team_plan.authority_graph
+      .filter((entry) => entry.instance_id && entry.role_id !== "supervisor_runtime")
+      .every((entry) => runtimeInstanceIds.has(entry.instance_id)),
+    true
+  );
+  assert.equal(
+    orchestration.team_plan.collaboration_cells
+      .every((cell) => cell.member_instance_ids.every((instanceId) => runtimeInstanceIds.has(instanceId))),
+    true
+  );
 
   const firstAgentRun = orchestration.route_plan.actions.find((row) => row.type === "agent_run");
   assert.ok(firstAgentRun);
   assert.ok(firstAgentRun.inputs);
+  assert.equal(["researcher", "builder", "reviewer", "synthesizer", "operator"].includes(firstAgentRun.agent), true);
+  assert.equal(firstAgentRun.agent === "coder" || firstAgentRun.agent === "planner", false);
   assert.ok(Array.isArray(firstAgentRun.inputs.selected_skill_ids));
   assert.ok(typeof firstAgentRun.inputs.skill_load_levels === "object");
   assert.ok(String(firstAgentRun.inputs.context_pack_id || "").trim());

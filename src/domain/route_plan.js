@@ -29,7 +29,7 @@ export function normalizeRunRouteAction(raw, { resolveAgentId = null } = {}) {
   if (type === "codex" || type === "codex_implement") {
     const instruction = String(raw.instruction || raw.prompt || raw.task || "").trim();
     if (!instruction) return null;
-    return { type: "agent_run", agent: "coder", prompt: instruction, inputs: {} };
+    return { type: "agent_run", agent: "builder", prompt: instruction, inputs: {} };
   }
 
   if (type === "git_summary") return { type: "git_summary" };
@@ -42,15 +42,34 @@ export function normalizeRunRouteAction(raw, { resolveAgentId = null } = {}) {
   if (type === "chatgpt") {
     const prompt = String(raw.question || raw.prompt || raw.task || "").trim();
     if (!prompt) return null;
-    return { type: "agent_run", agent: "planner", prompt, inputs: {} };
+    return { type: "chatgpt_prompt", question: prompt };
   }
 
   if (["spawn_parallel", "checkpoint", "pause_children", "cancel_child", "reroute_child", "supervisor_decision", "synthesize_final"].includes(type)) {
+    const agents = Array.isArray(raw?.agents)
+      ? raw.agents
+        .map((agent) => {
+          const childAgent = resolver(agent?.agent || agent?.agentId || agent?.agent_id || agent?.role);
+          const childPrompt = String(agent?.prompt || agent?.goal || agent?.task || "").trim();
+          if (!childAgent || !childPrompt) return null;
+          return {
+            type: "agent_run",
+            agent: childAgent,
+            prompt: childPrompt,
+            inputs: agent?.inputs && typeof agent.inputs === "object" ? agent.inputs : {},
+          };
+        })
+        .filter(Boolean)
+      : [];
     return {
       type,
+      agent: type === "synthesize_final"
+        ? resolver(raw.agent || raw.agentId || raw.role || "synthesizer")
+        : undefined,
       label: String(raw.label || raw.reason || raw.summary || "").trim() || undefined,
       prompt: String(raw.prompt || raw.goal || raw.summary || "").trim() || undefined,
       inputs,
+      agents,
       metadata: raw?.metadata && typeof raw.metadata === "object" ? raw.metadata : undefined,
     };
   }
@@ -205,10 +224,7 @@ export function sanitizeSupervisorRoutePlan(routePlan, {
 
   if (actions.length === 0) {
     if (!done && !awaitUser && isWorkLikeMessage(message)) {
-      const plannerAvailable = enabledAgentSet.has("planner");
-      const fallbackAgent = plannerAvailable
-        ? "planner"
-        : (pickRuntimeDefaultAgentId(agents) || findDefaultChatAgentId());
+      const fallbackAgent = pickRuntimeDefaultAgentId(agents) || findDefaultChatAgentId();
       if (fallbackAgent) {
         actions = [{
           type: "run_agent",
@@ -216,7 +232,7 @@ export function sanitizeSupervisorRoutePlan(routePlan, {
           goal: `사용자 요청을 계획하고 필요한 agent 작업을 제안/수행: ${String(message || "").trim()}`,
           risk: "L1",
         }];
-        reason = `${reason}; empty_actions_work_like_planner_fallback`;
+        reason = `${reason}; empty_actions_work_like_runtime_fallback`;
         done = false;
       } else {
         actions = [{ type: "summarize", hint: "작업 실행 가능한 enabled agent가 없어 summarize로 종료", risk: "L0" }];

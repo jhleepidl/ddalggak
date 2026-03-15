@@ -12,7 +12,7 @@ test("parseRouterPlan normalizes agent aliases", () => {
     resolveAgentId: (id) => String(id || "").trim().toLowerCase(),
   });
   assert.equal(plan.actions[0].type, "agent_run");
-  assert.equal(plan.actions[0].agent, "coder");
+  assert.equal(plan.actions[0].agent, "builder");
   assert.equal(plan.actions[1].type, "git_summary");
 });
 

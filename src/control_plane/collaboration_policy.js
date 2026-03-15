@@ -4,6 +4,39 @@ function byRole(runtimeAgents = [], roleId = "") {
   return runtimeAgents.find((agent) => String(agent?.role_id || "").trim().toLowerCase() === roleId);
 }
 
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function hasTrait(runtimeAgent = {}, needles = []) {
+  const profile = runtimeAgent?.personality_profile && typeof runtimeAgent.personality_profile === "object"
+    ? runtimeAgent.personality_profile
+    : {};
+  const defaults = runtimeAgent?.collaboration_defaults && typeof runtimeAgent.collaboration_defaults === "object"
+    ? runtimeAgent.collaboration_defaults
+    : {};
+  const values = [
+    profile.style,
+    profile.temperament,
+    profile.stance,
+    profile.mode,
+    ...asArray(profile.tags),
+    ...asArray(profile.traits),
+    ...asArray(defaults.tags),
+  ].map((entry) => String(entry || "").trim().toLowerCase()).filter(Boolean);
+  return needles.some((needle) => values.includes(String(needle || "").trim().toLowerCase()));
+}
+
+function isCritic(runtimeAgent = {}) {
+  return runtimeAgent?.collaboration_defaults?.as_critic === true
+    || hasTrait(runtimeAgent, ["skeptical", "adversarial", "critic", "conservative", "evidence_strict"]);
+}
+
+function prefersReviewBeforeSynthesis(runtimeAgent = {}) {
+  return runtimeAgent?.collaboration_defaults?.review_before_synthesis === true
+    || hasTrait(runtimeAgent, ["conservative", "evidence_strict", "skeptical"]);
+}
+
 export function buildCollaborationCells({
   runtimeAgents = [],
   supervisorRuntime = null,
@@ -15,6 +48,8 @@ export function buildCollaborationCells({
   const builder = byRole(runtimeAgents, "builder");
   const reviewer = byRole(runtimeAgents, "reviewer");
   const synthesizer = byRole(runtimeAgents, "synthesizer");
+  const critic = reviewer || runtimeAgents.find((agent) => isCritic(agent));
+  const reviewBeforeSynthesis = runtimeAgents.some((agent) => prefersReviewBeforeSynthesis(agent));
 
   if (researchers.length > 1) {
     cells.push({
@@ -40,31 +75,35 @@ export function buildCollaborationCells({
       selection_reason: "research feeds build execution",
     });
   }
-  if (builder && reviewer) {
+  if (builder && critic) {
     cells.push({
       cell_id: "cell_builder_reviewer_reflection",
       pattern: "reflection",
-      member_instance_ids: [builder.instance_id, reviewer.instance_id],
+      member_instance_ids: [builder.instance_id, critic.instance_id],
       topology: "pair",
       max_rounds: 2,
       termination: { condition: "review_accepted" },
       visibility: "internal",
-      selection_reason: "builder changes require bounded review reflection",
+      selection_reason: critic === reviewer
+        ? "builder changes require bounded review reflection"
+        : "proposer and critic pairing inferred from preset personality",
     });
   }
-  if (researcher && reviewer) {
+  if (researcher && critic) {
     cells.push({
       cell_id: "cell_research_review_reflection",
       pattern: "reflection",
-      member_instance_ids: [researcher.instance_id, reviewer.instance_id],
+      member_instance_ids: [researcher.instance_id, critic.instance_id],
       topology: "pair",
       max_rounds: 2,
       termination: { condition: "claims_validated" },
       visibility: "shared",
-      selection_reason: "claim-heavy research benefits from skeptical review",
+      selection_reason: critic === reviewer
+        ? "claim-heavy research benefits from skeptical review"
+        : "research paired with critic-style preset for bounded reflection",
     });
   }
-  if (reviewer && synthesizer && !cells.some((cell) => cell.cell_id === "cell_parallel_research_fanout")) {
+  if (reviewer && synthesizer && (reviewBeforeSynthesis || !cells.some((cell) => cell.cell_id === "cell_parallel_research_fanout"))) {
     cells.push({
       cell_id: "cell_review_to_synthesis",
       pattern: "handoff",
@@ -72,7 +111,9 @@ export function buildCollaborationCells({
       topology: "pipeline",
       max_rounds: 1,
       termination: { condition: "summary_ready" },
-      selection_reason: "reviewer output is passed to synthesis",
+      selection_reason: reviewBeforeSynthesis
+        ? "preset personality favors review-before-synthesis"
+        : "reviewer output is passed to synthesis",
     });
   }
   if (supervisorRuntime?.enabled === true) {

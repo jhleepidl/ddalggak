@@ -312,6 +312,9 @@ export class PresetResolver {
         ephemeral: selectedPreset == null,
         fallback: selectedPreset == null,
         status: "ready",
+        personality_profile: selectedPreset?.personality_profile || undefined,
+        collaboration_defaults: selectedPreset?.collaboration_defaults || undefined,
+        selection_features: selectedPreset?.selection_features || undefined,
       }));
       selectionExplanations.push({
         subject_id: slot.slot_id,

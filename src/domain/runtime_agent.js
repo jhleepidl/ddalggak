@@ -133,6 +133,15 @@ export function normalizeRuntimeAgentInstance(raw = {}, {
     execution_budget: row.execution_budget && typeof row.execution_budget === "object"
       ? row.execution_budget
       : (row.executionBudget && typeof row.executionBudget === "object" ? row.executionBudget : undefined),
+    personality_profile: row.personality_profile && typeof row.personality_profile === "object"
+      ? row.personality_profile
+      : (row.personalityProfile && typeof row.personalityProfile === "object" ? row.personalityProfile : undefined),
+    collaboration_defaults: row.collaboration_defaults && typeof row.collaboration_defaults === "object"
+      ? row.collaboration_defaults
+      : (row.collaborationDefaults && typeof row.collaborationDefaults === "object" ? row.collaborationDefaults : undefined),
+    selection_features: row.selection_features && typeof row.selection_features === "object"
+      ? row.selection_features
+      : (row.selectionFeatures && typeof row.selectionFeatures === "object" ? row.selectionFeatures : undefined),
   };
 }
 

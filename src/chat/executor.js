@@ -14,6 +14,9 @@ import {
   formatChatAgentDisplayName,
 } from "../shared/agent_labels.js";
 import { formatChatActionLabel } from "../adapters/telegram/preview_formatting.js";
+import {
+  evaluateActionAuthority,
+} from "../application/run_authority.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -183,6 +186,9 @@ export async function executeSupervisorActions({
   const approvalCfg = asObject(config.approval);
   const allowlist = parseAllowlist(config, tools);
   const actions = Array.isArray(plan?.actions) ? plan.actions : [];
+  const runtimeSnapshot = plan?.runtime_team_snapshot && typeof plan.runtime_team_snapshot === "object"
+    ? plan.runtime_team_snapshot
+    : plan;
   const agentDisplayIndex = buildAgentDisplayIndex(agents);
   const maxActions = Number.isFinite(Number(budgetCfg.max_actions))
     ? Math.max(1, Math.floor(Number(budgetCfg.max_actions)))
@@ -279,6 +285,56 @@ export async function executeSupervisorActions({
       break;
     }
 
+    const authority = evaluateActionAuthority({
+      action,
+      runtimeSnapshot,
+    });
+    if (authority.enforced && authority.allowed !== true) {
+      blockedActions += 1;
+      results.push({
+        label,
+        status: "blocked",
+        note: authority.reasons.join("; ") || "authority denied",
+      });
+      continue;
+    }
+    if (authority.requires_approval) {
+      blockedActions += 1;
+      blockedIndex = i;
+      remainingActions = actions.slice(i);
+      pendingApproval = {
+        id: nextApprovalId(),
+        chat_id: String(chatId || ""),
+        job_id: String(jobId || ""),
+        action,
+        action_display_label: actionLabel(action, { agentIndex: agentDisplayIndex }),
+        reason: authority.reasons.join("; ") || "authority approval required",
+        preview_reason: "authority approval required",
+        actions_summary: approvalActionSummary(remainingActions, { agentIndex: agentDisplayIndex }),
+        cancel_impact: "취소 시 영향 없음",
+        gate_type: "authority_approval",
+        blocked_index: i,
+        remaining_actions: remainingActions,
+        checkpoint_id: action?.inputs?.checkpoint_id || undefined,
+        checkpoint_ids: Array.isArray(action?.inputs?.checkpoint_ids) ? action.inputs.checkpoint_ids : undefined,
+        checkpoint_status: action?.inputs?.checkpoint_status || undefined,
+        already_done: {
+          results: [...results],
+          outputs: [...outputs],
+        },
+        requested_by: String(userId || ""),
+        ts: new Date().toISOString(),
+      };
+      results.push({ label, status: "blocked", note: pendingApproval.reason });
+      if (sessionStore) {
+        sessionStore.upsert(chatId, {
+          state: "awaiting_approval",
+          pending_approval: pendingApproval,
+        });
+      }
+      break;
+    }
+
     if (!isActionAllowed(action, allowlist)) {
       blockedActions += 1;
       results.push({ label, status: "blocked", note: "not in allowlist" });
@@ -321,6 +377,42 @@ export async function executeSupervisorActions({
         ts: new Date().toISOString(),
       };
       results.push({ label, status: "blocked", note: `approval required: ${approval.reason}` });
+      if (sessionStore) {
+        sessionStore.upsert(chatId, {
+          state: "awaiting_approval",
+          pending_approval: pendingApproval,
+        });
+      }
+      break;
+    }
+    if (action.type === "checkpoint" && action?.inputs?.approval_required === true) {
+      blockedActions += 1;
+      blockedIndex = i;
+      remainingActions = actions.slice(i);
+      pendingApproval = {
+        id: nextApprovalId(),
+        chat_id: String(chatId || ""),
+        job_id: String(jobId || ""),
+        action,
+        action_display_label: actionLabel(action, { agentIndex: agentDisplayIndex }),
+        reason: action?.prompt || action?.label || "checkpoint approval required",
+        preview_reason: "checkpoint approval required",
+        actions_summary: approvalActionSummary(remainingActions, { agentIndex: agentDisplayIndex }),
+        cancel_impact: "취소 시 영향 없음",
+        gate_type: "checkpoint",
+        blocked_index: i,
+        remaining_actions: remainingActions,
+        checkpoint_id: action?.inputs?.checkpoint_id || undefined,
+        checkpoint_ids: Array.isArray(action?.inputs?.checkpoint_ids) ? action.inputs.checkpoint_ids : undefined,
+        checkpoint_status: action?.inputs?.checkpoint_status || "pending",
+        already_done: {
+          results: [...results],
+          outputs: [...outputs],
+        },
+        requested_by: String(userId || ""),
+        ts: new Date().toISOString(),
+      };
+      results.push({ label, status: "blocked", note: pendingApproval.reason });
       if (sessionStore) {
         sessionStore.upsert(chatId, {
           state: "awaiting_approval",
@@ -388,6 +480,66 @@ export async function executeSupervisorActions({
           jobId: String(jobId || ""),
         });
         results.push({ label, status: "ok", note: `children=${children.length}` });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "spawn_parallel") {
+        if (typeof callbacks.spawnAgents !== "function") {
+          throw new Error("spawnAgents callback is missing");
+        }
+        const spawned = await callbacks.spawnAgents({
+          action: {
+            type: "spawn_agents",
+            summary: String(action?.label || action?.prompt || "").trim(),
+            max_parallel: Number(action?.inputs?.max_parallel || action?.agents?.length || 0) || undefined,
+            agents: asObject(action)?.agents instanceof Array
+              ? action.agents.map((child) => ({
+                agent_id: String(child?.agent || child?.agent_id || "").trim().toLowerCase(),
+                goal: String(child?.prompt || child?.goal || "").trim(),
+                inputs: child?.inputs && typeof child.inputs === "object" ? child.inputs : {},
+              }))
+              : [],
+          },
+          jobId,
+          detailContext,
+        });
+        const children = Array.isArray(spawned?.children) ? spawned.children : [];
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "spawn_parallel",
+          output: String(spawned?.summary || spawned?.text || "").trim() || `parallel spawn finished (${children.length})`,
+          children,
+          jobId: String(jobId || ""),
+        });
+        results.push({ label, status: "ok", note: `children=${children.length}` });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "synthesize_final") {
+        if (typeof callbacks.runAgent !== "function") {
+          throw new Error("runAgent callback is missing");
+        }
+        const runResult = await callbacks.runAgent({
+          action: {
+            type: "run_agent",
+            agent_id: String(action?.agent || action?.agent_id || "").trim().toLowerCase(),
+            goal: String(action?.prompt || action?.goal || "").trim(),
+            inputs: action?.inputs && typeof action.inputs === "object" ? action.inputs : {},
+          },
+          jobId,
+          detailContext,
+        });
+        outputs.push({
+          agentId: String(action?.agent || "").trim().toLowerCase() || "synthesizer",
+          provider: String(runResult?.provider || "unknown").trim().toLowerCase(),
+          mode: "synthesize_final",
+          output: String(runResult?.output || ""),
+          jobId: String(jobId || ""),
+        });
+        results.push({ label, status: "ok", note: "final synthesis" });
         usedActions += 1;
         continue;
       }
@@ -982,6 +1134,40 @@ export async function executeSupervisorActions({
           }
         }
         results.push({ label, status: "ok", note: action.hint || "checkpoint" });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "checkpoint") {
+        results.push({
+          label,
+          status: "ok",
+          note: action?.inputs?.checkpoint_status || action?.hint || "checkpoint",
+        });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "supervisor_decision") {
+        if (typeof callbacks.summarize === "function") {
+          const summary = await callbacks.summarize({
+            action,
+            jobId,
+            outputs,
+            results,
+            detailContext,
+          });
+          if (summary?.text) {
+            outputs.push({
+              agentId: "supervisor",
+              provider: "system",
+              mode: "supervisor_decision",
+              output: String(summary.text),
+              jobId: String(jobId || ""),
+            });
+          }
+        }
+        results.push({ label, status: "ok", note: "supervisor decision" });
         usedActions += 1;
         continue;
       }

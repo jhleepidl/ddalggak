@@ -481,7 +481,7 @@ function normalizeActionShape(raw) {
   if (type === "codex" || type === "codex_implement") {
     const prompt = String(raw.instruction || raw.prompt || raw.task || "").trim();
     if (!prompt) return null;
-    return { type: "agent_run", agent: "coder", prompt, inputs: {} };
+    return { type: "agent_run", agent: "builder", prompt, inputs: {} };
   }
   if (type === "chatgpt_prompt") {
     const question = String(raw.question || raw.prompt || raw.task || "").trim();
@@ -491,12 +491,58 @@ function normalizeActionShape(raw) {
   if (type === "chatgpt") {
     const prompt = String(raw.question || raw.prompt || raw.task || "").trim();
     if (!prompt) return null;
-    return { type: "agent_run", agent: "planner", prompt, inputs: {} };
+    return { type: "chatgpt_prompt", question: prompt };
   }
   if (type === "track_append") {
     return { type: "track_append", doc: raw.doc || "plan.md", markdown: String(raw.markdown || "") };
   }
   if (type === "git_summary") return { type: "git_summary" };
+  if (["checkpoint", "pause_children", "cancel_child", "reroute_child", "supervisor_decision"].includes(type)) {
+    return {
+      type,
+      label: String(raw.label || raw.reason || raw.summary || "").trim() || undefined,
+      prompt: String(raw.prompt || raw.goal || raw.summary || "").trim() || undefined,
+      inputs: raw.inputs && typeof raw.inputs === "object" ? raw.inputs : {},
+      metadata: raw.metadata && typeof raw.metadata === "object" ? raw.metadata : undefined,
+    };
+  }
+  if (type === "synthesize_final") {
+    const agent = resolveAgentId(raw.agent || raw.agentId || "synthesizer");
+    const prompt = String(raw.prompt || raw.goal || raw.summary || "").trim();
+    if (!agent || !prompt) return null;
+    return {
+      type: "synthesize_final",
+      agent,
+      prompt,
+      inputs: raw.inputs && typeof raw.inputs === "object" ? raw.inputs : {},
+      metadata: raw.metadata && typeof raw.metadata === "object" ? raw.metadata : undefined,
+    };
+  }
+  if (type === "spawn_parallel") {
+    const agents = Array.isArray(raw.agents)
+      ? raw.agents
+        .map((child) => {
+          const agent = resolveAgentId(child.agent || child.agentId || "");
+          const prompt = String(child.prompt || child.goal || child.task || "").trim();
+          if (!agent || !prompt) return null;
+          return {
+            type: "agent_run",
+            agent,
+            prompt,
+            inputs: child.inputs && typeof child.inputs === "object" ? child.inputs : {},
+          };
+        })
+        .filter(Boolean)
+      : [];
+    if (agents.length === 0) return null;
+    return {
+      type: "spawn_parallel",
+      label: String(raw.label || raw.reason || raw.summary || "").trim() || undefined,
+      prompt: String(raw.prompt || raw.goal || raw.summary || "").trim() || undefined,
+      inputs: raw.inputs && typeof raw.inputs === "object" ? raw.inputs : {},
+      agents,
+    };
+  }
   if (type === "commit_request") {
     const message = String(raw.message || "").trim();
     if (!message) return null;

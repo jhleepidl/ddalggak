@@ -31,14 +31,16 @@ function actionAgentId(action) {
   const type = actionType(action);
   if (type === "run_agent") return String(action?.agent_id || action?.agent || "").trim().toLowerCase();
   if (type === "agent_run") return String(action?.agent || action?.agent_id || "").trim().toLowerCase();
+  if (type === "synthesize_final") return String(action?.agent || action?.agent_id || "synthesizer").trim().toLowerCase();
   if (type === "spawn_agents") return "router";
+  if (type === "spawn_parallel") return "router";
   if (type === "need_more_detail") return "context";
   return "system";
 }
 
 function actionGoal(action) {
   const type = actionType(action);
-  if (type === "spawn_agents") return String(action?.summary || action?.goal || "").trim();
+  if (type === "spawn_agents" || type === "spawn_parallel") return String(action?.summary || action?.goal || action?.prompt || "").trim();
   if (type === "chatgpt_prompt") return String(action?.question || action?.prompt || "").trim();
   return String(action?.goal || action?.prompt || action?.task || action?.hint || "").trim();
 }

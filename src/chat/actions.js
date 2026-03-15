@@ -366,6 +366,19 @@ function normalizeSpawnAgents(raw) {
   };
 }
 
+function normalizeControlAction(raw, type = "") {
+  const row = asObject(raw);
+  return {
+    type,
+    label: String(row.label || row.reason || row.summary || "").trim() || undefined,
+    prompt: String(row.prompt || row.goal || row.summary || "").trim() || undefined,
+    inputs: row.inputs && typeof row.inputs === "object" ? row.inputs : {},
+    agents: Array.isArray(row.agents) ? row.agents : undefined,
+    metadata: row.metadata && typeof row.metadata === "object" ? row.metadata : undefined,
+    risk: normalizeRisk(row.risk, "L1"),
+  };
+}
+
 export function normalizeAction(raw) {
   const row = asObject(raw);
   const type = String(row.type || "").trim().toLowerCase();
@@ -394,6 +407,10 @@ export function normalizeAction(raw) {
   if (type === "get_status" || type === "status") return normalizeGetStatus(row);
   if (type === "interrupt" || type === "cancel") return normalizeInterrupt(row);
   if (type === "spawn_agents" || type === "fork_join" || type === "spawn") return normalizeSpawnAgents(row);
+  if (type === "spawn_parallel") return normalizeControlAction(row, "spawn_parallel");
+  if (["checkpoint", "pause_children", "cancel_child", "reroute_child", "supervisor_decision", "synthesize_final"].includes(type)) {
+    return normalizeControlAction(row, type);
+  }
   return null;
 }
 
@@ -453,6 +470,13 @@ export function defaultAllowlist() {
     "get_status",
     "interrupt",
     "spawn_agents",
+    "spawn_parallel",
+    "checkpoint",
+    "pause_children",
+    "cancel_child",
+    "reroute_child",
+    "supervisor_decision",
+    "synthesize_final",
   ]);
 }
 

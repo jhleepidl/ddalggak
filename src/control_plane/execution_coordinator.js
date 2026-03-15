@@ -14,12 +14,25 @@ function asArray(raw) {
 function actionSignature(action = {}) {
   const row = action && typeof action === "object" ? action : {};
   const type = normalizeText(row.type, { lower: true });
-  if (type === "agent_run") {
+  if (type === "agent_run" || type === "synthesize_final") {
     return [
       type,
       normalizeText(row.agent || row.agent_id, { lower: true }),
       normalizeText(row.prompt || row.goal),
     ].join("|");
+  }
+  if (type === "spawn_parallel") {
+    return [
+      type,
+      normalizeText(row.inputs?.parallel_group_id || row.parallel_group_id),
+      asArray(row.agents).map((child) => normalizeText(child.agent, { lower: true })).join(","),
+    ].join("|");
+  }
+  if (type === "checkpoint") {
+    return [type, normalizeText(row.inputs?.checkpoint_id || row.checkpoint_id)].join("|");
+  }
+  if (type === "supervisor_decision") {
+    return [type, normalizeText(row.inputs?.supervisor_instance_id)].join("|");
   }
   if (type === "chatgpt_prompt") {
     return [type, normalizeText(row.question)].join("|");
@@ -44,8 +57,8 @@ export function createDefaultRunRoute(mode, goal, seedInstruction = "") {
       actions: [
         {
           type: "agent_run",
-          agent: "coder",
-          prompt: seedInstruction || "run/shared docs and continue the requested implementation.",
+          agent: "builder",
+          prompt: seedInstruction || "continue the requested implementation from the current workspace state.",
           inputs: {},
         },
         { type: "git_summary" },
@@ -58,7 +71,7 @@ export function createDefaultRunRoute(mode, goal, seedInstruction = "") {
   return {
     actions: [
       { type: "agent_run", agent: "researcher", prompt: goal, inputs: {} },
-      { type: "agent_run", agent: "coder", prompt: goal, inputs: {} },
+      { type: "agent_run", agent: "builder", prompt: goal, inputs: {} },
       { type: "git_summary" },
     ],
     reason: "fallback: run default",
@@ -79,11 +92,12 @@ function createPlanIndex(teamPlan = {}, runtimeAgents = []) {
     slotsByRole.set(roleId, list);
   }
   const agentsBySlotId = new Map();
+  const agentsByInstanceId = new Map();
   for (const agent of runtimeAgentList) {
     const slotId = normalizeText(agent?.slot_id || agent?.slotId);
-    if (slotId && !agentsBySlotId.has(slotId)) {
-      agentsBySlotId.set(slotId, agent);
-    }
+    const instanceId = normalizeText(agent?.instance_id || agent?.instanceId);
+    if (slotId && !agentsBySlotId.has(slotId)) agentsBySlotId.set(slotId, agent);
+    if (instanceId && !agentsByInstanceId.has(instanceId)) agentsByInstanceId.set(instanceId, agent);
   }
   return {
     slots,
@@ -91,6 +105,7 @@ function createPlanIndex(teamPlan = {}, runtimeAgents = []) {
     slotsByRole,
     runtimeAgents: runtimeAgentList,
     agentsBySlotId,
+    agentsByInstanceId,
   };
 }
 
@@ -109,10 +124,12 @@ function normalizeNodes(teamPlan = {}, runtimeAgents = []) {
       const slotIds = resolveSlotIds(index, node?.slot_id || node?.slotId || node?.role_id || node?.roleId);
       return slotIds.map((slotId) => {
         const slot = index.slotsById.get(slotId);
+        const runtimeAgent = index.agentsBySlotId.get(slotId);
         if (!slot) return null;
         return {
           slot_id: slotId,
           role_id: normalizeRoleId(slot?.role_id || slot?.role_label),
+          instance_id: normalizeText(node?.instance_id || node?.instanceId || runtimeAgent?.instance_id) || undefined,
           parallelizable: slot?.parallelizable === true,
         };
       });
@@ -123,6 +140,7 @@ function normalizeNodes(teamPlan = {}, runtimeAgents = []) {
   return index.slots.map((slot) => ({
     slot_id: normalizeText(slot.slot_id),
     role_id: normalizeRoleId(slot?.role_id || slot?.role_label),
+    instance_id: normalizeText(index.agentsBySlotId.get(slot.slot_id)?.instance_id) || undefined,
     parallelizable: slot?.parallelizable === true,
   })).filter((slot) => slot.slot_id && slot.role_id);
 }
@@ -150,9 +168,7 @@ function normalizeEdges(teamPlan = {}, runtimeAgents = []) {
     const fromSlotIds = resolveSlotIds(index, rawEdge?.from_slot_id || rawEdge?.fromSlotId || rawEdge?.from);
     const toSlotIds = resolveSlotIds(index, rawEdge?.to_slot_id || rawEdge?.toSlotId || rawEdge?.to);
     for (const fromSlotId of fromSlotIds) {
-      for (const toSlotId of toSlotIds) {
-        addEdge(fromSlotId, toSlotId, rawEdge?.relation);
-      }
+      for (const toSlotId of toSlotIds) addEdge(fromSlotId, toSlotId, rawEdge?.relation);
     }
   }
   if (edges.length > 0) return edges;
@@ -161,9 +177,7 @@ function normalizeEdges(teamPlan = {}, runtimeAgents = []) {
     const fromSlotIds = resolveSlotIds(index, rawEdge?.from);
     const toSlotIds = resolveSlotIds(index, rawEdge?.to);
     for (const fromSlotId of fromSlotIds) {
-      for (const toSlotId of toSlotIds) {
-        addEdge(fromSlotId, toSlotId, "precedes");
-      }
+      for (const toSlotId of toSlotIds) addEdge(fromSlotId, toSlotId, "precedes");
     }
   }
   return edges;
@@ -244,6 +258,261 @@ function findRuntimeAgentForSlot(slot = {}, runtimeAgents = []) {
   return null;
 }
 
+function buildParallelGroups(teamPlan = {}, runtimeAgents = []) {
+  const explicitGroups = asArray(teamPlan?.execution_graph?.parallel_groups);
+  if (explicitGroups.length > 0) return explicitGroups.map((group, index) => ({
+    parallel_group_id: normalizeText(group?.parallel_group_id || group?.parallelGroupId || `parallel_group_${index + 1}`)
+      || `parallel_group_${index + 1}`,
+    slot_ids: asArray(group?.slot_ids ?? group?.slotIds).map((slotId) => normalizeText(slotId)).filter(Boolean),
+    role_ids: asArray(group?.role_ids ?? group?.roleIds).map((roleId) => normalizeRoleId(roleId)).filter(Boolean),
+    instance_ids: asArray(group?.instance_ids ?? group?.instanceIds).map((instanceId) => normalizeText(instanceId)).filter(Boolean),
+  })).filter((group) => group.slot_ids.length > 1);
+  return topologicalLevels(teamPlan, runtimeAgents)
+    .filter((group) => group.length > 1)
+    .map((group, index) => ({
+      parallel_group_id: `parallel_group_${index + 1}`,
+      slot_ids: group,
+      role_ids: group.map((slotId) => {
+        const slot = asArray(teamPlan?.slots).find((entry) => normalizeText(entry?.slot_id) === slotId);
+        return normalizeRoleId(slot?.role_id || slot?.role_label);
+      }).filter(Boolean),
+      instance_ids: group.map((slotId) => {
+        const agent = asArray(runtimeAgents).find((entry) => normalizeText(entry?.slot_id) === slotId);
+        return normalizeText(agent?.instance_id);
+      }).filter(Boolean),
+    }));
+}
+
+function createDependencyMap(teamPlan = {}, runtimeAgents = []) {
+  const dependencyMap = new Map();
+  for (const edge of normalizeEdges(teamPlan, runtimeAgents)) {
+    const list = dependencyMap.get(edge.to_slot_id) || [];
+    list.push(edge.from_slot_id);
+    dependencyMap.set(edge.to_slot_id, list);
+  }
+  return dependencyMap;
+}
+
+function createCheckpointLookup(teamPlan = {}) {
+  const bySlotId = new Map();
+  for (const checkpoint of asArray(teamPlan?.checkpoints)) {
+    for (const slotId of asArray(checkpoint?.target_slot_ids ?? checkpoint?.targetSlotIds)) {
+      const list = bySlotId.get(normalizeText(slotId)) || [];
+      list.push(checkpoint);
+      bySlotId.set(normalizeText(slotId), list);
+    }
+  }
+  return bySlotId;
+}
+
+function createCollaborationLookup(teamPlan = {}) {
+  const byMemberInstanceId = new Map();
+  for (const cell of asArray(teamPlan?.collaboration_cells)) {
+    for (const instanceId of asArray(cell?.member_instance_ids)) {
+      const key = normalizeText(instanceId);
+      if (!key) continue;
+      const list = byMemberInstanceId.get(key) || [];
+      list.push(cell);
+      byMemberInstanceId.set(key, list);
+    }
+  }
+  return byMemberInstanceId;
+}
+
+function buildSlotPrompt({
+  slot = {},
+  runtimeAgent = {},
+  roleId = "",
+  goal = "",
+  seedInstruction = "",
+  taskInterpretation = {},
+} = {}) {
+  const cleanRoleId = normalizeRoleId(roleId || slot?.role_id || runtimeAgent?.role_id || runtimeAgent?.role_label);
+  if (cleanRoleId === "builder") {
+    return normalizeText(seedInstruction || goal || slot?.purpose || runtimeAgent?.assigned_goal);
+  }
+  if (cleanRoleId === "synthesizer") {
+    return normalizeText(
+      slot?.purpose
+      || taskInterpretation?.task_summary
+      || goal
+      || runtimeAgent?.assigned_goal
+    );
+  }
+  return normalizeText(slot?.purpose || runtimeAgent?.assigned_goal || goal || seedInstruction);
+}
+
+function buildSlotActionInputs({
+  slot = {},
+  runtimeAgent = {},
+  dependencyMap = new Map(),
+  collaborationLookup = new Map(),
+  checkpointIds = [],
+  parallelGroupId = undefined,
+  taskInterpretation = {},
+  supervisorRuntime = null,
+} = {}) {
+  const instanceId = normalizeText(runtimeAgent?.instance_id || runtimeAgent?.instanceId);
+  const slotId = normalizeText(slot?.slot_id || slot?.slotId);
+  const roleId = normalizeRoleId(slot?.role_id || runtimeAgent?.role_id || runtimeAgent?.role_label);
+  const slotCollaborationCells = instanceId
+    ? asArray(collaborationLookup.get(instanceId))
+    : [];
+  const managerCell = slotCollaborationCells.find((cell) => cell.pattern === "manager_as_tool");
+
+  return {
+    role_id: roleId || undefined,
+    role_label: normalizeText(runtimeAgent?.role_label || roleId, { lower: true }) || undefined,
+    runtime_instance_id: instanceId || undefined,
+    slot_id: slotId || undefined,
+    parallel_group_id: parallelGroupId || undefined,
+    dependency_slot_ids: asArray(dependencyMap.get(slotId)).filter(Boolean),
+    collaboration_cell_ids: slotCollaborationCells.map((cell) => cell.cell_id).filter(Boolean),
+    checkpoint_ids: checkpointIds,
+    report_back_to_instance_ids: slotCollaborationCells
+      .map((cell) => cell.report_back_to_instance_id)
+      .filter(Boolean),
+    supervisor_instance_id: managerCell?.report_back_to_instance_id
+      || (supervisorRuntime?.enabled === true ? supervisorRuntime.instance_id : undefined),
+    deliverable_type: normalizeText(slot?.deliverable_type || taskInterpretation?.deliverable_type) || undefined,
+    authority_profile_id: normalizeText(
+      runtimeAgent?.authority_profile_id || slot?.authority_profile_id,
+      { lower: true }
+    ) || undefined,
+    transport_agent_id: normalizeText(
+      runtimeAgent?.template_id || getTransportRoleId(roleId),
+      { lower: true }
+    ) || undefined,
+  };
+}
+
+function buildSlotRunAction({
+  slot = {},
+  runtimeAgent = {},
+  goal = "",
+  seedInstruction = "",
+  dependencyMap = new Map(),
+  collaborationLookup = new Map(),
+  checkpointIds = [],
+  parallelGroupId = undefined,
+  taskInterpretation = {},
+  supervisorRuntime = null,
+  finalSynthesis = false,
+} = {}) {
+  const roleId = normalizeRoleId(slot?.role_id || runtimeAgent?.role_id || runtimeAgent?.role_label);
+  const prompt = buildSlotPrompt({
+    slot,
+    runtimeAgent,
+    roleId,
+    goal,
+    seedInstruction,
+    taskInterpretation,
+  });
+  if (!roleId || !prompt) return null;
+  return {
+    type: finalSynthesis ? "synthesize_final" : "agent_run",
+    agent: roleId,
+    prompt,
+    inputs: {
+      ...buildSlotActionInputs({
+        slot,
+        runtimeAgent,
+        dependencyMap,
+        collaborationLookup,
+        checkpointIds,
+        parallelGroupId,
+        taskInterpretation,
+        supervisorRuntime,
+      }),
+      final_synthesis: finalSynthesis === true || undefined,
+    },
+  };
+}
+
+function buildCheckpointAction(checkpoint = {}, {
+  supervisorRuntime = null,
+  targetInstanceIds = [],
+} = {}) {
+  const checkpointId = normalizeText(checkpoint?.checkpoint_id || checkpoint?.checkpointId);
+  if (!checkpointId) return null;
+  return {
+    type: "checkpoint",
+    label: normalizeText(checkpoint?.label || checkpointId) || checkpointId,
+    prompt: normalizeText(checkpoint?.label || checkpointId) || checkpointId,
+    inputs: {
+      checkpoint_id: checkpointId,
+      checkpoint_ids: [checkpointId],
+      checkpoint_status: normalizeText(checkpoint?.status || "pending", { lower: true }) || "pending",
+      target_slot_ids: asArray(checkpoint?.target_slot_ids ?? checkpoint?.targetSlotIds).map((slotId) => normalizeText(slotId)).filter(Boolean),
+      trigger_after_instances: asArray(checkpoint?.trigger_after_instances).map((instanceId) => normalizeText(instanceId)).filter(Boolean),
+      target_instance_ids: targetInstanceIds,
+      approval_required: checkpoint?.approval_required === true,
+      human_interrupt_allowed: checkpoint?.human_interrupt_allowed === true,
+      supervisor_instance_id: normalizeText(supervisorRuntime?.instance_id || supervisorRuntime?.instanceId) || undefined,
+      supervisor_decision: checkpoint?.supervisor_decision || undefined,
+    },
+    metadata: {
+      kind: normalizeText(checkpoint?.kind, { lower: true }) || undefined,
+      completion_signal: checkpoint?.completion_signal || undefined,
+      selection_reason: checkpoint?.selection_reason || undefined,
+    },
+  };
+}
+
+function buildSupervisorDecisionAction({
+  supervisorRuntime = null,
+  slotIds = [],
+  instanceIds = [],
+  checkpointIds = [],
+  label = "",
+  summaryKind = "intermediate",
+} = {}) {
+  if (supervisorRuntime?.enabled !== true) return null;
+  const supervisorInstanceId = normalizeText(supervisorRuntime?.instance_id || supervisorRuntime?.instanceId);
+  if (!supervisorInstanceId) return null;
+  return {
+    type: "supervisor_decision",
+    label: normalizeText(label || "Supervisor decision") || "Supervisor decision",
+    prompt: normalizeText(label || "Supervisor decision") || "Supervisor decision",
+    inputs: {
+      supervisor_instance_id: supervisorInstanceId,
+      target_slot_ids: asArray(slotIds).map((slotId) => normalizeText(slotId)).filter(Boolean),
+      target_instance_ids: asArray(instanceIds).map((instanceId) => normalizeText(instanceId)).filter(Boolean),
+      checkpoint_ids: asArray(checkpointIds).map((checkpointId) => normalizeText(checkpointId)).filter(Boolean),
+      user_visible: supervisorRuntime?.user_visible === true,
+      interaction_mode: normalizeText(supervisorRuntime?.interaction_mode, { lower: true }) || undefined,
+      summary_kind: normalizeText(summaryKind, { lower: true }) || "intermediate",
+    },
+    metadata: {
+      report_back: true,
+    },
+  };
+}
+
+function checkpointIdsForSlots(slotIds = [], checkpointLookup = new Map()) {
+  const checkpoints = [];
+  for (const slotId of slotIds) {
+    for (const checkpoint of asArray(checkpointLookup.get(normalizeText(slotId)))) {
+      if (!checkpoints.some((entry) => normalizeText(entry?.checkpoint_id) === normalizeText(checkpoint?.checkpoint_id))) {
+        checkpoints.push(checkpoint);
+      }
+    }
+  }
+  return checkpoints;
+}
+
+function findTerminalSynthesizerSlotId(teamPlan = {}, slotOrder = []) {
+  const slotsById = new Map(asArray(teamPlan?.slots).map((slot) => [normalizeText(slot?.slot_id), slot]));
+  let terminalSlotId = "";
+  for (const slotId of slotOrder) {
+    const slot = slotsById.get(normalizeText(slotId));
+    if (normalizeRoleId(slot?.role_id || slot?.role_label) === "synthesizer") {
+      terminalSlotId = normalizeText(slot?.slot_id);
+    }
+  }
+  return terminalSlotId;
+}
+
 export function mapTeamPlanToRouteActions(teamBuild = {}, {
   mode = "run",
   goal = "",
@@ -257,81 +526,178 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
   const index = createPlanIndex(teamPlan, runtimeAgents);
   const slotOrder = findExecutionOrder(teamPlan, runtimeAgents);
   const levels = topologicalLevels(teamPlan, runtimeAgents);
-  const parallelGroupBySlot = new Map();
-  for (let levelIndex = 0; levelIndex < levels.length; levelIndex += 1) {
-    if (levels[levelIndex].length <= 1) continue;
-    const groupId = `parallel_group_${levelIndex + 1}`;
-    for (const slotId of levels[levelIndex]) parallelGroupBySlot.set(slotId, groupId);
-  }
-  const dependencyMap = new Map();
-  for (const edge of normalizeEdges(teamPlan, runtimeAgents)) {
-    const list = dependencyMap.get(edge.to_slot_id) || [];
-    list.push(edge.from_slot_id);
-    dependencyMap.set(edge.to_slot_id, list);
-  }
-  const collaborationCells = asArray(teamPlan?.collaboration_cells);
-  const checkpoints = asArray(teamPlan?.checkpoints);
+  const dependencyMap = createDependencyMap(teamPlan, runtimeAgents);
+  const collaborationLookup = createCollaborationLookup(teamPlan);
+  const checkpointLookup = createCheckpointLookup(teamPlan);
   const supervisorRuntime = teamPlan?.supervisor_runtime && typeof teamPlan.supervisor_runtime === "object"
     ? teamPlan.supervisor_runtime
     : null;
-
-  const actions = [];
-  for (const slotId of slotOrder) {
-    const slot = index.slotsById.get(slotId);
-    if (!slot) continue;
-    const match = findRuntimeAgentForSlot(slot, runtimeAgents);
-    if (!match) continue;
-    const roleId = normalizeRoleId(slot?.role_id || match?.role_id || match?.role_label);
-    const prompt = normalizeText(
-      roleId === "builder"
-        ? (seedInstruction || goal || slot?.purpose || match?.assigned_goal)
-        : (slot?.purpose || match?.assigned_goal || goal || seedInstruction)
-    );
-    if (!prompt) continue;
-    const targetAgent = normalizeText(
-      match.template_id
-      || getTransportRoleId(roleId)
-      || match.role_label
-      || roleId,
-      { lower: true }
-    );
-    if (!targetAgent) continue;
-    const slotCollaborationCells = collaborationCells.filter((cell) =>
-      asArray(cell?.member_instance_ids).includes(match.instance_id)
-    );
-    const slotCheckpointIds = checkpoints
-      .filter((checkpoint) => asArray(checkpoint?.target_slot_ids).includes(slotId))
-      .map((checkpoint) => checkpoint.checkpoint_id)
-      .filter(Boolean);
-    const managerCell = slotCollaborationCells.find((cell) => cell.pattern === "manager_as_tool");
-    actions.push({
-      type: "agent_run",
-      agent: targetAgent,
-      prompt,
-      inputs: {
-        role_id: roleId || undefined,
-        role_label: normalizeText(match.role_label || roleId, { lower: true }) || undefined,
-        runtime_instance_id: normalizeText(match.instance_id) || undefined,
-        slot_id: normalizeText(slotId) || undefined,
-        parallel_group_id: parallelGroupBySlot.get(slotId) || undefined,
-        dependency_slot_ids: asArray(dependencyMap.get(slotId)).filter(Boolean),
-        collaboration_cell_ids: slotCollaborationCells.map((cell) => cell.cell_id).filter(Boolean),
-        checkpoint_ids: slotCheckpointIds,
-        report_back_to_instance_ids: slotCollaborationCells
-          .map((cell) => cell.report_back_to_instance_id)
-          .filter(Boolean),
-        supervisor_instance_id: managerCell?.report_back_to_instance_id
-          || (supervisorRuntime?.enabled === true ? supervisorRuntime.instance_id : undefined),
-        deliverable_type: normalizeText(slot?.deliverable_type || taskInterpretation?.deliverable_type) || undefined,
-      },
-    });
-    if (actions.length >= 8) break;
+  const parallelGroups = buildParallelGroups(teamPlan, runtimeAgents);
+  const parallelGroupBySlot = new Map();
+  for (const group of parallelGroups) {
+    for (const slotId of asArray(group.slot_ids)) {
+      parallelGroupBySlot.set(normalizeText(slotId), group.parallel_group_id);
+    }
   }
 
-  if (normalizeText(mode, { lower: true }) !== "chat" && actions.length < 8) {
+  const terminalSynthesizerSlotId = findTerminalSynthesizerSlotId(teamPlan, slotOrder);
+  const emittedCheckpointIds = new Set();
+  const actions = [];
+
+  for (const levelSlotIds of levels) {
+    const runnableSlots = levelSlotIds
+      .map((slotId) => index.slotsById.get(normalizeText(slotId)))
+      .filter(Boolean)
+      .filter((slot) => normalizeText(slot.slot_id) !== terminalSynthesizerSlotId);
+    if (runnableSlots.length === 0) continue;
+
+    const levelCheckpointList = checkpointIdsForSlots(
+      runnableSlots.map((slot) => slot.slot_id),
+      checkpointLookup
+    );
+
+    if (runnableSlots.length > 1) {
+      const children = runnableSlots
+        .map((slot) => {
+          const runtimeAgent = findRuntimeAgentForSlot(slot, runtimeAgents);
+          if (!runtimeAgent) return null;
+          return buildSlotRunAction({
+            slot,
+            runtimeAgent,
+            goal,
+            seedInstruction,
+            dependencyMap,
+            collaborationLookup,
+            checkpointIds: levelCheckpointList.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
+            parallelGroupId: parallelGroupBySlot.get(slot.slot_id),
+            taskInterpretation,
+            supervisorRuntime,
+            finalSynthesis: false,
+          });
+        })
+        .filter(Boolean);
+      if (children.length > 0) {
+        const slotIds = children.map((child) => normalizeText(child.inputs?.slot_id)).filter(Boolean);
+        const instanceIds = children.map((child) => normalizeText(child.inputs?.runtime_instance_id)).filter(Boolean);
+        actions.push({
+          type: "spawn_parallel",
+          label: `Parallel ${children.map((child) => child.agent).join(", ")}`,
+          prompt: children.map((child) => child.prompt).join("\n\n"),
+          inputs: {
+            parallel_group_id: parallelGroupBySlot.get(slotIds[0]) || undefined,
+            target_slot_ids: slotIds,
+            target_instance_ids: instanceIds,
+            checkpoint_ids: levelCheckpointList.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
+            supervisor_instance_id: normalizeText(supervisorRuntime?.instance_id || supervisorRuntime?.instanceId) || undefined,
+          },
+          agents: children,
+        });
+        for (const checkpoint of levelCheckpointList) {
+          const checkpointId = normalizeText(checkpoint?.checkpoint_id);
+          if (!checkpointId || emittedCheckpointIds.has(checkpointId)) continue;
+          emittedCheckpointIds.add(checkpointId);
+          const checkpointAction = buildCheckpointAction(checkpoint, {
+            supervisorRuntime,
+            targetInstanceIds: instanceIds,
+          });
+          if (checkpointAction) actions.push(checkpointAction);
+        }
+        const supervisorAction = buildSupervisorDecisionAction({
+          supervisorRuntime,
+          slotIds,
+          instanceIds,
+          checkpointIds: levelCheckpointList.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
+          label: "Supervisor review after parallel group",
+          summaryKind: "parallel_report",
+        });
+        if (supervisorAction) actions.push(supervisorAction);
+      }
+      continue;
+    }
+
+    for (const slot of runnableSlots) {
+      const runtimeAgent = findRuntimeAgentForSlot(slot, runtimeAgents);
+      if (!runtimeAgent) continue;
+      const slotCheckpointList = checkpointIdsForSlots([slot.slot_id], checkpointLookup);
+      const action = buildSlotRunAction({
+        slot,
+        runtimeAgent,
+        goal,
+        seedInstruction,
+        dependencyMap,
+        collaborationLookup,
+        checkpointIds: slotCheckpointList.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
+        parallelGroupId: parallelGroupBySlot.get(slot.slot_id),
+        taskInterpretation,
+        supervisorRuntime,
+        finalSynthesis: false,
+      });
+      if (action) actions.push(action);
+
+      for (const checkpoint of slotCheckpointList) {
+        const checkpointId = normalizeText(checkpoint?.checkpoint_id);
+        if (!checkpointId || emittedCheckpointIds.has(checkpointId)) continue;
+        emittedCheckpointIds.add(checkpointId);
+        const checkpointAction = buildCheckpointAction(checkpoint, {
+          supervisorRuntime,
+          targetInstanceIds: [runtimeAgent.instance_id].filter(Boolean),
+        });
+        if (checkpointAction) actions.push(checkpointAction);
+      }
+    }
+  }
+
+  if (terminalSynthesizerSlotId) {
+    const synthesizerSlot = index.slotsById.get(terminalSynthesizerSlotId);
+    const synthesizerAgent = synthesizerSlot
+      ? findRuntimeAgentForSlot(synthesizerSlot, runtimeAgents)
+      : null;
+    const slotCheckpointList = checkpointIdsForSlots([terminalSynthesizerSlotId], checkpointLookup);
+    const synthesisAction = synthesizerSlot && synthesizerAgent
+      ? buildSlotRunAction({
+        slot: synthesizerSlot,
+        runtimeAgent: synthesizerAgent,
+        goal,
+        seedInstruction,
+        dependencyMap,
+        collaborationLookup,
+        checkpointIds: slotCheckpointList.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
+        parallelGroupId: parallelGroupBySlot.get(terminalSynthesizerSlotId),
+        taskInterpretation,
+        supervisorRuntime,
+        finalSynthesis: true,
+      })
+      : null;
+    if (synthesisAction) actions.push(synthesisAction);
+    for (const checkpoint of slotCheckpointList) {
+      const checkpointId = normalizeText(checkpoint?.checkpoint_id);
+      if (!checkpointId || emittedCheckpointIds.has(checkpointId)) continue;
+      emittedCheckpointIds.add(checkpointId);
+      const checkpointAction = buildCheckpointAction(checkpoint, {
+        supervisorRuntime,
+        targetInstanceIds: synthesisAction?.inputs?.runtime_instance_id
+          ? [synthesisAction.inputs.runtime_instance_id]
+          : [],
+      });
+      if (checkpointAction) actions.push(checkpointAction);
+    }
+    const supervisorAction = buildSupervisorDecisionAction({
+      supervisorRuntime,
+      slotIds: [terminalSynthesizerSlotId],
+      instanceIds: synthesisAction?.inputs?.runtime_instance_id
+        ? [synthesisAction.inputs.runtime_instance_id]
+        : [],
+      checkpointIds: slotCheckpointList.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
+      label: "Supervisor final synthesis review",
+      summaryKind: "final_output",
+    });
+    if (supervisorAction) actions.push(supervisorAction);
+  }
+
+  if (normalizeText(mode, { lower: true }) !== "chat" && actions.length < 12) {
     actions.push({ type: "git_summary" });
   }
-  return actions.slice(0, 8);
+  return actions.slice(0, 16);
 }
 
 export function shouldUseGeneratedTeamActions({
@@ -400,19 +766,9 @@ export function coordinateExecutionPlan({
     useTeamActions,
     explicitActions,
   });
-  const levels = topologicalLevels(teamPlan, runtimeAgents);
-  const parallelGroups = levels
-    .filter((group) => group.length > 1)
-    .map((group, index) => ({
-      parallel_group_id: `parallel_group_${index + 1}`,
-      slot_ids: group,
-      role_ids: group.map((slotId) => {
-        const slot = asArray(teamPlan?.slots).find((entry) => normalizeText(entry?.slot_id) === slotId);
-        return normalizeRoleId(slot?.role_id || slot?.role_label);
-      }).filter(Boolean),
-    }));
-  const explicitParallelGroups = asArray(teamPlan?.execution_graph?.parallel_groups);
-  const effectiveParallelGroups = explicitParallelGroups.length > 0 ? explicitParallelGroups : parallelGroups;
+  const effectiveParallelGroups = asArray(teamPlan?.execution_graph?.parallel_groups).length > 0
+    ? asArray(teamPlan?.execution_graph?.parallel_groups)
+    : buildParallelGroups(teamPlan, runtimeAgents);
 
   return {
     action_source: actionSource,

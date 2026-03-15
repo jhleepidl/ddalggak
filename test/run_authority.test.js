@@ -6,6 +6,7 @@ import {
   buildRunAuthorityEnvelope,
   buildRunAuthority,
   buildRunAuthorityPatch,
+  evaluateActionAuthority,
   createRunAuthorityContract,
   mergeRunAuthority,
   normalizeRunAuthority,
@@ -173,4 +174,36 @@ test("applyRunAuthority mutates runtime with canonical authority patch", () => {
   assert.equal(runtime.plan_source, "local_fallback");
   assert.equal(runtime.degraded_mode, true);
   assert.equal(runtime.fallback_reason, "network unreachable");
+});
+
+test("evaluateActionAuthority denies builder-like execution for readonly researcher", () => {
+  const evaluation = evaluateActionAuthority({
+    action: {
+      type: "agent_run",
+      agent: "builder",
+      prompt: "apply the requested patch",
+      inputs: {
+        runtime_instance_id: "inst_builder_1",
+        role_id: "builder",
+      },
+    },
+    runtimeSnapshot: {
+      runtime_agents: [{
+        instance_id: "inst_builder_1",
+        slot_id: "slot_builder_1",
+        role_id: "builder",
+        authority_profile_id: "worker_readonly_research",
+      }],
+      authority_graph: [{
+        slot_id: "slot_builder_1",
+        instance_id: "inst_builder_1",
+        role_id: "builder",
+        authority_profile_id: "worker_readonly_research",
+      }],
+    },
+  });
+
+  assert.equal(evaluation.enforced, true);
+  assert.equal(evaluation.allowed, false);
+  assert.equal(evaluation.denied_by.some((entry) => entry.includes("not_allowed:write")), true);
 });

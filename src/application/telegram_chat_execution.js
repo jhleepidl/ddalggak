@@ -71,6 +71,8 @@ import {
   applyRunAuthority,
   buildRunAuthority,
   buildRunAuthorityPatch,
+  createAuthorityDeniedError,
+  evaluateActionAuthority,
   normalizeRunAuthority,
   summarizeRunAuthorityLines,
 } from "./run_authority.js";
@@ -3000,6 +3002,20 @@ async function executeAgentRun(
 
     const agent = findAgentConfigInRuntime(agentId, runtime) || findAgentConfig(agentId);
     if (!agent) throw new Error(`Unknown agent: ${agentId}. Check conversation runtime/catalog.`);
+    const authority = evaluateActionAuthority({
+      action: {
+        type: "agent_run",
+        agent: agentId,
+        prompt: taskPrompt,
+        inputs: act?.inputs && typeof act.inputs === "object" ? act.inputs : {},
+      },
+      runtimeSnapshot: runtime,
+    });
+    if (authority.enforced && (!authority.execute_allowed || authority.requires_approval)) {
+      throw createAuthorityDeniedError(authority, {
+        fallbackMessage: `authority denied for agent=${agentId}`,
+      });
+    }
 
     const provider = String(agent.provider || "gemini").trim().toLowerCase();
     const model = String(agent.model || provider).trim() || provider;
@@ -3134,6 +3150,18 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
   for (const rawAct of actions) {
     const act = normalizeActionShape(rawAct);
     if (!act?.type) continue;
+    const authority = evaluateActionAuthority({
+      action: act,
+      runtimeSnapshot: runtimeTeamSnapshot,
+    });
+    if (authority.enforced && authority.allowed !== true) {
+      await bot.sendMessage(chatId, `⛔️ authority denied: ${authority.reasons.join("; ") || "action blocked"}`);
+      continue;
+    }
+    if (authority.requires_approval) {
+      await bot.sendMessage(chatId, `🟡 authority approval required: ${authority.reasons.join("; ") || act.type}`);
+      break;
+    }
 
     if (act.type === "agent_run") {
       const agentInfo = findAgentConfigInRuntime(act.agent, runtime) || findAgentConfig(act.agent);
@@ -3153,6 +3181,68 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
       continue;
     }
 
+    if (act.type === "synthesize_final") {
+      const agentInfo = findAgentConfigInRuntime(act.agent, runtime) || findAgentConfig(act.agent);
+      const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
+      const displayName = formatChatAgentDisplayName(act.agent, agentIndex);
+      await bot.sendMessage(chatId, `🧩 ${displayName} 최종 합성 중… (${provider})`);
+      const result = await enqueue(
+        () => executeAgentRun(bot, chatId, jobId, {
+          type: "agent_run",
+          agent: act.agent,
+          prompt: act.prompt,
+          inputs: {
+            ...(act.inputs && typeof act.inputs === "object" ? act.inputs : {}),
+            final_synthesis: true,
+          },
+        }, {
+          signal,
+          runtime,
+          telegramUserId,
+        }),
+        { jobId, signal, label: `synthesize_final_${act.agent}` }
+      );
+      await sendLong(bot, chatId, `🧩 ${displayName} 최종 합성 완료 (${result.mode})\n${clip(result.output, 3500)}`);
+      if (result.provider === "chatgpt") askedChatGPT = true;
+      continue;
+    }
+
+    if (act.type === "spawn_parallel") {
+      const children = Array.isArray(act.agents) ? act.agents : [];
+      if (children.length === 0) continue;
+      await bot.sendMessage(chatId, `📣 병렬 실행 시작 (${children.length})`);
+      const settled = await Promise.allSettled(children.map((child) => enqueue(
+        () => executeAgentRun(bot, chatId, jobId, child, {
+          signal,
+          runtime,
+          telegramUserId,
+          notify: false,
+        }),
+        { jobId, signal, label: `spawn_parallel_${child.agent}` }
+      )));
+      let okCount = 0;
+      let errorCount = 0;
+      const summaries = [];
+      for (let index = 0; index < settled.length; index += 1) {
+        const row = settled[index];
+        const child = children[index];
+        const displayName = formatChatAgentDisplayName(child?.agent || "", agentIndex);
+        if (row.status === "fulfilled") {
+          okCount += 1;
+          if (row.value?.provider === "chatgpt") askedChatGPT = true;
+          summaries.push(`- ${displayName}: ok`);
+        } else {
+          errorCount += 1;
+          summaries.push(`- ${displayName}: ${String(row.reason?.message || row.reason || "error")}`);
+        }
+      }
+      await sendLong(bot, chatId, [
+        `📣 병렬 실행 완료: ok=${okCount}, error=${errorCount}`,
+        ...summaries,
+      ].join("\n"));
+      continue;
+    }
+
     if (act.type === "git_summary") {
       const { status, diff } = await gitSummary(jobId, signal);
       await sendLong(bot, chatId, `📌 git status\n${FENCE}\n${clip(status, 1500)}\n${FENCE}\n\n📌 git diff(일부)\n${FENCE}diff\n${clip(diff, 2500)}\n${FENCE}\n\n커밋: /commit ${jobId} <message>`);
@@ -3163,6 +3253,31 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
       const q = String(act.question || "현재 상태에서 다음 단계 action plan(JSON)을 제안해줘.").trim();
       await sendChatGPTPrompt(bot, chatId, jobId, q);
       askedChatGPT = true;
+      continue;
+    }
+
+    if (act.type === "checkpoint") {
+      const approvalRequired = act?.inputs?.approval_required === true;
+      const label = String(act.label || act.prompt || act.inputs?.checkpoint_id || "checkpoint").trim();
+      await bot.sendMessage(
+        chatId,
+        approvalRequired
+          ? `🟡 checkpoint reached: ${label}\n승인이 필요해 실행을 멈춥니다.`
+          : `⏸️ checkpoint reached: ${label}`
+      );
+      if (approvalRequired) break;
+      continue;
+    }
+
+    if (act.type === "supervisor_decision") {
+      const label = String(act.label || act.prompt || "Supervisor decision").trim();
+      await bot.sendMessage(chatId, `🧭 ${label}`);
+      continue;
+    }
+
+    if (["pause_children", "cancel_child", "reroute_child"].includes(act.type)) {
+      await bot.sendMessage(chatId, `🧭 control action noted: ${act.type}`);
+      continue;
     }
   }
 

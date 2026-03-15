@@ -289,6 +289,98 @@ function buildExecutionGraph(slots = []) {
   };
 }
 
+function distinctRuntimeAgentsByRole(runtimeAgents = [], roleId = "") {
+  return asArray(runtimeAgents).filter((agent) => normalizeWorkerRoleId(agent?.role_id || agent?.role_label) === roleId);
+}
+
+function inferSkillCluster(runtimeAgent = {}) {
+  const attachedSkillIds = normalizeStringList(runtimeAgent?.attached_skill_ids || [], { max: 24, lower: true });
+  if (attachedSkillIds.length > 0) return attachedSkillIds.slice().sort().join("|");
+  const presetHints = normalizeStringList(runtimeAgent?.selection_features?.domain_hints || [], { max: 12, lower: true });
+  if (presetHints.length > 0) return presetHints.slice().sort().join("|");
+  return normalizeWorkerRoleId(runtimeAgent?.role_id || runtimeAgent?.role_label) || "unknown";
+}
+
+export function rerankResolvedTeamComposition({
+  teamPlan = null,
+  runtimeAgents = [],
+  taskInterpretation = {},
+  scoredCandidatesBySlot = {},
+} = {}) {
+  const plan = teamPlan && typeof teamPlan === "object" ? teamPlan : {};
+  const runtimeAgentList = asArray(runtimeAgents);
+  const explanations = [];
+  let score = 0;
+  const researchers = distinctRuntimeAgentsByRole(runtimeAgentList, "researcher");
+  const reviewers = distinctRuntimeAgentsByRole(runtimeAgentList, "reviewer");
+  const synthesizers = distinctRuntimeAgentsByRole(runtimeAgentList, "synthesizer");
+  const providers = normalizeStringList(
+    runtimeAgentList.map((agent) => normalizeText(agent?.provider, { lower: true })).filter(Boolean),
+    { max: 16, lower: true }
+  );
+  const upstreamSlots = asArray(plan.slots).filter((slot) => slot.role_id !== "synthesizer");
+  const toolHints = runtimeAgentList.flatMap((agent) => normalizeStringList(
+    agent?.selection_features?.tool_hints || [],
+    { max: 8, lower: true }
+  ));
+  const duplicateToolHints = toolHints.length - new Set(toolHints).size;
+
+  if ((taskInterpretation?.risk_level === "high" || taskInterpretation?.review_policy !== "optional") && reviewers.length === 0) {
+    score -= 18;
+    explanations.push({ subject_id: "team_plan", reason: "team_reranker:-18 missing reviewer for required review policy" });
+  }
+  if (upstreamSlots.length > 1 && synthesizers.length === 0) {
+    score -= 12;
+    explanations.push({ subject_id: "team_plan", reason: "team_reranker:-12 missing synthesizer for multiple upstream slots" });
+  }
+  if (reviewers.length > 0 && synthesizers.length > 0) {
+    score += 10;
+    explanations.push({ subject_id: "team_plan", reason: "team_reranker:+10 reviewer and synthesizer coverage present" });
+  }
+  if (researchers.length > 1) {
+    const clusters = researchers.map((agent) => inferSkillCluster(agent));
+    const uniqueClusters = new Set(clusters);
+    if (uniqueClusters.size < clusters.length) {
+      const penalty = (clusters.length - uniqueClusters.size) * 6;
+      score -= penalty;
+      explanations.push({ subject_id: "team_plan", reason: `team_reranker:-${penalty} duplicate researcher skill clusters` });
+    }
+    if (taskInterpretation?.parallelism_preference === "parallel" && uniqueClusters.size > 1) {
+      score += 8;
+      explanations.push({ subject_id: "team_plan", reason: "team_reranker:+8 diverse researcher clusters for multi-source task" });
+    }
+  }
+  if (providers.length > 1) {
+    score += 4;
+    explanations.push({ subject_id: "team_plan", reason: "team_reranker:+4 provider diversity reduces concentration risk" });
+  } else if (runtimeAgentList.length > 2 && providers.length === 1) {
+    score -= 4;
+    explanations.push({ subject_id: "team_plan", reason: "team_reranker:-4 concentrated provider footprint" });
+  }
+  if (duplicateToolHints > 1) {
+    const penalty = duplicateToolHints * 2;
+    score -= penalty;
+    explanations.push({ subject_id: "team_plan", reason: `team_reranker:-${penalty} overlapping tool hints across runtime agents` });
+  }
+
+  for (const runtimeAgent of runtimeAgentList) {
+    const slotId = normalizeText(runtimeAgent?.slot_id || runtimeAgent?.slotId);
+    const scoredCandidates = Array.isArray(scoredCandidatesBySlot?.[slotId]) ? scoredCandidatesBySlot[slotId] : [];
+    if (scoredCandidates.length === 0) continue;
+    const selectedPresetId = normalizeText(runtimeAgent?.preset_id || runtimeAgent?.presetId, { lower: true });
+    const topCandidate = scoredCandidates[0];
+    if (selectedPresetId && selectedPresetId === normalizeText(topCandidate?.preset_id, { lower: true })) {
+      score += 2;
+      explanations.push({ subject_id: slotId, reason: `team_reranker:+2 top preset retained (${selectedPresetId})` });
+    }
+  }
+
+  return {
+    score,
+    selection_explanations: explanations,
+  };
+}
+
 export function buildTeamFromTemplates({
   goal = "",
   routeContext = null,
