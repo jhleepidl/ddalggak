@@ -67,6 +67,12 @@ test("skill resolver picks representative skills for reconciliation/audit/kr-equ
     goal: "KOSPI valuation for Korean stock thesis",
   });
   assert.equal(incompatible.attachments.some((row) => row.skill_id === "skill.kr_equity_analysis.v1"), false);
+
+  const canonicalBuilder = resolver.resolveForRole({
+    roleType: "builder",
+    goal: "KOSPI valuation for Korean stock thesis",
+  });
+  assert.equal(canonicalBuilder.attachments.some((row) => row.skill_id === "skill.kr_equity_analysis.v1"), false);
 });
 
 test("resolver defaults metadata_only and loader upgrades to instructions/resources when needed", () => {

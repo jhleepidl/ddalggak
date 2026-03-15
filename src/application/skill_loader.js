@@ -110,7 +110,7 @@ export class SkillLoader {
     ];
     if (
       includesAny(goalText, resourceNeedles)
-      || (role === "coder" && includesAny(goalText, ["python", "js", "script"]))
+      || (["coder", "builder"].includes(role) && includesAny(goalText, ["python", "js", "script"]))
     ) {
       next = upgradeSkillLoadLevel(next, "resources");
     }
@@ -214,4 +214,3 @@ export class SkillLoader {
     });
   }
 }
-

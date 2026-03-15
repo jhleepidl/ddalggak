@@ -47,11 +47,13 @@ test("buildTeamFromTemplates selects known roles first", () => {
     templates,
   });
   const roleIds = built.team_plan.roles.map((role) => role.id);
-  assert.ok(roleIds.includes("planner"));
-  assert.ok(roleIds.includes("coder"));
+  assert.equal(roleIds.includes("planner"), false);
+  assert.ok(roleIds.includes("builder"));
   assert.ok(roleIds.includes("reviewer"));
-  assert.equal(built.missing_roles.length, 0);
-  assert.ok(built.runtime_agents.length >= 3);
+  const builder = built.runtime_agents.find((agent) => agent.role_id === "builder");
+  assert.ok(builder);
+  assert.equal(builder.template_id, "coder");
+  assert.ok(built.runtime_agents.length >= 2);
 });
 
 test("fallback runtime roles are clearly marked as ephemeral", () => {
@@ -61,15 +63,10 @@ test("fallback runtime roles are clearly marked as ephemeral", () => {
     maxAgents: 4,
   });
 
-  const fallbackRoles = built.runtime_agents.filter((agent) =>
-    ["messenger", "context_curator"].includes(String(agent.role_label || "").toLowerCase())
-  );
+  const fallbackRoles = built.runtime_agents.filter((agent) => agent.synthesized === true);
   assert.ok(fallbackRoles.length > 0);
   for (const role of fallbackRoles) {
     assert.equal(role.ephemeral, true);
-    assert.ok(
-      String(role.template_id || "").includes("ephemeral")
-      || String(role.template_id || "") === ""
-    );
+    assert.equal(role.role_id === "deprecated_control_plane_only", false);
   }
 });

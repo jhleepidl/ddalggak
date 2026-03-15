@@ -15,7 +15,10 @@ test("skill registry loads manifests from skills directory", () => {
 
   const threadSkill = registry.getById("skill.thread_team_reconciliation.v1");
   assert.ok(threadSkill);
+  assert.equal(threadSkill.skill_id, "skill.thread_team_reconciliation.v1");
   assert.equal(threadSkill.slug, "thread_team_reconciliation");
+  assert.equal(threadSkill.title, "Thread Team Reconciliation");
+  assert.equal(threadSkill.kind, "method");
   assert.equal(threadSkill.instructions_ref, "SKILL.md");
   assert.ok(threadSkill.resource_refs.includes("checklist.md"));
 });
@@ -50,9 +53,12 @@ test("skill registry skips invalid manifests and normalizes canonical defaults",
 
   const skill = loaded.skills[0];
   assert.equal(skill.id, "skill.custom_skill.v1");
+  assert.equal(skill.skill_id, "skill.custom_skill.v1");
   assert.equal(skill.slug, "custom_skill");
+  assert.equal(skill.title, "Custom Skill");
   assert.equal(skill.instructions_ref, "SKILL.md");
   assert.deepEqual(skill.capability_tags, ["evidence"]);
+  assert.deepEqual(skill.tags, ["evidence"]);
   assert.deepEqual(skill.trigger_terms, ["claim"]);
   assert.deepEqual(skill.compatible_roles, ["researcher", "reviewer"]);
   assert.equal(skill.visibility, "internal");

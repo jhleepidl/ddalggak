@@ -10,6 +10,11 @@ test("team plan roles preserve attached_skills and role-level metadata", () => {
     mode: "run",
     roles: [
       {
+        id: "planner",
+        role_type: "planner",
+        role_label: "planner",
+      },
+      {
         id: "researcher",
         role_type: "researcher",
         role_label: "researcher",
@@ -32,16 +37,19 @@ test("team plan roles preserve attached_skills and role-level metadata", () => {
     execution_order: ["researcher"],
   });
 
+  assert.equal(plan.slots.length, 1);
   assert.equal(plan.roles.length, 1);
+  assert.equal(plan.roles[0].id, "researcher");
   assert.equal(plan.roles[0].attached_skills.length, 1);
   assert.equal(plan.roles[0].attached_skills[0].skill_id, "skill.claim_evidence_audit.v1");
   assert.equal(plan.roles[0].attached_skills[0].load_level, "instructions");
-  assert.deepEqual(plan.roles[0].depends_on, ["planner"]);
+  assert.deepEqual(plan.roles[0].depends_on, []);
   assert.equal(plan.roles[0].context_policy.include_evidence, true);
   assert.equal(plan.roles[0].status, "ready");
+  assert.equal(plan.supervisor_runtime.planner_requested, true);
 });
 
-test("team plan normalization keeps no-skill roles and canonicalizes attachment fields", () => {
+test("team plan normalization keeps no-skill roles, canonicalizes aliases, and removes planner workers", () => {
   const plan = normalizeTeamPlan({
     mode: "run",
     roles: [
@@ -68,12 +76,11 @@ test("team plan normalization keeps no-skill roles and canonicalizes attachment 
     execution_order: ["planner", "coder"],
   });
 
-  assert.equal(plan.roles.length, 2);
-  assert.equal(plan.roles[0].attached_skills.length, 1);
-  assert.equal(plan.roles[0].attached_skills[0].skill_id, "skill.thread_team_reconciliation.v1");
-  assert.equal(plan.roles[0].attached_skills[0].load_level, "metadata_only");
-  assert.equal(plan.roles[0].attached_skills[0].status, "selected");
-  assert.equal(plan.roles[1].attached_skills.length, 0);
+  assert.equal(plan.roles.length, 1);
+  assert.equal(plan.roles[0].id, "builder");
+  assert.equal(plan.execution_order[0], "builder");
+  assert.equal(plan.supervisor_runtime.planner_requested, true);
+  assert.equal(plan.selection_explanations.some((row) => row.reason.includes("planner role normalized")), true);
 });
 
 test("compatible roles receive expected skills while incompatible roles stay clean", () => {

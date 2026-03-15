@@ -2,6 +2,10 @@ import crypto from "node:crypto";
 import { normalizeLensSpec } from "./lens.js";
 import { normalizeProviderName, normalizeStringList } from "../shared/normalize.js";
 import { normalizeSkillAttachmentList } from "./skill_attachment.js";
+import { normalizeRoleId } from "../compatibility/legacy_roles.js";
+import {
+  createRuntimeAgentInstance as createNormalizedRuntimeAgentInstance,
+} from "./runtime_agent.js";
 
 const DEFAULT_ROLE_BY_ID = {
   planner: "planner",
@@ -145,6 +149,7 @@ export function createRuntimeAgentInstance({
   const cleanProvider = String(provider || tpl?.provider || "gemini").trim().toLowerCase() || "gemini";
   const cleanModel = String(model || tpl?.model || cleanProvider).trim() || cleanProvider;
   const cleanRoleLabel = String(roleLabel || tpl?.role_type || tpl?.name || cleanTemplateId || "runtime_role").trim();
+  const normalizedRoleId = normalizeRoleId(cleanRoleLabel || tpl?.role_type || cleanTemplateId);
   const cleanCapabilityTags = normalizeStringList(
     capabilityTags.length > 0 ? capabilityTags : (tpl?.capability_tags || []),
     { max: 32, lower: true }
@@ -155,11 +160,16 @@ export function createRuntimeAgentInstance({
     ? rawStatus
     : "ready";
 
-  return {
+  return createNormalizedRuntimeAgentInstance({
     instance_id: `inst_${Date.now().toString(36)}_${crypto.randomBytes(4).toString("hex")}`,
     run_id: String(runId || "").trim() || undefined,
+    slot_id: undefined,
+    role_id: normalizedRoleId || undefined,
+    role_label: normalizedRoleId || cleanRoleLabel,
+    display_label: normalizedRoleId || cleanRoleLabel,
+    preset_id: cleanTemplateId || undefined,
+    synthesized: false,
     template_id: cleanTemplateId,
-    role_label: cleanRoleLabel,
     assigned_goal: String(assignedGoal || "").trim() || undefined,
     attached_skills: normalizeSkillAttachmentList(attachedSkills),
     context_pack_id: String(contextPackId || "").trim() || undefined,
@@ -176,5 +186,5 @@ export function createRuntimeAgentInstance({
     execution_budget: executionBudget && typeof executionBudget === "object"
       ? executionBudget
       : undefined,
-  };
+  });
 }

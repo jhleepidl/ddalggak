@@ -1,0 +1,17 @@
+preset_id: market_news_researcher
+display_name: Market News Researcher
+description: Track recent market-moving developments, compare sources, and hand off a concise briefing.
+examples:
+  - Summarize the last week of EV supply chain news and note unresolved claims.
+  - Gather market-moving macro headlines and group them by likely portfolio impact.
+role_hint: researcher
+domain_hints: [market_news, macro, equities]
+method_hints: [source_comparison, recency_filtering, event_synthesis]
+tool_hints: [web_search, news_scan]
+policy_hints: [cite_sources, separate_news_from_opinion]
+personality: fast, skeptical, signal-focused
+collaboration_defaults:
+  pair_with: synthesizer
+  handoff_to: reviewer
+locale: en-US
+instructions_ref: prompt.md

@@ -1,5 +1,6 @@
 import { normalizeSkillAttachmentList, summarizeSkillLoadLevels } from "../domain/skill_attachment.js";
 import { normalizeContextPackList } from "../domain/context_pack.js";
+import { normalizeRuntimeAgentInstance } from "../domain/runtime_agent.js";
 import { normalizeSkillUsageEvent, summarizeSkillUsageEvents } from "./skill_feedback.js";
 
 function asObject(value) {
@@ -44,6 +45,12 @@ function normalizeSkillLoadLevelsMap(value = {}) {
     if (Object.keys(normalized).length > 0) out[mapKey] = normalized;
   }
   return out;
+}
+
+function omitUndefinedFields(value = {}) {
+  return Object.fromEntries(
+    Object.entries(asObject(value)).filter(([, entry]) => entry !== undefined)
+  );
 }
 
 export const ACTION_SOURCE_VALUES = Object.freeze([
@@ -214,43 +221,12 @@ export function normalizeRuntimeAuthority(input = null, { fallback = null } = {}
 }
 
 export function normalizeRuntimeAgent(agent = {}, { defaultStatus = "ready" } = {}) {
-  const row = asObject(agent);
-  const statusRaw = (
-    row.status
-    ?? row.runtime_status
-    ?? row.runtimeStatus
-    ?? defaultStatus
-  );
-  return {
-    instance_id: String(
-      row.instance_id
-      || row.runtime_instance_id
-      || row.instanceId
-      || row.runtimeInstanceId
-      || ""
-    ).trim(),
-    template_id: String(row.template_id || row.templateId || "").trim().toLowerCase() || undefined,
-    role_label: String(row.role_label || row.roleLabel || "").trim().toLowerCase() || undefined,
-    provider: String(row.provider || "").trim().toLowerCase() || undefined,
-    model: String(row.model || "").trim() || undefined,
-    assigned_goal: String(row.assigned_goal || row.assignedGoal || "").trim() || undefined,
-    run_id: String(row.run_id || row.runId || "").trim() || undefined,
-    attached_skills: normalizeSkillAttachmentList(row.attached_skills ?? row.attachedSkills ?? []),
-    context_pack_id: String(row.context_pack_id || row.contextPackId || "").trim() || undefined,
-    provider_binding: row.provider_binding && typeof row.provider_binding === "object"
-      ? row.provider_binding
-      : (row.providerBinding && typeof row.providerBinding === "object" ? row.providerBinding : undefined),
-    capability_tags: normalizeTagList(row.capability_tags ?? row.capabilityTags),
-    lens_spec: row.lens_spec && typeof row.lens_spec === "object"
-      ? row.lens_spec
-      : (row.lensSpec && typeof row.lensSpec === "object" ? row.lensSpec : undefined),
-    execution_budget: row.execution_budget && typeof row.execution_budget === "object"
-      ? row.execution_budget
-      : (row.executionBudget && typeof row.executionBudget === "object" ? row.executionBudget : undefined),
-    status: String(statusRaw || defaultStatus).trim().toLowerCase() || defaultStatus,
-    ephemeral: row.ephemeral === true,
-    fallback: row.fallback === true,
-  };
+  return normalizeRuntimeAgentInstance({
+    ...(agent && typeof agent === "object" ? agent : {}),
+    status: agent?.status ?? agent?.runtime_status ?? agent?.runtimeStatus ?? defaultStatus,
+  }, {
+    defaultSelectionReason: "",
+  });
 }
 
 function hasSnapshotFields(row = {}) {
@@ -525,24 +501,32 @@ export function buildRuntimeMetadataPatch(metadata = null, {
 export function buildRuntimeRolePayload(runtimeAgent = null) {
   const agent = normalizeRuntimeAgent(runtimeAgent, { defaultStatus: "" });
   if (!agent.instance_id && !agent.template_id && !agent.role_label) return {};
-  const rolePayload = {
+  const rolePayload = omitUndefinedFields({
+    role_id: agent.role_id || undefined,
     role_label: agent.role_label || undefined,
+    display_label: agent.display_label || undefined,
     runtime_instance_id: agent.instance_id || undefined,
+    slot_id: agent.slot_id || undefined,
+    preset_id: agent.preset_id || undefined,
     template_id: agent.template_id || undefined,
     run_id: agent.run_id || undefined,
     provider: agent.provider || undefined,
     model: agent.model || undefined,
     capability_tags: Array.isArray(agent.capability_tags) ? agent.capability_tags : [],
     attached_skills: agent.attached_skills || [],
+    attached_skill_ids: Array.isArray(agent.attached_skill_ids) ? agent.attached_skill_ids : [],
     selected_skill_ids: normalizeSkillAttachmentList(agent.attached_skills || []).map((row) => row.skill_id),
     skill_load_levels: summarizeSkillLoadLevels(agent.attached_skills || []),
     context_pack_id: agent.context_pack_id || undefined,
+    authority_profile_id: agent.authority_profile_id || undefined,
+    selection_reason: agent.selection_reason || undefined,
+    synthesized: agent.synthesized === true,
     provider_binding: agent.provider_binding || undefined,
     execution_budget: agent.execution_budget || undefined,
     runtime_status: agent.status || undefined,
     ephemeral: agent.ephemeral === true,
     fallback: agent.fallback === true,
-  };
+  });
   return {
     runtime_role: rolePayload,
     ...rolePayload,

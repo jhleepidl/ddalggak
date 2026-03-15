@@ -1,7 +1,9 @@
 import { normalizeStringList } from "../shared/normalize.js";
+import { normalizeRoleList } from "../compatibility/legacy_roles.js";
 
 const VISIBILITY_VALUES = ["public", "internal", "private"];
 const STATUS_VALUES = ["active", "experimental", "deprecated", "disabled"];
+const KIND_VALUES = ["domain", "method", "tool", "policy"];
 
 function asArray(raw) {
   return Array.isArray(raw) ? raw : [];
@@ -81,6 +83,26 @@ function normalizeRankingMetadata(raw = {}) {
   };
 }
 
+function normalizeKind(raw = "", category = "") {
+  const value = normalizeText(raw, { lower: true });
+  if (KIND_VALUES.includes(value)) return value;
+  const categoryKey = normalizeText(category, { lower: true });
+  if (["policy", "safety"].includes(categoryKey)) return "policy";
+  if (["tool", "tools", "utility"].includes(categoryKey)) return "tool";
+  if (["finance", "equity", "research", "domain"].includes(categoryKey)) return "domain";
+  return "method";
+}
+
+function normalizeWeight(raw, fallback = 1) {
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.min(10, value));
+}
+
+function normalizeTagList(raw = []) {
+  return normalizeStringList(raw, { max: 64, lower: true });
+}
+
 export function normalizeSkillPackage(raw = {}, {
   manifestPath = "",
   skillDir = "",
@@ -91,21 +113,38 @@ export function normalizeSkillPackage(raw = {}, {
 
   const version = normalizeVersion(row.version);
   const id = inferSkillId({
-    id: row.id,
+    id: row.id || row.skill_id || row.skillId,
     slug,
     version,
   });
+  const capabilityTags = normalizeTagList(row.capability_tags ?? row.capabilityTags ?? []);
+  const tags = normalizeTagList([...(row.tags || []), ...capabilityTags]);
+  const compatibleRoles = normalizeRoleList(
+    row.compatible_roles ?? row.compatibleRoles ?? [],
+    { allowDeprecatedControlPlane: true, max: 24 }
+  );
 
   return {
     id,
+    skill_id: id,
     slug,
-    name: normalizeText(row.name || slug) || slug,
+    name: normalizeText(row.name || row.title || slug) || slug,
+    title: normalizeText(row.title || row.name || slug) || slug,
     version,
     description: normalizeText(row.description),
     category: normalizeText(row.category, { lower: true }) || "general",
-    capability_tags: normalizeStringList(row.capability_tags ?? row.capabilityTags ?? [], { max: 64, lower: true }),
-    trigger_terms: normalizeStringList(row.trigger_terms ?? row.triggerTerms ?? [], { max: 64, lower: true }),
-    compatible_roles: normalizeStringList(row.compatible_roles ?? row.compatibleRoles ?? [], { max: 24, lower: true }),
+    kind: normalizeKind(row.kind, row.category),
+    tags,
+    required_tools: normalizeTagList(row.required_tools ?? row.requiredTools ?? []),
+    required_context_types: normalizeTagList(
+      row.required_context_types ?? row.requiredContextTypes ?? []
+    ),
+    compatible_roles: compatibleRoles,
+    conflicts_with: normalizeTagList(row.conflicts_with ?? row.conflictsWith ?? []),
+    cost_weight: normalizeWeight(row.cost_weight ?? row.costWeight, 1),
+    quality_weight: normalizeWeight(row.quality_weight ?? row.qualityWeight, 1),
+    capability_tags: capabilityTags,
+    trigger_terms: normalizeTagList(row.trigger_terms ?? row.triggerTerms ?? []),
     input_contract: asObject(row.input_contract ?? row.inputContract),
     output_contract: asObject(row.output_contract ?? row.outputContract),
     instructions_ref: normalizeRef(row.instructions_ref ?? row.instructionsRef ?? "SKILL.md"),
@@ -144,4 +183,3 @@ export function validateSkillPackage(raw = {}) {
     skill_package: skill,
   };
 }
-

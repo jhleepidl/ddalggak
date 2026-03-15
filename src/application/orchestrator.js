@@ -7,6 +7,11 @@ import { SkillResolver } from "./skill_resolver.js";
 import { SkillLoader } from "./skill_loader.js";
 import { ContextPackBuilder } from "./context_pack_builder.js";
 import {
+  createDefaultRunRoute as createDefaultRunRouteV2,
+  mapTeamPlanToRouteActions as mapTeamPlanToRouteActionsV2,
+  shouldUseGeneratedTeamActions as shouldUseGeneratedTeamActionsV2,
+} from "../control_plane/execution_coordinator.js";
+import {
   createSkillUsageEvent,
   recordSkillUsageEvent,
   summarizeSkillUsageEvents,
@@ -167,32 +172,7 @@ function createSkillUsageEventsFromRuntimeAgents({
 }
 
 export function createDefaultRunRoute(mode, goal, seedInstruction = "") {
-  const cleanMode = String(mode || "run").trim().toLowerCase();
-  if (cleanMode === "continue") {
-    return {
-      actions: [
-        {
-          type: "agent_run",
-          agent: "coder",
-          prompt: seedInstruction || "run/shared 문서를 반영해 CODEX_WORKSPACE_ROOT 코드 변경을 진행하라.",
-          inputs: {},
-        },
-        { type: "git_summary" },
-      ],
-      reason: "fallback: continue default",
-      mode: cleanMode,
-    };
-  }
-
-  return {
-    actions: [
-      { type: "agent_run", agent: "researcher", prompt: goal, inputs: {} },
-      { type: "agent_run", agent: "coder", prompt: goal, inputs: {} },
-      { type: "git_summary" },
-    ],
-    reason: "fallback: run default",
-    mode: cleanMode,
-  };
+  return createDefaultRunRouteV2(mode, goal, seedInstruction);
 }
 
 export function mapTeamPlanToRouteActions(teamBuild = {}, {
@@ -200,36 +180,11 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
   goal = "",
   seedInstruction = "",
 } = {}) {
-  const runtimeAgents = Array.isArray(teamBuild?.runtime_agents) ? teamBuild.runtime_agents : [];
-  if (runtimeAgents.length === 0) return [];
-
-  const actions = [];
-  for (const role of (teamBuild?.team_plan?.execution_order || [])) {
-    const match = runtimeAgents.find((agent) => String(agent.role_label || "").trim().toLowerCase() === String(role || "").trim().toLowerCase());
-    if (!match) continue;
-    if (["messenger", "context_curator"].includes(String(role || ""))) continue;
-    const prompt = String(
-      role === "coder"
-        ? (seedInstruction || goal)
-        : goal
-    ).trim();
-    if (!prompt) continue;
-    actions.push({
-      type: "agent_run",
-      agent: String(match.template_id || match.role_label || "").trim().toLowerCase(),
-      prompt,
-      inputs: {
-        role_label: String(match.role_label || "").trim().toLowerCase(),
-        runtime_instance_id: String(match.instance_id || "").trim(),
-      },
-    });
-    if (actions.length >= 4) break;
-  }
-
-  if (String(mode || "").trim().toLowerCase() !== "chat" && actions.length < 4) {
-    actions.push({ type: "git_summary" });
-  }
-  return actions.slice(0, 4);
+  return mapTeamPlanToRouteActionsV2(teamBuild, {
+    mode,
+    goal,
+    seedInstruction,
+  });
 }
 
 function actionSignature(action = {}) {
@@ -264,20 +219,12 @@ export function shouldUseGeneratedTeamActions({
   teamActions = [],
   hasExplicitRoutePlan = true,
 } = {}) {
-  if (!hasExplicitRoutePlan) {
-    return Array.isArray(teamActions) && teamActions.length > 0;
-  }
-  const explicitActions = Array.isArray(normalizedRoute?.actions) ? normalizedRoute.actions : [];
-  if (!Array.isArray(teamActions) || teamActions.length === 0) return false;
-  if (explicitActions.length === 0) return true;
-
-  const reason = String(normalizedRoute?.reason || "").trim().toLowerCase();
-  if (reason.includes("fallback")) return true;
-
-  const fallbackActions = Array.isArray(defaultRoute?.actions) ? defaultRoute.actions : [];
-  if (fallbackActions.length > 0 && sameActionPlan(explicitActions, fallbackActions)) return true;
-
-  return false;
+  return shouldUseGeneratedTeamActionsV2({
+    normalizedRoute,
+    defaultRoute,
+    teamActions,
+    hasExplicitRoutePlan,
+  });
 }
 
 function classifyActionSource({
