@@ -2,6 +2,7 @@ import {
   normalizeContextPack,
   normalizeContextPackList,
 } from "../domain/context_pack.js";
+import { normalizeStringList } from "../shared/normalize.js";
 import {
   normalizeSkillAttachmentList,
   summarizeSkillLoadLevels,
@@ -22,7 +23,6 @@ function normalizeText(raw = "", {
 
 function includesAny(text = "", keywords = []) {
   const src = normalizeText(text, { lower: true });
-  if (!src) return false;
   return asArray(keywords).some((row) => src.includes(normalizeText(row, { lower: true })));
 }
 
@@ -59,34 +59,23 @@ function buildActionMap(actions = []) {
 function resolveTokenBudget(roleType = "") {
   const role = normalizeRoleId(roleType);
   if (role === "builder") return { soft_limit: 1800, hard_limit: 2800 };
-  if (role === "researcher") return { soft_limit: 1600, hard_limit: 2400 };
-  if (role === "reviewer") return { soft_limit: 1400, hard_limit: 2200 };
-  if (role === "synthesizer") return { soft_limit: 1200, hard_limit: 1800 };
+  if (role === "researcher") return { soft_limit: 1800, hard_limit: 2600 };
+  if (role === "reviewer") return { soft_limit: 1500, hard_limit: 2300 };
+  if (role === "synthesizer") return { soft_limit: 1300, hard_limit: 1900 };
   if (role === "operator") return { soft_limit: 1500, hard_limit: 2200 };
   return { soft_limit: 1200, hard_limit: 2000 };
 }
 
-function findRole(teamPlan = {}, runtimeAgent = {}) {
-  const roles = Array.isArray(teamPlan?.roles) && teamPlan.roles.length > 0
-    ? teamPlan.roles
-    : (Array.isArray(teamPlan?.slots) ? teamPlan.slots : []);
-  const instanceRole = normalizeRoleId(
-    runtimeAgent?.role_id
-    || runtimeAgent?.role_label
-    || runtimeAgent?.roleLabel
-  );
+function findSlot(teamPlan = {}, runtimeAgent = {}) {
+  const slots = Array.isArray(teamPlan?.slots) ? teamPlan.slots : [];
   const slotId = normalizeText(runtimeAgent?.slot_id || runtimeAgent?.slotId);
+  const roleId = normalizeRoleId(runtimeAgent?.role_id || runtimeAgent?.role_label);
   if (slotId) {
-    const bySlot = roles.find((row) => normalizeText(row?.slot_id || row?.slotId) === slotId);
+    const bySlot = slots.find((row) => normalizeText(row?.slot_id || row?.slotId) === slotId);
     if (bySlot) return bySlot;
   }
-  if (instanceRole) {
-    const byRole = roles.find((row) => normalizeRoleId(
-      row?.role_id
-      || row?.role_type
-      || row?.id
-      || row?.role_label
-    ) === instanceRole);
+  if (roleId) {
+    const byRole = slots.find((row) => normalizeRoleId(row?.role_id || row?.role_label) === roleId);
     if (byRole) return byRole;
   }
   return null;
@@ -111,11 +100,84 @@ function resolveLoadLevelForSkill({
       skillPackage,
     });
   }
-
   const combined = `${goal}\n${actionPrompt}`.toLowerCase();
-  if (includesAny(combined, ["template", "checklist", "script", "audit", "debug", "trace"])) return "resources";
+  if (includesAny(combined, ["template", "checklist", "script", "audit", "debug", "trace", "filing", "citation"])) {
+    return "resources";
+  }
   if (combined.trim()) return "instructions";
   return currentLevel || "metadata_only";
+}
+
+function buildRolePackProfile({
+  roleType = "",
+  purpose = "",
+  goal = "",
+  taskInterpretation = {},
+} = {}) {
+  const text = `${purpose}\n${goal}\n${taskInterpretation?.task_summary || ""}`;
+  switch (normalizeRoleId(roleType)) {
+    case "researcher":
+      return {
+        context_types: [
+          "evidence",
+          "citations",
+          includesAny(text, ["news", "market", "headline"]) ? "news" : "",
+          includesAny(text, ["filing", "dart", "공시"]) ? "filings" : "",
+        ].filter(Boolean),
+        shared_items: [
+          { kind: "research_focus", value: normalizeText(purpose) || undefined },
+        ],
+        role_specific_items: [
+          { kind: "source_policy", value: "evidence_first" },
+        ],
+      };
+    case "builder":
+      return {
+        context_types: ["workspace", "code", "patch_plan", "tests"],
+        shared_items: [
+          { kind: "implementation_goal", value: normalizeText(purpose) || undefined },
+        ],
+        role_specific_items: [
+          { kind: "workspace_scope", value: "repo_local" },
+        ],
+      };
+    case "reviewer":
+      return {
+        context_types: ["contradictions", "claim_check", "risk", "tests"],
+        shared_items: [
+          { kind: "review_focus", value: normalizeText(purpose) || undefined },
+        ],
+        role_specific_items: [
+          { kind: "review_policy", value: normalizeText(taskInterpretation?.review_policy) || "required" },
+        ],
+      };
+    case "synthesizer":
+      return {
+        context_types: ["upstream_results", "aggregation", "final_output"],
+        shared_items: [
+          { kind: "output_style", value: normalizeText(taskInterpretation?.deliverable_type) || "report" },
+        ],
+        role_specific_items: [
+          { kind: "finalization", value: "synthesize_upstream_results" },
+        ],
+      };
+    case "operator":
+      return {
+        context_types: ["workflow", "run_state", "tools", "team_state"],
+        shared_items: [
+          { kind: "control_mode", value: normalizeText(taskInterpretation?.control_mode) || "supervised" },
+        ],
+        role_specific_items: [
+          { kind: "workflow_goal", value: normalizeText(purpose) || undefined },
+        ],
+      };
+    default:
+      return {
+        context_types: ["goal"],
+        shared_items: [],
+        role_specific_items: [],
+      };
+  }
 }
 
 export class ContextPackBuilder {
@@ -139,30 +201,31 @@ export class ContextPackBuilder {
     runtimeAgents = [],
     effectiveActions = [],
     routeReason = "",
+    taskInterpretation = {},
   } = {}) {
     const cleanRunId = normalizeText(runId);
     const plan = teamPlan && typeof teamPlan === "object" ? teamPlan : {};
     const actionMap = buildActionMap(effectiveActions);
     const contextPacks = [];
     const runtimeAgentsOut = [];
-    const roleSkillMap = new Map();
+    const slotSkillMap = new Map();
 
     for (const agent of asArray(runtimeAgents)) {
-      const role = findRole(plan, agent);
-      const roleType = normalizeRoleId(
-        role?.role_id
-        || role?.role_type
-        || role?.id
-        || agent?.role_id
-        || agent?.role_label
-      );
+      const slot = findSlot(plan, agent);
+      const roleType = normalizeRoleId(slot?.role_id || agent?.role_id || agent?.role_label);
       const action = actionMap.byInstanceId.get(normalizeText(agent?.instance_id))
         || actionMap.byRole.get(roleType)
         || null;
       const actionPrompt = normalizeText(action?.prompt || action?.goal);
       const attachmentsRaw = normalizeSkillAttachmentList(
-        role?.attached_skills || agent?.attached_skills || []
+        slot?.attached_skills || agent?.attached_skills || []
       );
+      const profile = buildRolePackProfile({
+        roleType,
+        purpose: slot?.purpose || agent?.assigned_goal || goal,
+        goal,
+        taskInterpretation,
+      });
       const skillItems = [];
       const missingItems = [];
       const upgradedAttachments = [];
@@ -207,24 +270,26 @@ export class ContextPackBuilder {
         });
       }
 
+      const contextTypes = normalizeStringList([
+        ...profile.context_types,
+        ...(slot?.required_context_types || []),
+      ], { max: 32, lower: true });
       const contextPack = normalizeContextPack({
         run_id: cleanRunId || undefined,
         scope: "role",
         target_instance_id: normalizeText(agent?.instance_id),
         target_runtime_agent_instance_id: normalizeText(agent?.instance_id),
-        context_types: [
-          "goal",
-          "route_reason",
-          roleType ? `role:${roleType}` : "",
-        ].filter(Boolean),
+        context_types: contextTypes,
         shared_items: [
           { kind: "goal", value: normalizeText(goal) || undefined },
           { kind: "route_reason", value: normalizeText(routeReason) || undefined },
+          ...profile.shared_items,
         ].filter((row) => row.value),
         role_specific_items: [
           { kind: "role_type", value: roleType || undefined },
           { kind: "slot_id", value: normalizeText(agent?.slot_id || agent?.slotId) || undefined },
-          { kind: "template_id", value: normalizeText(agent?.template_id) || undefined },
+          { kind: "slot_purpose", value: normalizeText(slot?.purpose) || undefined },
+          ...profile.role_specific_items,
         ].filter((row) => row.value),
         skill_items: skillItems,
         excluded_items: [],
@@ -247,16 +312,24 @@ export class ContextPackBuilder {
         attached_skill_ids: summarizeSelectedSkillIds(upgradedAttachments),
         context_pack_id: contextPack.id,
       });
-      roleSkillMap.set(roleType, upgradedAttachments);
+      slotSkillMap.set(normalizeText(agent?.slot_id || agent?.instance_id), upgradedAttachments);
     }
 
+    const slotsOut = asArray(plan.slots).map((slot) => {
+      const runtimeAgent = runtimeAgentsOut.find((agent) => normalizeText(agent?.slot_id) === normalizeText(slot?.slot_id));
+      if (!runtimeAgent) return slot;
+      return {
+        ...slot,
+        attached_skills: runtimeAgent.attached_skills,
+      };
+    });
     const rolesOut = asArray(plan.roles).map((role) => {
       const roleType = normalizeRoleId(role?.role_id || role?.role_type || role?.id || role?.role_label);
-      const attached = roleSkillMap.get(roleType);
-      if (!attached) return role;
+      const runtimeAgent = runtimeAgentsOut.find((agent) => normalizeRoleId(agent?.role_id || agent?.role_label) === roleType);
+      if (!runtimeAgent) return role;
       return {
         ...role,
-        attached_skills: attached,
+        attached_skills: runtimeAgent.attached_skills,
       };
     });
 
@@ -276,6 +349,7 @@ export class ContextPackBuilder {
     return {
       team_plan: {
         ...plan,
+        slots: slotsOut,
         roles: rolesOut,
       },
       runtime_agents: runtimeAgentsOut,

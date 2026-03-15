@@ -63,6 +63,34 @@ const DEFAULT_AGENTS = [
       "- 치명도 순으로 발견사항을 정리한다.",
     ].join("\n"),
   },
+  {
+    id: "messenger",
+    name: "Messenger",
+    role_type: "messenger",
+    description: "최종 결과 요약/전달 담당",
+    capability_tags: ["summary", "briefing", "handoff"],
+    provider: "gemini",
+    model: "gemini",
+    prompt: [
+      "역할: 결과 종합 에이전트",
+      "- upstream 조사/구현/리뷰 결과를 짧고 명확한 최종 응답으로 정리한다.",
+      "- 과장 없이 결론, 근거, 남은 리스크를 분리해서 전달한다.",
+    ].join("\n"),
+  },
+  {
+    id: "context_curator",
+    name: "Context Curator",
+    role_type: "context_curator",
+    description: "워크플로우/컨텍스트/상태 운영 담당",
+    capability_tags: ["operations", "context", "runtime"],
+    provider: "gemini",
+    model: "gemini",
+    prompt: [
+      "역할: 운영 컨텍스트 에이전트",
+      "- 작업 흐름, 컨텍스트 적재, 런타임 상태를 정리하고 필요한 연결을 맞춘다.",
+      "- 실행 준비 상태와 운영 리스크를 간결하게 요약한다.",
+    ].join("\n"),
+  },
 ];
 
 function normalizeAgent(raw) {

@@ -46,6 +46,9 @@ test("buildTeamFromTemplates selects known roles first", () => {
     goal: "코드 구현 후 리뷰까지 진행해줘",
     templates,
   });
+  assert.ok(Array.isArray(built.team_plan.slots));
+  assert.ok(built.team_plan.slots.length >= 2);
+  assert.equal(built.team_plan.slots.some((slot) => slot.role_id === "deprecated_control_plane_only"), false);
   const roleIds = built.team_plan.roles.map((role) => role.id);
   assert.equal(roleIds.includes("planner"), false);
   assert.ok(roleIds.includes("builder"));

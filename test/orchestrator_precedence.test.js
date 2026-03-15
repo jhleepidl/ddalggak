@@ -51,7 +51,7 @@ test("generated team actions are used when no explicit route plan exists", () =>
   assert.ok(orchestration.route_plan.actions.length > 0);
 });
 
-test("default fallback route is used when no explicit route and no team actions are available", () => {
+test("synthesized team actions keep the generated route usable even when the registry is empty", () => {
   const orchestration = buildRuntimeOrchestration({
     mode: "chat",
     goal: "아무거나",
@@ -61,9 +61,7 @@ test("default fallback route is used when no explicit route and no team actions 
     resolveAgentId: (id) => String(id || "").trim().toLowerCase(),
   });
 
-  assert.equal(orchestration.route_plan.action_source, "default_fallback_route");
-  assert.deepEqual(
-    orchestration.route_plan.actions.map((action) => action.type),
-    ["agent_run", "agent_run", "git_summary"]
-  );
+  assert.equal(orchestration.route_plan.action_source, "generated_team_actions");
+  assert.ok(orchestration.runtime_agents.some((agent) => agent.synthesized === true));
+  assert.ok(orchestration.route_plan.actions.some((action) => action.type === "agent_run"));
 });

@@ -80,6 +80,7 @@ export function normalizeRoutePlan(routePlan, {
     reason: String(parsed.reason || "route plan").trim() || "route plan",
     actions: outActions,
     mode: String(parsed.mode || "").trim().toLowerCase() || undefined,
+    action_source: String(parsed.action_source || parsed.actionSource || "").trim().toLowerCase() || undefined,
     done: parsed.done === true,
     await_user: parsed.await_user === true || parsed.awaitUser === true,
     deliverables: normalizeStringList(parsed.deliverables || [], { max: 24 }),
@@ -89,6 +90,16 @@ export function normalizeRoutePlan(routePlan, {
     ),
     followup_hint: String((parsed.followup_hint ?? parsed.followupHint) || "").trim() || undefined,
     final_response_style: String(parsed.final_response_style || "concise").trim() || "concise",
+    execution_graph: parsed.execution_graph && typeof parsed.execution_graph === "object"
+      ? parsed.execution_graph
+      : (parsed.executionGraph && typeof parsed.executionGraph === "object" ? parsed.executionGraph : undefined),
+    parallel_groups: Array.isArray(parsed.parallel_groups)
+      ? parsed.parallel_groups
+      : (Array.isArray(parsed.parallelGroups) ? parsed.parallelGroups : []),
+    checkpoints: Array.isArray(parsed.checkpoints) ? parsed.checkpoints : [],
+    supervisor_runtime: parsed.supervisor_runtime && typeof parsed.supervisor_runtime === "object"
+      ? parsed.supervisor_runtime
+      : (parsed.supervisorRuntime && typeof parsed.supervisorRuntime === "object" ? parsed.supervisorRuntime : undefined),
   };
 }
 

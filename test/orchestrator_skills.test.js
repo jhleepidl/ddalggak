@@ -33,6 +33,8 @@ test("runtime orchestration attaches skills and context packs additively", () =>
   assert.ok(Array.isArray(orchestration.context_packs));
   assert.ok(Array.isArray(orchestration.selected_skill_ids));
   assert.ok(orchestration.context_packs.length > 0);
+  assert.ok(Array.isArray(orchestration.team_plan.slots));
+  assert.ok(orchestration.team_plan.execution_graph && typeof orchestration.team_plan.execution_graph === "object");
 
   const hasAttachedSkill = orchestration.runtime_agents.some((agent) =>
     Array.isArray(agent.attached_skills) && agent.attached_skills.length > 0
@@ -50,6 +52,7 @@ test("runtime orchestration attaches skills and context packs additively", () =>
   assert.ok(Array.isArray(firstAgentRun.inputs.selected_skill_ids));
   assert.ok(typeof firstAgentRun.inputs.skill_load_levels === "object");
   assert.ok(String(firstAgentRun.inputs.context_pack_id || "").trim());
+  assert.ok(orchestration.route_plan.execution_graph && typeof orchestration.route_plan.execution_graph === "object");
 });
 
 test("orchestration remains compatible when no skills are available", () => {

@@ -27,6 +27,8 @@ test("local planner emits normalized planning metadata including plan_source", (
   assert.equal(result.route_summary.action_count, result.route_plan.actions.length);
   assert.ok(result.planner_metadata);
   assert.equal(result.planner_metadata.planner_type, "local");
+  assert.equal(result.planner_metadata.pipeline_version, "control_plane_v2");
+  assert.equal(typeof result.planner_metadata.control_mode, "string");
   assert.ok(result.route_plan);
   assert.ok(Array.isArray(result.route_plan.actions));
   assert.ok(typeof result.route_plan.action_source === "string");

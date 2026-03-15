@@ -32,53 +32,34 @@ const ROLE_CAPABILITY_HINTS = {
   operator: ["operations", "context", "runtime"],
 };
 
-function buildKeywordMatcher(text = "") {
-  const src = String(text || "").toLowerCase();
-  return (keywords = []) => keywords.some((keyword) => src.includes(keyword));
+function normalizeText(raw = "", {
+  lower = false,
+} = {}) {
+  const value = String(raw || "").trim();
+  return lower ? value.toLowerCase() : value;
+}
+
+function asArray(raw) {
+  return Array.isArray(raw) ? raw : [];
 }
 
 function normalizePreferredRoles(preferredRoles = []) {
   return normalizeStringList(
-    (Array.isArray(preferredRoles) ? preferredRoles : [])
-      .map((role) => normalizeWorkerRoleId(role))
-      .filter(Boolean),
+    asArray(preferredRoles).map((role) => normalizeWorkerRoleId(role)).filter(Boolean),
     { max: 12, lower: true }
   );
 }
 
 export function inferRuntimeRolesForGoal(goal = "", { routeContext = null } = {}) {
-  const text = String(goal || "").trim();
-  const has = buildKeywordMatcher(text);
-  const roles = [];
-
-  const needsResearch = has(["research", "조사", "분석", "리서치", "fact", "검증", "search", "web"]);
-  const needsBuild = has(["code", "코드", "구현", "개발", "refactor", "fix", "bug", "patch", "ipynb", "노트북"]);
-  const needsReview = has(["review", "리뷰", "검토", "qa", "test", "테스트", "verify", "검증"]);
-  const needsSynthesis = has(["summary", "brief", "telegram", "요약", "정리", "보고", "handoff"]);
-  const needsOperations = has(["membership", "context", "operator", "runtime", "lifecycle", "polling", "shutdown", "trace", "debug", "upload"]);
-
-  if (needsOperations) roles.push("operator");
-  if (needsResearch || (!needsBuild && !needsSynthesis && text.length > 0)) roles.push("researcher");
-  if (needsBuild) roles.push("builder");
-  if (needsReview || needsBuild) roles.push("reviewer");
-  if (needsSynthesis) roles.push("synthesizer");
-
-  const routeActions = Array.isArray(routeContext?.actions) ? routeContext.actions : [];
-  for (const action of routeActions) {
-    const type = String(action?.type || "").trim().toLowerCase();
-    if (type !== "run_agent" && type !== "agent_run") continue;
-    const target = normalizeWorkerRoleId(
-      action?.agent_id
-      || action?.agent
-      || action?.role
-      || action?.role_id
-    );
-    if (target) roles.push(target);
-  }
-
-  if (roles.length === 0) roles.push("researcher");
+  const interpreted = interpretTask({
+    goal,
+    routeContext,
+  });
+  const slots = Array.isArray(interpreted.candidate_capability_slots)
+    ? interpreted.candidate_capability_slots
+    : [];
   return normalizeStringList(
-    DEFAULT_ROLE_ORDER.filter((role) => roles.includes(role)),
+    slots.map((slot) => slot.role_id).filter(Boolean),
     { max: 12, lower: true }
   );
 }
@@ -96,6 +77,7 @@ function scoreTemplateForRole(role = "", template = {}) {
   if (transportAlias && id === transportAlias) score += 80;
   if (String(template?.provider || "") === "codex" && cleanRole === "builder") score += 20;
   if (String(template?.provider || "") === "gemini" && cleanRole === "researcher") score += 12;
+  if (String(template?.provider || "") === "gemini" && cleanRole === "reviewer") score += 8;
 
   const hints = ROLE_CAPABILITY_HINTS[cleanRole] || [];
   for (const hint of hints) {
@@ -117,40 +99,193 @@ function pickTemplateForRole(role = "", templates = [], usedTemplateIds = new Se
   return best ? best.template : null;
 }
 
-function buildDependencies(roleIds = []) {
-  const clean = normalizeStringList(roleIds, { max: 16, lower: true });
-  const edges = [];
+function buildLegacyDependencies(slots = []) {
+  const clean = normalizeStringList(
+    asArray(slots).map((slot) => slot?.role_id).filter(Boolean),
+    { max: 32, lower: true }
+  );
+  const dependencies = [];
   const has = (role) => clean.includes(role);
+  if (has("operator") && has("researcher")) dependencies.push({ from: "operator", to: "researcher" });
+  if (has("researcher") && has("builder")) dependencies.push({ from: "researcher", to: "builder" });
+  if (has("researcher") && has("reviewer")) dependencies.push({ from: "researcher", to: "reviewer" });
+  if (has("builder") && has("reviewer")) dependencies.push({ from: "builder", to: "reviewer" });
+  if (has("reviewer") && has("synthesizer")) dependencies.push({ from: "reviewer", to: "synthesizer" });
+  if (!has("reviewer") && has("researcher") && has("synthesizer")) {
+    dependencies.push({ from: "researcher", to: "synthesizer" });
+  }
+  if (!has("reviewer") && has("builder") && has("synthesizer")) {
+    dependencies.push({ from: "builder", to: "synthesizer" });
+  }
+  return dependencies;
+}
 
-  if (has("operator") && has("researcher")) edges.push({ from: "operator", to: "researcher" });
-  if (has("researcher") && has("builder")) edges.push({ from: "researcher", to: "builder" });
-  if (has("researcher") && has("reviewer")) edges.push({ from: "researcher", to: "reviewer" });
-  if (has("builder") && has("reviewer")) edges.push({ from: "builder", to: "reviewer" });
-  if (has("reviewer") && has("synthesizer")) edges.push({ from: "reviewer", to: "synthesizer" });
+function buildExecutionEdges(slots = []) {
+  const researchers = asArray(slots).filter((slot) => slot.role_id === "researcher");
+  const builders = asArray(slots).filter((slot) => slot.role_id === "builder");
+  const reviewers = asArray(slots).filter((slot) => slot.role_id === "reviewer");
+  const synthesizers = asArray(slots).filter((slot) => slot.role_id === "synthesizer");
+  const operators = asArray(slots).filter((slot) => slot.role_id === "operator");
+  const edges = [];
+  const addEdge = (fromSlot = null, toSlot = null) => {
+    const fromSlotId = normalizeText(fromSlot?.slot_id);
+    const toSlotId = normalizeText(toSlot?.slot_id);
+    if (!fromSlotId || !toSlotId || fromSlotId === toSlotId) return;
+    if (edges.some((edge) => edge.from_slot_id === fromSlotId && edge.to_slot_id === toSlotId)) return;
+    edges.push({
+      from_slot_id: fromSlotId,
+      to_slot_id: toSlotId,
+      from: fromSlot?.role_id,
+      to: toSlot?.role_id,
+      relation: "precedes",
+    });
+  };
 
+  for (const operator of operators) {
+    for (const downstream of [...researchers, ...builders, ...reviewers, ...synthesizers]) {
+      addEdge(operator, downstream);
+    }
+  }
+  for (const researcher of researchers) {
+    for (const builder of builders) addEdge(researcher, builder);
+    for (const reviewer of reviewers) addEdge(researcher, reviewer);
+    if (reviewers.length === 0) {
+      for (const synthesizer of synthesizers) addEdge(researcher, synthesizer);
+    }
+  }
+  for (const builder of builders) {
+    for (const reviewer of reviewers) addEdge(builder, reviewer);
+    if (reviewers.length === 0) {
+      for (const synthesizer of synthesizers) addEdge(builder, synthesizer);
+    }
+  }
+  for (const reviewer of reviewers) {
+    for (const synthesizer of synthesizers) addEdge(reviewer, synthesizer);
+  }
   return edges;
 }
 
 function buildSlotSpec({
-  slotId = "",
-  roleId = "",
-  goal = "",
-  selectionReason = "",
+  slot = {},
+  index = 0,
 } = {}) {
+  const roleId = normalizeWorkerRoleId(slot.role_id);
   return {
-    slot_id: slotId,
-    purpose: goal || roleId,
+    slot_id: normalizeText(slot.slot_id || `slot_${roleId}_${index + 1}`) || `slot_${roleId}_${index + 1}`,
+    purpose: normalizeText(slot.purpose || roleId) || roleId,
     role_id: roleId,
-    required_skill_ids: [],
-    preferred_skill_ids: [],
-    forbidden_skill_ids: [],
-    authority_profile_id: pickDefaultAuthorityProfileId(roleId),
-    parallelizable: roleId !== "reviewer",
-    reviewer_required: roleId === "builder" ? true : undefined,
-    deliverable_type: roleId === "builder"
-      ? "artifact"
-      : (roleId === "synthesizer" ? "brief" : undefined),
-    selection_reason: selectionReason || `selected:${roleId}`,
+    required_skill_ids: normalizeStringList(slot.required_skill_ids || [], { max: 24, lower: true }),
+    preferred_skill_ids: normalizeStringList(slot.preferred_skill_ids || [], { max: 24, lower: true }),
+    forbidden_skill_ids: normalizeStringList(slot.forbidden_skill_ids || [], { max: 24, lower: true }),
+    authority_profile_id: normalizeText(
+      slot.authority_profile_id || pickDefaultAuthorityProfileId(roleId),
+      { lower: true }
+    ) || pickDefaultAuthorityProfileId(roleId),
+    parallelizable: slot.parallelizable !== false,
+    reviewer_required: slot.reviewer_required === true ? true : undefined,
+    deliverable_type: normalizeText(slot.deliverable_type).toLowerCase() || undefined,
+    selection_reason: normalizeText(slot.selection_reason || `candidate:${roleId}`) || `candidate:${roleId}`,
+    required_context_types: normalizeStringList(slot.required_context_types || [], { max: 24, lower: true }),
+    required_tool_ids: normalizeStringList(slot.required_tool_ids || [], { max: 24, lower: true }),
+  };
+}
+
+function buildCandidateSlots(taskInterpretation = {}, {
+  preferredRoles = [],
+  maxAgents = 6,
+} = {}) {
+  const preferred = normalizePreferredRoles(preferredRoles);
+  const suppressed = new Set(asArray(taskInterpretation?.suppressed_role_ids).map((entry) => normalizeWorkerRoleId(entry)).filter(Boolean));
+  const candidateSlots = asArray(taskInterpretation?.candidate_capability_slots)
+    .map((slot, index) => buildSlotSpec({ slot, index }))
+    .filter((slot) => slot && !suppressed.has(slot.role_id));
+
+  for (const roleId of preferred) {
+    if (suppressed.has(roleId)) continue;
+    if (candidateSlots.some((slot) => slot.role_id === roleId)) continue;
+    candidateSlots.push(buildSlotSpec({
+      slot: {
+        role_id: roleId,
+        purpose: `${taskInterpretation.task_summary || "task"} (${roleId})`,
+        selection_reason: "preferred_role",
+      },
+      index: candidateSlots.length,
+    }));
+  }
+
+  const ordered = DEFAULT_ROLE_ORDER.flatMap((roleId) =>
+    candidateSlots.filter((slot) => slot.role_id === roleId)
+  );
+  return ordered.slice(0, Math.max(1, Math.floor(Number(maxAgents) || 6)));
+}
+
+function buildRuntimeAgentsFromSlots({
+  slots = [],
+  templates = [],
+  goal = "",
+} = {}) {
+  const usedTemplateIds = new Set();
+  const runtimeAgents = [];
+  const missingRoles = [];
+  const selectionExplanations = [];
+
+  for (const slot of slots) {
+    const matched = pickTemplateForRole(slot.role_id, templates, usedTemplateIds);
+    if (matched) usedTemplateIds.add(matched.id);
+    const transportAlias = getTransportRoleId(slot.role_id);
+    const synthesized = !matched;
+    const selectionReason = matched
+      ? `matched_template:${matched.id}`
+      : `synthesized_slot:${slot.role_id}`;
+    if (!matched) missingRoles.push(slot.role_id);
+    runtimeAgents.push(createRuntimeAgentInstance({
+      slot_id: slot.slot_id,
+      role_id: slot.role_id,
+      role_label: slot.role_id,
+      display_label: slot.role_id,
+      preset_id: matched ? `legacy.${matched.id}` : null,
+      synthesized,
+      attached_skills: [],
+      context_pack_id: undefined,
+      authority_profile_id: slot.authority_profile_id,
+      selection_reason: selectionReason,
+      template_id: matched?.id || transportAlias || undefined,
+      provider: matched?.provider || undefined,
+      model: matched?.model || undefined,
+      capability_tags: [
+        ...(matched?.capability_tags || []),
+        ...(ROLE_CAPABILITY_HINTS[slot.role_id] || []),
+      ],
+      assigned_goal: goal || slot.purpose,
+      ephemeral: synthesized,
+      fallback: synthesized,
+      status: "ready",
+    }));
+    selectionExplanations.push({
+      subject_id: slot.slot_id,
+      reason: selectionReason,
+    });
+  }
+
+  return {
+    runtime_agents: runtimeAgents,
+    missing_roles: normalizeStringList(missingRoles, { max: 16, lower: true }),
+    selection_explanations: selectionExplanations,
+  };
+}
+
+function buildExecutionGraph(slots = []) {
+  const edges = buildExecutionEdges(slots);
+  const order = slots.map((slot) => slot.slot_id);
+  return {
+    order,
+    role_order: normalizeStringList(slots.map((slot) => slot.role_id), { max: 32, lower: true }),
+    nodes: slots.map((slot) => ({
+      slot_id: slot.slot_id,
+      role_id: slot.role_id,
+      parallelizable: slot.parallelizable === true,
+    })),
+    edges,
   };
 }
 
@@ -161,116 +296,60 @@ export function buildTeamFromTemplates({
   mode = "balanced",
   preferredRoles = [],
   maxAgents = 6,
+  taskInterpretation = null,
 } = {}) {
-  const knownTemplates = (Array.isArray(templates) ? templates : [])
+  const knownTemplates = asArray(templates)
     .map((row) => normalizeAgentTemplate(row))
     .filter(Boolean);
-
-  const inferredRoles = inferRuntimeRolesForGoal(goal, { routeContext });
-  const requestedRoles = normalizePreferredRoles(preferredRoles);
-  const roles = normalizeStringList([
-    ...requestedRoles,
-    ...DEFAULT_ROLE_ORDER.filter((role) => inferredRoles.includes(role)),
-  ], {
-    max: Math.max(1, Math.floor(Number(maxAgents) || 6)),
-    lower: true,
-  });
-
-  const usedTemplateIds = new Set();
-  const runtimeAgents = [];
-  const slots = [];
-  const missingRoles = [];
-  const selectionExplanations = [];
-
-  for (const role of roles) {
-    const slotId = `slot_${role}_${slots.length + 1}`;
-    const matched = pickTemplateForRole(role, knownTemplates, usedTemplateIds);
-    const selectionReason = matched
-      ? `matched_template:${matched.id}`
-      : `synthesized_slot:${role}`;
-    if (matched) usedTemplateIds.add(matched.id);
-
-    const runtimeAgent = createRuntimeAgentInstance({
-      slot_id: slotId,
-      role_id: role,
-      role_label: role,
-      display_label: role,
-      preset_id: matched?.id || role,
-      synthesized: !matched,
-      attached_skills: [],
-      context_pack_id: undefined,
-      authority_profile_id: pickDefaultAuthorityProfileId(role),
-      selection_reason: selectionReason,
-      template_id: matched?.id || undefined,
-      provider: matched?.provider,
-      model: matched?.model,
-      capability_tags: [
-        ...(matched?.capability_tags || []),
-        ...(ROLE_CAPABILITY_HINTS[role] || []),
-      ],
-      assigned_goal: goal,
-      ephemeral: !matched,
-      fallback: !matched,
-      status: "ready",
-    });
-    runtimeAgents.push(runtimeAgent);
-    slots.push(buildSlotSpec({
-      slotId,
-      roleId: role,
+  const interpreted = taskInterpretation && typeof taskInterpretation === "object"
+    ? taskInterpretation
+    : interpretTask({
       goal,
-      selectionReason,
-    }));
-    selectionExplanations.push({
-      subject_id: slotId,
-      reason: selectionReason,
+      mode,
+      preferredRoles,
+      routeContext,
     });
-
-    if (!matched) missingRoles.push(role);
-  }
-
+  const slots = buildCandidateSlots(interpreted, {
+    preferredRoles,
+    maxAgents,
+  });
+  const dependencies = buildLegacyDependencies(slots);
+  const provisional = buildRuntimeAgentsFromSlots({
+    slots,
+    templates: knownTemplates,
+    goal,
+  });
+  const executionGraph = buildExecutionGraph(slots);
   const collaborationCells = buildCollaborationCells({
-    runtimeAgents,
+    runtimeAgents: provisional.runtime_agents,
   });
   const checkpoints = buildExecutionCheckpoints({
     slots,
   });
-  const roleOrder = roles;
-  const dependencies = buildDependencies(roleOrder);
-  const executionGraph = {
-    order: [...roleOrder],
-    edges: dependencies.map((edge) => ({
-      from: edge.from,
-      to: edge.to,
-      relation: "precedes",
-    })),
-  };
+  const supervisorRuntime = createSupervisorRuntime({
+    coordination_mode: interpreted.control_mode || mode,
+    planner_requested: false,
+    max_parallel_workers: interpreted.parallelism_preference === "parallel" ? 4 : 2,
+    selection_reason: interpreted.control_mode || "worker team build",
+  });
 
   const teamPlan = normalizeTeamPlan({
     mode,
-    reason: missingRoles.length > 0
-      ? `matched=${runtimeAgents.length - missingRoles.length}, missing=${missingRoles.join(",")}`
-      : `matched=${runtimeAgents.length}`,
+    reason: provisional.missing_roles.length > 0
+      ? `slots=${slots.length}, synthesized=${provisional.missing_roles.join(",")}`
+      : `slots=${slots.length}`,
     budget: {
       max_agents: Math.max(1, Math.floor(Number(maxAgents) || 6)),
       max_actions: 8,
       preferred_provider_mix: normalizeStringList(
-        runtimeAgents.map((row) => row.provider).filter(Boolean),
+        provisional.runtime_agents.map((row) => row.provider).filter(Boolean),
         { max: 8, lower: true }
       ),
     },
-    task_interpretation: interpretTask({
-      goal,
-      mode,
-      preferredRoles: roles,
-      routeContext,
-    }),
-    supervisor_runtime: createSupervisorRuntime({
-      coordination_mode: mode,
-      planner_requested: false,
-      selection_reason: "worker team build",
-    }),
+    task_interpretation: interpreted,
+    supervisor_runtime: supervisorRuntime,
     slots,
-    runtime_agents: runtimeAgents,
+    runtime_agents: provisional.runtime_agents,
     collaboration_cells: collaborationCells,
     authority_graph: slots.map((slot) => ({
       slot_id: slot.slot_id,
@@ -278,7 +357,7 @@ export function buildTeamFromTemplates({
     })),
     execution_graph: executionGraph,
     checkpoints,
-    selection_explanations: selectionExplanations,
+    selection_explanations: provisional.selection_explanations,
     roles: slots.map((slot) => ({
       id: slot.role_id,
       role_id: slot.role_id,
@@ -290,14 +369,15 @@ export function buildTeamFromTemplates({
       selection_reason: slot.selection_reason,
     })),
     dependencies,
-    execution_order: roleOrder,
+    execution_order: executionGraph.role_order,
   });
 
   return {
+    interpreted_task: interpreted,
     team_plan: teamPlan,
-    runtime_agents: runtimeAgents,
-    missing_roles: missingRoles,
-    selected_template_ids: runtimeAgents.map((row) => row.template_id).filter(Boolean),
+    runtime_agents: provisional.runtime_agents,
+    missing_roles: provisional.missing_roles,
+    selected_template_ids: provisional.runtime_agents.map((row) => row.template_id).filter(Boolean),
     reason: teamPlan.reason,
   };
 }
@@ -309,6 +389,7 @@ export function buildTeamFromRegistry({
   mode = "balanced",
   preferredRoles = [],
   maxAgents = 6,
+  taskInterpretation = null,
 } = {}) {
   const normalizedRegistry = normalizeAgentRegistryToTemplates(registry || {});
   return buildTeamFromTemplates({
@@ -318,5 +399,6 @@ export function buildTeamFromRegistry({
     mode,
     preferredRoles,
     maxAgents,
+    taskInterpretation,
   });
 }

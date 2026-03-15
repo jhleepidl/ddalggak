@@ -225,37 +225,101 @@ function normalizeExecutionGraph(raw = {}, {
   executionOrder = [],
 } = {}) {
   const row = asObject(raw);
-  const order = normalizeStringList(
-    asArray(row.order ?? executionOrder ?? []).map((entry) => normalizeWorkerRoleId(entry)).filter(Boolean),
-    { max: 32, lower: true }
-  );
-  const slotRoles = normalizeStringList(slots.map((slot) => slot.role_id), { max: 32, lower: true });
-  const normalizedOrder = order.length > 0
-    ? order.filter((entry) => slotRoles.includes(entry))
-    : slotRoles;
-  const edges = asArray(row.edges).map((entry) => {
+  const slotIds = normalizeStringList(slots.map((slot) => slot.slot_id), { max: 64, lower: false });
+  const slotsById = new Map(slots.map((slot) => [slot.slot_id, slot]));
+  const slotsByRole = new Map();
+  for (const slot of slots) {
+    const list = slotsByRole.get(slot.role_id) || [];
+    list.push(slot);
+    slotsByRole.set(slot.role_id, list);
+  }
+
+  const resolveSlotIds = (rawRef = "", { fallbackRole = "" } = {}) => {
+    const slotRef = normalizeText(rawRef);
+    if (slotRef && slotsById.has(slotRef)) return [slotRef];
+    const roleRef = normalizeWorkerRoleId(rawRef || fallbackRole);
+    if (!roleRef) return [];
+    return asArray(slotsByRole.get(roleRef)).map((slot) => slot.slot_id);
+  };
+
+  const normalizedOrder = (() => {
+    const rawOrder = asArray(row.order ?? []);
+    const orderedSlotIds = [];
+    const seen = new Set();
+    for (const entry of rawOrder) {
+      for (const slotId of resolveSlotIds(entry)) {
+        if (seen.has(slotId)) continue;
+        seen.add(slotId);
+        orderedSlotIds.push(slotId);
+      }
+    }
+    if (orderedSlotIds.length > 0) {
+      for (const slotId of slotIds) {
+        if (seen.has(slotId)) continue;
+        seen.add(slotId);
+        orderedSlotIds.push(slotId);
+      }
+      return orderedSlotIds;
+    }
+    return slotIds;
+  })();
+
+  const explicitEdges = [];
+  for (const entry of asArray(row.edges)) {
     const edge = asObject(entry);
-    const from = normalizeWorkerRoleId(edge.from);
-    const to = normalizeWorkerRoleId(edge.to);
-    if (!from || !to || from === to) return null;
-    return {
-      from,
-      to,
-      relation: normalizeText(edge.relation || "precedes", { lower: true }) || "precedes",
-    };
-  }).filter(Boolean);
-  const fallbackEdges = dependencies.map((edge) => ({
-    from: edge.from,
-    to: edge.to,
-    relation: "precedes",
-  }));
+    const fromSlotIds = resolveSlotIds(edge.from_slot_id || edge.fromSlotId || edge.from);
+    const toSlotIds = resolveSlotIds(edge.to_slot_id || edge.toSlotId || edge.to);
+    for (const fromSlotId of fromSlotIds) {
+      for (const toSlotId of toSlotIds) {
+        if (!fromSlotId || !toSlotId || fromSlotId === toSlotId) continue;
+        const fromSlot = slotsById.get(fromSlotId);
+        const toSlot = slotsById.get(toSlotId);
+        if (!fromSlot || !toSlot) continue;
+        if (explicitEdges.some((existing) => existing.from_slot_id === fromSlotId && existing.to_slot_id === toSlotId)) {
+          continue;
+        }
+        explicitEdges.push({
+          from_slot_id: fromSlotId,
+          to_slot_id: toSlotId,
+          from: fromSlot.role_id,
+          to: toSlot.role_id,
+          relation: normalizeText(edge.relation || "precedes", { lower: true }) || "precedes",
+        });
+      }
+    }
+  }
+
+  const fallbackEdges = [];
+  for (const edge of dependencies) {
+    const fromSlotIds = resolveSlotIds(edge.from);
+    const toSlotIds = resolveSlotIds(edge.to);
+    for (const fromSlotId of fromSlotIds) {
+      for (const toSlotId of toSlotIds) {
+        if (!fromSlotId || !toSlotId || fromSlotId === toSlotId) continue;
+        const fromSlot = slotsById.get(fromSlotId);
+        const toSlot = slotsById.get(toSlotId);
+        if (!fromSlot || !toSlot) continue;
+        if (fallbackEdges.some((existing) => existing.from_slot_id === fromSlotId && existing.to_slot_id === toSlotId)) {
+          continue;
+        }
+        fallbackEdges.push({
+          from_slot_id: fromSlotId,
+          to_slot_id: toSlotId,
+          from: fromSlot.role_id,
+          to: toSlot.role_id,
+          relation: "precedes",
+        });
+      }
+    }
+  }
+
   return {
     nodes: slots.map((slot) => ({
       slot_id: slot.slot_id,
       role_id: slot.role_id,
       parallelizable: slot.parallelizable === true,
     })),
-    edges: edges.length > 0 ? edges : fallbackEdges,
+    edges: explicitEdges.length > 0 ? explicitEdges : fallbackEdges,
     order: normalizedOrder,
   };
 }
@@ -387,7 +451,7 @@ export function normalizeTeamPlan(raw = {}) {
   );
   const executionOrder = givenOrder.length > 0
     ? givenOrder.filter((id) => roleIds.has(id))
-    : slots.map((slot) => slot.role_id);
+    : normalizeStringList(slots.map((slot) => slot.role_id), { max: 32, lower: true });
   const supervisorRuntime = normalizeSupervisorRuntime(
     row.supervisor_runtime ?? row.supervisorRuntime,
     {
@@ -444,7 +508,7 @@ export function normalizeTeamPlan(raw = {}) {
     mode,
     roles: legacyRoles,
     dependencies,
-    execution_order: executionGraph.order,
+    execution_order: executionOrder,
     reason,
     budget,
   };

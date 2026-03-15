@@ -1,12 +1,24 @@
 import { buildTeamFromRegistry } from "./team_builder.js";
 import { normalizeRoutePlan } from "../domain/route_plan.js";
-import { createRuntimeTeamSnapshot, attachRuntimeTeamSnapshot } from "./runtime_metadata.js";
-import { normalizeSkillAttachmentList, summarizeSkillLoadLevels } from "../domain/skill_attachment.js";
+import { normalizeTeamPlan } from "../domain/team_plan.js";
+import {
+  createRuntimeTeamSnapshot,
+  attachRuntimeTeamSnapshot,
+} from "./runtime_metadata.js";
+import {
+  normalizeSkillAttachmentList,
+  summarizeSkillLoadLevels,
+  summarizeSelectedSkillIds,
+} from "../domain/skill_attachment.js";
 import { SkillRegistry } from "./skill_registry.js";
 import { SkillResolver } from "./skill_resolver.js";
 import { SkillLoader } from "./skill_loader.js";
 import { ContextPackBuilder } from "./context_pack_builder.js";
+import { PresetRegistry } from "../catalog/preset_registry.js";
+import { PresetResolver } from "../control_plane/preset_resolver.js";
+import { interpretTask } from "../control_plane/task_interpreter.js";
 import {
+  coordinateExecutionPlan,
   createDefaultRunRoute as createDefaultRunRouteV2,
   mapTeamPlanToRouteActions as mapTeamPlanToRouteActionsV2,
   shouldUseGeneratedTeamActions as shouldUseGeneratedTeamActionsV2,
@@ -28,38 +40,25 @@ function asArray(raw) {
   return Array.isArray(raw) ? raw : [];
 }
 
-function roleKey(raw = {}) {
-  return normalizeText(raw?.id || raw?.role_type || raw?.role_label, { lower: true });
-}
-
-function mapRoleSkillResolution(teamBuild = {}, resolution = {}) {
-  const roleSkillMap = resolution?.role_skill_map && typeof resolution.role_skill_map === "object"
-    ? resolution.role_skill_map
-    : {};
-  const roles = asArray(teamBuild?.team_plan?.roles).map((role) => {
-    const key = roleKey(role);
-    const attached = normalizeSkillAttachmentList(roleSkillMap[key] || role?.attached_skills || []);
-    return {
-      ...role,
-      attached_skills: attached,
-    };
-  });
-  const runtimeAgents = asArray(teamBuild?.runtime_agents).map((agent) => {
-    const key = normalizeText(agent?.role_label, { lower: true });
-    const attached = normalizeSkillAttachmentList(roleSkillMap[key] || agent?.attached_skills || []);
-    return {
-      ...agent,
-      attached_skills: attached,
-    };
-  });
-  return {
-    ...teamBuild,
-    team_plan: {
-      ...(teamBuild?.team_plan || {}),
-      roles,
-    },
-    runtime_agents: runtimeAgents,
-  };
+function normalizeStringList(raw = [], {
+  lower = true,
+  max = 64,
+} = {}) {
+  const list = Array.isArray(raw)
+    ? raw
+    : (typeof raw === "string" ? raw.split(",") : []);
+  const out = [];
+  const seen = new Set();
+  for (const entry of list) {
+    const text = normalizeText(entry);
+    if (!text) continue;
+    const value = lower ? text.toLowerCase() : text;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+    if (out.length >= max) break;
+  }
+  return out;
 }
 
 function collectContextHints(goal = "", route = {}) {
@@ -72,10 +71,109 @@ function collectContextHints(goal = "", route = {}) {
   return hints.filter(Boolean);
 }
 
+function collectAvailableToolIds({
+  registry = null,
+  availableToolIds = [],
+  toolHints = [],
+} = {}) {
+  const collected = [];
+  for (const toolId of availableToolIds) collected.push(toolId);
+  for (const toolId of toolHints) collected.push(toolId);
+  for (const agent of asArray(registry?.agents)) {
+    for (const toolId of asArray(agent?.tools || agent?.tool_ids || agent?.toolIds)) {
+      collected.push(toolId);
+    }
+  }
+  for (const template of asArray(registry?.templates)) {
+    for (const toolId of asArray(template?.tools || template?.tool_ids || template?.toolIds)) {
+      collected.push(toolId);
+    }
+  }
+  return normalizeStringList(collected, { max: 64, lower: true });
+}
+
+function applyResolvedSkills({
+  teamPlan = null,
+  runtimeAgents = [],
+  resolution = {},
+} = {}) {
+  const plan = teamPlan && typeof teamPlan === "object" ? teamPlan : {};
+  const slotSkillMap = resolution?.slot_skill_map && typeof resolution.slot_skill_map === "object"
+    ? resolution.slot_skill_map
+    : {};
+  const runtimeAgentSkillMap = resolution?.runtime_agent_skill_map && typeof resolution.runtime_agent_skill_map === "object"
+    ? resolution.runtime_agent_skill_map
+    : {};
+  const roleSkillMap = resolution?.role_skill_map && typeof resolution.role_skill_map === "object"
+    ? resolution.role_skill_map
+    : {};
+
+  const runtimeAgentsOut = asArray(runtimeAgents).map((agent) => {
+    const slotKey = normalizeText(agent?.slot_id || agent?.slotId);
+    const instanceKey = normalizeText(agent?.instance_id || agent?.instanceId);
+    const roleKey = normalizeText(agent?.role_id || agent?.role_label, { lower: true });
+    const attachments = normalizeSkillAttachmentList(
+      runtimeAgentSkillMap[instanceKey]
+      || slotSkillMap[slotKey]
+      || roleSkillMap[roleKey]
+      || agent?.attached_skills
+      || []
+    );
+    return {
+      ...agent,
+      attached_skills: attachments,
+      attached_skill_ids: summarizeSelectedSkillIds(attachments),
+    };
+  });
+
+  const slotsOut = asArray(plan.slots).map((slot) => {
+    const slotKey = normalizeText(slot?.slot_id || slot?.slotId);
+    const roleKey = normalizeText(slot?.role_id || slot?.role_label, { lower: true });
+    const runtimeAgent = runtimeAgentsOut.find((agent) => normalizeText(agent?.slot_id) === slotKey);
+    const attachments = normalizeSkillAttachmentList(
+      slotSkillMap[slotKey]
+      || roleSkillMap[roleKey]
+      || runtimeAgent?.attached_skills
+      || slot?.attached_skills
+      || []
+    );
+    return {
+      ...slot,
+      attached_skills: attachments,
+    };
+  });
+
+  const rolesOut = asArray(plan.roles).map((role) => {
+    const roleKey = normalizeText(role?.role_id || role?.role_type || role?.id || role?.role_label, { lower: true });
+    const runtimeAgent = runtimeAgentsOut.find((agent) => normalizeText(agent?.slot_id) === normalizeText(role?.slot_id))
+      || runtimeAgentsOut.find((agent) => normalizeText(agent?.role_id || agent?.role_label, { lower: true }) === roleKey);
+    const attachments = normalizeSkillAttachmentList(
+      roleSkillMap[roleKey]
+      || runtimeAgent?.attached_skills
+      || role?.attached_skills
+      || []
+    );
+    return {
+      ...role,
+      attached_skills: attachments,
+    };
+  });
+
+  return {
+    team_plan: {
+      ...plan,
+      slots: slotsOut,
+      roles: rolesOut,
+    },
+    runtime_agents: runtimeAgentsOut,
+  };
+}
+
 function resolveRuntimeAgentForAction(action = {}, runtimeAgents = []) {
   const row = action && typeof action === "object" ? action : {};
   const inputs = row.inputs && typeof row.inputs === "object" ? row.inputs : {};
   const runtimeInstanceId = normalizeText(inputs.runtime_instance_id || inputs.runtimeInstanceId);
+  const slotId = normalizeText(inputs.slot_id || inputs.slotId);
   const roleLabel = normalizeText(
     inputs.role_label
     || inputs.roleLabel
@@ -87,6 +185,10 @@ function resolveRuntimeAgentForAction(action = {}, runtimeAgents = []) {
   if (runtimeInstanceId) {
     const byInstance = runtimeAgents.find((agent) => normalizeText(agent?.instance_id) === runtimeInstanceId);
     if (byInstance) return byInstance;
+  }
+  if (slotId) {
+    const bySlot = runtimeAgents.find((agent) => normalizeText(agent?.slot_id) === slotId);
+    if (bySlot) return bySlot;
   }
   if (roleLabel) {
     const byRole = runtimeAgents.find((agent) => normalizeText(agent?.role_label, { lower: true }) === roleLabel);
@@ -113,9 +215,11 @@ function enrichRouteActionsWithRuntimeSkills(actions = [], runtimeAgents = []) {
       ...row,
       inputs: {
         ...inputs,
-        role_label: normalizeText(match.role_label, { lower: true }) || undefined,
-        runtime_instance_id: normalizeText(match.instance_id) || undefined,
-        context_pack_id: normalizeText(match.context_pack_id) || undefined,
+        role_id: normalizeText(match.role_id || inputs.role_id, { lower: true }) || undefined,
+        role_label: normalizeText(match.role_label || inputs.role_label, { lower: true }) || undefined,
+        runtime_instance_id: normalizeText(match.instance_id || inputs.runtime_instance_id) || undefined,
+        slot_id: normalizeText(match.slot_id || inputs.slot_id) || undefined,
+        context_pack_id: normalizeText(match.context_pack_id || inputs.context_pack_id) || undefined,
         selected_skill_ids: attachedSkills.map((skill) => skill.skill_id),
         skill_load_levels: summarizeSkillLoadLevels(attachedSkills),
       },
@@ -123,15 +227,53 @@ function enrichRouteActionsWithRuntimeSkills(actions = [], runtimeAgents = []) {
   });
 }
 
-function summarizeSelectionReasonByRole(runtimeAgents = []) {
-  const summary = {};
+function buildSelectionReasonSummary({
+  teamPlan = null,
+  runtimeAgents = [],
+  selectionExplanations = [],
+  presetResolution = {},
+  skillResolution = {},
+} = {}) {
+  const summary = {
+    ...(skillResolution?.selection_reason_summary || {}),
+  };
+  for (const row of asArray(selectionExplanations)) {
+    const subjectId = normalizeText(row?.subject_id || row?.subjectId);
+    const reason = normalizeText(row?.reason || row?.selection_reason || row?.selectionReason);
+    if (!subjectId || !reason) continue;
+    summary[subjectId] = summary[subjectId]
+      ? `${summary[subjectId]}; ${reason}`
+      : reason;
+  }
+  for (const [slotId, presetId] of Object.entries(presetResolution?.slot_preset_map || {})) {
+    if (!slotId) continue;
+    const reason = presetId ? `preset:${presetId}` : "preset:synthesized";
+    summary[slotId] = summary[slotId]
+      ? `${summary[slotId]}; ${reason}`
+      : reason;
+  }
   for (const agent of asArray(runtimeAgents)) {
-    const key = normalizeText(agent?.role_label, { lower: true });
-    if (!key) continue;
-    const reasons = normalizeSkillAttachmentList(agent?.attached_skills || [])
-      .map((row) => `${row.skill_id}:${row.selection_reason || "selected"}`);
-    if (reasons.length === 0) continue;
-    summary[key] = reasons.join("; ");
+    const instanceId = normalizeText(agent?.instance_id);
+    const roleId = normalizeText(agent?.role_id || agent?.role_label, { lower: true });
+    const reason = normalizeText(agent?.selection_reason);
+    if (!reason) continue;
+    if (instanceId) {
+      summary[instanceId] = summary[instanceId]
+        ? `${summary[instanceId]}; ${reason}`
+        : reason;
+    }
+    if (roleId && !summary[roleId]) {
+      summary[roleId] = reason;
+    }
+  }
+  const plan = teamPlan && typeof teamPlan === "object" ? teamPlan : {};
+  for (const slot of asArray(plan.slots)) {
+    const slotId = normalizeText(slot?.slot_id);
+    const reason = normalizeText(slot?.selection_reason);
+    if (!slotId || !reason) continue;
+    summary[slotId] = summary[slotId]
+      ? `${summary[slotId]}; ${reason}`
+      : reason;
   }
   return summary;
 }
@@ -171,6 +313,35 @@ function createSkillUsageEventsFromRuntimeAgents({
   return events;
 }
 
+function buildPlannerMetadata({
+  interpretedTask = {},
+  routePlan = {},
+  teamPlan = null,
+  runtimeAgents = [],
+  contextPacks = [],
+  selectedSkillIds = [],
+  missingRoles = [],
+  actionSource = "",
+  planSource = "local",
+  plannerType = "local",
+} = {}) {
+  return {
+    planner_type: plannerType,
+    plan_source: planSource,
+    pipeline_version: "control_plane_v2",
+    control_mode: normalizeText(interpretedTask?.control_mode, { lower: true }) || undefined,
+    review_policy: normalizeText(interpretedTask?.review_policy, { lower: true }) || undefined,
+    action_source: normalizeText(actionSource || routePlan?.action_source, { lower: true }) || undefined,
+    slot_count: asArray(teamPlan?.slots).length,
+    runtime_agent_count: asArray(runtimeAgents).length,
+    synthesized_agent_count: asArray(runtimeAgents).filter((agent) => agent?.synthesized === true).length,
+    context_pack_count: asArray(contextPacks).length,
+    selected_skill_count: asArray(selectedSkillIds).length,
+    checkpoint_count: asArray(teamPlan?.checkpoints).length,
+    missing_roles: normalizeStringList(missingRoles, { max: 24, lower: true }),
+  };
+}
+
 export function createDefaultRunRoute(mode, goal, seedInstruction = "") {
   return createDefaultRunRouteV2(mode, goal, seedInstruction);
 }
@@ -179,38 +350,14 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
   mode = "run",
   goal = "",
   seedInstruction = "",
+  taskInterpretation = {},
 } = {}) {
   return mapTeamPlanToRouteActionsV2(teamBuild, {
     mode,
     goal,
     seedInstruction,
+    taskInterpretation,
   });
-}
-
-function actionSignature(action = {}) {
-  const row = action && typeof action === "object" ? action : {};
-  const type = String(row.type || "").trim().toLowerCase();
-  if (type === "agent_run") {
-    return [
-      type,
-      String(row.agent || row.agent_id || "").trim().toLowerCase(),
-      String(row.prompt || row.goal || "").trim(),
-    ].join("|");
-  }
-  if (type === "chatgpt_prompt") {
-    return [type, String(row.question || "").trim()].join("|");
-  }
-  return type;
-}
-
-function sameActionPlan(a = [], b = []) {
-  const aList = Array.isArray(a) ? a : [];
-  const bList = Array.isArray(b) ? b : [];
-  if (aList.length !== bList.length) return false;
-  for (let i = 0; i < aList.length; i += 1) {
-    if (actionSignature(aList[i]) !== actionSignature(bList[i])) return false;
-  }
-  return true;
 }
 
 export function shouldUseGeneratedTeamActions({
@@ -227,24 +374,22 @@ export function shouldUseGeneratedTeamActions({
   });
 }
 
-function classifyActionSource({
-  useTeamActions = false,
-  explicitActions = [],
-} = {}) {
-  if (useTeamActions) return "generated_team_actions";
-  if (Array.isArray(explicitActions) && explicitActions.length > 0) return "explicit_route_plan";
-  return "default_fallback_route";
-}
-
 export function buildRuntimeOrchestration({
   mode = "run",
   goal = "",
+  task = "",
+  message = "",
   seedInstruction = "",
   routePlan = null,
   registry = null,
   preferredRoles = [],
+  conversationHints = [],
+  toolHints = [],
+  availableToolIds = [],
   maxAgents = 6,
   resolveAgentId = null,
+  presetRegistry = null,
+  presetResolver = null,
   skillRegistry = null,
   skillResolver = null,
   skillLoader = null,
@@ -253,30 +398,125 @@ export function buildRuntimeOrchestration({
   jobId = "",
   runsDir = "",
   persistSkillEvents = false,
+  planSource = "local",
+  plannerType = "local",
 } = {}) {
-  const defaultRoute = createDefaultRunRoute(mode, goal, seedInstruction);
-  const hasExplicitRoutePlan = !!(routePlan && typeof routePlan === "object");
-  const normalizedRoute = normalizeRoutePlan(hasExplicitRoutePlan ? routePlan : null, {
-    maxActions: 4,
+  const normalizedRoute = normalizeRoutePlan(routePlan, {
+    maxActions: 8,
     resolveAgentId,
   });
+  const effectiveGoal = normalizeText(goal || task || message);
+  const collectedToolIds = collectAvailableToolIds({
+    registry,
+    availableToolIds,
+    toolHints,
+  });
+  const taskInterpretation = interpretTask({
+    goal: effectiveGoal,
+    task,
+    message,
+    mode,
+    seedInstruction,
+    preferredRoles,
+    conversationHints,
+    routeContext: normalizedRoute,
+    registry,
+    toolHints: collectedToolIds,
+  });
 
-  const teamBuildBase = buildTeamFromRegistry({
-    goal,
+  const teamBuild = buildTeamFromRegistry({
+    goal: effectiveGoal,
     routeContext: normalizedRoute,
     registry,
     preferredRoles,
     maxAgents,
     mode,
+    taskInterpretation,
   });
+
+  const presetRegistryInstance = presetRegistry || new PresetRegistry();
+  if (typeof presetRegistryInstance?.load === "function") {
+    presetRegistryInstance.load();
+  }
+  const presetResolverInstance = presetResolver || new PresetResolver({
+    presetRegistry: presetRegistryInstance,
+    registry,
+  });
+  const presetResolution = typeof presetResolverInstance?.resolveForTeam === "function"
+    ? presetResolverInstance.resolveForTeam({
+      teamPlan: teamBuild.team_plan,
+      taskInterpretation,
+      goal: effectiveGoal,
+      registry,
+      availableToolIds: collectedToolIds,
+    })
+    : {
+      runtime_agents: teamBuild.runtime_agents,
+      selection_explanations: [],
+      slot_preset_map: {},
+      missing_roles: teamBuild.missing_roles || [],
+    };
+
+  const combinedSelectionExplanations = [
+    ...asArray(teamBuild.team_plan?.selection_explanations),
+    ...asArray(presetResolution.selection_explanations),
+  ];
+
+  let teamPlan = normalizeTeamPlan({
+    ...(teamBuild.team_plan || {}),
+    task_interpretation: taskInterpretation,
+    runtime_agents: presetResolution.runtime_agents,
+    selection_explanations: combinedSelectionExplanations,
+  });
+  let runtimeAgents = asArray(presetResolution.runtime_agents);
+
   const skillRegistryInstance = skillRegistry || new SkillRegistry();
   if (typeof skillRegistryInstance?.load === "function") {
     skillRegistryInstance.load();
   }
   const skillResolverInstance = skillResolver || new SkillResolver({
     registry: skillRegistryInstance,
-    maxSkillsPerRole: 2,
+    maxSkillsPerRole: 3,
   });
+  const skillResolution = typeof skillResolverInstance?.resolveForTeam === "function"
+    ? skillResolverInstance.resolveForTeam({
+      goal: effectiveGoal,
+      teamPlan,
+      runtimeAgents,
+      contextHints: collectContextHints(effectiveGoal, normalizedRoute),
+      taskInterpretation,
+      availableToolIds: collectedToolIds,
+    })
+    : {
+      slot_skill_map: {},
+      role_skill_map: {},
+      runtime_agent_skill_map: {},
+      selection_reason_summary: {},
+      selected_skill_ids: [],
+    };
+
+  const skillApplied = applyResolvedSkills({
+    teamPlan,
+    runtimeAgents,
+    resolution: skillResolution,
+  });
+  teamPlan = normalizeTeamPlan({
+    ...(skillApplied.team_plan || {}),
+    runtime_agents: skillApplied.runtime_agents,
+    selection_explanations: combinedSelectionExplanations,
+  });
+  runtimeAgents = asArray(skillApplied.runtime_agents);
+
+  const coordinated = coordinateExecutionPlan({
+    mode,
+    goal: effectiveGoal,
+    seedInstruction,
+    routePlan: normalizedRoute,
+    teamPlan,
+    runtimeAgents,
+    taskInterpretation,
+  });
+
   const skillLoaderInstance = skillLoader || new SkillLoader({
     registry: skillRegistryInstance,
   });
@@ -284,108 +524,101 @@ export function buildRuntimeOrchestration({
     registry: skillRegistryInstance,
     skillLoader: skillLoaderInstance,
   });
-  const skillResolution = typeof skillResolverInstance?.resolveForTeam === "function"
-    ? skillResolverInstance.resolveForTeam({
-      goal,
-      teamPlan: teamBuildBase.team_plan,
-      contextHints: collectContextHints(goal, normalizedRoute),
-    })
-    : {
-      role_skill_map: {},
-      selection_reason_summary: {},
-      selected_skill_ids: [],
-    };
-  let teamBuild = mapRoleSkillResolution(teamBuildBase, skillResolution);
-
-  const teamActions = mapTeamPlanToRouteActions(teamBuild, { mode, goal, seedInstruction });
-  const useTeamActions = shouldUseGeneratedTeamActions({
-    normalizedRoute,
-    defaultRoute,
-    teamActions,
-    hasExplicitRoutePlan,
-  });
-  const explicitActions = Array.isArray(normalizedRoute.actions) ? normalizedRoute.actions : [];
-  const effectiveActionsBase = useTeamActions
-    ? teamActions
-    : (explicitActions.length > 0
-      ? explicitActions
-      : defaultRoute.actions);
-  const actionSource = classifyActionSource({
-    useTeamActions,
-    explicitActions,
-  });
   const contextPackResult = typeof contextPackBuilderInstance?.build === "function"
     ? contextPackBuilderInstance.build({
       runId,
-      goal,
-      teamPlan: teamBuild.team_plan,
-      runtimeAgents: teamBuild.runtime_agents,
-      effectiveActions: effectiveActionsBase,
-      routeReason: normalizeText(normalizedRoute.reason) || normalizeText(defaultRoute.reason),
+      goal: effectiveGoal,
+      teamPlan,
+      runtimeAgents,
+      effectiveActions: coordinated.route_plan.actions,
+      routeReason: coordinated.route_plan.reason,
+      taskInterpretation,
     })
     : {
-      team_plan: teamBuild.team_plan,
-      runtime_agents: teamBuild.runtime_agents,
+      team_plan: teamPlan,
+      runtime_agents: runtimeAgents,
       context_packs: [],
-      selected_skill_ids: [],
+      selected_skill_ids: skillResolution.selected_skill_ids || [],
       skill_load_levels: {},
     };
-  teamBuild = {
-    ...teamBuild,
-    team_plan: contextPackResult.team_plan,
+
+  teamPlan = normalizeTeamPlan({
+    ...(contextPackResult.team_plan || teamPlan),
+    task_interpretation: taskInterpretation,
     runtime_agents: contextPackResult.runtime_agents,
-  };
-  const effectiveActions = enrichRouteActionsWithRuntimeSkills(effectiveActionsBase, teamBuild.runtime_agents);
-  const selectionReasonSummary = {
-    ...(skillResolution.selection_reason_summary || {}),
-    ...summarizeSelectionReasonByRole(teamBuild.runtime_agents),
-  };
+    selection_explanations: combinedSelectionExplanations,
+  });
+  runtimeAgents = asArray(contextPackResult.runtime_agents);
+
+  const selectedSkillIds = normalizeStringList(
+    contextPackResult.selected_skill_ids || skillResolution.selected_skill_ids || [],
+    { max: 128, lower: true }
+  );
+  const selectionReasonSummary = buildSelectionReasonSummary({
+    teamPlan,
+    runtimeAgents,
+    selectionExplanations: combinedSelectionExplanations,
+    presetResolution,
+    skillResolution,
+  });
   const skillUsageEvents = createSkillUsageEventsFromRuntimeAgents({
     runId,
-    runtimeAgents: teamBuild.runtime_agents,
+    runtimeAgents,
     jobId,
     runsDir,
     persist: persistSkillEvents === true,
   });
-  const usageSummary = summarizeSkillUsageEvents(skillUsageEvents);
+  const skillUsageSummary = summarizeSkillUsageEvents(skillUsageEvents);
   const runtimeTeamSnapshot = createRuntimeTeamSnapshot({
-    teamPlan: teamBuild.team_plan,
-    runtimeAgents: teamBuild.runtime_agents,
+    teamPlan,
+    runtimeAgents,
     contextPacks: contextPackResult.context_packs,
-    selectedSkillIds: contextPackResult.selected_skill_ids,
+    selectedSkillIds,
     skillLoadLevels: contextPackResult.skill_load_levels,
     selectionReasonSummary,
     skillUsageEvents,
-    skillUsageSummary: usageSummary,
-    source: "team_builder",
+    skillUsageSummary,
+    source: "control_plane",
   });
-  const routeReason = actionSource === "default_fallback_route"
-    ? String(defaultRoute.reason || "fallback route")
-    : String(normalizedRoute.reason || "route plan");
-
-  return {
-    team_plan: teamBuild.team_plan,
-    runtime_agents: teamBuild.runtime_agents,
-    runtime_team_snapshot: runtimeTeamSnapshot,
-    context_packs: contextPackResult.context_packs,
-    selected_skill_ids: contextPackResult.selected_skill_ids,
+  const routePlanWithSkills = attachRuntimeTeamSnapshot({
+    ...coordinated.route_plan,
+    actions: enrichRouteActionsWithRuntimeSkills(coordinated.route_plan.actions, runtimeAgents),
+    selected_skill_ids: selectedSkillIds,
     skill_load_levels: contextPackResult.skill_load_levels,
     selection_reason_summary: selectionReasonSummary,
+    context_packs: contextPackResult.context_packs,
+    selection_explanations: combinedSelectionExplanations,
+  }, runtimeTeamSnapshot);
+  const missingRoles = normalizeStringList(
+    presetResolution.missing_roles || teamBuild.missing_roles || [],
+    { max: 24, lower: true }
+  );
+  const plannerMetadata = buildPlannerMetadata({
+    interpretedTask: taskInterpretation,
+    routePlan: routePlanWithSkills,
+    teamPlan,
+    runtimeAgents,
+    contextPacks: contextPackResult.context_packs,
+    selectedSkillIds,
+    missingRoles,
+    actionSource: coordinated.action_source,
+    planSource,
+    plannerType,
+  });
+
+  return {
+    interpreted_task: taskInterpretation,
+    team_plan: teamPlan,
+    runtime_agents: runtimeAgents,
+    context_packs: contextPackResult.context_packs,
+    selected_skill_ids: selectedSkillIds,
+    skill_load_levels: contextPackResult.skill_load_levels || {},
+    selection_reason_summary: selectionReasonSummary,
     skill_usage_events: skillUsageEvents,
-    missing_roles: teamBuild.missing_roles,
-    route_plan: attachRuntimeTeamSnapshot({
-      ...normalizedRoute,
-      mode: String(mode || "run").trim().toLowerCase(),
-      actions: effectiveActions,
-      action_source: actionSource,
-      selected_skill_ids: contextPackResult.selected_skill_ids,
-      skill_load_levels: contextPackResult.skill_load_levels,
-      selection_reason_summary: selectionReasonSummary,
-      context_packs: contextPackResult.context_packs,
-      reason: [
-        routeReason,
-        String(teamBuild.reason || "team build"),
-      ].filter(Boolean).join("; "),
-    }, runtimeTeamSnapshot),
+    skill_usage_summary: skillUsageSummary,
+    route_plan: routePlanWithSkills,
+    runtime_team_snapshot: runtimeTeamSnapshot,
+    planner_metadata: plannerMetadata,
+    missing_roles: missingRoles,
   };
 }

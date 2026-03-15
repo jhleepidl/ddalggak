@@ -57,6 +57,8 @@ export function normalizeRuntimeAgentInstance(raw = {}, {
   ], { max: 64, lower: true });
   const hasExplicitTemplateId = Object.prototype.hasOwnProperty.call(row, "template_id")
     || Object.prototype.hasOwnProperty.call(row, "templateId");
+  const hasExplicitPresetId = Object.prototype.hasOwnProperty.call(row, "preset_id")
+    || Object.prototype.hasOwnProperty.call(row, "presetId");
   const templateId = normalizeText(
     hasExplicitTemplateId
       ? (row.template_id ?? row.templateId ?? "")
@@ -71,12 +73,17 @@ export function normalizeRuntimeAgentInstance(raw = {}, {
     || templateId
     || "runtime_agent"
   ) || "runtime_agent";
-  const presetId = normalizeText(
-    row.preset_id
-    || row.presetId
-    || defaultPresetId
-    || templateId
-  , { lower: true }) || undefined;
+  const presetId = hasExplicitPresetId
+    ? (() => {
+      if (row.preset_id == null && row.presetId == null) return null;
+      return normalizeText(row.preset_id ?? row.presetId ?? "", { lower: true }) || null;
+    })()
+    : (normalizeText(
+      row.preset_id
+      || row.presetId
+      || defaultPresetId
+      || templateId
+    , { lower: true }) || undefined);
   const instanceId = normalizeText(
     row.instance_id
     || row.instanceId
@@ -89,7 +96,7 @@ export function normalizeRuntimeAgentInstance(raw = {}, {
     role_id: roleId || undefined,
     display_label: displayLabel,
     preset_id: presetId,
-    synthesized: row.synthesized === true || (!presetId && !templateId),
+    synthesized: row.synthesized === true || (hasExplicitPresetId ? presetId == null : (!presetId && !templateId)),
     attached_skill_ids: attachedSkillIds,
     attached_skills: attachedSkills,
     context_pack_id: normalizeText(row.context_pack_id || row.contextPackId) || undefined,

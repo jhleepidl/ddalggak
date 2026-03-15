@@ -73,8 +73,12 @@ test("LocalPlanner returns canonical normalized planning result", () => {
   assert.equal(result.interpreted_task.has_route_recommendation, false);
   assert.equal(result.planner_metadata.planner_type, "local");
   assert.equal(result.planner_metadata.plan_source, "local");
+  assert.equal(result.planner_metadata.pipeline_version, "control_plane_v2");
   assert.ok(Array.isArray(result.route_plan.actions));
+  assert.ok(Array.isArray(result.team_plan.slots));
+  assert.ok(result.team_plan.slots.length > 0);
   assert.ok(Array.isArray(result.runtime_agents));
+  assert.equal(result.runtime_agents.some((agent) => agent.role_id === "deprecated_control_plane_only"), false);
   assert.ok(Array.isArray(result.context_packs));
   assert.ok(Array.isArray(result.selected_skill_ids));
   assert.ok(typeof result.skill_load_levels === "object");

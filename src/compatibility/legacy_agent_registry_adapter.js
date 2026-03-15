@@ -18,6 +18,7 @@ export function adaptLegacyAgentRegistry(raw = {}) {
       optional_skill_ids: [],
       personality_profile: {},
       selection_features: {
+        legacy_template_id: normalizeText(template.id),
         provider: normalizeText(template.provider),
         model: normalizeText(template.model),
       },
