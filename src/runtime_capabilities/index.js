@@ -60,6 +60,7 @@ export function composeRuntimeCapabilities({
     ? new GocConversationTeamStore({
       client: gocClient,
       resolveMembershipTarget,
+      baseDir: String(baseDir || "").trim(),
       logger: runtimeLogger,
     })
     : new LocalConversationTeamStore({

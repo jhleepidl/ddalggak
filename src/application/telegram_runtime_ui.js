@@ -370,11 +370,11 @@ export async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawA
 
     if (cleanKind === "agent" && ["add", "remove", "enable", "disable"].includes(sub)) {
       if (!targetAgentId) {
-        await bot.sendMessage(chatId, "Usage: /agents add|remove|enable|disable <agent_ref>");
+        await bot.sendMessage(chatId, "Usage: /agents add|remove|enable|disable <preset_or_role_ref>");
         return;
       }
       if (!currentJobId) {
-        await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어 conversation agent를 변경할 수 없습니다.");
+        await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어 conversation preset/preferences 를 변경할 수 없습니다.");
         return;
       }
       try {

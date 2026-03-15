@@ -1,5 +1,10 @@
 import { loadAgents } from "./agents.js";
 import { ensureAgentsThread, ensurePublicLibraryThreadId } from "./goc_mapping.js";
+import {
+  getLegacyAliasesForRole,
+  getTransportRoleId,
+  normalizeRoleId,
+} from "./compatibility/legacy_roles.js";
 
 const PROVIDER_ALIASES = {
   gpt: "chatgpt",
@@ -344,6 +349,21 @@ function buildRegistry(agents, meta = {}) {
     byId.set(row.id, row);
     const systemKey = String(row.system_key || row.systemKey || row.meta?.system_key || row.meta?.systemKey || "").trim().toLowerCase();
     if (systemKey) byId.set(systemKey, row);
+    const canonicalRoleId = normalizeRoleId(row.role_type || systemKey || row.id, {
+      allowDeprecatedControlPlane: false,
+      fallback: "",
+    });
+    if (canonicalRoleId) {
+      for (const alias of [
+        canonicalRoleId,
+        getTransportRoleId(canonicalRoleId),
+        ...getLegacyAliasesForRole(canonicalRoleId),
+      ]) {
+        const cleanAlias = String(alias || "").trim().toLowerCase();
+        if (!cleanAlias || cleanAlias === "planner") continue;
+        if (!byId.has(cleanAlias)) byId.set(cleanAlias, row);
+      }
+    }
   }
   return {
     path: "goc://agents",

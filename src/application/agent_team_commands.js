@@ -1,4 +1,5 @@
 import {
+  applyConversationPreferenceMutation,
   applyValidatedConversationTeamMutation,
   createConversationTeamMutationValidationError,
   reconcileConversationTeamWithCatalog,
@@ -14,6 +15,8 @@ import {
 } from "./logical_agents.js";
 import { summarizeMembershipTarget } from "./membership_target.js";
 import { buildRunAuthority } from "./run_authority.js";
+import { normalizeConversationPreferences } from "../domain/conversation_preferences.js";
+import { normalizeWorkerRoleId } from "../compatibility/legacy_roles.js";
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -94,6 +97,14 @@ function deriveLastActiveRunTeamAgentIds(runtime = {}) {
     || row?.role_label
     || row?.roleLabel
   )));
+}
+
+function getRuntimeConversationPreferences(runtime = {}) {
+  return normalizeConversationPreferences(
+    runtime?.conversationPreferences
+    || runtime?.conversation_preferences
+    || {}
+  );
 }
 
 function buildLogicalMembershipIndex(conversationRows = [], logicalCatalog = null) {
@@ -312,6 +323,8 @@ export function deriveConversationTeamView(runtime = {}, {
     asArray(membershipIndex.byLogicalId.get(logicalAgentId)?.enabled_member_agent_ids).length === 0
   ));
   const explicitDisabledSet = new Set(explicitDisabledLogicalIds);
+  const conversationPreferences = getRuntimeConversationPreferences(runtime);
+  const suppressedRoleSet = new Set(asArray(conversationPreferences.suppressed_role_ids));
   const activeExplicitLogicalIds = availableCatalogLogicalIds.length > 0
     ? explicitEnabledLogicalIds.filter((logicalAgentId) => availableCatalogLogicalSet.has(logicalAgentId))
     : explicitEnabledLogicalIds;
@@ -330,11 +343,21 @@ export function deriveConversationTeamView(runtime = {}, {
     || representativeIdFor(logicalAgentId)
     || logicalAgentId
   );
+  const roleIdFor = (logicalAgentId = "") => normalizeWorkerRoleId(
+    logicalEntryFor(logicalAgentId)?.logical_system_key
+    || logicalEntryFor(logicalAgentId)?.command_ref
+    || representativeIdFor(logicalAgentId)
+    || logicalAgentId
+  );
+  const isSuppressedLogicalRole = (logicalAgentId = "") => {
+    const roleId = roleIdFor(logicalAgentId);
+    return !!(roleId && suppressedRoleSet.has(roleId));
+  };
 
   const effectiveEnabledLogicalIds = uniqIds([
     ...baselineDefaultLogicalIds,
     ...activeExplicitLogicalIds,
-  ]).filter((logicalAgentId) => !explicitDisabledSet.has(logicalAgentId));
+  ]).filter((logicalAgentId) => !explicitDisabledSet.has(logicalAgentId) && !isSuppressedLogicalRole(logicalAgentId));
   const effectiveEnabledAgentIds = uniqIds(
     effectiveEnabledLogicalIds.map((logicalAgentId) => representativeIdFor(logicalAgentId))
   );
@@ -360,6 +383,7 @@ export function deriveConversationTeamView(runtime = {}, {
   const addressableAgents = buildAddressableLogicalAgents(logicalCatalog, membershipIndex);
 
   return {
+    conversationPreferences,
     teamConsistency,
     logicalCatalog,
     membershipIndex,
@@ -549,6 +573,11 @@ function formatAgentRefs(refs = [], { limit = 20 } = {}) {
   return rows.map((ref) => `@${ref}`).join(", ");
 }
 
+function formatPreferenceRefs(refs = [], { limit = 20 } = {}) {
+  const rows = uniqIds(refs).slice(0, Math.max(1, Number(limit) || 20));
+  return rows.map((ref) => `@${ref}`).join(", ");
+}
+
 function buildMutationOptions(runtime = null, {
   jobId = "",
   source = "",
@@ -569,6 +598,43 @@ function buildMutationOptions(runtime = null, {
     source: source || "conversation_team_mutation",
     agentId: cleanId(agentId),
     enabled: enabled !== false,
+  };
+}
+
+async function applyConversationPreferenceAliasCommand({
+  runtime = null,
+  jobId = "",
+  actionType = "",
+  agentId = "",
+  source = "",
+} = {}) {
+  if (!runtime || typeof runtime !== "object") throw new Error("runtime is required");
+  const teamStore = runtime?.capabilities?.conversationTeamStore;
+  if (!teamStore) throw new Error("conversation team store is unavailable");
+  const catalogRows = await ensureRuntimeAgentCatalogRows(runtime);
+  const options = buildMutationOptions(runtime, {
+    jobId,
+    source: source || "conversation_preference_mutation",
+    agentId,
+    enabled: actionType !== "disable",
+  });
+  const mutation = await applyConversationPreferenceMutation({
+    teamStore,
+    actionType,
+    agentId,
+    mutationOptions: options,
+    catalogRows,
+  });
+  if (!mutation.ok) {
+    throw createConversationTeamMutationValidationError(mutation.validation);
+  }
+  const preferences = normalizeConversationPreferences(mutation?.result?.preferences || {});
+  runtime.conversationPreferences = preferences;
+  runtime.conversation_preferences = preferences;
+  return {
+    preferences,
+    target: mutation.target,
+    agentRef: mutation?.target?.target_id || cleanId(agentId),
   };
 }
 
@@ -941,15 +1007,12 @@ export async function runConversationAgentTeamCommand({
   let mutationResult = null;
 
   if (["add", "remove", "enable", "disable"].includes(cleanCommand)) {
-    mutationResult = await applyConversationAgentMutation({
+    mutationResult = await applyConversationPreferenceAliasCommand({
       runtime,
       jobId: cleanJobId,
       actionType: cleanCommand,
       agentId,
-      enabled: cleanCommand !== "disable",
       source: source || "conversation_team_command",
-      summarizeSelectionState,
-      recordDiagnostic,
     });
   }
 
@@ -957,6 +1020,7 @@ export async function runConversationAgentTeamCommand({
   const teamView = deriveConversationTeamView(runtime, {
     conversationRows: updated,
   });
+  const preferences = teamView.conversationPreferences;
   const targetAgentRef = cleanId(mutationResult?.agentRef || agentId);
 
   if (cleanCommand === "list") {
@@ -966,31 +1030,58 @@ export async function runConversationAgentTeamCommand({
       type: "list",
       command: cleanCommand,
       message: [
-        "현재 agent/team 상태",
+        "현재 team/preset 상태",
         `- job_id: ${cleanJobId}`,
         `- thread_id: ${String(runtime?.map?.threadId || "").trim() || "(none)"}`,
         `- conversation_id: ${String(runtime?.conversationMembershipTarget?.conversation_id || runtime?.conversation?.id || "").trim() || "(none)"}`,
         teamView.baselineDefaultCommandRefs.length > 0
           ? `- baseline_defaults: ${formatAgentRefs(teamView.baselineDefaultCommandRefs, { limit: 20 })}`
           : "- baseline_defaults: (none)",
-        teamView.explicitEnabledCommandRefs.length > 0
-          ? `- explicit_enabled: ${formatAgentRefs(teamView.explicitEnabledCommandRefs, { limit: 20 })}`
-          : "- explicit_enabled: (none)",
-        teamView.explicitDisabledCommandRefs.length > 0
-          ? `- explicit_disabled: ${formatAgentRefs(teamView.explicitDisabledCommandRefs, { limit: 20 })}`
-          : "- explicit_disabled: (none)",
         teamView.effectiveEnabledCommandRefs.length > 0
-          ? `- effective_enabled: ${formatAgentRefs(teamView.effectiveEnabledCommandRefs, { limit: 20 })}`
-          : "- effective_enabled: (none)",
+          ? `- effective_team_view: ${formatAgentRefs(teamView.effectiveEnabledCommandRefs, { limit: 20 })}`
+          : "- effective_team_view: (none)",
+        preferences.pinned_preset_ids.length > 0
+          ? `- pinned_presets: ${formatPreferenceRefs(preferences.pinned_preset_ids, { limit: 20 })}`
+          : "- pinned_presets: (none)",
+        preferences.banned_preset_ids.length > 0
+          ? `- banned_presets: ${formatPreferenceRefs(preferences.banned_preset_ids, { limit: 20 })}`
+          : "- banned_presets: (none)",
+        preferences.suppressed_role_ids.length > 0
+          ? `- suppressed_roles: ${formatPreferenceRefs(preferences.suppressed_role_ids, { limit: 20 })}`
+          : "- suppressed_roles: (none)",
+        preferences.suppressed_skill_ids.length > 0
+          ? `- suppressed_skills: ${formatPreferenceRefs(preferences.suppressed_skill_ids, { limit: 20 })}`
+          : "",
+        preferences.preferred_domains.length > 0
+          ? `- preferred_domains: ${preferences.preferred_domains.join(", ")}`
+          : "",
+        preferences.preferred_locales.length > 0
+          ? `- preferred_locales: ${preferences.preferred_locales.join(", ")}`
+          : "",
+        preferences.default_control_mode
+          ? `- default_control_mode: ${preferences.default_control_mode}`
+          : "",
+        preferences.reviewer_policy
+          ? `- reviewer_policy: ${preferences.reviewer_policy}`
+          : "",
+        preferences.max_parallel_slots > 0
+          ? `- max_parallel_slots: ${preferences.max_parallel_slots}`
+          : "",
+        teamView.explicitEnabledCommandRefs.length > 0
+          ? `- legacy_explicit_enabled: ${formatAgentRefs(teamView.explicitEnabledCommandRefs, { limit: 20 })}`
+          : "",
+        teamView.explicitDisabledCommandRefs.length > 0
+          ? `- legacy_explicit_disabled: ${formatAgentRefs(teamView.explicitDisabledCommandRefs, { limit: 20 })}`
+          : "",
         teamView.unknownExplicitMemberAgentIds.length > 0
           ? `- unknown_explicit_members: ${formatAgentRefs(teamView.unknownExplicitMemberAgentIds, { limit: 20 })}`
           : "",
         teamView.availableCatalogCommandRefs.length > 0
-          ? `- available_catalog: ${formatAgentRefs(teamView.availableCatalogCommandRefs, { limit: 30 })}`
-          : "- available_catalog: (none)",
+          ? `- available_presets: ${formatAgentRefs(teamView.availableCatalogCommandRefs, { limit: 30 })}`
+          : "- available_presets: (none)",
         teamView.optionalCommandRefs.length > 0
-          ? `- optional_members: ${formatAgentRefs(teamView.optionalCommandRefs, { limit: 30 })}`
-          : "- optional_members: (none)",
+          ? `- optional_presets: ${formatAgentRefs(teamView.optionalCommandRefs, { limit: 30 })}`
+          : "- optional_presets: (none)",
         teamView.lastActiveRunTeamCommandRefs.length > 0
           ? `- last_active_run_team: ${formatAgentRefs(teamView.lastActiveRunTeamCommandRefs, { limit: 20 })}`
           : "",
@@ -998,9 +1089,10 @@ export async function runConversationAgentTeamCommand({
           ? `- warnings: ${String(runtime.conversationMembershipWarning || "").trim()}`
           : "",
         authority?.mode === "goc"
-          ? "명령: /agents registry | /agents public [query] | /agents add <agent_ref> | /agents remove <agent_ref> | /agents enable <agent_ref> | /agents disable <agent_ref>"
-          : "명령: /agents registry | /agents add <agent_ref> | /agents remove <agent_ref> | /agents enable <agent_ref> | /agents disable <agent_ref>",
+          ? "명령: /agents registry | /agents public [query] | /agents add <preset_or_role_ref> | /agents remove <preset_or_role_ref> | /agents enable <preset_or_role_ref> | /agents disable <preset_or_role_ref>"
+          : "명령: /agents registry | /agents add <preset_or_role_ref> | /agents remove <preset_or_role_ref> | /agents enable <preset_or_role_ref> | /agents disable <preset_or_role_ref>",
       ].filter(Boolean).join("\n"),
+      conversation_preferences: preferences,
       baselineDefaultAgentIds: teamView.baselineDefaultAgentIds,
       baselineDefaultAgentRefs: teamView.baselineDefaultCommandRefs,
       enabledAgentIds: teamView.effectiveEnabledAgentIds,
@@ -1025,16 +1117,23 @@ export async function runConversationAgentTeamCommand({
     type: "mutation",
     command: cleanCommand,
     message: [
-      `✅ conversation agent ${actionVerb(cleanCommand)} 완료`,
+      `✅ conversation preference ${actionVerb(cleanCommand)} 완료`,
       `- job_id: ${cleanJobId}`,
       `- agent: @${targetAgentRef || cleanId(agentId) || "unknown"}`,
+      preferences.pinned_preset_ids.length > 0
+        ? `- pinned_presets: ${formatPreferenceRefs(preferences.pinned_preset_ids, { limit: 20 })}`
+        : "- pinned_presets: (none)",
+      preferences.banned_preset_ids.length > 0
+        ? `- banned_presets: ${formatPreferenceRefs(preferences.banned_preset_ids, { limit: 20 })}`
+        : "- banned_presets: (none)",
+      preferences.suppressed_role_ids.length > 0
+        ? `- suppressed_roles: ${formatPreferenceRefs(preferences.suppressed_role_ids, { limit: 20 })}`
+        : "- suppressed_roles: (none)",
       teamView.effectiveEnabledCommandRefs.length > 0
-        ? `- effective_enabled: ${formatAgentRefs(teamView.effectiveEnabledCommandRefs, { limit: 20 })}`
-        : "- effective_enabled: (none)",
-      teamView.explicitDisabledCommandRefs.length > 0
-        ? `- explicit_disabled: ${formatAgentRefs(teamView.explicitDisabledCommandRefs, { limit: 20 })}`
-        : "- explicit_disabled: (none)",
+        ? `- effective_team_view: ${formatAgentRefs(teamView.effectiveEnabledCommandRefs, { limit: 20 })}`
+        : "- effective_team_view: (none)",
     ].join("\n"),
+    conversation_preferences: preferences,
     baselineDefaultAgentIds: teamView.baselineDefaultAgentIds,
     baselineDefaultAgentRefs: teamView.baselineDefaultCommandRefs,
     enabledAgentIds: teamView.effectiveEnabledAgentIds,

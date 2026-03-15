@@ -19,3 +19,8 @@
 - Keep user-facing Telegram runtime formatting in `src/application/telegram_runtime_ui.js`.
 - Do not add new implementations directly back into `src/application/telegram_runtime_ops.js`.
 - Do not add new business logic directly to `telegram_runner.js` unless it is true bootstrap code.
+- Canonical worker roles are only `researcher`, `builder`, `reviewer`, `synthesizer`, and `operator`.
+- `planner` is control-plane compatibility metadata only. Do not introduce it as a runtime worker role.
+- Human-authored preset specs belong under `presets/*` and should remain text-first (`preset.yaml` + `prompt.md`).
+- Conversation-level `/agents` semantics are preference-based: pin/ban presets, suppress roles/skills, and adjust control/review settings. Legacy commands remain aliases over that preference state.
+- `SupervisorRuntime` is a control actor layered on runtime execution, not a worker role.

@@ -5,49 +5,50 @@ import {
   normalizeAgentTemplate,
   normalizeLegacyAgentToTemplate,
 } from "./domain/agent_templates.js";
+import {
+  getLegacyAliasesForRole,
+  getTransportRoleId,
+  normalizeRoleId,
+} from "./compatibility/legacy_roles.js";
 
 const DEFAULT_AGENTS = [
   {
-    id: "planner",
-    name: "Planner",
-    role_type: "planner",
-    description: "상위 의사결정/다음 단계 계획 수립",
-    capability_tags: ["planning", "routing", "prioritization"],
-    provider: "chatgpt",
-    model: "chatgpt",
+    id: "researcher",
+    name: "Researcher",
+    role_type: "researcher",
+    description: "조사/증거 수집/리스크 분석 담당",
+    capability_tags: ["research", "analysis", "fact_check"],
+    provider: "gemini",
+    model: "gemini",
     prompt: [
-      "역할: 오케스트레이터 플래너",
-      "- 전체 목표 대비 우선순위를 정하고 다음 액션을 최소 단계로 제안한다.",
-      "- 중복 분석/중복 구현을 피하고 의사결정 근거를 짧게 남긴다.",
+      "역할: 조사 에이전트",
+      "- 구현 전 확인사항, 리스크, 근거 자료를 정리한다.",
+      "- 코드 패치보다 분석, 출처, 검증 포인트를 우선한다.",
     ].join("\n"),
+    meta: {
+      team_default: true,
+      system_key: "researcher",
+      legacy_aliases: [],
+    },
   },
   {
-    id: "coder",
-    name: "Coder",
-    role_type: "coder",
+    id: "builder",
+    name: "Builder",
+    role_type: "builder",
     description: "코드 구현/수정 담당",
     capability_tags: ["implementation", "coding", "refactor"],
     provider: "codex",
     model: "codex",
     prompt: [
-      "역할: 구현 에이전트",
+      "역할: 빌더 에이전트",
       "- 요청 범위 안에서만 정확히 코드 변경을 수행한다.",
       "- 변경 이유/영향/테스트 포인트를 간결히 요약한다.",
     ].join("\n"),
-  },
-  {
-    id: "researcher",
-    name: "Researcher",
-    role_type: "researcher",
-    description: "조사/리스크 분석 담당",
-    capability_tags: ["research", "analysis", "risk_assessment"],
-    provider: "gemini",
-    model: "gemini",
-    prompt: [
-      "역할: 기술 조사 에이전트",
-      "- 구현 전 확인사항, 리스크, 검증 체크리스트를 정리한다.",
-      "- 코드 패치 대신 분석/근거 중심으로 답한다.",
-    ].join("\n"),
+    meta: {
+      team_default: true,
+      system_key: "builder",
+      legacy_aliases: ["coder"],
+    },
   },
   {
     id: "reviewer",
@@ -62,11 +63,16 @@ const DEFAULT_AGENTS = [
       "- 변경사항의 버그 가능성, 회귀 위험, 누락 테스트를 우선 점검한다.",
       "- 치명도 순으로 발견사항을 정리한다.",
     ].join("\n"),
+    meta: {
+      team_default: true,
+      system_key: "reviewer",
+      legacy_aliases: ["verifier"],
+    },
   },
   {
-    id: "messenger",
-    name: "Messenger",
-    role_type: "messenger",
+    id: "synthesizer",
+    name: "Synthesizer",
+    role_type: "synthesizer",
     description: "최종 결과 요약/전달 담당",
     capability_tags: ["summary", "briefing", "handoff"],
     provider: "gemini",
@@ -76,11 +82,16 @@ const DEFAULT_AGENTS = [
       "- upstream 조사/구현/리뷰 결과를 짧고 명확한 최종 응답으로 정리한다.",
       "- 과장 없이 결론, 근거, 남은 리스크를 분리해서 전달한다.",
     ].join("\n"),
+    meta: {
+      team_default: true,
+      system_key: "synthesizer",
+      legacy_aliases: ["messenger"],
+    },
   },
   {
-    id: "context_curator",
-    name: "Context Curator",
-    role_type: "context_curator",
+    id: "operator",
+    name: "Operator",
+    role_type: "operator",
     description: "워크플로우/컨텍스트/상태 운영 담당",
     capability_tags: ["operations", "context", "runtime"],
     provider: "gemini",
@@ -90,6 +101,11 @@ const DEFAULT_AGENTS = [
       "- 작업 흐름, 컨텍스트 적재, 런타임 상태를 정리하고 필요한 연결을 맞춘다.",
       "- 실행 준비 상태와 운영 리스크를 간결하게 요약한다.",
     ].join("\n"),
+    meta: {
+      team_default: true,
+      system_key: "operator",
+      legacy_aliases: ["context_curator"],
+    },
   },
 ];
 
@@ -163,8 +179,43 @@ export function loadAgents() {
       .map((agent) => normalizeLegacyAgentToTemplate(agent))
       .filter(Boolean)
   );
-  const byId = new Map(agents.map((agent) => [agent.id, agent]));
-  const templatesById = new Map(templates.map((template) => [template.id, template]));
+  const byId = new Map();
+  for (const agent of agents) {
+    byId.set(agent.id, agent);
+    const canonicalRoleId = normalizeRoleId(agent.role_type || agent.id, {
+      allowDeprecatedControlPlane: false,
+      fallback: "",
+    });
+    const aliases = canonicalRoleId
+      ? [
+        canonicalRoleId,
+        getTransportRoleId(canonicalRoleId),
+        ...getLegacyAliasesForRole(canonicalRoleId),
+        ...(Array.isArray(agent?.meta?.legacy_aliases) ? agent.meta.legacy_aliases : []),
+      ]
+      : [];
+    for (const alias of aliases) {
+      const cleanAlias = String(alias || "").trim().toLowerCase();
+      if (!cleanAlias || cleanAlias === "planner") continue;
+      if (!byId.has(cleanAlias)) byId.set(cleanAlias, agent);
+    }
+  }
+  const templatesById = new Map();
+  for (const template of templates) {
+    templatesById.set(template.id, template);
+    const canonicalRoleId = normalizeRoleId(template.role_type || template.id, {
+      allowDeprecatedControlPlane: false,
+      fallback: "",
+    });
+    const aliases = canonicalRoleId
+      ? [canonicalRoleId, getTransportRoleId(canonicalRoleId), ...getLegacyAliasesForRole(canonicalRoleId)]
+      : [];
+    for (const alias of aliases) {
+      const cleanAlias = String(alias || "").trim().toLowerCase();
+      if (!cleanAlias || cleanAlias === "planner") continue;
+      if (!templatesById.has(cleanAlias)) templatesById.set(cleanAlias, template);
+    }
+  }
   return {
     path: registryPath,
     agents,

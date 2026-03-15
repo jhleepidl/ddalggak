@@ -1,6 +1,6 @@
 # Skill Authoring Guide
 
-ddalggak의 skill은 role 기반 runtime 위에 additive하게 붙는 절차 패키지입니다.
+ddalggak의 preset은 `presets/*` 아래에서 text-first로 작성되고, skill은 그 위에 additive하게 붙는 절차 패키지입니다.
 
 ## 1) 디렉터리 규칙
 
@@ -31,7 +31,7 @@ skills/
   "category": "orchestration",
   "capability_tags": ["tag_a", "tag_b"],
   "trigger_terms": ["keyword a", "keyword b"],
-  "compatible_roles": ["planner", "researcher"],
+  "compatible_roles": ["researcher", "reviewer"],
   "input_contract": {},
   "output_contract": {},
   "instructions_ref": "SKILL.md",
@@ -55,6 +55,15 @@ skills/
 - 출력 기대치(최소 산출물)
 
 짧고 명확하게 유지하고, role이 바로 실행 가능한 수준으로 작성합니다.
+
+`compatible_roles`에는 stable worker role만 사용하세요:
+- `researcher`
+- `builder`
+- `reviewer`
+- `synthesizer`
+- `operator`
+
+`planner`는 worker role이 아니므로 skill compatibility target으로 쓰지 않습니다.
 
 ## 4) 네이밍 가이드
 

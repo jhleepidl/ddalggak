@@ -1,6 +1,7 @@
 import { normalizeStringList } from "../shared/normalize.js";
 import { normalizeTaskInterpretation } from "../domain/task_interpretation.js";
-import { normalizeRoleId } from "../compatibility/legacy_roles.js";
+import { normalizeConversationPreferences } from "../domain/conversation_preferences.js";
+import { normalizeRoleId, normalizeRoleList } from "../compatibility/legacy_roles.js";
 
 function asArray(raw) {
   return Array.isArray(raw) ? raw : [];
@@ -287,11 +288,13 @@ export function interpretTask({
   mode = "run",
   seedInstruction = "",
   preferredRoles = [],
+  conversationPreferences = null,
   conversationHints = [],
   routeContext = null,
   registry = null,
   toolHints = [],
 } = {}) {
+  const normalizedConversationPreferences = normalizeConversationPreferences(conversationPreferences || {});
   const goalText = normalizeText(goal || task || message);
   const routeReason = normalizeText(routeContext?.reason);
   const routePrompts = asArray(routeContext?.actions)
@@ -315,22 +318,41 @@ export function interpretTask({
   const deliverableType = inferDeliverableType(taskType, combinedText);
   const riskLevel = inferRiskLevel(combinedText, { taskType, domainHints });
   const reviewPolicy = inferReviewPolicy(combinedText, { taskType, riskLevel });
-  const controlMode = inferControlMode(taskType, { riskLevel, reviewPolicy });
-  const parallelismPreference = inferParallelismPreference(combinedText, { domainHints, taskType });
-  const pinnedPresetIds = inferPresetPins(combinedText, { domainHints });
-  const preferredLocales = [inferLocale(combinedText)];
-  const preferredDomains = domainHints;
-  const suppressedRoleIds = inferSuppressedRoles({
-    taskType,
-    deliverableType,
-    domainHints,
+  const controlMode = normalizedConversationPreferences.default_control_mode
+    || inferControlMode(taskType, { riskLevel, reviewPolicy });
+  const parallelismPreference = normalizedConversationPreferences.max_parallel_slots > 1
+    ? "parallel"
+    : inferParallelismPreference(combinedText, { domainHints, taskType });
+  const pinnedPresetIds = normalizeStringList([
+    ...inferPresetPins(combinedText, { domainHints }),
+    ...normalizedConversationPreferences.pinned_preset_ids,
+  ], { max: 24, lower: true });
+  const preferredLocales = normalizeStringList([
+    inferLocale(combinedText),
+    ...normalizedConversationPreferences.preferred_locales,
+  ], { max: 8, lower: true });
+  const preferredDomains = normalizeStringList([
+    ...domainHints,
+    ...normalizedConversationPreferences.preferred_domains,
+  ], { max: 16, lower: true });
+  const suppressedRoleIds = normalizeRoleList([
+    ...inferSuppressedRoles({
+      taskType,
+      deliverableType,
+      domainHints,
+    }),
+    ...normalizedConversationPreferences.suppressed_role_ids,
+  ], {
+    allowDeprecatedControlPlane: false,
+    max: 16,
   });
+  const reviewerPolicy = normalizedConversationPreferences.reviewer_policy || reviewPolicy;
   const candidateCapabilitySlots = buildCandidateSlots({
     taskType,
     deliverableType,
     riskLevel,
-    reviewPolicy,
-    domainHints,
+    reviewPolicy: reviewerPolicy,
+    domainHints: preferredDomains,
     controlMode,
     parallelismPreference,
     goal: goalText,
@@ -353,14 +375,14 @@ export function interpretTask({
     domain_hints: domainHints,
     candidate_capability_slots: candidateCapabilitySlots,
     control_mode: controlMode,
-    review_policy: reviewPolicy,
+    review_policy: reviewerPolicy,
     parallelism_preference: parallelismPreference,
     pinned_preset_ids: pinnedPresetIds,
-    banned_preset_ids: [],
+    banned_preset_ids: normalizedConversationPreferences.banned_preset_ids,
     preferred_domains: preferredDomains,
     preferred_locales: preferredLocales,
     suppressed_role_ids: suppressedRoleIds,
-    suppressed_skill_ids: [],
+    suppressed_skill_ids: normalizedConversationPreferences.suppressed_skill_ids,
   }, {
     fallbackGoal: goalText,
     fallbackMode: mode,

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildTeamFromTemplates } from "../src/application/team_builder.js";
+import { loadAgents, getAgent } from "../src/agents.js";
 
 const templates = [
   {
@@ -72,4 +73,17 @@ test("fallback runtime roles are clearly marked as ephemeral", () => {
     assert.equal(role.ephemeral, true);
     assert.equal(role.role_id === "deprecated_control_plane_only", false);
   }
+});
+
+test("default registry keeps legacy coder as a builder alias and never exposes planner as a default worker", () => {
+  const registry = loadAgents();
+  const builder = getAgent("builder", registry);
+  const coderAlias = getAgent("coder", registry);
+  const planner = getAgent("planner", registry);
+
+  assert.ok(builder);
+  assert.ok(coderAlias);
+  assert.equal(coderAlias.id, "builder");
+  assert.equal(builder.role_type, "builder");
+  assert.equal(planner, null);
 });

@@ -27,9 +27,18 @@ function createFormatterDeps() {
   };
 }
 
-test("runConversationAgentTeamCommand applies local mutation and formats the result", async () => {
-  const store = createLocalStore();
-  const runtime = {
+function createRuntime(store, {
+  jobId = "job_team_1",
+  baselineDefaultAgentIds = ["builder", "reviewer"],
+  conversationAgents = [],
+  agentsCatalog = [
+    { id: "builder", role_type: "builder" },
+    { id: "reviewer", role_type: "reviewer" },
+    { id: "researcher", role_type: "researcher" },
+    { id: "market_news_researcher", role_type: "researcher" },
+  ],
+} = {}) {
+  return {
     mode: "local",
     runtimeAuthority: {
       mode: "standalone",
@@ -39,88 +48,149 @@ test("runConversationAgentTeamCommand applies local mutation and formats the res
       conversation_team_source: "local",
       skill_catalog_source: "local",
     },
-    map: { threadId: "local:job_team_1" },
-    conversation: { id: "local:job_team_1", thread_id: "local:job_team_1" },
+    map: { threadId: `local:${jobId}` },
+    conversation: { id: `local:${jobId}`, thread_id: `local:${jobId}` },
     conversationMembershipTarget: {
-      thread_id: "local:job_team_1",
-      conversation_id: "local:job_team_1",
+      thread_id: `local:${jobId}`,
+      conversation_id: `local:${jobId}`,
       source: "local",
     },
-    agentsCatalog: [
-      { id: "planner" },
-      { id: "coder" },
-      { id: "researcher" },
-    ],
+    baselineDefaultAgentIds,
+    conversationAgents,
+    agentsCatalog,
     capabilities: {
       conversationTeamStore: store,
     },
   };
+}
+
+test("/agents add on a preset pins it as a conversation preference", async () => {
+  const store = createLocalStore();
+  const runtime = createRuntime(store, {
+    jobId: "job_team_preset_pin",
+  });
   await store.ensureTeam({
-    jobId: "job_team_1",
-    baselineAgentIds: ["planner"],
+    jobId: "job_team_preset_pin",
+    baselineAgentIds: runtime.baselineDefaultAgentIds,
   });
 
   const result = await runConversationAgentTeamCommand({
     command: "add",
     runtime,
-    jobId: "job_team_1",
+    jobId: "job_team_preset_pin",
+    agentId: "market_news_researcher",
+    source: "test_agents_command",
+    agentRegistry: { agents: runtime.agentsCatalog },
+    ...createFormatterDeps(),
+  });
+
+  assert.match(result.message, /conversation preference 추가 완료/);
+  assert.deepEqual(result.conversation_preferences.pinned_preset_ids, ["market_news_researcher"]);
+  assert.deepEqual(runtime.conversationPreferences.pinned_preset_ids, ["market_news_researcher"]);
+
+  const listed = await runConversationAgentTeamCommand({
+    command: "list",
+    runtime,
+    jobId: "job_team_preset_pin",
+    source: "test_agents_command",
+    agentRegistry: { agents: runtime.agentsCatalog },
+    ...createFormatterDeps(),
+  });
+
+  assert.match(listed.message, /현재 team\/preset 상태/);
+  assert.match(listed.message, /pinned_presets: @market_news_researcher/);
+  assert.match(listed.message, /baseline_defaults: @builder, @reviewer/);
+});
+
+test("/agents remove on a canonical role suppresses that role without mutating membership transport", async () => {
+  const store = createLocalStore();
+  const runtime = createRuntime(store, {
+    jobId: "job_team_role_suppress",
+    conversationAgents: [
+      { agent_id: "builder", enabled: true },
+      { agent_id: "reviewer", enabled: true },
+    ],
+  });
+  await store.ensureTeam({
+    jobId: "job_team_role_suppress",
+    baselineAgentIds: runtime.baselineDefaultAgentIds,
+  });
+
+  const result = await runConversationAgentTeamCommand({
+    command: "remove",
+    runtime,
+    jobId: "job_team_role_suppress",
+    agentId: "reviewer",
+    source: "test_agents_command",
+    agentRegistry: { agents: runtime.agentsCatalog },
+    ...createFormatterDeps(),
+  });
+
+  assert.deepEqual(result.conversation_preferences.suppressed_role_ids, ["reviewer"]);
+  assert.deepEqual(runtime.conversationPreferences.suppressed_role_ids, ["reviewer"]);
+  assert.deepEqual(result.enabledAgentIds, ["builder"]);
+  assert.deepEqual(runtime.conversationAgents, [
+    { agent_id: "builder", enabled: true },
+    { agent_id: "reviewer", enabled: true },
+  ]);
+  assert.match(result.message, /suppressed_roles: @reviewer/);
+  assert.match(result.message, /effective_team_view: @builder/);
+});
+
+test("legacy coder command resolves to builder preference semantics safely", async () => {
+  const store = createLocalStore();
+  const runtime = createRuntime(store, {
+    jobId: "job_team_legacy_coder",
+    baselineDefaultAgentIds: ["builder", "researcher"],
+  });
+  await store.ensureTeam({
+    jobId: "job_team_legacy_coder",
+    baselineAgentIds: runtime.baselineDefaultAgentIds,
+  });
+
+  const disabled = await runConversationAgentTeamCommand({
+    command: "disable",
+    runtime,
+    jobId: "job_team_legacy_coder",
     agentId: "coder",
     source: "test_agents_command",
     agentRegistry: { agents: runtime.agentsCatalog },
     ...createFormatterDeps(),
   });
 
-  assert.match(result.message, /conversation agent 추가 완료/);
-  assert.match(result.message, /@coder/);
-  assert.deepEqual(runtime.enabledAgentIds, ["planner", "coder"]);
+  assert.deepEqual(disabled.conversation_preferences.suppressed_role_ids, ["builder"]);
+  assert.deepEqual(disabled.enabledAgentIds, ["researcher"]);
 
-  const listed = await runConversationAgentTeamCommand({
-    command: "list",
+  const reenabled = await runConversationAgentTeamCommand({
+    command: "enable",
     runtime,
-    jobId: "job_team_1",
+    jobId: "job_team_legacy_coder",
+    agentId: "coder",
     source: "test_agents_command",
     agentRegistry: { agents: runtime.agentsCatalog },
     ...createFormatterDeps(),
   });
 
-  assert.match(listed.message, /현재 agent\/team 상태/);
-  assert.match(listed.message, /explicit_enabled: @planner, @coder/);
-  assert.match(listed.message, /optional_members: @researcher/);
+  assert.deepEqual(reenabled.conversation_preferences.suppressed_role_ids, []);
+  assert.deepEqual(reenabled.enabledAgentIds, ["builder", "researcher"]);
 });
 
 test("applyConversationAgentMutation preserves local catalog validation", async () => {
   const store = createLocalStore();
-  const runtime = {
-    mode: "local",
-    runtimeAuthority: {
-      mode: "standalone",
-      plan_source: "local",
-      context_source: "local",
-      agent_catalog_source: "local",
-      conversation_team_source: "local",
-      skill_catalog_source: "local",
-    },
-    map: { threadId: "local:job_team_2" },
-    conversation: { id: "local:job_team_2", thread_id: "local:job_team_2" },
-    conversationMembershipTarget: {
-      thread_id: "local:job_team_2",
-      conversation_id: "local:job_team_2",
-      source: "local",
-    },
-    agentsCatalog: [{ id: "planner" }],
-    capabilities: {
-      conversationTeamStore: store,
-    },
-  };
+  const runtime = createRuntime(store, {
+    jobId: "job_team_local_validation",
+    baselineDefaultAgentIds: ["builder"],
+    agentsCatalog: [{ id: "builder" }],
+  });
   await store.ensureTeam({
-    jobId: "job_team_2",
-    baselineAgentIds: ["planner"],
+    jobId: "job_team_local_validation",
+    baselineAgentIds: runtime.baselineDefaultAgentIds,
   });
 
   await assert.rejects(
     () => applyConversationAgentMutation({
       runtime,
-      jobId: "job_team_2",
+      jobId: "job_team_local_validation",
       actionType: "add",
       agentId: "ghost",
       source: "test_agents_command",
@@ -175,7 +245,7 @@ test("applyConversationAgentMutation skips local catalog validation for goc auth
 
   const mutation = await applyConversationAgentMutation({
     runtime,
-    jobId: "job_team_3",
+    jobId: "job_team_goc_validation",
     actionType: "add",
     agentId: "ghost",
     source: "test_agents_command",
@@ -185,337 +255,4 @@ test("applyConversationAgentMutation skips local catalog validation for goc auth
   assert.equal(mutation.verification.confirmed, true);
   assert.deepEqual(runtime.enabledAgentIds, ["ghost"]);
   assert.deepEqual(runtime.conversationAgents, [{ agent_id: "ghost", enabled: true }]);
-});
-
-test("/agents list separates baseline defaults, explicit membership, and last active run team", async () => {
-  const runtime = {
-    mode: "goc",
-    runtimeAuthority: {
-      mode: "goc",
-      plan_source: "local",
-      context_source: "goc",
-      agent_catalog_source: "goc",
-      conversation_team_source: "goc",
-      skill_catalog_source: "mixed",
-    },
-    map: { threadId: "goc-thread" },
-    conversation: { id: "goc-conversation", thread_id: "goc-thread" },
-    conversationMembershipTarget: {
-      thread_id: "goc-thread",
-      conversation_id: "goc-conversation",
-      source: "goc",
-    },
-    baselineDefaultAgentIds: ["planner", "coder"],
-    conversationAgents: [
-      { agent_id: "researcher", enabled: true },
-      { agent_id: "coder", enabled: false },
-    ],
-    agentsCatalog: [
-      { id: "planner" },
-      { id: "coder" },
-      { id: "researcher" },
-      { id: "reviewer" },
-    ],
-    runtimeTeamSnapshot: {
-      runtime_agents: [
-        { template_id: "reviewer" },
-        { template_id: "coder" },
-      ],
-    },
-  };
-
-  const result = await runConversationAgentTeamCommand({
-    command: "list",
-    runtime,
-    jobId: "job_team_4",
-    source: "test_agents_command",
-    agentRegistry: { agents: runtime.agentsCatalog },
-    ...createFormatterDeps(),
-  });
-
-  assert.match(result.message, /baseline_defaults: @planner, @coder/);
-  assert.match(result.message, /explicit_enabled: @researcher/);
-  assert.match(result.message, /explicit_disabled: @coder/);
-  assert.match(result.message, /effective_enabled: @planner, @researcher/);
-  assert.match(result.message, /optional_members: @reviewer/);
-  assert.match(result.message, /last_active_run_team: @reviewer, @coder/);
-  assert.deepEqual(result.baselineDefaultAgentIds, ["planner", "coder"]);
-  assert.deepEqual(result.explicitEnabledAgentIds, ["researcher"]);
-  assert.deepEqual(result.explicitDisabledAgentIds, ["coder"]);
-  assert.deepEqual(result.enabledAgentIds, ["planner", "researcher"]);
-});
-
-test("/agents list keeps baseline defaults visible when GoC explicit membership sync is degraded", async () => {
-  const runtime = {
-    mode: "goc",
-    runtimeAuthority: {
-      mode: "goc",
-      plan_source: "local",
-      context_source: "goc",
-      agent_catalog_source: "goc",
-      conversation_team_source: "goc",
-      skill_catalog_source: "mixed",
-    },
-    map: { threadId: "goc-thread" },
-    conversation: { id: "goc-conversation", thread_id: "goc-thread" },
-    conversationMembershipTarget: {
-      thread_id: "goc-thread",
-      conversation_id: "goc-conversation",
-      source: "goc",
-    },
-    baselineDefaultAgentIds: ["planner", "coder"],
-    conversationAgents: [],
-    conversationMembershipWarning: "team_sync:list_explicit_members:GoC API GET /api/threads/goc-thread/team failed (404)",
-    agentsCatalog: [
-      { id: "planner" },
-      { id: "coder" },
-      { id: "researcher" },
-    ],
-  };
-
-  const result = await runConversationAgentTeamCommand({
-    command: "list",
-    runtime,
-    jobId: "job_team_5",
-    source: "test_agents_command",
-    agentRegistry: { agents: runtime.agentsCatalog },
-    ...createFormatterDeps(),
-  });
-
-  assert.match(result.message, /baseline_defaults: @planner, @coder/);
-  assert.match(result.message, /explicit_enabled: \(none\)/);
-  assert.match(result.message, /effective_enabled: @planner, @coder/);
-  assert.match(result.message, /warnings: team_sync:list_explicit_members:/);
-  assert.doesNotMatch(result.message, /add_baseline_agent|bootstrap_default_agents/);
-});
-
-test("goc logical team view dedupes public/private defaults and disables baseline by logical ref", async () => {
-  const plannerPublicId = "planner_public_uuid_like";
-  const plannerPrivateId = "planner_private_uuid_like";
-  const researcherPublicId = "researcher_public_uuid_like";
-  const researcherPrivateId = "researcher_private_uuid_like";
-  const state = [];
-  const setCalls = [];
-  const target = {
-    thread_id: "goc-thread",
-    conversation_id: "goc-conversation",
-    source: "goc",
-  };
-  const runtime = {
-    mode: "goc",
-    runtimeAuthority: {
-      mode: "goc",
-      plan_source: "local",
-      context_source: "goc",
-      agent_catalog_source: "goc",
-      conversation_team_source: "goc",
-      skill_catalog_source: "mixed",
-    },
-    map: { threadId: "goc-thread" },
-    conversation: { id: "goc-conversation", thread_id: "goc-thread" },
-    conversationMembershipTarget: target,
-    baselineDefaultAgentIds: [plannerPublicId, researcherPublicId],
-    conversationAgents: [],
-    agentsCatalog: [
-      {
-        id: plannerPublicId,
-        name: "Planner",
-        system_key: "planner",
-        source_agent_id: null,
-        is_system_default: true,
-        service_id: "public",
-        visibility: "public",
-        published: true,
-      },
-      {
-        id: plannerPrivateId,
-        name: "Planner",
-        system_key: null,
-        source_agent_id: plannerPublicId,
-        is_system_default: false,
-        owner_user_id: "user_1",
-        service_id: "svc_1",
-        visibility: "private",
-        installed_from_public: true,
-        origin: { type: "public", public_node_id: "planner_node" },
-      },
-      {
-        id: researcherPublicId,
-        name: "Researcher",
-        system_key: "researcher",
-        source_agent_id: null,
-        is_system_default: true,
-        service_id: "public",
-        visibility: "public",
-        published: true,
-      },
-      {
-        id: researcherPrivateId,
-        name: "Researcher",
-        system_key: null,
-        source_agent_id: researcherPublicId,
-        is_system_default: false,
-        owner_user_id: "user_1",
-        service_id: "svc_1",
-        visibility: "private",
-        installed_from_public: true,
-        origin: { type: "public", public_node_id: "researcher_node" },
-      },
-    ],
-    capabilities: {
-      conversationTeamStore: {
-        source: "goc",
-        async listAgents() {
-          return {
-            target,
-            rows: state.map((row) => ({ ...row })),
-            warnings: [],
-          };
-        },
-        async setAgentEnabled({ agentId, enabled }) {
-          setCalls.push({ agentId, enabled });
-          const index = state.findIndex((row) => row.agent_id === agentId);
-          if (index >= 0) state[index] = { ...state[index], enabled };
-          else state.push({ agent_id: agentId, enabled });
-          return {
-            target,
-            rows: state.map((row) => ({ ...row })),
-            warnings: [],
-            mutation_response: { ok: true, agent_id: agentId, enabled },
-          };
-        },
-      },
-    },
-  };
-
-  const listed = await runConversationAgentTeamCommand({
-    command: "list",
-    runtime,
-    jobId: "job_team_6",
-    source: "test_agents_command",
-    agentRegistry: { agents: runtime.agentsCatalog },
-    ...createFormatterDeps(),
-  });
-
-  assert.match(listed.message, /baseline_defaults: @planner, @researcher/);
-  assert.match(listed.message, /available_catalog: @planner, @researcher/);
-  assert.doesNotMatch(listed.message, /planner_public_uuid_like|planner_private_uuid_like/);
-
-  const disabled = await runConversationAgentTeamCommand({
-    command: "disable",
-    runtime,
-    jobId: "job_team_6",
-    agentId: "planner",
-    source: "test_agents_command",
-    agentRegistry: { agents: runtime.agentsCatalog },
-    ...createFormatterDeps(),
-  });
-
-  assert.deepEqual(setCalls, [{ agentId: plannerPrivateId, enabled: false }]);
-  assert.match(disabled.message, /agent: @planner/);
-  assert.deepEqual(runtime.enabledAgentRefs, ["researcher"]);
-  assert.deepEqual(runtime.enabledAgentIds, [researcherPrivateId]);
-
-  const relisted = await runConversationAgentTeamCommand({
-    command: "list",
-    runtime,
-    jobId: "job_team_6",
-    source: "test_agents_command",
-    agentRegistry: { agents: runtime.agentsCatalog },
-    ...createFormatterDeps(),
-  });
-
-  assert.match(relisted.message, /explicit_disabled: @planner/);
-  assert.match(relisted.message, /effective_enabled: @researcher/);
-});
-
-test("goc logical remove removes explicit specialist regardless of underlying raw membership id", async () => {
-  const reviewerPublicId = "reviewer_public_uuid_like";
-  const reviewerPrivateId = "reviewer_private_uuid_like";
-  const state = [{ agent_id: reviewerPublicId, enabled: true }];
-  const removeCalls = [];
-  const target = {
-    thread_id: "goc-thread",
-    conversation_id: "goc-conversation",
-    source: "goc",
-  };
-  const runtime = {
-    mode: "goc",
-    runtimeAuthority: {
-      mode: "goc",
-      plan_source: "local",
-      context_source: "goc",
-      agent_catalog_source: "goc",
-      conversation_team_source: "goc",
-      skill_catalog_source: "mixed",
-    },
-    map: { threadId: "goc-thread" },
-    conversation: { id: "goc-conversation", thread_id: "goc-thread" },
-    conversationMembershipTarget: target,
-    baselineDefaultAgentIds: [],
-    conversationAgents: state.map((row) => ({ ...row })),
-    agentsCatalog: [
-      {
-        id: reviewerPublicId,
-        name: "Reviewer",
-        system_key: "reviewer",
-        source_agent_id: null,
-        is_system_default: true,
-        service_id: "public",
-        visibility: "public",
-        published: true,
-      },
-      {
-        id: reviewerPrivateId,
-        name: "Reviewer",
-        system_key: null,
-        source_agent_id: reviewerPublicId,
-        is_system_default: false,
-        owner_user_id: "user_1",
-        service_id: "svc_1",
-        visibility: "private",
-        installed_from_public: true,
-        origin: { type: "public", public_node_id: "reviewer_node" },
-      },
-    ],
-    capabilities: {
-      conversationTeamStore: {
-        source: "goc",
-        async listAgents() {
-          return {
-            target,
-            rows: state.map((row) => ({ ...row })),
-            warnings: [],
-          };
-        },
-        async removeAgent({ agentId }) {
-          removeCalls.push(agentId);
-          const index = state.findIndex((row) => row.agent_id === agentId);
-          if (index >= 0) state.splice(index, 1);
-          return {
-            target,
-            rows: state.map((row) => ({ ...row })),
-            warnings: [],
-            mutation_response: { ok: true, agent_id: agentId },
-          };
-        },
-      },
-    },
-  };
-
-  const result = await runConversationAgentTeamCommand({
-    command: "remove",
-    runtime,
-    jobId: "job_team_7",
-    agentId: "reviewer",
-    source: "test_agents_command",
-    agentRegistry: { agents: runtime.agentsCatalog },
-    ...createFormatterDeps(),
-  });
-
-  assert.deepEqual(removeCalls, [reviewerPublicId]);
-  assert.match(result.message, /agent: @reviewer/);
-  assert.deepEqual(runtime.conversationAgents, []);
-  assert.deepEqual(runtime.explicitConversationAgentRefs, []);
-  assert.deepEqual(runtime.enabledAgentRefs, []);
 });

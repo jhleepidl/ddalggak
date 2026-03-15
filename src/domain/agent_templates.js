@@ -8,21 +8,26 @@ import {
 } from "./runtime_agent.js";
 
 const DEFAULT_ROLE_BY_ID = {
-  planner: "planner",
   researcher: "researcher",
-  coder: "coder",
+  builder: "builder",
+  coder: "builder",
   reviewer: "reviewer",
   verifier: "reviewer",
+  synthesizer: "synthesizer",
+  messenger: "synthesizer",
+  operator: "operator",
+  context_curator: "operator",
+  planner: "planner",
   router: "planner",
 };
 
 const DEFAULT_CAPABILITY_TAGS = {
-  planner: ["planning", "routing", "prioritization"],
   researcher: ["research", "analysis", "risk_assessment"],
-  coder: ["implementation", "coding", "refactoring"],
+  builder: ["implementation", "coding", "refactoring"],
   reviewer: ["review", "qa", "verification"],
-  messenger: ["communication", "summary"],
-  context_curator: ["context", "memory", "curation"],
+  synthesizer: ["communication", "summary", "handoff"],
+  operator: ["context", "memory", "curation", "operations"],
+  planner: ["planning", "routing", "prioritization"],
 };
 
 function inferRoleType(raw = {}) {
@@ -33,7 +38,7 @@ function inferRoleType(raw = {}) {
   const systemKey = String(raw.system_key || raw.systemKey || "").trim().toLowerCase();
   if (systemKey && DEFAULT_ROLE_BY_ID[systemKey]) return DEFAULT_ROLE_BY_ID[systemKey];
   const provider = normalizeProviderName(raw.provider || raw.model || "gemini");
-  if (provider === "codex") return "coder";
+  if (provider === "codex") return "builder";
   return "researcher";
 }
 

@@ -133,7 +133,9 @@ function pickDefaultEnabledAgentId(allIds = []) {
   const catalog = normalizeStringList(allIds, { lower: true });
   if (catalog.length === 0) return "";
   if (catalog.includes("router")) return "router";
+  if (catalog.includes("builder")) return "builder";
   if (catalog.includes("coder")) return "coder";
+  if (catalog.includes("researcher")) return "researcher";
   return catalog[0] || "";
 }
 

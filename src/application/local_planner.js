@@ -119,6 +119,11 @@ export function normalizePlanningRequest(input = {}) {
       lower: true,
       max: 12,
     }),
+    conversation_preferences: row.conversation_preferences && typeof row.conversation_preferences === "object"
+      ? row.conversation_preferences
+      : (row.conversationPreferences && typeof row.conversationPreferences === "object"
+        ? row.conversationPreferences
+        : null),
     conversation_hints: normalizeStringList(
       row.conversation_hints ?? row.conversationHints ?? [],
       { lower: false, max: 24 }
@@ -252,6 +257,7 @@ export class LocalPlanner {
       routePlan: effectiveRequest.route_plan,
       registry: effectiveRequest.registry,
       preferredRoles: effectiveRequest.preferred_roles,
+      conversationPreferences: effectiveRequest.conversation_preferences,
       conversationHints: effectiveRequest.conversation_hints,
       toolHints: effectiveRequest.tool_hints,
       maxAgents: effectiveRequest.max_agents,

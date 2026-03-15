@@ -6,6 +6,19 @@ function asObject(value) {
   return value && typeof value === "object" ? value : {};
 }
 
+function normalizeRoleId(raw = "") {
+  const value = cleanId(raw);
+  if (value === "coder") return "builder";
+  if (value === "verifier") return "reviewer";
+  if (value === "messenger") return "synthesizer";
+  if (value === "context_curator") return "operator";
+  if (["researcher", "builder", "reviewer", "synthesizer", "operator"].includes(value)) {
+    return value;
+  }
+  if (value === "planner" || value === "router") return "deprecated_control_plane_only";
+  return "";
+}
+
 function cleanId(raw = "") {
   return String(raw || "").trim().toLowerCase();
 }
@@ -27,6 +40,24 @@ function uniqIds(values = []) {
     out.push(id);
   }
   return out;
+}
+
+function pickLogicalLabel(agent = {}, fallback = "") {
+  const row = asObject(agent);
+  const label = String(
+    row.display_label
+    || row.displayLabel
+    || row.name
+    || row.title
+    || row.logical_label
+    || row.logicalLabel
+    || row.system_key
+    || row.systemKey
+    || row.role_label
+    || row.roleLabel
+    || fallback
+  ).trim();
+  return label || String(fallback || "").trim();
 }
 
 function pickStringFromRows(rows = [], keys = []) {
@@ -202,6 +233,11 @@ function extractLogicalSignals(agent = {}, {
           : (publicNodeId
             ? "public_node_id"
             : (blueprintId ? "blueprint_id" : "raw_id")))));
+  const canonicalRoleId = normalizeRoleId(defaultRole || systemKey || logicalAgentId);
+  const logicalKind = canonicalRoleId === "deprecated_control_plane_only"
+    ? "control_actor"
+    : "preset";
+  const logicalLabel = pickLogicalLabel(row, commandRef || logicalAgentId || rawAgentId);
 
   return {
     raw_agent_id: rawAgentId,
@@ -213,6 +249,9 @@ function extractLogicalSignals(agent = {}, {
     default_role: defaultRole,
     public_node_id: publicNodeId,
     blueprint_id: blueprintId,
+    canonical_role_id: canonicalRoleId,
+    logical_kind: logicalKind,
+    logical_label: logicalLabel,
     visibility,
     published,
     installed_from_public: installedFromPublic,
@@ -334,6 +373,9 @@ export function buildLogicalAgentCatalogIndex(catalogRows = [], {
     const logicalAgent = {
       ...representative,
       logical_agent_id: group.logical_agent_id,
+      logical_kind: repInfo.logical_kind || "preset",
+      logical_label: repInfo.logical_label || pickLogicalLabel(representative, group.logical_agent_id),
+      logical_role_id: repInfo.canonical_role_id || undefined,
       command_ref: group.command_ref || repInfo.command_ref || repInfo.raw_agent_id,
       representative_agent_id: repInfo.raw_agent_id,
       logical_aliases: uniqIds([...group.aliases]),

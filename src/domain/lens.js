@@ -53,7 +53,7 @@ export function defaultLensSpecForRole({
   const cleanRoleType = String(roleType || roleLabel || "").trim().toLowerCase();
   const query = String(goal || "").trim().slice(0, 280) || undefined;
 
-  if (["planner", "router", "messenger", "context_curator"].includes(cleanRoleType)) {
+  if (["planner", "router", "operator", "context_curator"].includes(cleanRoleType)) {
     return {
       mode: "shared_only",
       budget_tokens: 900,
@@ -68,13 +68,23 @@ export function defaultLensSpecForRole({
     };
   }
 
-  if (["coder", "reviewer", "verifier"].includes(cleanRoleType)) {
+  if (cleanRoleType === "synthesizer" || cleanRoleType === "messenger") {
+    const artifactIds = dedupeNodeIds(recentArtifactNodeIds).slice(0, 4);
+    return {
+      mode: "unfold_query",
+      query: query || "upstream 결과를 종합하는 데 필요한 핵심 맥락",
+      add_node_ids: artifactIds.length > 0 ? artifactIds : undefined,
+      budget_tokens: 1000,
+    };
+  }
+
+  if (["builder", "coder", "reviewer", "verifier"].includes(cleanRoleType)) {
     const artifactIds = dedupeNodeIds(recentArtifactNodeIds).slice(0, 3);
     return {
       mode: "unfold_query",
       query: query || "코드 변경과 직접 연관된 맥락",
       add_node_ids: artifactIds.length > 0 ? artifactIds : undefined,
-      budget_tokens: cleanRoleType === "coder" ? 1400 : 1200,
+      budget_tokens: ["builder", "coder"].includes(cleanRoleType) ? 1400 : 1200,
     };
   }
 

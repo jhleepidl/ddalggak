@@ -10,6 +10,14 @@ const TEAM_CONFIGURATION_PATTERNS = [
   /team\s*composition/,
   /스레드\s*팀/,
   /멤버\s*재정리/,
+  /preset/,
+  /핀\s*고정/,
+  /pin\s+preset/,
+  /suppress/,
+  /reviewer\s*policy/,
+  /parallel\s*slots?/,
+  /locale/,
+  /domain/,
 ];
 
 const WORK_EXECUTION_PATTERNS = [

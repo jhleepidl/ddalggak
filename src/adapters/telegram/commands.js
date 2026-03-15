@@ -73,10 +73,10 @@ export function createTelegramCommandHandler(deps = {}) {
     if (cmd === "/help") {
       const sub = String(args || "").trim().toLowerCase();
       if (sub === "advanced") {
-        await bot.sendMessage(chatId, "Commands:\n- plain text: 기본 /chat(supervisor) 처리\n- /whoami\n- /running\n- /status\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents [registry|public [query]|add <id>|remove <id>|enable <id>|disable <id>]\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
+        await bot.sendMessage(chatId, "Commands:\n- plain text: 기본 /chat(supervisor) 처리\n- /whoami\n- /running\n- /status\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents [registry|public [query]|add <preset_or_role_ref>|remove <preset_or_role_ref>|enable <preset_or_role_ref>|disable <preset_or_role_ref>]\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
         return true;
       }
-      await bot.sendMessage(chatId, "Commands:\n- plain text: 대화/작업 지시\n- /context [global]\n- /agents [registry|public [query]|add <id>|remove <id>|enable <id>|disable <id>]\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /status\n- /stop [jobId]\n- /running\n- /whoami\n- /help advanced");
+      await bot.sendMessage(chatId, "Commands:\n- plain text: 대화/작업 지시\n- /context [global]\n- /agents [registry|public [query]|add <preset_or_role_ref>|remove <preset_or_role_ref>|enable <preset_or_role_ref>|disable <preset_or_role_ref>]\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /status\n- /stop [jobId]\n- /running\n- /whoami\n- /help advanced");
       return true;
     }
 

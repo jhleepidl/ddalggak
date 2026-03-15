@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
+import { normalizeConversationPreferences } from "../domain/conversation_preferences.js";
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -147,6 +149,7 @@ function normalizeLocalState(raw = {}, { jobId = "" } = {}) {
     job_id: cleanJobId,
     thread_id: threadId,
     conversation_id: conversationId,
+    preferences: normalizeConversationPreferences(row.preferences || row.conversation_preferences || {}),
     agents: rows.map((entry, index) => ({
       agent_id: cleanId(entry.agent_id),
       enabled: entry.enabled !== false,
@@ -238,8 +241,30 @@ export class LocalConversationTeamStore {
         conversation_id: normalized.conversation_id,
         source: "local",
       }),
+      preferences: normalizeConversationPreferences(normalized.preferences || {}),
       rows: this._rowsFromState(normalized),
       warnings: normalizeWarnings(warnings),
+    };
+  }
+
+  async getPreferences({ jobId = "" } = {}) {
+    const state = this._readState(jobId);
+    return normalizeConversationPreferences(state.preferences || {});
+  }
+
+  async updatePreferences({
+    jobId = "",
+    preferences = {},
+  } = {}) {
+    const state = this._readState(jobId);
+    state.preferences = normalizeConversationPreferences(preferences, {
+      fallback: state.preferences || {},
+    });
+    state.updated_at = nowIso();
+    const written = this._writeState(jobId, state);
+    return {
+      ...this._buildResult(written),
+      preferences: normalizeConversationPreferences(written.preferences || {}),
     };
   }
 
@@ -364,6 +389,7 @@ export class GocConversationTeamStore {
   constructor({
     client = null,
     resolveMembershipTarget = null,
+    baseDir = "",
     logger = null,
   } = {}) {
     this.source = "goc";
@@ -371,6 +397,7 @@ export class GocConversationTeamStore {
     this.resolveMembershipTarget = typeof resolveMembershipTarget === "function"
       ? resolveMembershipTarget
       : null;
+    this.baseDir = String(baseDir || "").trim();
     this.logger = normalizeLogger(logger);
   }
 
@@ -398,6 +425,62 @@ export class GocConversationTeamStore {
         source: "goc",
       })).filter(Boolean)
     );
+  }
+
+  _preferencesDir() {
+    if (!this.baseDir) return "";
+    const dir = path.join(this.baseDir, "conversation_preferences");
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  _preferencesKey({
+    jobId = "",
+    threadId = "",
+    conversationId = "",
+  } = {}) {
+    const rawKey = String(jobId || threadId || conversationId || "").trim();
+    if (!rawKey) return "";
+    return crypto.createHash("sha1").update(rawKey).digest("hex");
+  }
+
+  _readPreferences({
+    jobId = "",
+    threadId = "",
+    conversationId = "",
+  } = {}) {
+    const dir = this._preferencesDir();
+    const key = this._preferencesKey({ jobId, threadId, conversationId });
+    if (!dir || !key) return normalizeConversationPreferences({});
+    const filePath = path.join(dir, `${key}.json`);
+    if (!fs.existsSync(filePath)) return normalizeConversationPreferences({});
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      return normalizeConversationPreferences(parsed.preferences || parsed || {});
+    } catch {
+      return normalizeConversationPreferences({});
+    }
+  }
+
+  _writePreferences({
+    jobId = "",
+    threadId = "",
+    conversationId = "",
+    preferences = {},
+  } = {}) {
+    const dir = this._preferencesDir();
+    const key = this._preferencesKey({ jobId, threadId, conversationId });
+    const normalized = normalizeConversationPreferences(preferences || {});
+    if (!dir || !key) return normalized;
+    const filePath = path.join(dir, `${key}.json`);
+    fs.writeFileSync(filePath, `${JSON.stringify({
+      job_id: String(jobId || "").trim() || undefined,
+      thread_id: String(threadId || "").trim() || undefined,
+      conversation_id: String(conversationId || "").trim() || undefined,
+      preferences: normalized,
+      updated_at: nowIso(),
+    }, null, 2)}\n`, "utf8");
+    return normalized;
   }
 
   async _resolveTarget({
@@ -479,6 +562,11 @@ export class GocConversationTeamStore {
     return {
       target,
       rows,
+      preferences: this._readPreferences({
+        jobId,
+        threadId: target.thread_id,
+        conversationId: target.conversation_id,
+      }),
       warnings: normalizeWarnings(warnings),
     };
   }
@@ -511,6 +599,11 @@ export class GocConversationTeamStore {
       target,
       rows,
       baseline_agent_ids: baselineIds,
+      preferences: this._readPreferences({
+        jobId,
+        threadId: target.thread_id,
+        conversationId: target.conversation_id,
+      }),
       warnings: normalizeWarnings(warnings),
     };
   }
@@ -547,6 +640,11 @@ export class GocConversationTeamStore {
     return {
       target,
       rows,
+      preferences: this._readPreferences({
+        jobId,
+        threadId: target.thread_id,
+        conversationId: target.conversation_id,
+      }),
       warnings: [],
       mutation_response: normalizeTeamRow(mutationResponse, {
         threadId: target.thread_id,
@@ -587,6 +685,11 @@ export class GocConversationTeamStore {
     return {
       target,
       rows,
+      preferences: this._readPreferences({
+        jobId,
+        threadId: target.thread_id,
+        conversationId: target.conversation_id,
+      }),
       warnings: [],
       mutation_response: normalizeTeamRow(mutationResponse, {
         threadId: target.thread_id,
@@ -652,6 +755,11 @@ export class GocConversationTeamStore {
     return {
       target,
       rows,
+      preferences: this._readPreferences({
+        jobId,
+        threadId: target.thread_id,
+        conversationId: target.conversation_id,
+      }),
       warnings: [],
       mutation_response: normalizeTeamRow(mutationResponse, {
         threadId: target.thread_id,
@@ -663,6 +771,58 @@ export class GocConversationTeamStore {
         conversation_id: target.conversation_id,
         enabled: enabled !== false,
       },
+    };
+  }
+
+  async getPreferences({
+    threadId = "",
+    conversationId = "",
+    membershipTarget = null,
+    jobId = "",
+  } = {}) {
+    const target = membershipTarget
+      ? summarizeTarget(membershipTarget, { source: "goc" })
+      : await this._resolveTarget({
+        threadId,
+        conversationId,
+        jobId,
+        source: "get_preferences",
+        ensureConversation: false,
+      });
+    return this._readPreferences({
+      jobId,
+      threadId: target.thread_id,
+      conversationId: target.conversation_id,
+    });
+  }
+
+  async updatePreferences({
+    threadId = "",
+    conversationId = "",
+    membershipTarget = null,
+    jobId = "",
+    preferences = {},
+  } = {}) {
+    const target = membershipTarget
+      ? summarizeTarget(membershipTarget, { source: "goc" })
+      : await this._resolveTarget({
+        threadId,
+        conversationId,
+        jobId,
+        source: "update_preferences",
+        ensureConversation: false,
+      });
+    const normalized = this._writePreferences({
+      jobId,
+      threadId: target.thread_id,
+      conversationId: target.conversation_id,
+      preferences,
+    });
+    return {
+      target,
+      rows: [],
+      preferences: normalized,
+      warnings: [],
     };
   }
 }

@@ -8,6 +8,7 @@ import {
 } from "./run_authority.js";
 import { createRuntimeTeamSnapshot } from "./runtime_metadata.js";
 import { createSupervisorRuntime } from "../control_plane/supervisor_runtime.js";
+import { normalizeConversationPreferences } from "../domain/conversation_preferences.js";
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -183,6 +184,12 @@ export function createSupervisorRuntimeLoader({
             warnings: [],
           };
         const conversationAgents = asArray(teamResult?.rows);
+        const conversationPreferences = normalizeConversationPreferences(
+          teamResult?.preferences
+          || (teamStore && typeof teamStore.getPreferences === "function"
+            ? await teamStore.getPreferences({ jobId: cleanJobId }).catch(() => ({}))
+            : {})
+        );
         const localWarningLines = [...asArray(teamResult?.warnings)];
         const localThreadId = String(
           teamResult?.target?.thread_id || `local:${cleanJobId}`
@@ -275,6 +282,8 @@ export function createSupervisorRuntimeLoader({
           contextSummary: includeContext ? localDeps.localDocs(cleanJobId, trackedDocNames, 2200) : "",
           globalSummary: "",
           capabilities,
+          conversationPreferences,
+          conversation_preferences: conversationPreferences,
           supervisorRuntime,
           supervisor_runtime: supervisorRuntime,
           runtimeTeamSnapshot,
@@ -386,6 +395,16 @@ export function createSupervisorRuntimeLoader({
         id: String(membershipTarget?.conversation_id || "").trim(),
         thread_id: String(membershipTarget?.thread_id || map.threadId || "").trim(),
       };
+      const conversationPreferences = normalizeConversationPreferences(
+        teamResult?.preferences
+        || (teamStore && typeof teamStore.getPreferences === "function"
+          ? await teamStore.getPreferences({
+            threadId: map.threadId,
+            conversationId: conversation.id,
+            jobId: cleanJobId,
+          }).catch(() => ({}))
+          : {})
+      );
 
       const latestJobNode = typeof listLatestResourceByKind === "function"
         ? await listLatestResourceByKind(client, map.threadId, "job_config")
@@ -549,6 +568,8 @@ export function createSupervisorRuntimeLoader({
         contextSummary: contextSummary || "",
         globalSummary: globalSummary || "",
         capabilities,
+        conversationPreferences,
+        conversation_preferences: conversationPreferences,
         supervisorRuntime,
         supervisor_runtime: supervisorRuntime,
         runtimeTeamSnapshot,

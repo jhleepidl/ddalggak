@@ -43,28 +43,41 @@
 - `src/runtime_capabilities/agent_catalog.js`: AgentCatalog capability 어댑터(local/goc)
 - `src/runtime_capabilities/conversation_team_store.js`: ConversationTeamStore capability 어댑터(local filesystem/goc)
 - `src/runtime_capabilities/skill_catalog.js`: SkillCatalog capability 어댑터(local authority)
-- `src/runtime_capabilities/planner.js`: Planner capability(LocalPlanner + RemotePlanner placeholder)
+- `src/runtime_capabilities/planner.js`: Planner capability(`LocalPlanner` compatibility facade + remote placeholder)
 - `src/runtime_capabilities/run_event_sink.js`: RunEventSink capability(local/goc)
 - `src/runtime_capabilities/index.js`: capability composition + run authority metadata
+- `src/control_plane/*`: task interpretation, slot planning, preset/skill/context resolution, execution coordination
+- `src/catalog/*`: text-first preset loading/compiler/registries
+- `src/compatibility/*`: legacy role/plan/registry alias layers
 
-### Internal Runtime Concepts (Role + Skill)
+### Canonical Runtime Model
 
-- `AgentTemplate`
-  - `{ id, name, role_type, description, capability_tags, provider, model, prompt, tools, meta }`
+- Human-authored preset specs live under `presets/*` and stay text-first (`preset.yaml` + `prompt.md`).
+- Internal runtime planning is structured and normalized: `TaskInterpretation -> TeamPlan v2 -> RuntimeAgentInstance -> ContextPack`.
+- Stable worker roles are only `researcher`, `builder`, `reviewer`, `synthesizer`, `operator`.
+- `planner` is not a worker role. It is compatibility-only control-plane metadata.
+- `SupervisorRuntime` is a runtime control actor, not a worker role.
+- `RuntimeAgent = Role + Attached Skills + Context Pack`.
+- Collaboration cells represent patterns such as `parallel_fanout`, `reflection`, and `manager_as_tool`.
+- Conversation configuration is preference-based: pinned presets, banned presets, preferred domains/locales, suppressed roles/skills, review policy, and control mode.
+
+### Internal Runtime Concepts (Preset + Runtime Agent)
+
+- `AgentPreset`
+  - `{ preset_id, display_name, role_id, default_skill_ids, optional_skill_ids, personality_profile, selection_features, retrieval_text, ... }`
 - `RuntimeAgentInstance`
-  - `{ instance_id, run_id, template_id, role_label, assigned_goal, attached_skills, context_pack_id, provider_binding, status, ephemeral, fallback, execution_budget, ... }`
+  - `{ instance_id, slot_id, role_id, display_label, preset_id, synthesized, attached_skill_ids, attached_skills, context_pack_id, authority_profile_id, selection_reason, template_id, provider, model, ... }`
 - `TeamPlan`
-  - `{ mode, roles[], dependencies, execution_order, reason, budget }`
-  - role 확장 필드: `attached_skills`, `depends_on`, `context_policy`, `ephemeral`, `fallback`, `status`
+  - `{ team_plan_id, task_interpretation, supervisor_runtime, slots[], runtime_agents[], collaboration_cells[], authority_graph[], execution_graph, checkpoints[], selection_explanations[] }`
 - `SkillPackage`
-  - `{ id, slug, name, version, description, category, capability_tags, trigger_terms, compatible_roles, input_contract, output_contract, instructions_ref, resource_refs, utility_refs, default_context_policy, validation_policy, safety_policy, ranking_metadata, visibility, status }`
+  - `{ skill_id, kind, title, description, tags, required_tools, required_context_types, compatible_roles, conflicts_with, cost_weight, quality_weight, ...legacy fields }`
 - `ContextPack`
-  - `{ id, run_id, scope, target_runtime_agent_instance_id, shared_items, role_specific_items, skill_items[{skill_id,load_level}], excluded_items, missing_items, conflicts, token_budget }`
+  - `{ context_pack_id, target_instance_id, context_types, evidence_node_ids, budget_tokens, load_level, selection_reason, ...compat aliases }`
 
 핵심 모델:
-- Agent = role/responsibility
+- Preset = human-authored role/personality/instruction bundle
 - Skill = 재사용 가능한 절차 지식 패키지
-- TeamPlan = role + attached skills + 실행 정책
+- TeamPlan = capability slots + runtime/control metadata
 - RuntimeAgentInstance = 실제 실행 단위(role + attached skills)
 - ContextPack = shared + role + skill 로딩 계획
 
@@ -176,14 +189,16 @@ runtime/GOC additive 메타데이터:
 
 기본은 lightweight metadata이며, role/action 필요도에 따라 load level을 올립니다.
 
-### Team Reconfiguration Behavior
+### Conversation Configuration Behavior
 
-- 사용자 요청이 명시적 팀 재구성 의도일 때만(team composition intent) thread team diff를 계산합니다.
-- 이 경우 `add/enable`뿐 아니라 필요 시 `remove_agent_from_conversation`(또는 경로별 disable)도 포함될 수 있습니다.
-- 일반 작업 요청에서는 기존처럼 보수적으로 동작하며, 불필요한 자동 제거를 하지 않습니다.
-- membership mutation(`add/remove/enable/disable`)은 write 이후 readback 확인이 성공해야만 성공으로 처리됩니다.
+- `/agents` 명령은 이제 conversation-level preference surface입니다.
+- `/agents add <preset>` / `/agents enable <preset>` 는 preset pin 선호로 해석됩니다.
+- `/agents remove <preset>` / `/agents disable <preset>` 는 preset ban 선호로 해석됩니다.
+- `/agents remove reviewer` 같은 legacy role command는 해당 canonical role suppression으로 해석됩니다.
+- 기존 conversation membership write/readback 흐름은 runtime transport compatibility용으로 유지됩니다.
+- compatibility membership mutation(`add/remove/enable/disable`)은 write 이후 readback 확인이 성공해야만 성공으로 처리됩니다.
 - readback 확인 실패 시 팀 변경 성공으로 간주하지 않고, 진단 메타데이터를 기록한 뒤 후속 실행을 중단합니다.
-- membership write/readback/`/agents`는 동일한 canonical target을 사용합니다:
+- membership write/readback과 `/agents` 조회는 동일한 canonical target을 사용합니다:
   - `{ thread_id, conversation_id, workspace_id, account_id, source }`
   - `ensureConversation` 응답의 `thread_id`가 요청 thread와 다르면 mismatch로 기록하고, 자동으로 다른 thread scope로 전환하지 않습니다.
 
@@ -465,7 +480,7 @@ sudo systemctl status telegram-orchestrator
 - `/sendfile <relative_path>` : `uploads/` 또는 `outputs/` 파일 1개 전송
 
 ### 6) GoC 명령
-- `/agents` : 현재 agent registry 목록 출력
+- `/agents` : 현재 preset catalog / team view / preference 상태 출력
 - `/context <jobId|global>` : GoC UI 링크 반환 (`jobId` 생략 시 현재 job 사용)
 - `GOC_UI_LINK_MODE=telegram_auth`면 기본적으로 `#token` 없는 링크를 제공 (Telegram SSO)
 - `GOC_UI_LINK_MODE=bearer_token`일 때만 UI 토큰을 민팅해 링크에 포함
@@ -480,9 +495,9 @@ sudo systemctl status telegram-orchestrator
 ### 8) MEMORY_MODE 동작
 - `local`: standalone capability composition 사용 (local context + local agent catalog + local conversation team + local planner)
 - `goc`: GoC-enhanced capability composition 사용 (GoC context/agent/team/event + local planner + local/mixed skill catalog)
-- `goc` 모드에서도 planner는 기본 local이며, remote planner가 있을 때만 `plan_source=goc`로 전환
+- `goc` 모드에서도 control-plane planner는 기본 local이며, remote planner가 있을 때만 `plan_source=goc`로 전환
 - GoC API/UI 실패 시 degraded local fallback으로 전환되며 metadata에 `degraded_mode=true`, `fallback_reason`이 기록됨
-- standalone 모드에서도 `/agents add|remove|enable|disable`로 conversation team을 파일 기반으로 관리 가능
+- standalone 모드에서도 `/agents add|remove|enable|disable`로 conversation preset/preferences를 파일 기반으로 관리 가능
 
 ---
 

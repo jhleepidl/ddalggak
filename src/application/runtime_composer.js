@@ -74,6 +74,7 @@ export async function invokeRuntimePlanner({
   routePlan = null,
   registry = null,
   preferredRoles = [],
+  conversationPreferences = null,
   maxAgents = 6,
   resolveAgentId = null,
   runsDir = "",
@@ -82,6 +83,17 @@ export async function invokeRuntimePlanner({
   const compose = typeof composeForRun === "function" ? composeForRun : null;
   const capabilitiesPack = compose ? compose({ jobId, runtime }) : null;
   const runtimeAuthority = normalizeRunAuthority(capabilitiesPack?.authority || null);
+  const conversationTeamStore = capabilitiesPack?.capabilities?.conversationTeamStore;
+  const persistedConversationPreferences = conversationPreferences && typeof conversationPreferences === "object"
+    ? conversationPreferences
+    : (conversationTeamStore && typeof conversationTeamStore.getPreferences === "function"
+      ? await conversationTeamStore.getPreferences({
+        jobId: String(jobId || "").trim(),
+        threadId: String(runtime?.map?.threadId || "").trim(),
+        conversationId: String(runtime?.conversation?.id || "").trim(),
+        membershipTarget: runtime?.conversationMembershipTarget || null,
+      }).catch(() => null)
+      : null);
   const planner = capabilitiesPack?.capabilities?.planner
     || new LocalPlanner({
       resolveAgentId,
@@ -94,6 +106,7 @@ export async function invokeRuntimePlanner({
     routePlan,
     registry,
     preferredRoles,
+    conversationPreferences: persistedConversationPreferences,
     maxAgents,
     runId: `route_${String(jobId || "").trim()}_${Date.now().toString(36)}`,
     jobId: String(jobId || "").trim(),

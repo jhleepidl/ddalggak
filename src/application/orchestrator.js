@@ -383,6 +383,7 @@ export function buildRuntimeOrchestration({
   routePlan = null,
   registry = null,
   preferredRoles = [],
+  conversationPreferences = null,
   conversationHints = [],
   toolHints = [],
   availableToolIds = [],
@@ -418,6 +419,7 @@ export function buildRuntimeOrchestration({
     mode,
     seedInstruction,
     preferredRoles,
+    conversationPreferences,
     conversationHints,
     routeContext: normalizedRoute,
     registry,
@@ -465,6 +467,7 @@ export function buildRuntimeOrchestration({
   let teamPlan = normalizeTeamPlan({
     ...(teamBuild.team_plan || {}),
     task_interpretation: taskInterpretation,
+    conversation_preferences: conversationPreferences || undefined,
     runtime_agents: presetResolution.runtime_agents,
     selection_explanations: combinedSelectionExplanations,
   });
@@ -502,6 +505,7 @@ export function buildRuntimeOrchestration({
   });
   teamPlan = normalizeTeamPlan({
     ...(skillApplied.team_plan || {}),
+    conversation_preferences: conversationPreferences || undefined,
     runtime_agents: skillApplied.runtime_agents,
     selection_explanations: combinedSelectionExplanations,
   });
@@ -545,6 +549,7 @@ export function buildRuntimeOrchestration({
   teamPlan = normalizeTeamPlan({
     ...(contextPackResult.team_plan || teamPlan),
     task_interpretation: taskInterpretation,
+    conversation_preferences: conversationPreferences || undefined,
     runtime_agents: contextPackResult.runtime_agents,
     selection_explanations: combinedSelectionExplanations,
   });

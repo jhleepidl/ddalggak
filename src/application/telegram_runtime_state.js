@@ -107,8 +107,8 @@ const SHARED_CONTEXT_EXCLUDE_RESOURCE_KINDS = String(
   .filter(Boolean);
 const LEGACY_AGENT_MAP = {
   gemini: "researcher",
-  codex: "coder",
-  chatgpt: "planner",
+  codex: "builder",
+  chatgpt: "synthesizer",
 };
 
 const memory = new OrchestratorMemory({ baseDir: jobs.baseDir });

@@ -6,16 +6,14 @@ import {
   resolveLogicalAgentRef,
 } from "../src/application/logical_agents.js";
 
-test("logical agent catalog dedupes public defaults and installed private copies using public lineage ids", () => {
-  const plannerPublicId = "planner_public_uuid_like";
-  const plannerPrivateId = "planner_private_uuid_like";
-  const routerPublicId = "router_public_uuid_like";
-  const routerPrivateId = "router_private_uuid_like";
+test("logical agent catalog groups installed/public preset lineage under stable logical ids", () => {
+  const builderPublicId = "builder_public_uuid_like";
+  const builderPrivateId = "builder_private_uuid_like";
   const catalog = buildLogicalAgentCatalogIndex([
     {
-      id: plannerPublicId,
-      name: "Planner",
-      system_key: "planner",
+      id: builderPublicId,
+      name: "Builder",
+      system_key: "builder",
       source_agent_id: null,
       is_system_default: true,
       service_id: "public",
@@ -23,31 +21,10 @@ test("logical agent catalog dedupes public defaults and installed private copies
       published: true,
     },
     {
-      id: plannerPrivateId,
-      name: "Planner",
+      id: builderPrivateId,
+      name: "Builder",
       system_key: null,
-      source_agent_id: plannerPublicId,
-      is_system_default: false,
-      owner_user_id: "user_1",
-      service_id: "svc_1",
-      visibility: "private",
-      installed_from_public: true,
-    },
-    {
-      id: routerPublicId,
-      name: "Router",
-      system_key: "router",
-      source_agent_id: null,
-      is_system_default: true,
-      service_id: "public",
-      visibility: "public",
-      published: true,
-    },
-    {
-      id: routerPrivateId,
-      name: "Router",
-      system_key: null,
-      source_agent_id: routerPublicId,
+      source_agent_id: builderPublicId,
       is_system_default: false,
       owner_user_id: "user_1",
       service_id: "svc_1",
@@ -56,27 +33,28 @@ test("logical agent catalog dedupes public defaults and installed private copies
     },
   ]);
 
-  assert.equal(catalog.agents.length, 2);
-  assert.equal(catalog.rawIdToLogicalId.get(plannerPublicId), "planner");
-  assert.equal(catalog.rawIdToLogicalId.get(plannerPrivateId), "planner");
-  assert.equal(catalog.rawIdToLogicalId.get(routerPublicId), "router");
-  assert.equal(catalog.rawIdToLogicalId.get(routerPrivateId), "router");
+  assert.equal(catalog.agents.length, 1);
+  assert.equal(catalog.rawIdToLogicalId.get(builderPublicId), "builder");
+  assert.equal(catalog.rawIdToLogicalId.get(builderPrivateId), "builder");
 
-  const planner = catalog.byLogicalId.get("planner");
-  assert.ok(planner);
-  assert.equal(planner.command_ref, "planner");
-  assert.equal(planner.representative_agent_id, plannerPrivateId);
-  assert.deepEqual(planner.logical_member_agent_ids, [plannerPublicId, plannerPrivateId]);
+  const builder = catalog.byLogicalId.get("builder");
+  assert.ok(builder);
+  assert.equal(builder.command_ref, "builder");
+  assert.equal(builder.representative_agent_id, builderPrivateId);
+  assert.equal(builder.logical_kind, "preset");
+  assert.equal(builder.logical_role_id, "builder");
+  assert.equal(builder.logical_label, "Builder");
+  assert.deepEqual(builder.logical_member_agent_ids, [builderPublicId, builderPrivateId]);
 });
 
-test("logical agent refs stay human-usable for real backend lineage ids", () => {
-  const plannerPublicId = "planner_public_uuid_like";
-  const plannerPrivateId = "planner_private_uuid_like";
+test("logical agent refs remain human-usable through canonical and raw lineage ids", () => {
+  const reviewerPublicId = "reviewer_public_uuid_like";
+  const reviewerPrivateId = "reviewer_private_uuid_like";
   const catalog = buildLogicalAgentCatalogIndex([
     {
-      id: plannerPublicId,
-      name: "Planner",
-      system_key: "planner",
+      id: reviewerPublicId,
+      name: "Reviewer",
+      system_key: "reviewer",
       source_agent_id: null,
       is_system_default: true,
       service_id: "public",
@@ -84,10 +62,10 @@ test("logical agent refs stay human-usable for real backend lineage ids", () => 
       published: true,
     },
     {
-      id: plannerPrivateId,
-      name: "Planner",
+      id: reviewerPrivateId,
+      name: "Reviewer",
       system_key: null,
-      source_agent_id: plannerPublicId,
+      source_agent_id: reviewerPublicId,
       is_system_default: false,
       owner_user_id: "user_1",
       service_id: "svc_1",
@@ -96,11 +74,30 @@ test("logical agent refs stay human-usable for real backend lineage ids", () => 
     },
   ]);
 
-  const plannerByRole = resolveLogicalAgentRef("planner", catalog);
-  assert.equal(plannerByRole?.logical_agent?.logical_agent_id, "planner");
-  assert.equal(plannerByRole?.logical_agent?.command_ref, "planner");
+  const reviewerByRole = resolveLogicalAgentRef("reviewer", catalog);
+  assert.equal(reviewerByRole?.logical_agent?.logical_agent_id, "reviewer");
+  assert.equal(reviewerByRole?.logical_agent?.logical_kind, "preset");
 
-  const plannerByPublicId = resolveLogicalAgentRef(plannerPublicId, catalog);
-  assert.equal(plannerByPublicId?.logical_agent?.logical_agent_id, "planner");
-  assert.equal(plannerByPublicId?.logical_agent?.command_ref, "planner");
+  const reviewerByPublicId = resolveLogicalAgentRef(reviewerPublicId, catalog);
+  assert.equal(reviewerByPublicId?.logical_agent?.logical_agent_id, "reviewer");
+  assert.equal(reviewerByPublicId?.logical_agent?.command_ref, "reviewer");
+});
+
+test("planner lineage remains a control actor and not a worker preset", () => {
+  const plannerCatalog = buildLogicalAgentCatalogIndex([
+    {
+      id: "planner_public_uuid_like",
+      name: "Planner",
+      system_key: "planner",
+      is_system_default: true,
+      service_id: "public",
+      visibility: "public",
+      published: true,
+    },
+  ]);
+
+  const planner = plannerCatalog.byLogicalId.get("planner");
+  assert.ok(planner);
+  assert.equal(planner.logical_kind, "control_actor");
+  assert.equal(planner.logical_role_id, "deprecated_control_plane_only");
 });
