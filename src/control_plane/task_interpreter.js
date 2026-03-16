@@ -14,6 +14,11 @@ function normalizeText(raw = "", {
   return lower ? value.toLowerCase() : value;
 }
 
+const WORKFLOW_TERMS = ["workflow", "membership", "runtime", "polling", "shutdown", "operator", "thread team", "운영"];
+const CODE_REQUEST_TERMS = ["code", "implement", "fix", "bug", "patch", "refactor", "ipynb", "notebook", "script", "repository", "repo", "workspace", "python", "javascript", "typescript", "sql", "bash", "shell", "commit", "pull request", "코드", "구현", "리팩터", "패치", "노트북", "스크립트", "파이썬", "자바스크립트", "타입스크립트", "레포"];
+const CODE_ARTIFACT_TERMS = ["ipynb", "notebook", "jupyter", "script", "patch", "commit", "workspace", "repo", "repository", "python", "javascript", "typescript", "sql", "bash", "shell", "pr", "pull request", "주피터", "노트북", "스크립트", "패치", "커밋", "파이썬", "자바스크립트", "타입스크립트", "레포"];
+const FINANCE_RESEARCH_TERMS = ["stock", "equity", "market", "news", "filing", "valuation", "invest", "investment", "주식", "시장", "뉴스", "공시", "투자", "밸류"];
+
 function includesAny(text = "", needles = []) {
   const source = normalizeText(text, { lower: true });
   return asArray(needles).some((needle) => source.includes(normalizeText(needle, { lower: true })));
@@ -24,6 +29,27 @@ function tokenize(text = "") {
     normalizeText(text, { lower: true }).split(/[^a-z0-9가-힣._-]+/g),
     { max: 128, lower: true }
   );
+}
+
+function includesAnyToken(text = "", needles = []) {
+  const source = normalizeText(text, { lower: true });
+  const tokens = new Set(tokenize(source));
+  return asArray(needles).some((needle) => {
+    const clean = normalizeText(needle, { lower: true });
+    if (!clean) return false;
+    if (clean.includes(' ')) return source.includes(clean);
+    if (/[가-힣]/.test(clean)) return tokens.has(clean) || source.includes(clean);
+    if (clean.length <= 4) return tokens.has(clean);
+    return source.includes(clean);
+  });
+}
+
+function hasExplicitCodeArtifactNeed(text = "") {
+  return includesAnyToken(text, CODE_ARTIFACT_TERMS);
+}
+
+function isFinanceResearchOnlyRequest(text = "") {
+  return includesAny(text, FINANCE_RESEARCH_TERMS) && !hasExplicitCodeArtifactNeed(text);
 }
 
 function inferLocale(text = "") {
@@ -37,7 +63,7 @@ function collectDomainHints(text = "") {
   if (includesAny(text, ["market", "news", "headline", "macro", "시장", "뉴스"])) hints.push("market_news");
   if (includesAny(text, ["claim", "evidence", "citation", "근거", "주장"])) hints.push("claims");
   if (includesAny(text, ["stock", "equity", "valuation", "주식", "밸류"])) hints.push("finance");
-  if (includesAny(text, ["code", "implement", "fix", "bug", "patch", "리팩터", "코드", "구현"])) hints.push("codebase");
+  if (includesAnyToken(text, CODE_REQUEST_TERMS)) hints.push("codebase");
   if (includesAny(text, ["workflow", "membership", "runtime", "polling", "shutdown", "team", "context", "운영"])) hints.push("workflow");
   if (includesAny(text, ["test", "qa", "verify", "regression", "검토", "테스트"])) hints.push("quality");
   return normalizeStringList(hints, { max: 16, lower: true });
@@ -45,10 +71,13 @@ function collectDomainHints(text = "") {
 
 function inferTaskType(text = "", routeContext = null) {
   const routeText = normalizeText(routeContext?.reason);
-  if (includesAny(`${text}\n${routeText}`, ["workflow", "membership", "runtime", "polling", "shutdown", "operator", "thread team"])) {
+  const combined = `${text}
+${routeText}`;
+  if (includesAny(combined, WORKFLOW_TERMS)) {
     return "workflow";
   }
-  if (includesAny(text, ["code", "implement", "fix", "bug", "patch", "refactor", "ipynb", "코드", "구현", "리팩터"])) {
+  const explicitCodeIntent = includesAnyToken(text, CODE_REQUEST_TERMS);
+  if (explicitCodeIntent && !isFinanceResearchOnlyRequest(text)) {
     return "code_change";
   }
   if (includesAny(text, ["review", "audit", "verify", "claim", "evidence", "검토", "감사"])) {

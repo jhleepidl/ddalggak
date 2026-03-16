@@ -58,6 +58,7 @@ import {
   buildGeminiModelSwitchNoticeText as buildGeminiModelSwitchNoticeTextShared,
   buildGeminiGiveUpNoticeText as buildGeminiGiveUpNoticeTextShared,
 } from "../adapters/telegram/status_messages.js";
+import { toolInputPreviewFromAction, outputPreviewFromResult } from "../adapters/telegram/tool_preview.js";
 import { formatByteSize } from "../adapters/telegram/uploads.js";
 import {
   createJobRuntimeState,
@@ -551,9 +552,21 @@ function normalizeActionShape(raw) {
   return null;
 }
 
+function buildTelegramAgentIndex({ runtime = null, routePlan = null, actions = [], extraSources = [] } = {}) {
+  return buildAgentDisplayIndexShared(
+    agentRegistry,
+    runtime,
+    runtime?.runtime_team_snapshot || runtime?.runtimeTeamSnapshot || null,
+    routePlan,
+    routePlan?.team_plan,
+    { actions },
+    ...(Array.isArray(extraSources) ? extraSources : []),
+  );
+}
+
 function actionLabel(act) {
   if (!act || !act.type) return "(unknown)";
-  const globalAgentIndex = buildAgentDisplayIndexShared(agentRegistry);
+  const globalAgentIndex = buildTelegramAgentIndex({ actions: [act] });
   if (act.type === "agent_run") {
     const agentDisplay = formatChatAgentDisplayName(act.agent, globalAgentIndex);
     return `agent_run:${agentDisplay}`;
@@ -577,7 +590,7 @@ function formatRegistryLines(reg) {
 function formatActionAgentLabel(action = {}, { agentIndex = null } = {}) {
   const resolvedIndex = agentIndex instanceof Map
     ? agentIndex
-    : buildAgentDisplayIndexShared(agentRegistry);
+    : buildTelegramAgentIndex({ actions: [action] });
   return formatActionAgentLabelShared(action, {
     agentIndex: resolvedIndex,
     fallback: "unknown",
@@ -587,7 +600,7 @@ function formatActionAgentLabel(action = {}, { agentIndex = null } = {}) {
 function chatActionLabel(action, { agentIndex = null } = {}) {
   const resolvedIndex = agentIndex instanceof Map
     ? agentIndex
-    : buildAgentDisplayIndexShared(agentRegistry);
+    : buildTelegramAgentIndex({ actions: [action] });
   return chatActionLabelShared(action, {
     agentIndex: resolvedIndex,
     needMoreDetailFallback: "ctx",
@@ -697,9 +710,10 @@ function hasCoderDelegation(actions = [], coderAgentId = "") {
 }
 
 function buildPlanPreviewLines(actions = []) {
+  const agentIndex = buildTelegramAgentIndex({ actions });
   return buildPlanPreviewLinesShared(actions, {
-    agentIndex: buildAgentDisplayIndexShared(agentRegistry),
-    actionLabel: (action) => chatActionLabel(action),
+    agentIndex,
+    actionLabel: (action) => chatActionLabel(action, { agentIndex }),
   });
 }
 
@@ -708,11 +722,12 @@ function buildQueuedAgentStatusFromActions(actions = []) {
 }
 
 function buildRoutedDashboardText({ actions = [], agentStatus = {} } = {}) {
+  const agentIndex = buildTelegramAgentIndex({ actions });
   return buildRoutedDashboardTextShared({
     actions,
     agentStatus,
-    actionLabel: (action) => chatActionLabel(action),
-    agentIndex: buildAgentDisplayIndexShared(agentRegistry),
+    actionLabel: (action) => chatActionLabel(action, { agentIndex }),
+    agentIndex,
   });
 }
 
@@ -782,7 +797,7 @@ function buildAgentTransitionText({ agentId = "", state = "", goal = "", error =
   const cleanAgentId = String(agentId || "").trim().toLowerCase() || "unknown";
   const agentDisplay = formatChatAgentDisplayName(
     cleanAgentId,
-    buildAgentDisplayIndexShared(agentRegistry)
+    buildTelegramAgentIndex()
   );
   const cleanState = String(state || "").trim().toLowerCase();
   if (cleanState === "running") {
@@ -845,7 +860,7 @@ async function sendGeminiRetryMessage(
     ? Number(replyToMessageId)
     : (Number.isFinite(Number(fallbackReply)) && Number(fallbackReply) > 0 ? Number(fallbackReply) : null);
   const agentLabel = agentId
-    ? formatChatAgentDisplayName(agentId, buildAgentDisplayIndexShared(agentRegistry))
+    ? formatChatAgentDisplayName(agentId, buildTelegramAgentIndex())
     : "";
   await bot.sendMessage(
     chatId,
@@ -868,7 +883,7 @@ async function sendGeminiModelSwitchMessage(
     ? Number(replyToMessageId)
     : (Number.isFinite(Number(fallbackReply)) && Number(fallbackReply) > 0 ? Number(fallbackReply) : null);
   const agentLabel = agentId
-    ? formatChatAgentDisplayName(agentId, buildAgentDisplayIndexShared(agentRegistry))
+    ? formatChatAgentDisplayName(agentId, buildTelegramAgentIndex())
     : "";
   await bot.sendMessage(
     chatId,
@@ -891,7 +906,7 @@ async function sendGeminiGiveUpMessage(
     ? Number(replyToMessageId)
     : (Number.isFinite(Number(fallbackReply)) && Number(fallbackReply) > 0 ? Number(fallbackReply) : null);
   const agentLabel = agentId
-    ? formatChatAgentDisplayName(agentId, buildAgentDisplayIndexShared(agentRegistry))
+    ? formatChatAgentDisplayName(agentId, buildTelegramAgentIndex())
     : "";
   await bot.sendMessage(
     chatId,
@@ -932,49 +947,6 @@ function updateAgentStatus(chatId, agentId, patch = {}) {
     previousState,
     nextState,
   };
-}
-
-function toolInputPreviewFromAction(action, detailContext = "") {
-  const type = String(action?.type || "").trim().toLowerCase();
-  const lines = [
-    `type=${type || "unknown"}`,
-  ];
-  if (action?.agent_id) lines.push(`agent_id=${String(action.agent_id).trim().toLowerCase()}`);
-  if (action?.goal) lines.push(`goal=${clip(String(action.goal), 400)}`);
-  if (type === "spawn_agents") {
-    const children = Array.isArray(action?.agents) ? action.agents : [];
-    if (children.length > 0) {
-      lines.push(`children=${children.map((row) => `@${String(row?.agent_id || "").trim().toLowerCase()}`).filter(Boolean).join(", ")}`);
-    }
-  }
-  if (type === "need_more_detail") {
-    lines.push(`context_set_id=${String(action?.context_set_id || "").trim() || "(shared)"}`);
-  }
-  const detail = String(detailContext || "").trim();
-  if (detail) lines.push(`detail_context=${clip(detail, 220)}`);
-  return lines.join("\n");
-}
-
-function outputPreviewFromResult(result) {
-  if (typeof result === "string") return clip(result, 1800);
-  if (result == null) return "";
-  if (typeof result === "number" || typeof result === "boolean") return String(result);
-  if (Array.isArray(result)) return clip(JSON.stringify(result), 1800);
-  const row = result && typeof result === "object" ? result : {};
-  const direct = String(
-    row.output
-    || row.text
-    || row.summary
-    || row.link
-    || row.message
-    || ""
-  ).trim();
-  if (direct) return clip(direct, 1800);
-  try {
-    return clip(JSON.stringify(row), 1800);
-  } catch {
-    return clip(String(row), 1800);
-  }
 }
 
 function normalizeDeliverableList(raw, { max = 24 } = {}) {

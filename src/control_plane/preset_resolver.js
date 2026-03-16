@@ -1,5 +1,6 @@
 import { normalizeStringList } from "../shared/normalize.js";
 import { createRuntimeAgentInstance, normalizeRuntimeAgentInstance } from "../domain/runtime_agent.js";
+import { inferRuntimeDisplayLabel } from "../shared/runtime_agent_naming.js";
 import { getTransportRoleId, normalizeRoleId } from "../compatibility/legacy_roles.js";
 import { adaptLegacyAgentRegistry } from "../compatibility/legacy_agent_registry_adapter.js";
 
@@ -291,13 +292,31 @@ export class PresetResolver {
         slot_id: slot.slot_id,
         role_id: slot.role_id,
         role_label: slot.role_id,
-        display_label: selectedPreset?.display_name || slot.role_id,
+        display_label: inferRuntimeDisplayLabel({
+          roleId: slot.role_id,
+          currentLabel: selectedPreset?.display_name || slot.role_id,
+          purpose: slot.purpose,
+          deliverableType: slot.deliverable_type,
+          taskSummary: taskInterpretation?.task_summary || goal,
+          domainHints: taskInterpretation?.domain_hints || [],
+          requiredSkillIds: slot.required_skill_ids || [],
+          preferredSkillIds: slot.preferred_skill_ids || [],
+          requiredContextTypes: slot.required_context_types || [],
+          personalityProfile: selectedPreset?.personality_profile || undefined,
+          collaborationDefaults: selectedPreset?.collaboration_defaults || undefined,
+          presetDisplayName: selectedPreset?.display_name || undefined,
+        }),
         preset_id: selectedPreset?.preset_id ?? null,
         synthesized: !selectedPreset,
         attached_skills: [],
         attached_skill_ids: [],
         context_pack_id: undefined,
         authority_profile_id: slot.authority_profile_id,
+        slot_purpose: slot.purpose,
+        deliverable_type: slot.deliverable_type,
+        required_context_types: slot.required_context_types || [],
+        required_skill_ids: slot.required_skill_ids || [],
+        preferred_skill_ids: slot.preferred_skill_ids || [],
         selection_reason: selectionReason,
         template_id: normalizeText(
           selectedPreset?.selection_features?.legacy_template_id
@@ -309,6 +328,8 @@ export class PresetResolver {
         provider: normalizeText(selectedPreset?.selection_features?.provider, { lower: true }) || undefined,
         model: normalizeText(selectedPreset?.selection_features?.model) || undefined,
         assigned_goal: goal || slot.purpose,
+        task_summary: taskInterpretation?.task_summary || goal || slot.purpose,
+        domain_hints: taskInterpretation?.domain_hints || [],
         ephemeral: selectedPreset == null,
         fallback: selectedPreset == null,
         status: "ready",

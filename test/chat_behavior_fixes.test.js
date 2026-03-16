@@ -30,7 +30,7 @@ test("chat-facing agent display labels prefer human-readable names without id su
     includeShortId: true,
   });
   assert.equal(chatLabel, "시장 분석가");
-  assert.equal(label, "시장 분석가 [00133bba]");
+  assert.equal(label, "시장 분석가");
 });
 
 test("explicit team reconfiguration diff adds missing members and removes obsolete ones", () => {

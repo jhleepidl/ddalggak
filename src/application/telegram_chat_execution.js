@@ -59,6 +59,7 @@ import {
   buildGeminiGiveUpNoticeText as buildGeminiGiveUpNoticeTextShared,
 } from "../adapters/telegram/status_messages.js";
 import { formatByteSize } from "../adapters/telegram/uploads.js";
+import { toolInputPreviewFromAction, outputPreviewFromResult } from "../adapters/telegram/tool_preview.js";
 import {
   createJobRuntimeState,
   makeCancelledError as makeCancelledErrorDomain,
@@ -228,6 +229,18 @@ const {
   buildGocAgentCreateSpec,
 } = gocRuntime;
 const { buildChatStatusCard } = runtimeUi;
+
+function buildTelegramAgentIndex({ runtime = null, routePlan = null, actions = [], extraSources = [] } = {}) {
+  return buildAgentDisplayIndexShared(
+    agentRegistry,
+    runtime,
+    runtime?.runtime_team_snapshot || runtime?.runtimeTeamSnapshot || null,
+    routePlan,
+    routePlan?.team_plan,
+    { actions },
+    ...(Array.isArray(extraSources) ? extraSources : []),
+  );
+}
 
 async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const sectionTitle = String(opts.sectionTitle || "Gemini notes");
@@ -459,7 +472,7 @@ function buildSupervisorExecutionCallbacks({
   };
 
   const formatRuntimeAgentDisplay = (agentId = "") => {
-    const index = buildAgentDisplayIndexShared(agentRegistry, runtime);
+    const index = buildTelegramAgentIndex({ runtime });
     return formatChatAgentDisplayName(agentId, index);
   };
 
@@ -2862,7 +2875,7 @@ async function executeChatActions(
   let currentJobId = resolveCurrentJobIdForChat(chatId);
 
   for (const action of actions) {
-    const label = chatActionLabel(action);
+    const label = chatActionLabel(action, { agentIndex: buildTelegramAgentIndex({ runtime, routePlan, actions }) });
     try {
       if (action.type === "show_agents") {
         const reg = await refreshAgentRegistry();
@@ -2931,7 +2944,7 @@ async function executeChatActions(
         rememberLastChatJob(chatId, targetJobId);
         const agentDisplay = formatChatAgentDisplayName(
           agentId,
-          buildAgentDisplayIndexShared(agentRegistry, runtime)
+          buildTelegramAgentIndex({ runtime })
         );
         if (verbose) await bot.sendMessage(chatId, `🤖 ${agentDisplay} 실행 중…`);
 
@@ -3110,7 +3123,7 @@ async function executeAgentRun(
 async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts = {}) {
   const runtime = opts?.runtime && typeof opts.runtime === "object" ? opts.runtime : null;
   const runtimeAuthority = buildRunAuthority(runtime);
-  const agentIndex = buildAgentDisplayIndexShared(agentRegistry, runtime);
+  const agentIndex = buildTelegramAgentIndex({ runtime, routePlan: plan, actions: plan?.actions || [] });
   const telegramUserId = String(opts?.telegramUserId || "").trim();
   const runtimeTeamSnapshot = route?.runtime_team_snapshot && typeof route.runtime_team_snapshot === "object"
     ? route.runtime_team_snapshot
@@ -3294,7 +3307,7 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
 
 async function executeActions(bot, chatId, jobId, plan, signal = null, opts = {}) {
   const runtime = opts?.runtime && typeof opts.runtime === "object" ? opts.runtime : null;
-  const agentIndex = buildAgentDisplayIndexShared(agentRegistry, runtime);
+  const agentIndex = buildTelegramAgentIndex({ runtime, routePlan: plan, actions: plan?.actions || [] });
   const telegramUserId = String(opts?.telegramUserId || "").trim();
   if (!plan || !Array.isArray(plan.actions)) return;
   const allowed = new Set(["track_append", "agent_run", "gemini", "codex", "git_summary", "chatgpt_prompt", "chatgpt", "commit_request"]);

@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { normalizeStringList } from "../shared/normalize.js";
 import { normalizeSkillAttachmentList } from "./skill_attachment.js";
 import { getTransportRoleId, normalizeRoleId } from "../compatibility/legacy_roles.js";
+import { inferRuntimeDisplayLabel } from "../shared/runtime_agent_naming.js";
 
 function asObject(raw) {
   return raw && typeof raw === "object" ? raw : {};
@@ -64,15 +65,29 @@ export function normalizeRuntimeAgentInstance(raw = {}, {
       ? (row.template_id ?? row.templateId ?? "")
       : (row.template_id || row.templateId || getTransportRoleId(roleId))
   , { lower: true }) || undefined;
-  const displayLabel = normalizeText(
-    row.display_label
-    || row.displayLabel
-    || row.role_label
-    || row.roleLabel
-    || roleId
-    || templateId
-    || "runtime_agent"
-  ) || "runtime_agent";
+  const displayLabel = inferRuntimeDisplayLabel({
+    roleId,
+    currentLabel: normalizeText(
+      row.display_label
+      || row.displayLabel
+      || row.role_label
+      || row.roleLabel
+      || roleId
+      || templateId
+      || "runtime_agent"
+    ) || "runtime_agent",
+    purpose: normalizeText(row.slot_purpose || row.slotPurpose || row.assigned_goal || row.assignedGoal || row.selection_reason || defaultSelectionReason),
+    deliverableType: normalizeText(row.deliverable_type || row.deliverableType),
+    taskSummary: normalizeText(row.task_summary || row.taskSummary || row.goal || row.prompt),
+    domainHints: row.domain_hints || row.domainHints || [],
+    requiredSkillIds: row.required_skill_ids || row.requiredSkillIds || [],
+    preferredSkillIds: row.preferred_skill_ids || row.preferredSkillIds || [],
+    requiredContextTypes: row.required_context_types || row.requiredContextTypes || [],
+    attachedSkillIds,
+    personalityProfile: row.personality_profile || row.personalityProfile || undefined,
+    collaborationDefaults: row.collaboration_defaults || row.collaborationDefaults || undefined,
+    presetDisplayName: row.preset_display_name || row.presetDisplayName || undefined,
+  });
   const presetId = hasExplicitPresetId
     ? (() => {
       if (row.preset_id == null && row.presetId == null) return null;

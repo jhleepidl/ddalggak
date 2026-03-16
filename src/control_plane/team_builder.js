@@ -4,6 +4,7 @@ import {
 } from "../domain/agent_templates.js";
 import { normalizeTeamPlan } from "../domain/team_plan.js";
 import { createRuntimeAgentInstance } from "../domain/runtime_agent.js";
+import { inferRuntimeDisplayLabel } from "../shared/runtime_agent_naming.js";
 import { normalizeStringList } from "../shared/normalize.js";
 import {
   getTransportRoleId,
@@ -337,7 +338,16 @@ function buildRuntimeAgentsFromSlots({
       slot_id: slot.slot_id,
       role_id: slot.role_id,
       role_label: slot.role_id,
-      display_label: slot.role_id,
+      display_label: inferRuntimeDisplayLabel({
+        roleId: slot.role_id,
+        currentLabel: slot.display_label || slot.role_id,
+        purpose: slot.purpose,
+        deliverableType: slot.deliverable_type,
+        taskSummary: goal || slot.purpose,
+        requiredSkillIds: slot.required_skill_ids || [],
+        preferredSkillIds: slot.preferred_skill_ids || [],
+        requiredContextTypes: slot.required_context_types || [],
+      }),
       preset_id: matched ? `legacy.${matched.id}` : null,
       synthesized,
       attached_skills: [],
@@ -352,6 +362,7 @@ function buildRuntimeAgentsFromSlots({
         ...(ROLE_CAPABILITY_HINTS[slot.role_id] || []),
       ],
       assigned_goal: goal || slot.purpose,
+      task_summary: goal || slot.purpose,
       ephemeral: synthesized,
       fallback: synthesized,
       status: "ready",
