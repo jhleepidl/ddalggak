@@ -3,6 +3,46 @@ import {
   executeContinueCommand,
 } from "../../application/route_executor.js";
 
+const HELP_TEXT = [
+  "Commands:",
+  "- plain text: 대화/작업 지시 대신 /chat [text]: 대화/작업 지시",
+  "- /context [global]: 현재 job 또는 global 컨텍스트 보기",
+  "- /team [registry|public [query]|add <preset_or_role_ref>|remove <preset_or_role_ref>|enable <preset_or_role_ref>|disable <preset_or_role_ref>]: 팀/프리셋 상태 조회 및 변경 (/agents alias)",
+  "- /tools: 현재 job의 tool 상태 보기",
+  "- /files [uploads|outputs|all] [limit]: workspace 파일 목록 보기",
+  "- /outputs [send]: output 목록 보기 또는 파일 전송",
+  "- /sendfile <relative_path>: 특정 workspace 파일 전송",
+  "- /status: 현재 chat/job 상태 보기",
+  "- /stop [jobId]: 현재 실행 또는 지정 job 중단",
+  "- /running: 실행 중이거나 대기 중인 job 확인",
+  "- /whoami: 현재 chat_id / user_id 확인",
+  "- /help advanced: 고급 명령 보기",
+].join("\n");
+
+const ADVANCED_HELP_TEXT = [
+  "Commands:",
+  "- plain text: 기본 /chat(supervisor) 처리",
+  "- /whoami: 현재 chat_id / user_id 확인",
+  "- /running: 실행/대기 job 목록 확인",
+  "- /status: 현재 chat/job 상태 보기",
+  "- /stop [jobId]: 현재 실행 또는 지정 job 중단",
+  "- /memory [show|md|policy|routing|role|agents|note|lesson|reset]: 런타임 메모리 조회/수정",
+  "- /settings ...: /memory alias",
+  "- /team [registry|public [query]|add <preset_or_role_ref>|remove <preset_or_role_ref>|enable <preset_or_role_ref>|disable <preset_or_role_ref>]: 팀/프리셋 상태 조회 및 변경 (/agents alias)",
+  "- /tools: 현재 job의 tool 상태 보기",
+  "- /files [uploads|outputs|all] [limit]: workspace 파일 목록 보기",
+  "- /outputs [send]: output 목록 보기 또는 파일 전송",
+  "- /sendfile <relative_path>: 특정 workspace 파일 전송",
+  "- /chat [--debug] <message>|reset: supervisor chat 실행 또는 세션 초기화",
+  "- /context <jobId|global>: 컨텍스트 보기 (jobId 생략 시 현재 job)",
+  "- /run <goal>: goal 기반 실행 시작",
+  "- /continue <jobId>: 기존 job 이어서 실행",
+  "- /gptprompt <jobId> <question>: GPT 확인용 프롬프트 생성",
+  "- /gptapply [jobId]: GPT 응답 적용",
+  "- /gptdone: GPT paste 대기 모드 종료",
+  "- /commit <jobId> <message>: 작업 결과 커밋",
+].join("\n");
+
 export function createTelegramCommandHandler(deps = {}) {
   const telegramUi = deps.telegramUi || {};
   const runtimeOps = deps.runtimeOps || {};
@@ -73,10 +113,10 @@ export function createTelegramCommandHandler(deps = {}) {
     if (cmd === "/help" || cmd === "/commands") {
       const sub = String(args || "").trim().toLowerCase();
       if (sub === "advanced") {
-        await bot.sendMessage(chatId, "Commands:\n- plain text: 기본 /chat(supervisor) 처리\n- /whoami\n- /running\n- /status\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /team [registry|public [query]|add <preset_or_role_ref>|remove <preset_or_role_ref>|enable <preset_or_role_ref>|disable <preset_or_role_ref>]  (legacy alias: /agents)\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
+        await bot.sendMessage(chatId, ADVANCED_HELP_TEXT);
         return true;
       }
-      await bot.sendMessage(chatId, "Commands:\n- plain text: 대화/작업 지시\n- /context [global]\n- /team [registry|public [query]|add <preset_or_role_ref>|remove <preset_or_role_ref>|enable <preset_or_role_ref>|disable <preset_or_role_ref>]  (legacy alias: /agents)\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /status\n- /stop [jobId]\n- /running\n- /whoami\n- /help advanced");
+      await bot.sendMessage(chatId, HELP_TEXT);
       return true;
     }
 
@@ -249,7 +289,7 @@ export function createTelegramCommandHandler(deps = {}) {
       return true;
     }
 
-    if (cmd === "/agents") {
+    if (cmd === "/agents" || cmd === "/team") {
       await sendAgentOrToolListQuick(bot, chatId, "agent", args, { telegramUserId: userId });
       return true;
     }
