@@ -328,7 +328,7 @@ export async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawA
       const authority = composeCapabilitiesForRun({ jobId: currentJobId || "" }).authority || {};
       const isGocAuthority = String(authority.mode || "").trim().toLowerCase() === "goc";
       if (sub === "public" && !isGocAuthority) {
-        await bot.sendMessage(chatId, "❌ /team public 는 GoC 모드에서만 지원됩니다.");
+        await bot.sendMessage(chatId, "❌ /agents public 는 GoC 모드에서만 지원됩니다.");
         return;
       }
       try {
@@ -370,11 +370,11 @@ export async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawA
 
     if (cleanKind === "agent" && ["add", "remove", "enable", "disable"].includes(sub)) {
       if (!targetAgentId) {
-        await bot.sendMessage(chatId, "Usage: /team add|remove|enable|disable <preset_or_role_ref>");
+        await bot.sendMessage(chatId, "Usage: /agents add|remove|enable|disable <preset_or_role_ref>");
         return;
       }
       if (!currentJobId) {
-        await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어 team/preset preferences 를 변경할 수 없습니다. 먼저 plain text 요청이나 /run 으로 작업을 시작해 주세요.");
+        await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어 conversation preset/preferences 를 변경할 수 없습니다.");
         return;
       }
       try {
@@ -399,7 +399,7 @@ export async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawA
         });
         await sendLong(bot, chatId, result.message);
       } catch (error) {
-        await bot.sendMessage(chatId, `❌ /team ${sub} 실패: ${String(error?.message ?? error)}`);
+        await bot.sendMessage(chatId, `❌ /agents ${sub} 실패: ${String(error?.message ?? error)}`);
       }
       return;
     }
@@ -414,9 +414,9 @@ export async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawA
         const lines = [
           "현재 활성 job이 없습니다.",
           sampleRows.length > 0
-            ? `Preset catalog (sample): ${sampleRows.map((row) => formatAgentRef(row?.id, agentIndex)).join(", ")}`
+            ? `등록된 agent(샘플): ${sampleRows.map((row) => formatAgentRef(row?.id, agentIndex)).join(", ")}`
             : "등록된 agent가 없습니다.",
-          "plain text 요청이나 /run 으로 작업을 시작하면 chat별 job이 생성됩니다.",
+          "작업 지시를 보내면 chat별 job이 생성됩니다.",
         ];
         let fallbackAgentsUi = null;
         if (memoryModeWithFallback() === "goc") {
@@ -429,12 +429,12 @@ export async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawA
         await sendTextWithOptionalGocButton(bot, chatId, lines.join("\n"), {
           miniAppLink: fallbackAgentsUi?.miniAppLink || "",
           browserLink: fallbackAgentsUi?.browserLink || fallbackAgentsUi?.link || "",
-          miniAppLabel: "Open Preset Catalog",
-          browserLabel: "Open Preset Catalog",
+          miniAppLabel: "Open Agents Catalog",
+          browserLabel: "Open Agents Catalog",
         });
         return;
       }
-      await bot.sendMessage(chatId, "현재 활성 job이 없어 tool 목록을 확인할 수 없습니다. 먼저 plain text 요청이나 /run 으로 작업을 시작해 주세요.");
+      await bot.sendMessage(chatId, "현재 활성 job이 없어 tool 목록을 확인할 수 없습니다.");
       return;
     }
 
@@ -473,8 +473,8 @@ export async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawA
       await sendTextWithOptionalGocButton(bot, chatId, result.message, {
         miniAppLink: threadTeamInfo?.miniAppLink || "",
         browserLink: threadTeamInfo?.browserLink || threadTeamInfo?.link || "",
-        miniAppLabel: "Open Team View",
-        browserLabel: "Open Team View",
+        miniAppLabel: "Open Thread Team",
+        browserLabel: "Open Thread Team",
       });
       return;
     }

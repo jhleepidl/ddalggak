@@ -1,3 +1,6 @@
+import { normalizeWorkerRoleId } from '../compatibility/legacy_roles.js';
+import { inferRuntimeDisplayLabel } from './runtime_agent_naming.js';
+
 function asObject(value) {
   return value && typeof value === 'object' ? value : {};
 }
@@ -49,6 +52,33 @@ function looksOpaqueInternalId(value = '') {
   if (/^(rt|slot|ctx|cell|cp|sup|tp)_[a-z0-9_:-]+$/.test(text)) return true;
   if (/^[a-z]{1,4}[0-9a-f]{6,}$/.test(text)) return true;
   return false;
+}
+
+
+function inferRoleIdFromActionAgent(action = {}) {
+  const row = asObject(action);
+  const candidates = [row.agent, row.agent_id, row.agentId, row.runtime_instance_id, row.runtimeInstanceId];
+  for (const candidate of candidates) {
+    const clean = normalizeAgentId(candidate);
+    if (!clean || looksOpaqueInternalId(clean)) continue;
+    const normalized = normalizeAgentId(normalizeWorkerRoleId(clean));
+    if (normalized && CANONICAL_ROLE_LABELS[normalized]) return normalized;
+  }
+  return '';
+}
+
+function inferActionTaskSummary(action = {}) {
+  const row = asObject(action);
+  const inputs = actionInputs(action);
+  return firstNonEmpty(
+    row.prompt,
+    row.goal,
+    row.task,
+    row.instruction,
+    row.summary,
+    inputs.slot_purpose,
+    inputs.slotPurpose,
+  );
 }
 
 export function canonicalRoleDisplayName(roleId = '') {
@@ -103,7 +133,15 @@ function actionRuntimeRows(actions = []) {
       || action.roleId
       || action.role_label
       || action.roleLabel
+      || inferRoleIdFromActionAgent(action)
     );
+    const inferredDisplayLabel = inferRuntimeDisplayLabel({
+      roleId,
+      currentLabel: firstNonEmpty(inputs.display_label, inputs.displayLabel, action.display_label, action.displayLabel, action.label, action.name),
+      purpose: firstNonEmpty(inputs.slot_purpose, inputs.slotPurpose, inputs.slot_label, inputs.slotLabel),
+      taskSummary: inferActionTaskSummary(action),
+      presetDisplayName: firstNonEmpty(inputs.preset_display_name, inputs.presetDisplayName),
+    });
     const displayLabel = firstNonEmpty(
       inputs.display_label,
       inputs.displayLabel,
@@ -114,6 +152,7 @@ function actionRuntimeRows(actions = []) {
       action.label,
       action.name,
       canonicalRoleDisplayName(roleId),
+      inferredDisplayLabel,
     );
     if (displayLabel || inputs.runtime_instance_id || inputs.slot_id || roleId) {
       rows.push({
@@ -336,7 +375,7 @@ export function resolveActionAgentNameHint(action = {}) {
   const row = asObject(action);
   const inputs = actionInputs(action);
   const type = normalizeAgentId(row.type);
-  const roleHintId = inputs.role_id || inputs.roleId || row.role_id || row.roleId || row.role_label || row.roleLabel;
+  const roleHintId = inputs.role_id || inputs.roleId || row.role_id || row.roleId || row.role_label || row.roleLabel || inferRoleIdFromActionAgent(action);
   const slotHint = firstNonEmpty(inputs.slot_label, inputs.slotLabel);
   const explicitHint = firstNonEmpty(
     inputs.display_label,
@@ -369,5 +408,12 @@ export function resolveActionAgentNameHint(action = {}) {
   if (presetHint) return humanizeIdentifier(presetHint);
   const roleHint = canonicalRoleDisplayName(roleHintId);
   if (roleHint) return roleHint;
+  const inferredLabel = inferRuntimeDisplayLabel({
+    roleId: roleHintId,
+    purpose: firstNonEmpty(inputs.slot_purpose, inputs.slotPurpose, inputs.slot_label, inputs.slotLabel),
+    taskSummary: inferActionTaskSummary(action),
+    presetDisplayName: firstNonEmpty(inputs.preset_display_name, inputs.presetDisplayName),
+  });
+  if (inferredLabel) return inferredLabel;
   return '';
 }

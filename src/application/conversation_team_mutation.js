@@ -168,7 +168,7 @@ export function validateConversationPreferenceMutationAgainstCatalog({
     agent_id: id,
     available_preset_ids: availablePresetIds,
     available_role_ids: listCanonicalWorkerRoles(),
-    message: `Unknown preset/role ref: ${id}. Use /catalog to browse presets or choose a canonical role (${listCanonicalWorkerRoles().join(", ")}).`,
+    message: `Unknown preset/role ref: @${id}. Use a preset id from /agents registry or a canonical role (${listCanonicalWorkerRoles().join(", ")}).`,
   };
 }
 
@@ -368,7 +368,7 @@ export function validateConversationTeamMutationAgainstCatalog({
     action_type: type,
     agent_id: id,
     available_agent_ids: catalogIds,
-    message: `Unknown agent id: ${id}. Run /catalog and choose an existing preset or role.`,
+    message: `Unknown agent id: @${id}. Run /agents registry and choose an existing agent id.`,
   };
 }
 

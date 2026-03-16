@@ -157,5 +157,13 @@ export function inferRuntimeDisplayLabel({
     return 'Supervisor Runtime';
   }
 
+  if (!cleanRole) {
+    if (code) return explicitPatch ? 'Patch Agent' : 'Implementation Agent';
+    if (report) return investment ? 'Investment Report Agent' : 'Report Agent';
+    if (evidence || contradiction) return skeptical ? 'Skeptical Review Agent' : 'Review Agent';
+    if (news || filings || investment) return investment ? 'Investment Research Agent' : 'Research Agent';
+    if (workflow) return 'Workflow Agent';
+  }
+
   return existing || canonicalRoleDisplayName(cleanRole) || 'Runtime Agent';
 }

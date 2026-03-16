@@ -28,7 +28,8 @@ export function formatActionAgentLabel(action = {}, {
   fallback = 'unknown',
 } = {}) {
   const index = asMap(agentIndex);
-  const nameHint = resolveActionAgentNameHint(action);
+  const rawHint = resolveActionAgentNameHint(action);
+  const nameHint = ['Agent', 'Runtime Agent'].includes(String(rawHint || '').trim()) ? '' : rawHint;
   const agentId = resolveActionAgentId(action);
   if (nameHint) return formatChatAgentDisplayName(agentId || nameHint, index, { nameHint });
   if (!agentId) return fallback;
@@ -124,6 +125,7 @@ export function buildQueuedAgentStatusFromActions(actions = []) {
       out[agentId] = {
         state: 'queued',
         goal: getActionGoal(action),
+        display_label: resolveActionAgentNameHint(action) || undefined,
       };
       continue;
     }
@@ -134,6 +136,7 @@ export function buildQueuedAgentStatusFromActions(actions = []) {
       out[agentId] = {
         state: 'queued',
         goal: String(child?.goal || child?.prompt || child?.task || '').trim(),
+        display_label: resolveActionAgentNameHint(child) || undefined,
       };
     }
   }
@@ -161,7 +164,9 @@ export function buildAgentStatusLines(agentStatusMap = {}, { agentIndex = new Ma
         ? state
         : 'queued';
       const emoji = stateEmoji[normalizedState] || '⏳';
-      const agentDisplay = formatChatAgentDisplayName(agentId, index);
+      const agentDisplay = formatChatAgentDisplayName(agentId, index, {
+        nameHint: String(row.display_label || row.displayLabel || row.label || row.name || '').trim(),
+      });
       return `- ${agentDisplay} ${emoji} ${normalizedState}`;
     })
     .filter(Boolean);

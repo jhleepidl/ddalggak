@@ -37,3 +37,19 @@ test('buildAgentDisplayIndex preserves direct raw-id rows with human display lab
   ]);
   assert.equal(formatChatAgentDisplayName('9c1d31a3f7b54e90', index), 'Investment Memo Synthesizer');
 });
+
+
+test('action agent raw ids are not promoted into display labels or name hints', () => {
+  const actions = [{
+    type: 'agent_run',
+    agent: '9c1d31a3',
+    prompt: 'analyze',
+    inputs: {
+      role_id: 'researcher',
+    },
+  }];
+  const agentIndex = buildPreviewAgentIndex({ actions });
+  const lines = buildPlanPreviewLines(actions, { agentIndex });
+  assert.deepEqual(lines, ['- Researcher: analyze']);
+  assert.equal(formatChatAgentDisplayName('9c1d31a3', agentIndex), 'Researcher');
+});
