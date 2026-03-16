@@ -96,7 +96,14 @@ function actionRuntimeRows(actions = []) {
   for (const actionRaw of asArray(actions)) {
     const action = asObject(actionRaw);
     const inputs = asObject(action.inputs);
-    const roleId = normalizeAgentId(inputs.role_id || inputs.roleId || action.agent || action.agent_id);
+    const roleId = normalizeAgentId(
+      inputs.role_id
+      || inputs.roleId
+      || action.role_id
+      || action.roleId
+      || action.role_label
+      || action.roleLabel
+    );
     const displayLabel = firstNonEmpty(
       inputs.display_label,
       inputs.displayLabel,
@@ -106,6 +113,7 @@ function actionRuntimeRows(actions = []) {
       action.displayLabel,
       action.label,
       action.name,
+      canonicalRoleDisplayName(roleId),
     );
     if (displayLabel || inputs.runtime_instance_id || inputs.slot_id || roleId) {
       rows.push({
@@ -117,7 +125,7 @@ function actionRuntimeRows(actions = []) {
         preset_id: inputs.preset_id || inputs.presetId,
         role_id: roleId || undefined,
         role_label: canonicalRoleDisplayName(roleId) || undefined,
-        display_label: displayLabel || canonicalRoleDisplayName(roleId) || undefined,
+        display_label: displayLabel || undefined,
         purpose: firstNonEmpty(inputs.slot_purpose, inputs.slotPurpose),
       });
     }
@@ -174,7 +182,7 @@ export function buildPreviewAgentDisplayIndex({
 
 function inferAgentName(row = {}, fallbackId = '') {
   const entry = asObject(row);
-  return firstNonEmpty(
+  const preferred = [
     entry.display_label,
     entry.displayLabel,
     entry.logical_label,
@@ -193,7 +201,14 @@ function inferAgentName(row = {}, fallbackId = '') {
     entry.systemKey,
     looksOpaqueInternalId(fallbackId) ? '' : canonicalRoleDisplayName(fallbackId),
     looksOpaqueInternalId(fallbackId) ? '' : fallbackId,
-  );
+  ];
+  for (const candidate of preferred) {
+    const clean = normalizeAgentName(candidate);
+    if (!clean) continue;
+    if (looksOpaqueInternalId(clean)) continue;
+    return clean;
+  }
+  return '';
 }
 
 function inferAgentMeta(row = {}) {
@@ -321,7 +336,7 @@ export function resolveActionAgentNameHint(action = {}) {
   const row = asObject(action);
   const inputs = actionInputs(action);
   const type = normalizeAgentId(row.type);
-  const roleHintId = inputs.role_id || inputs.roleId || row.agent || row.agent_id;
+  const roleHintId = inputs.role_id || inputs.roleId || row.role_id || row.roleId || row.role_label || row.roleLabel;
   const slotHint = firstNonEmpty(inputs.slot_label, inputs.slotLabel);
   const explicitHint = firstNonEmpty(
     inputs.display_label,

@@ -3,8 +3,7 @@ import { clip } from "../../textutil.js";
 function resolveAgentNoticeLabel(agentId = "", agentLabel = "") {
   const explicit = String(agentLabel || "").trim();
   if (explicit) return explicit;
-  const suffix = String(agentId || "").trim().toLowerCase();
-  return suffix ? `@${suffix}` : "";
+  return "";
 }
 
 export function buildGeminiRetryNoticeText({ retryCount = 0, maxRetries = 0, agentId = "", agentLabel = "" } = {}) {
