@@ -26,6 +26,29 @@ function cleanId(raw = "") {
   return String(raw || "").trim().toLowerCase();
 }
 
+
+function humanizeRef(raw = "") {
+  const clean = cleanId(String(raw || "").replace(/^@+/, ""));
+  if (!clean) return "Agent";
+  const canonicalRole = normalizeWorkerRoleId(clean);
+  if (canonicalRole) {
+    return canonicalRole.charAt(0).toUpperCase() + canonicalRole.slice(1);
+  }
+  const words = clean
+    .replace(/[._-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean)
+    .map((part) => {
+      if (part.toUpperCase() === part && part.length <= 5) return part;
+      if (part === 'dart') return 'DART';
+      if (part === 'goc') return 'GoC';
+      if (part === 'ui') return 'UI';
+      return part.charAt(0).toUpperCase() + part.slice(1);
+    });
+  return words.join(' ') || 'Agent';
+}
 function uniqIds(values = []) {
   const out = [];
   const seen = new Set();
@@ -48,7 +71,7 @@ function actionVerb(actionType = "") {
 }
 
 function formatAgentRefDefault(agentId = "") {
-  return `@${cleanId(agentId) || "unknown"}`;
+  return humanizeRef(agentId);
 }
 
 function enabledAgentIdsFromConsistency(teamConsistency = {}) {
@@ -570,12 +593,12 @@ function normalizeWarningLines(values = []) {
 
 function formatAgentRefs(refs = [], { limit = 20 } = {}) {
   const rows = uniqIds(refs).slice(0, Math.max(1, Number(limit) || 20));
-  return rows.map((ref) => `@${ref}`).join(", ");
+  return rows.map((ref) => humanizeRef(ref)).join(", ");
 }
 
 function formatPreferenceRefs(refs = [], { limit = 20 } = {}) {
   const rows = uniqIds(refs).slice(0, Math.max(1, Number(limit) || 20));
-  return rows.map((ref) => `@${ref}`).join(", ");
+  return rows.map((ref) => humanizeRef(ref)).join(", ");
 }
 
 function buildMutationOptions(runtime = null, {
@@ -644,10 +667,10 @@ function resolveConversationTeamCommandTarget(agentRef = "", teamView = {}) {
   const resolved = resolveAddressableLogicalAgent(query, teamView.addressableAgents);
   if (resolved?.ambiguous) {
     const candidates = asArray(resolved.candidates)
-      .map((row) => `@${cleanId(row?.command_ref || row?.representative_agent_id || row?.logical_agent_id)}`)
+      .map((row) => humanizeRef(row?.command_ref || row?.representative_agent_id || row?.logical_agent_id))
       .filter(Boolean);
     throw new Error(
-      `Ambiguous agent ref: @${query}. Candidates: ${candidates.join(", ") || "(none)"}`
+      `Ambiguous team ref: ${humanizeRef(query)}. Candidates: ${candidates.join(", ") || "(none)"}`
     );
   }
   if (!resolved || typeof resolved !== "object") {
@@ -1030,7 +1053,7 @@ export async function runConversationAgentTeamCommand({
       type: "list",
       command: cleanCommand,
       message: [
-        "현재 team/preset 상태",
+        "Current team & preset state",
         `- job_id: ${cleanJobId}`,
         `- thread_id: ${String(runtime?.map?.threadId || "").trim() || "(none)"}`,
         `- conversation_id: ${String(runtime?.conversationMembershipTarget?.conversation_id || runtime?.conversation?.id || "").trim() || "(none)"}`,
@@ -1089,8 +1112,8 @@ export async function runConversationAgentTeamCommand({
           ? `- warnings: ${String(runtime.conversationMembershipWarning || "").trim()}`
           : "",
         authority?.mode === "goc"
-          ? "명령: /agents registry | /agents public [query] | /agents add <preset_or_role_ref> | /agents remove <preset_or_role_ref> | /agents enable <preset_or_role_ref> | /agents disable <preset_or_role_ref>"
-          : "명령: /agents registry | /agents add <preset_or_role_ref> | /agents remove <preset_or_role_ref> | /agents enable <preset_or_role_ref> | /agents disable <preset_or_role_ref>",
+          ? "명령: /team | /team add <preset_or_role_ref> | /team remove <preset_or_role_ref> | /team enable <preset_or_role_ref> | /team disable <preset_or_role_ref> | /catalog [query] | /agents (legacy alias)"
+          : "명령: /team | /team add <preset_or_role_ref> | /team remove <preset_or_role_ref> | /team enable <preset_or_role_ref> | /team disable <preset_or_role_ref> | /catalog [query] | /agents (legacy alias)",
       ].filter(Boolean).join("\n"),
       conversation_preferences: preferences,
       baselineDefaultAgentIds: teamView.baselineDefaultAgentIds,
@@ -1117,9 +1140,9 @@ export async function runConversationAgentTeamCommand({
     type: "mutation",
     command: cleanCommand,
     message: [
-      `✅ conversation preference ${actionVerb(cleanCommand)} 완료`,
+      `✅ Team preference ${actionVerb(cleanCommand)} complete`,
       `- job_id: ${cleanJobId}`,
-      `- agent: @${targetAgentRef || cleanId(agentId) || "unknown"}`,
+      `- target: ${humanizeRef(targetAgentRef || cleanId(agentId) || "unknown")}`,
       preferences.pinned_preset_ids.length > 0
         ? `- pinned_presets: ${formatPreferenceRefs(preferences.pinned_preset_ids, { limit: 20 })}`
         : "- pinned_presets: (none)",

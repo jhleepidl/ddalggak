@@ -2,6 +2,7 @@ import {
   executeRunCommand,
   executeContinueCommand,
 } from "../../application/route_executor.js";
+import { buildTelegramHelpText, normalizeTelegramCommand } from "./command_catalog.js";
 
 export function createTelegramCommandHandler(deps = {}) {
   const telegramUi = deps.telegramUi || {};
@@ -67,16 +68,16 @@ export function createTelegramCommandHandler(deps = {}) {
   return async function handleTelegramCommand({ msg, text, chatId, userId }) {
     if (!String(text || "").startsWith("/")) return false;
 
-    const [cmd, ...rest] = String(text || "").split(/\s+/);
-    const args = rest.join(" ").trim();
+    const [rawCmd, ...rest] = String(text || "").split(/\s+/);
+    const rawArgs = rest.join(" ").trim();
+    const normalized = normalizeTelegramCommand(rawCmd, rawArgs);
+    const cmd = normalized.cmd;
+    const args = normalized.args;
+    const commandTokens = String(args || "").trim().split(/\s+/).filter(Boolean);
 
     if (cmd === "/help") {
       const sub = String(args || "").trim().toLowerCase();
-      if (sub === "advanced") {
-        await bot.sendMessage(chatId, "Commands:\n- plain text: 기본 /chat(supervisor) 처리\n- /whoami\n- /running\n- /status\n- /stop [jobId]\n- /memory [show|md|policy|routing|role|agents|note|lesson|reset]\n- /settings ... (alias)\n- /agents [registry|public [query]|add <preset_or_role_ref>|remove <preset_or_role_ref>|enable <preset_or_role_ref>|disable <preset_or_role_ref>]\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /chat [--debug] <message>|reset\n- /context <jobId|global>  (jobId 생략 시 현재 job)\n- /run <goal>\n- /continue <jobId>\n- /gptprompt <jobId> <question>\n- /gptapply [jobId]\n- /gptdone\n- /commit <jobId> <message>");
-        return true;
-      }
-      await bot.sendMessage(chatId, "Commands:\n- plain text: 대화/작업 지시\n- /context [global]\n- /agents [registry|public [query]|add <preset_or_role_ref>|remove <preset_or_role_ref>|enable <preset_or_role_ref>|disable <preset_or_role_ref>]\n- /tools\n- /files [uploads|outputs|all] [limit]\n- /outputs [send]\n- /sendfile <relative_path>\n- /status\n- /stop [jobId]\n- /running\n- /whoami\n- /help advanced");
+      await sendLong(bot, chatId, buildTelegramHelpText(sub));
       return true;
     }
 
@@ -135,7 +136,7 @@ export function createTelegramCommandHandler(deps = {}) {
     }
 
     if (cmd === "/memory" || cmd === "/settings") {
-      const sub = String(rest[0] || "show").trim().toLowerCase();
+      const sub = String(commandTokens[0] || "show").trim().toLowerCase();
 
       if (sub === "show") {
         await sendLong(bot, chatId, formatMemorySummary());
@@ -154,7 +155,7 @@ export function createTelegramCommandHandler(deps = {}) {
       }
 
       if (sub === "policy") {
-        const value = rest.slice(1).join(" ").trim();
+        const value = commandTokens.slice(1).join(" ").trim();
         if (!value) {
           await bot.sendMessage(chatId, "Usage: /memory policy <자연어 프롬프트>");
           return true;
@@ -169,7 +170,7 @@ export function createTelegramCommandHandler(deps = {}) {
       }
 
       if (sub === "routing") {
-        const value = rest.slice(1).join(" ").trim();
+        const value = commandTokens.slice(1).join(" ").trim();
         if (!value) {
           await bot.sendMessage(chatId, "Usage: /memory routing <자연어 프롬프트>");
           return true;
@@ -184,8 +185,8 @@ export function createTelegramCommandHandler(deps = {}) {
       }
 
       if (sub === "role") {
-        const agent = String(rest[1] || "").trim().toLowerCase();
-        const value = rest.slice(2).join(" ").trim();
+        const agent = String(commandTokens[1] || "").trim().toLowerCase();
+        const value = commandTokens.slice(2).join(" ").trim();
         if (!agent || !value) {
           await bot.sendMessage(chatId, "Usage: /memory role <gemini|codex|chatgpt> <자연어 역할>");
           return true;
@@ -205,7 +206,7 @@ export function createTelegramCommandHandler(deps = {}) {
       }
 
       if (sub === "note") {
-        const value = rest.slice(1).join(" ").trim();
+        const value = commandTokens.slice(1).join(" ").trim();
         if (!value) {
           await bot.sendMessage(chatId, "Usage: /memory note <메모>");
           return true;
@@ -220,7 +221,7 @@ export function createTelegramCommandHandler(deps = {}) {
       }
 
       if (sub === "lesson") {
-        const value = rest.slice(1).join(" ").trim();
+        const value = commandTokens.slice(1).join(" ").trim();
         if (!value) {
           await bot.sendMessage(chatId, "Usage: /memory lesson <교훈>");
           return true;
@@ -265,10 +266,10 @@ export function createTelegramCommandHandler(deps = {}) {
         await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어요. 먼저 /chat 또는 /run으로 job을 시작해 주세요.");
         return true;
       }
-      const first = String(rest[0] || "").trim().toLowerCase();
+      const first = String(commandTokens[0] || "").trim().toLowerCase();
       const hasScope = first === "uploads" || first === "outputs" || first === "all";
       const scope = hasScope ? first : "all";
-      const limit = parseClampedInt(hasScope ? rest[1] : rest[0], 20, { min: 1, max: 100 });
+      const limit = parseClampedInt(hasScope ? commandTokens[1] : commandTokens[0], 20, { min: 1, max: 100 });
       const entries = collectWorkspaceFileEntries(currentJobId, { scope }).slice(0, limit);
       await sendLong(
         bot,
@@ -284,9 +285,9 @@ export function createTelegramCommandHandler(deps = {}) {
         await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어요. 먼저 /chat 또는 /run으로 job을 시작해 주세요.");
         return true;
       }
-      const mode = String(rest[0] || "").trim().toLowerCase();
+      const mode = String(commandTokens[0] || "").trim().toLowerCase();
       if (mode === "send") {
-        const sendLimit = parseClampedInt(rest[1], OUTPUT_AUTO_SEND_MAX_FILES, { min: 1, max: 10 });
+        const sendLimit = parseClampedInt(commandTokens[1], OUTPUT_AUTO_SEND_MAX_FILES, { min: 1, max: 10 });
         await deliverWorkspaceOutputs(bot, chatId, currentJobId, {
           replyToMessageId: msg.message_id,
           maxFiles: sendLimit,
@@ -294,7 +295,7 @@ export function createTelegramCommandHandler(deps = {}) {
         await bot.sendMessage(chatId, `✅ outputs 전송 시도 완료 (limit=${sendLimit})`);
         return true;
       }
-      const limit = parseClampedInt(rest[0], 20, { min: 1, max: 100 });
+      const limit = parseClampedInt(commandTokens[0], 20, { min: 1, max: 100 });
       const entries = collectWorkspaceFileEntries(currentJobId, { scope: "outputs" }).slice(0, limit);
       await sendLong(
         bot,
@@ -331,7 +332,7 @@ export function createTelegramCommandHandler(deps = {}) {
 
     if (cmd === "/context") {
       try {
-        const arg = String(rest[0] || "").trim();
+        const arg = String(commandTokens[0] || "").trim();
         await sendContextInfo(bot, chatId, arg, {
           userId,
           createIfMissing: true,
@@ -450,7 +451,7 @@ export function createTelegramCommandHandler(deps = {}) {
     }
 
     if (cmd === "/gptprompt") {
-      const parts = rest;
+      const parts = commandTokens;
       const jobId = parts[0];
       const question = parts.slice(1).join(" ").trim();
       if (!jobId || !question) {
@@ -476,7 +477,7 @@ export function createTelegramCommandHandler(deps = {}) {
     }
 
     if (cmd === "/commit") {
-      const parts = rest;
+      const parts = commandTokens;
       const jobId = parts[0];
       const message = parts.slice(1).join(" ").trim();
       if (!jobId || !message) {
@@ -505,7 +506,7 @@ export function createTelegramCommandHandler(deps = {}) {
     }
 
     if (cmd.startsWith("/")) {
-      await bot.sendMessage(chatId, "알 수 없는 명령입니다. /help 를 참고하세요.");
+      await bot.sendMessage(chatId, "알 수 없는 명령입니다. /help 를 참고하세요. Team/preset 관리는 /team, catalog 탐색은 /catalog 를 사용할 수 있어요.");
       return true;
     }
 
