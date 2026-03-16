@@ -1,3 +1,4 @@
+import { buildPreviewAgentDisplayIndex, formatChatAgentDisplayName, resolveActionAgentNameHint } from "../shared/agent_labels.js";
 import { randomUUID } from "node:crypto";
 import {
   normalizeActionSource as normalizeActionSourceShared,
@@ -10,6 +11,16 @@ import {
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
+}
+
+
+function userFacingAgentLabel(agentId = '', action = null, runtimeMetadata = null) {
+  const nameHint = action ? resolveActionAgentNameHint(action) : '';
+  const index = buildPreviewAgentDisplayIndex({
+    runtimeSnapshot: runtimeMetadata || null,
+    actions: action ? [action] : [],
+  });
+  return formatChatAgentDisplayName(agentId || nameHint, index, { nameHint, fallbackLabel: 'Agent' });
 }
 
 function nowIso() {
@@ -359,7 +370,7 @@ export class GocExecutionGraphRecorder {
       };
       const created = await this._createNode("Step", {
         name: `step:${stepId}`,
-        summary: clipPreview(`${type}${agentId ? ` @${agentId}` : ""} ${goal}`.trim(), 240),
+        summary: clipPreview(`${type}${agentId ? ` ${userFacingAgentLabel(agentId, action, this.runtimeMetadata?.runtime_team_snapshot || this.runtimeMetadata || null)}` : ""} ${goal}`.trim(), 240),
         payload,
       });
       const stepNodeId = String(created?.id || "").trim();
@@ -524,7 +535,7 @@ export class GocExecutionGraphRecorder {
       };
       const childNode = await this._createNode("Step", {
         name: `step:${childStepId}`,
-        summary: clipPreview(`spawn @${childAgentId} ${childGoal}`, 240),
+        summary: clipPreview(`spawn ${userFacingAgentLabel(childAgentId, { type: 'run_agent', agent_id: childAgentId, inputs: child.inputs || {} }, this.runtimeMetadata?.runtime_team_snapshot || this.runtimeMetadata || null)} ${childGoal}`, 240),
         payload,
       });
       const childNodeId = String(childNode?.id || "").trim();

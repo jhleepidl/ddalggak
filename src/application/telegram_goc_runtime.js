@@ -543,6 +543,12 @@ function uniqNodeIds(rows = []) {
   return out;
 }
 
+function humanizeParticipantLabel(value = '') {
+  const clean = String(value || '').trim().toLowerCase();
+  if (!clean) return 'Agent';
+  return canonicalRoleDisplayName(clean) || 'Agent';
+}
+
 function chunkNodeIds(ids = [], size = 100) {
   const rows = Array.isArray(ids) ? ids : [];
   const out = [];
@@ -566,7 +572,7 @@ function summarizeJobConfigDebug(rawConfig = {}) {
   return [
     `mode=${mode}`,
     `style=${style}`,
-    `participants=${participants.length > 0 ? participants.map((id) => `@${id}`).join(", ") : "(none)"}`,
+    `participants=${participants.length > 0 ? participants.map((id) => humanizeParticipantLabel(id)).join(', ') : '(none)'}`,
     `budget.max_actions=${maxActions}`,
     `budget.max_risk=${maxRisk}`,
   ].join(", ");

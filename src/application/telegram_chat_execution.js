@@ -1079,7 +1079,7 @@ function buildSupervisorExecutionCallbacks({
       if (executionGraph && cleanAgentId && stepNodeId && String(result?.output || "").trim()) {
         await executionGraph.attachArtifact(String(stepNodeId || "").trim(), {
           name: `artifact:${cleanAgentId}@${new Date().toISOString()}`,
-          summary: clip(`@${cleanAgentId} output`, 220),
+          summary: clip(`${formatChatAgentDisplayName(cleanAgentId, buildTelegramAgentIndex({ runtime, routePlan: plan, actions: plan?.actions || [] }))} output`, 220),
           text: String(result.output || ""),
           uri: `ddalggak://jobs/${jobId}/agents/${cleanAgentId}/output`,
           payload: {
@@ -1275,7 +1275,7 @@ function buildSupervisorExecutionCallbacks({
         const childToolCall = executionGraph
           ? await executionGraph.startToolCall(childStepNodeId, {
             toolName: "run_agent",
-            inputPreview: clip(`@${agentId} ${goal}`, 900),
+            inputPreview: clip(`${formatChatAgentDisplayName(agentId, buildTelegramAgentIndex({ runtime, routePlan: plan, actions: plan?.actions || [], extraSources: [{ actions: children }] }))} ${goal}`, 900),
             status: "running",
           })
           : null;

@@ -41,6 +41,16 @@ function humanizeIdentifier(value = '') {
     .replace(/\b\w/g, (match) => match.toUpperCase());
 }
 
+function looksOpaqueInternalId(value = '') {
+  const text = normalizeAgentName(value).toLowerCase();
+  if (!text) return false;
+  if (/^[0-9a-f]{8,}$/.test(text)) return true;
+  if (/^[0-9a-f]{8}-[0-9a-f-]{8,}$/.test(text)) return true;
+  if (/^(rt|slot|ctx|cell|cp|sup|tp)_[a-z0-9_:-]+$/.test(text)) return true;
+  if (/^[a-z]{1,4}[0-9a-f]{6,}$/.test(text)) return true;
+  return false;
+}
+
 export function canonicalRoleDisplayName(roleId = '') {
   const clean = normalizeAgentId(roleId);
   if (!clean) return '';
@@ -68,6 +78,10 @@ function pushAgentRows(index, rows = []) {
       row.roleId,
       row.role_label,
       row.roleLabel,
+      row.command_ref,
+      row.commandRef,
+      row.legacy_transport_agent_id,
+      row.legacyTransportAgentId,
     ]
       .map((value) => normalizeAgentId(value))
       .filter(Boolean);
@@ -95,8 +109,10 @@ function actionRuntimeRows(actions = []) {
     );
     if (displayLabel || inputs.runtime_instance_id || inputs.slot_id || roleId) {
       rows.push({
+        id: action.agent_id || action.agentId || action.agent,
+        agent_id: action.agent_id || action.agentId || action.agent,
         runtime_instance_id: inputs.runtime_instance_id || inputs.runtimeInstanceId,
-        instance_id: inputs.runtime_instance_id || inputs.runtimeInstanceId,
+        instance_id: inputs.runtime_instance_id || inputs.runtimeInstanceId || action.agent_id || action.agentId || action.agent,
         slot_id: inputs.slot_id || inputs.slotId,
         preset_id: inputs.preset_id || inputs.presetId,
         role_id: roleId || undefined,
@@ -175,8 +191,8 @@ function inferAgentName(row = {}, fallbackId = '') {
     entry.presetId,
     entry.system_key,
     entry.systemKey,
-    canonicalRoleDisplayName(fallbackId),
-    fallbackId,
+    looksOpaqueInternalId(fallbackId) ? '' : canonicalRoleDisplayName(fallbackId),
+    looksOpaqueInternalId(fallbackId) ? '' : fallbackId,
   );
 }
 
@@ -202,33 +218,40 @@ function isGenericLabel(label = '', id = '') {
 
 function pickDisplayName({ rowName = '', hintName = '', fallbackId = '' } = {}) {
   if (hintName && (!rowName || isGenericLabel(rowName, fallbackId))) return hintName;
-  return rowName || hintName || canonicalRoleDisplayName(fallbackId) || '';
+  if (rowName) return rowName;
+  if (hintName) return hintName;
+  if (!looksOpaqueInternalId(fallbackId)) return canonicalRoleDisplayName(fallbackId) || '';
+  return '';
 }
 
 export function formatAgentDisplayName(agentId = '', agentIndex = new Map(), {
   nameHint = '',
   includeShortId = true,
+  fallbackLabel = 'Agent',
 } = {}) {
   const id = normalizeAgentId(agentId);
-  if (!id && !nameHint) return '@unknown';
-  const shortId = (id || normalizeAgentId(nameHint)).slice(0, 8) || 'unknown';
-  const row = agentIndex instanceof Map ? agentIndex.get(id) : null;
-  const rowName = inferAgentName(row, id || nameHint);
-  const rowMeta = inferAgentMeta(row);
   const hintName = normalizeAgentName(nameHint);
-  const displayName = pickDisplayName({ rowName, hintName, fallbackId: id || hintName });
-  if (!displayName) return `@${shortId}`;
+  if (!id && !hintName) return fallbackLabel;
+  const shortId = (id || normalizeAgentId(hintName)).slice(0, 8) || 'unknown';
+  const row = agentIndex instanceof Map ? agentIndex.get(id) : null;
+  const rowName = inferAgentName(row, id || hintName);
+  const rowMeta = inferAgentMeta(row);
+  const displayName = pickDisplayName({ rowName, hintName, fallbackId: id || hintName }) || fallbackLabel;
   if (!includeShortId) return displayName;
-  if (!id || !isGenericLabel(displayName, id)) return rowMeta ? `${displayName} (${rowMeta})` : displayName;
+  if (!id || !isGenericLabel(displayName, id) || looksOpaqueInternalId(id)) {
+    return rowMeta ? `${displayName} (${rowMeta})` : displayName;
+  }
   return rowMeta ? `${displayName} (${rowMeta}) [${shortId}]` : `${displayName} [${shortId}]`;
 }
 
 export function formatChatAgentDisplayName(agentId = '', agentIndex = new Map(), {
   nameHint = '',
+  fallbackLabel = 'Agent',
 } = {}) {
   return formatAgentDisplayName(agentId, agentIndex, {
     nameHint,
     includeShortId: false,
+    fallbackLabel,
   });
 }
 
