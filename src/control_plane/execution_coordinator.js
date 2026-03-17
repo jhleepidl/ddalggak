@@ -244,6 +244,17 @@ export function findExecutionOrder(teamPlan = {}, runtimeAgents = []) {
   return topologicalLevels(teamPlan, runtimeAgents).flat();
 }
 
+function findScopeSpecForSlot(slot = {}, runtimeAgent = {}, teamPlan = {}) {
+  const scopeSpecs = asArray(teamPlan?.scope_specs ?? teamPlan?.scopeSpecs);
+  const instanceId = normalizeText(runtimeAgent?.instance_id || runtimeAgent?.instanceId);
+  const slotId = normalizeText(slot?.slot_id || slot?.slotId || runtimeAgent?.slot_id || runtimeAgent?.slotId);
+  const roleId = normalizeRoleId(slot?.role_id || runtimeAgent?.role_id || runtimeAgent?.role_label);
+  return scopeSpecs.find((scope) => normalizeText(scope?.target_instance_id || scope?.targetInstanceId) === instanceId)
+    || scopeSpecs.find((scope) => normalizeText(scope?.target_slot_id || scope?.targetSlotId) === slotId)
+    || scopeSpecs.find((scope) => normalizeRoleId(scope?.role_id || scope?.roleId) === roleId)
+    || null;
+}
+
 function findRuntimeAgentForSlot(slot = {}, runtimeAgents = []) {
   const slotId = normalizeText(slot?.slot_id || slot?.slotId);
   const roleId = normalizeRoleId(slot?.role_id || slot?.role_label);
@@ -444,6 +455,7 @@ function buildSlotActionInputs({
   parallelGroupId = undefined,
   taskInterpretation = {},
   supervisorRuntime = null,
+  scopeSpec = null,
 } = {}) {
   const instanceId = normalizeText(runtimeAgent?.instance_id || runtimeAgent?.instanceId);
   const slotId = normalizeText(slot?.slot_id || slot?.slotId);
@@ -476,6 +488,11 @@ function buildSlotActionInputs({
       runtimeAgent?.authority_profile_id || slot?.authority_profile_id,
       { lower: true }
     ) || undefined,
+    scope_id: normalizeText(scopeSpec?.scope_id || scopeSpec?.scopeId) || undefined,
+    memory_grants: scopeSpec?.memory_grants && typeof scopeSpec.memory_grants === "object"
+      ? scopeSpec.memory_grants
+      : undefined,
+    visibility_mode: normalizeText(scopeSpec?.visibility_mode || scopeSpec?.visibilityMode, { lower: true }) || undefined,
     legacy_transport_agent_id: normalizeText(
       runtimeAgent?.template_id || getTransportRoleId(roleId),
       { lower: true }
@@ -495,6 +512,7 @@ function buildSlotRunAction({
   taskInterpretation = {},
   supervisorRuntime = null,
   finalSynthesis = false,
+  scopeSpec = null,
 } = {}) {
   const roleId = normalizeRoleId(slot?.role_id || runtimeAgent?.role_id || runtimeAgent?.role_label);
   const prompt = buildSlotPrompt({
@@ -520,6 +538,7 @@ function buildSlotRunAction({
         parallelGroupId,
         taskInterpretation,
         supervisorRuntime,
+        scopeSpec,
       }),
       final_synthesis: finalSynthesis === true || undefined,
     },
@@ -664,6 +683,7 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
         .map((slot) => {
           const runtimeAgent = findRuntimeAgentForSlot(slot, runtimeAgents);
           if (!runtimeAgent) return null;
+          const scopeSpec = findScopeSpecForSlot(slot, runtimeAgent, teamPlan);
           return buildSlotRunAction({
             slot,
             runtimeAgent,
@@ -676,6 +696,7 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
             taskInterpretation,
             supervisorRuntime,
             finalSynthesis: false,
+            scopeSpec,
           });
         })
         .filter(Boolean);
@@ -724,6 +745,7 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
     for (const slot of runnableSlots) {
       const runtimeAgent = findRuntimeAgentForSlot(slot, runtimeAgents);
       if (!runtimeAgent) continue;
+      const scopeSpec = findScopeSpecForSlot(slot, runtimeAgent, teamPlan);
       const slotCheckpointList = checkpointIdsForSlots([slot.slot_id], checkpointLookup);
       const action = buildSlotRunAction({
         slot,
@@ -737,6 +759,7 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
         taskInterpretation,
         supervisorRuntime,
         finalSynthesis: false,
+        scopeSpec,
       });
       if (action) actions.push(action);
 
@@ -759,6 +782,9 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
       ? findRuntimeAgentForSlot(synthesizerSlot, runtimeAgents)
       : null;
     const slotCheckpointList = checkpointIdsForSlots([terminalSynthesizerSlotId], checkpointLookup);
+    const synthesisScopeSpec = synthesizerSlot && synthesizerAgent
+      ? findScopeSpecForSlot(synthesizerSlot, synthesizerAgent, teamPlan)
+      : null;
     const synthesisAction = synthesizerSlot && synthesizerAgent
       ? buildSlotRunAction({
         slot: synthesizerSlot,
@@ -772,6 +798,7 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
         taskInterpretation,
         supervisorRuntime,
         finalSynthesis: true,
+        scopeSpec: synthesisScopeSpec,
       })
       : null;
     if (synthesisAction) actions.push(synthesisAction);

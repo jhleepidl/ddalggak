@@ -144,7 +144,16 @@ export function normalizeRuntimeAgentInstance(raw = {}, {
       : (row.providerBinding && typeof row.providerBinding === "object" ? row.providerBinding : undefined),
     lens_spec: row.lens_spec && typeof row.lens_spec === "object"
       ? row.lens_spec
-      : (row.lensSpec && typeof row.lensSpec === "object" ? row.lensSpec : undefined),
+      : (row.lensSpec && typeof row.lensSpec === "object"
+        ? row.lensSpec
+        : (row.scope_hint && typeof row.scope_hint === "object"
+          ? row.scope_hint
+          : (row.scopeHint && typeof row.scopeHint === "object" ? row.scopeHint : undefined))),
+    scope_hint: row.scope_hint && typeof row.scope_hint === "object"
+      ? row.scope_hint
+      : (row.scopeHint && typeof row.scopeHint === "object"
+        ? row.scopeHint
+        : (row.lens_spec && typeof row.lens_spec === "object" ? row.lens_spec : (row.lensSpec && typeof row.lensSpec === "object" ? row.lensSpec : undefined))),
     execution_budget: row.execution_budget && typeof row.execution_budget === "object"
       ? row.execution_budget
       : (row.executionBudget && typeof row.executionBudget === "object" ? row.executionBudget : undefined),

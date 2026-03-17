@@ -4,9 +4,9 @@ import assert from "node:assert/strict";
 import { SkillRegistry } from "../src/application/skill_registry.js";
 import { SkillResolver } from "../src/application/skill_resolver.js";
 import { SkillLoader } from "../src/application/skill_loader.js";
-import { ContextPackBuilder } from "../src/application/context_pack_builder.js";
+import { LegacyContextPackBuilder } from "../src/control_plane/legacy_context_pack_builder.js";
 
-test("context pack builder records skill items and upgrades load level for execution", () => {
+test("legacy context pack builder records skill items and upgrades load level for execution", () => {
   const registry = new SkillRegistry({
     skillsDir: path.resolve(process.cwd(), "skills"),
   });
@@ -17,7 +17,7 @@ test("context pack builder records skill items and upgrades load level for execu
     minScore: 5,
   });
   const loader = new SkillLoader({ registry });
-  const builder = new ContextPackBuilder({
+  const builder = new LegacyContextPackBuilder({
     registry,
     skillLoader: loader,
   });
@@ -70,8 +70,8 @@ test("context pack builder records skill items and upgrades load level for execu
   assert.equal(build.context_packs[0].skill_items[0].load_level, "resources");
 });
 
-test("context pack builder remains backward-compatible for roles without skills", () => {
-  const builder = new ContextPackBuilder({
+test("legacy context pack builder remains backward-compatible for roles without skills", () => {
+  const builder = new LegacyContextPackBuilder({
     registry: null,
     skillLoader: null,
   });
@@ -119,13 +119,13 @@ test("context pack builder remains backward-compatible for roles without skills"
   assert.ok(Array.isArray(build.context_packs[0].conflicts));
 });
 
-test("context pack builder records instructions/resources levels and missing skill diagnostics", () => {
+test("legacy context pack builder records instructions/resources levels and missing skill diagnostics", () => {
   const registry = new SkillRegistry({
     skillsDir: path.resolve(process.cwd(), "skills"),
   });
   registry.load({ refresh: true });
   const loader = new SkillLoader({ registry });
-  const builder = new ContextPackBuilder({
+  const builder = new LegacyContextPackBuilder({
     registry,
     skillLoader: loader,
   });

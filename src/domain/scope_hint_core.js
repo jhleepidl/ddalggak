@@ -1,21 +1,21 @@
 import { normalizeNodeIds } from "../shared/normalize.js";
 
-export const LENS_MODES = ["shared_only", "unfold_query", "add_nodes", "remove_nodes"];
+export const SCOPE_HINT_MODES = ["shared_only", "unfold_query", "add_nodes", "remove_nodes"];
 
-export function dedupeNodeIds(nodeIds = [], { max = 200 } = {}) {
+export function dedupeScopeNodeIds(nodeIds = [], { max = 200 } = {}) {
   return normalizeNodeIds(nodeIds, { max });
 }
 
-export function normalizeLensSpec(rawLens, { fallbackBudget = 1200 } = {}) {
-  const row = rawLens && typeof rawLens === "object" ? rawLens : {};
+export function normalizeScopeHintCore(rawScope, { fallbackBudget = 1200 } = {}) {
+  const row = rawScope && typeof rawScope === "object" ? rawScope : {};
   const query = String(row.query || row.prompt || "").trim();
-  const addNodeIds = dedupeNodeIds(row.add_node_ids ?? row.addNodeIds, { max: 120 });
-  const removeNodeIds = dedupeNodeIds(row.remove_node_ids ?? row.removeNodeIds, { max: 120 });
+  const addNodeIds = dedupeScopeNodeIds(row.add_node_ids ?? row.addNodeIds, { max: 120 });
+  const removeNodeIds = dedupeScopeNodeIds(row.remove_node_ids ?? row.removeNodeIds, { max: 120 });
   const modeRaw = String(row.mode || "").trim().toLowerCase();
   const inferredMode = query
     ? "unfold_query"
     : (addNodeIds.length > 0 ? "add_nodes" : (removeNodeIds.length > 0 ? "remove_nodes" : "shared_only"));
-  const mode = LENS_MODES.includes(modeRaw) ? modeRaw : inferredMode;
+  const mode = SCOPE_HINT_MODES.includes(modeRaw) ? modeRaw : inferredMode;
   const budgetRaw = Number(row.budget_tokens ?? row.budgetTokens);
   const closureDirectionRaw = String((row.closure_direction ?? row.closureDirection) || "").trim().toLowerCase();
   const maxClosureRaw = Number(row.max_closure_nodes ?? row.maxClosureNodes);
@@ -44,7 +44,7 @@ export function normalizeLensSpec(rawLens, { fallbackBudget = 1200 } = {}) {
   };
 }
 
-export function defaultLensSpecForRole({
+export function defaultScopeHintForRole({
   roleType = "researcher",
   roleLabel = "",
   goal = "",
@@ -69,7 +69,7 @@ export function defaultLensSpecForRole({
   }
 
   if (cleanRoleType === "synthesizer" || cleanRoleType === "messenger") {
-    const artifactIds = dedupeNodeIds(recentArtifactNodeIds).slice(0, 4);
+    const artifactIds = dedupeScopeNodeIds(recentArtifactNodeIds).slice(0, 4);
     return {
       mode: "unfold_query",
       query: query || "upstream 결과를 종합하는 데 필요한 핵심 맥락",
@@ -79,7 +79,7 @@ export function defaultLensSpecForRole({
   }
 
   if (["builder", "coder", "reviewer", "verifier"].includes(cleanRoleType)) {
-    const artifactIds = dedupeNodeIds(recentArtifactNodeIds).slice(0, 3);
+    const artifactIds = dedupeScopeNodeIds(recentArtifactNodeIds).slice(0, 3);
     return {
       mode: "unfold_query",
       query: query || "코드 변경과 직접 연관된 맥락",
@@ -95,43 +95,43 @@ export function defaultLensSpecForRole({
   };
 }
 
-export function defaultLensSpecForAgent({ agentId = "", goal = "", recentArtifactNodeIds = [] } = {}) {
-  return defaultLensSpecForRole({
+export function defaultScopeHintForAgent({ agentId = "", goal = "", recentArtifactNodeIds = [] } = {}) {
+  return defaultScopeHintForRole({
     roleType: String(agentId || "").trim().toLowerCase(),
     goal,
     recentArtifactNodeIds,
   });
 }
 
-export function resolveEffectiveLensSpec(rawLens, {
+export function resolveEffectiveScopeHint(rawScope, {
   roleType = "",
   roleLabel = "",
   agentId = "",
   goal = "",
   recentArtifactNodeIds = [],
 } = {}) {
-  const hasUserLens = !!(rawLens && typeof rawLens === "object" && Object.keys(rawLens).length > 0);
-  const defaultSpec = defaultLensSpecForRole({
+  const hasUserScope = !!(rawScope && typeof rawScope === "object" && Object.keys(rawScope).length > 0);
+  const defaultSpec = defaultScopeHintForRole({
     roleType: roleType || agentId,
     roleLabel,
     goal,
     recentArtifactNodeIds,
   });
-  const base = hasUserLens ? rawLens : defaultSpec;
-  const fallbackBudget = hasUserLens
-    ? Number(rawLens?.budget_tokens ?? rawLens?.budgetTokens)
+  const base = hasUserScope ? rawScope : defaultSpec;
+  const fallbackBudget = hasUserScope
+    ? Number(rawScope?.budget_tokens ?? rawScope?.budgetTokens)
     : Number(defaultSpec?.budget_tokens || 1200);
-  return normalizeLensSpec(base, { fallbackBudget });
+  return normalizeScopeHintCore(base, { fallbackBudget });
 }
 
-export function validateLensSpec(rawLens) {
-  const spec = normalizeLensSpec(rawLens);
+export function validateScopeHint(rawScope) {
+  const spec = normalizeScopeHintCore(rawScope);
   const errors = [];
-  if (!LENS_MODES.includes(String(spec?.mode || ""))) errors.push("invalid_mode");
+  if (!SCOPE_HINT_MODES.includes(String(spec?.mode || ""))) errors.push("invalid_mode");
   if (!Number.isFinite(Number(spec?.budget_tokens))) errors.push("invalid_budget_tokens");
   return {
     ok: errors.length === 0,
     errors,
-    lens: spec,
+    scope_hint: spec,
   };
 }

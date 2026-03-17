@@ -13,7 +13,6 @@
 - `telegram_runner.js`: bootstrap + 이벤트 수신 + 오케스트레이션 위임
 - `src/shared/json_extract.js`: JSON 추출/파싱 공통 헬퍼
 - `src/shared/normalize.js`: 문자열/리스트/provider 정규화 공통 헬퍼
-- `src/domain/lens.js`: lens spec 정규화/기본값/검증
 - `src/domain/route_plan.js`: route plan/action 정규화 및 sanitize
 - `src/domain/agent_templates.js`: `AgentTemplate`, `RuntimeAgentInstance` 정규화/생성
 - `src/domain/team_plan.js`: `TeamPlan` 정규화/검증

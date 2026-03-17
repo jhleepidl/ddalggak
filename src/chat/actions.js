@@ -1,4 +1,4 @@
-import { normalizeLensSpec as normalizeDomainLensSpec } from "../domain/lens.js";
+import { normalizeScopeHintCompat } from "../domain/scope_hint.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -46,12 +46,8 @@ function normalizeStringArray(raw, { max = 16 } = {}) {
   return out;
 }
 
-function normalizeLensSpec(raw) {
-  const row = asObject(raw);
-  if (Object.keys(row).length === 0) return null;
-  return normalizeDomainLensSpec(row, {
-    fallbackBudget: Number(row.budget_tokens ?? row.budgetTokens) || 1200,
-  });
+function normalizeScopeSpec(raw) {
+  return normalizeScopeHintCompat(raw);
 }
 
 function normalizeRunAgent(raw) {
@@ -64,7 +60,8 @@ function normalizeRunAgent(raw) {
     agent_id: agentId,
     goal,
     inputs: row.inputs && typeof row.inputs === "object" ? row.inputs : {},
-    lens: normalizeLensSpec(row.lens),
+    scope: normalizeScopeSpec(row),
+    lens: normalizeScopeSpec(row),
     risk: normalizeRisk(row.risk, "L1"),
   };
 }
@@ -348,7 +345,8 @@ function normalizeSpawnAgents(raw) {
       agent_id: agentId,
       goal,
       inputs: child.inputs && typeof child.inputs === "object" ? child.inputs : {},
-      lens: normalizeLensSpec(child.lens),
+      scope: normalizeScopeSpec(child),
+      lens: normalizeScopeSpec(child),
       risk: normalizeRisk(child.risk, "L1"),
     });
     if (children.length >= 8) break;
@@ -357,7 +355,8 @@ function normalizeSpawnAgents(raw) {
   return {
     type: "spawn_agents",
     summary: String(row.summary || row.goal || row.reason || "").trim(),
-    lens: normalizeLensSpec(row.lens),
+    scope: normalizeScopeSpec(row),
+    lens: normalizeScopeSpec(row),
     agents: children,
     max_parallel: Number.isFinite(Number(row.max_parallel))
       ? Math.max(1, Math.min(8, Math.floor(Number(row.max_parallel))))

@@ -1,10 +1,15 @@
 import { normalizeSkillAttachmentList, summarizeSkillLoadLevels } from "../domain/skill_attachment.js";
 import { normalizeContextPackList } from "../domain/context_pack.js";
+import { normalizeScopeSpecList } from "../domain/scope_spec.js";
+import { normalizeMaterializedScopeList } from "../domain/materialized_scope.js";
+import { normalizeVisibilityGraph } from "../domain/visibility_graph.js";
+import { deriveScopeGrantRecords } from "../domain/scope_grant.js";
 import { normalizeRuntimeAgentInstance } from "../domain/runtime_agent.js";
 import { normalizeTaskInterpretation } from "../domain/task_interpretation.js";
 import { normalizeCollaborationCellList } from "../domain/collaboration_cell.js";
 import { normalizeExecutionCheckpointList } from "../domain/execution_checkpoint.js";
 import { normalizeTeamPlan } from "../domain/team_plan.js";
+import { normalizeContextRuntimeMode, summarizeLegacyContextState } from "../domain/context_runtime.js";
 import { normalizeSkillUsageEvent, summarizeSkillUsageEvents } from "./skill_feedback.js";
 import { AuthorityRegistry } from "../catalog/authority_registry.js";
 
@@ -359,6 +364,18 @@ function hasSnapshotFields(row = {}) {
     || Array.isArray(row.runtimeAgents)
     || Array.isArray(row.context_packs)
     || Array.isArray(row.contextPacks)
+    || Array.isArray(row.scope_specs)
+    || Array.isArray(row.scopeSpecs)
+    || Array.isArray(row.materialized_scopes)
+    || Array.isArray(row.materializedScopes)
+    || Array.isArray(row.visibility_graph)
+    || Array.isArray(row.visibilityGraph)
+    || row.context_runtime_mode
+    || row.contextRuntimeMode
+    || row.legacy_context_pack_count
+    || row.legacyContextPackCount
+    || row.legacy_context_packs_enabled
+    || row.legacyContextPacksEnabled
     || Array.isArray(row.collaboration_cells)
     || Array.isArray(row.collaborationCells)
     || Array.isArray(row.authority_graph)
@@ -424,6 +441,43 @@ export function normalizeRuntimeTeamSnapshot(input = null, {
     ?? row.contextPacks
     ?? []
   );
+  const scopeSpecs = normalizeScopeSpecList(
+    row.scope_specs
+    ?? row.scopeSpecs
+    ?? teamPlan?.scope_specs
+    ?? []
+  );
+  const materializedScopes = normalizeMaterializedScopeList(
+    row.materialized_scopes
+    ?? row.materializedScopes
+    ?? teamPlan?.materialized_scopes
+    ?? []
+  );
+  const visibilityGraph = normalizeVisibilityGraph(
+    row.visibility_graph
+    ?? row.visibilityGraph
+    ?? teamPlan?.visibility_graph
+    ?? []
+  );
+  const scopeGrants = deriveScopeGrantRecords(
+    row.scope_grants
+    ?? row.scopeGrants
+    ?? teamPlan?.scope_grants
+    ?? scopeSpecs
+  );
+  const contextRuntimeMode = normalizeContextRuntimeMode(
+    row.context_runtime_mode
+    ?? row.contextRuntimeMode
+    ?? teamPlan?.context_runtime_mode
+    ?? (scopeSpecs.length > 0 ? "scoped_context" : "shared_memory"),
+    { fallback: scopeSpecs.length > 0 ? "scoped_context" : "shared_memory" }
+  );
+  const legacyContextState = summarizeLegacyContextState({
+    contextRuntimeMode,
+    contextPacks,
+    scopeSpecs,
+    materializedScopes,
+  });
   const supervisorRuntime = (
     row.supervisor_runtime && typeof row.supervisor_runtime === "object"
       ? row.supervisor_runtime
@@ -497,6 +551,25 @@ export function normalizeRuntimeTeamSnapshot(input = null, {
     team_plan: teamPlan,
     runtime_agents: runtimeAgents,
     context_packs: contextPacks,
+    scope_specs: scopeSpecs,
+    materialized_scopes: materializedScopes,
+    visibility_graph: visibilityGraph,
+    scope_grants: scopeGrants,
+    context_runtime_mode: contextRuntimeMode,
+    legacy_context_pack_count: Number.isFinite(Number(row.legacy_context_pack_count ?? row.legacyContextPackCount ?? teamPlan?.legacy_context_pack_count))
+      ? Math.max(0, Math.floor(Number(row.legacy_context_pack_count ?? row.legacyContextPackCount ?? teamPlan?.legacy_context_pack_count)))
+      : legacyContextState.legacy_context_pack_count,
+    legacy_context_packs_enabled: row.legacy_context_packs_enabled === true
+      || row.legacyContextPacksEnabled === true
+      || teamPlan?.legacy_context_packs_enabled === true
+      || legacyContextState.legacy_context_packs_enabled === true,
+    legacy_context_strategy: String(
+      row.legacy_context_strategy
+      ?? row.legacyContextStrategy
+      ?? teamPlan?.legacy_context_strategy
+      ?? legacyContextState.legacy_context_strategy
+      ?? "disabled"
+    ).trim().toLowerCase() || legacyContextState.legacy_context_strategy,
     collaboration_cells: collaborationCells,
     authority_graph: authorityGraph,
     checkpoints,
@@ -523,6 +596,22 @@ export function createRuntimeTeamSnapshot({
   runtime_agents = undefined,
   contextPacks = undefined,
   context_packs = undefined,
+  scopeSpecs = undefined,
+  scope_specs = undefined,
+  materializedScopes = undefined,
+  materialized_scopes = undefined,
+  visibilityGraph = undefined,
+  visibility_graph = undefined,
+  scopeGrants = undefined,
+  scope_grants = undefined,
+  contextRuntimeMode = undefined,
+  context_runtime_mode = undefined,
+  legacyContextPackCount = undefined,
+  legacy_context_pack_count = undefined,
+  legacyContextPacksEnabled = undefined,
+  legacy_context_packs_enabled = undefined,
+  legacyContextStrategy = undefined,
+  legacy_context_strategy = undefined,
   selectedSkillIds = undefined,
   selected_skill_ids = undefined,
   skillLoadLevels = undefined,
@@ -564,6 +653,14 @@ export function createRuntimeTeamSnapshot({
     team_plan: team_plan ?? teamPlan,
     runtime_agents: runtime_agents ?? runtimeAgents,
     context_packs: context_packs ?? contextPacks,
+    scope_specs: scope_specs ?? scopeSpecs,
+    materialized_scopes: materialized_scopes ?? materializedScopes,
+    visibility_graph: visibility_graph ?? visibilityGraph,
+    scope_grants: scope_grants ?? scopeGrants,
+    context_runtime_mode: context_runtime_mode ?? contextRuntimeMode,
+    legacy_context_pack_count: legacy_context_pack_count ?? legacyContextPackCount,
+    legacy_context_packs_enabled: legacy_context_packs_enabled ?? legacyContextPacksEnabled,
+    legacy_context_strategy: legacy_context_strategy ?? legacyContextStrategy,
     collaboration_cells: collaboration_cells ?? collaborationCells,
     authority_graph: authority_graph ?? authorityGraph,
     checkpoints,
@@ -605,6 +702,14 @@ export function normalizeRuntimeMetadataEnvelope(input = {}) {
     team_plan: snapshot?.team_plan || null,
     runtime_agents: snapshot?.runtime_agents || [],
     context_packs: snapshot?.context_packs || [],
+    scope_specs: snapshot?.scope_specs || [],
+    materialized_scopes: snapshot?.materialized_scopes || [],
+    visibility_graph: snapshot?.visibility_graph || [],
+    scope_grants: snapshot?.scope_grants || [],
+    context_runtime_mode: snapshot?.context_runtime_mode || undefined,
+    legacy_context_pack_count: snapshot?.legacy_context_pack_count ?? undefined,
+    legacy_context_packs_enabled: snapshot?.legacy_context_packs_enabled ?? undefined,
+    legacy_context_strategy: snapshot?.legacy_context_strategy || undefined,
     collaboration_cells: snapshot?.collaboration_cells || [],
     authority_graph: snapshot?.authority_graph || [],
     checkpoints: snapshot?.checkpoints || [],
@@ -658,6 +763,14 @@ export function mergeRuntimeMetadataEnvelope(base = null, patch = null) {
     team_plan: snapshot?.team_plan || null,
     runtime_agents: snapshot?.runtime_agents || [],
     context_packs: snapshot?.context_packs || [],
+    scope_specs: snapshot?.scope_specs || [],
+    materialized_scopes: snapshot?.materialized_scopes || [],
+    visibility_graph: snapshot?.visibility_graph || [],
+    scope_grants: snapshot?.scope_grants || [],
+    context_runtime_mode: snapshot?.context_runtime_mode || undefined,
+    legacy_context_pack_count: snapshot?.legacy_context_pack_count ?? undefined,
+    legacy_context_packs_enabled: snapshot?.legacy_context_packs_enabled ?? undefined,
+    legacy_context_strategy: snapshot?.legacy_context_strategy || undefined,
     collaboration_cells: snapshot?.collaboration_cells || [],
     authority_graph: snapshot?.authority_graph || [],
     checkpoints: snapshot?.checkpoints || [],
@@ -706,6 +819,19 @@ export function buildRuntimeMetadataPatch(metadata = null, {
     context_packs: Array.isArray(snapshot?.context_packs) && snapshot.context_packs.length > 0
       ? snapshot.context_packs
       : undefined,
+    scope_specs: Array.isArray(snapshot?.scope_specs) && snapshot.scope_specs.length > 0
+      ? snapshot.scope_specs
+      : undefined,
+    materialized_scopes: Array.isArray(snapshot?.materialized_scopes) && snapshot.materialized_scopes.length > 0
+      ? snapshot.materialized_scopes
+      : undefined,
+    visibility_graph: Array.isArray(snapshot?.visibility_graph) && snapshot.visibility_graph.length > 0
+      ? snapshot.visibility_graph
+      : undefined,
+    context_runtime_mode: snapshot?.context_runtime_mode || undefined,
+    legacy_context_pack_count: snapshot?.legacy_context_pack_count ?? undefined,
+    legacy_context_packs_enabled: snapshot?.legacy_context_packs_enabled ?? undefined,
+    legacy_context_strategy: snapshot?.legacy_context_strategy || undefined,
     collaboration_cells: Array.isArray(snapshot?.collaboration_cells) && snapshot.collaboration_cells.length > 0
       ? snapshot.collaboration_cells
       : undefined,
@@ -772,6 +898,9 @@ export function buildRuntimeRolePayload(runtimeAgent = null) {
     selected_skill_ids: normalizeSkillAttachmentList(agent.attached_skills || []).map((row) => row.skill_id),
     skill_load_levels: summarizeSkillLoadLevels(agent.attached_skills || []),
     context_pack_id: agent.context_pack_id || undefined,
+    scope_id: agent.scope_id || undefined,
+    visibility_mode: agent.visibility_mode || undefined,
+    memory_grants: agent.memory_grants || undefined,
     authority_profile_id: agent.authority_profile_id || undefined,
     allowed_actions: authorityProfile?.allowed_actions || undefined,
     denied_actions: authorityProfile?.denied_actions || undefined,

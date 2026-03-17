@@ -17,7 +17,8 @@ import {
 import { SkillRegistry } from "./skill_registry.js";
 import { SkillResolver } from "./skill_resolver.js";
 import { SkillLoader } from "./skill_loader.js";
-import { ContextPackBuilder } from "./context_pack_builder.js";
+import { ScopePlanner } from "../control_plane/scope_planner.js";
+import { LegacyContextPackBuilder } from "../control_plane/legacy_context_pack_builder.js";
 import { PresetRegistry } from "../catalog/preset_registry.js";
 import { PresetResolver } from "../control_plane/preset_resolver.js";
 import { interpretTask } from "../control_plane/task_interpreter.js";
@@ -333,6 +334,14 @@ function buildPlannerMetadata({
   teamPlan = null,
   runtimeAgents = [],
   contextPacks = [],
+  scopeSpecs = [],
+  materializedScopes = [],
+  visibilityGraph = [],
+  scopeGrants = [],
+  contextRuntimeMode = "shared_memory",
+  legacyContextPackCount = undefined,
+  legacyContextPacksEnabled = undefined,
+  legacyContextStrategy = undefined,
   selectedSkillIds = [],
   missingRoles = [],
   actionSource = "",
@@ -350,6 +359,14 @@ function buildPlannerMetadata({
     runtime_agent_count: asArray(runtimeAgents).length,
     synthesized_agent_count: asArray(runtimeAgents).filter((agent) => agent?.synthesized === true).length,
     context_pack_count: asArray(contextPacks).length,
+    scope_count: asArray(scopeSpecs).length,
+    materialized_scope_count: asArray(materializedScopes).length,
+    visibility_edge_count: asArray(visibilityGraph).length,
+    scope_grant_count: asArray(scopeGrants).length,
+    context_runtime_mode: normalizeText(contextRuntimeMode, { lower: true }) || undefined,
+    legacy_context_pack_count: Number.isFinite(Number(legacyContextPackCount)) ? Number(legacyContextPackCount) : asArray(contextPacks).length,
+    legacy_context_packs_enabled: legacyContextPacksEnabled === true,
+    legacy_context_strategy: normalizeText(legacyContextStrategy, { lower: true }) || undefined,
     selected_skill_count: asArray(selectedSkillIds).length,
     checkpoint_count: asArray(teamPlan?.checkpoints).length,
     missing_roles: normalizeStringList(missingRoles, { max: 24, lower: true }),
@@ -408,7 +425,9 @@ export function buildRuntimeOrchestration({
   skillRegistry = null,
   skillResolver = null,
   skillLoader = null,
+  legacyContextPackBuilder = null,
   contextPackBuilder = null,
+  scopePlanner = null,
   runId = "",
   jobId = "",
   runsDir = "",
@@ -538,12 +557,12 @@ export function buildRuntimeOrchestration({
   const skillLoaderInstance = skillLoader || new SkillLoader({
     registry: skillRegistryInstance,
   });
-  const contextPackBuilderInstance = contextPackBuilder || new ContextPackBuilder({
+  const legacyContextPackBuilderInstance = legacyContextPackBuilder || contextPackBuilder || new LegacyContextPackBuilder({
     registry: skillRegistryInstance,
     skillLoader: skillLoaderInstance,
   });
-  const contextPackResult = typeof contextPackBuilderInstance?.build === "function"
-    ? contextPackBuilderInstance.build({
+  const legacyContextResult = typeof legacyContextPackBuilderInstance?.build === "function"
+    ? legacyContextPackBuilderInstance.build({
       runId,
       goal: effectiveGoal,
       teamPlan,
@@ -561,13 +580,84 @@ export function buildRuntimeOrchestration({
     };
 
   teamPlan = normalizeTeamPlan({
-    ...(contextPackResult.team_plan || teamPlan),
+    ...(legacyContextResult.team_plan || teamPlan),
     task_interpretation: taskInterpretation,
     conversation_preferences: conversationPreferences || undefined,
-    runtime_agents: contextPackResult.runtime_agents,
+    runtime_agents: legacyContextResult.runtime_agents,
     selection_explanations: combinedSelectionExplanations,
   });
-  runtimeAgents = asArray(contextPackResult.runtime_agents);
+  runtimeAgents = asArray(legacyContextResult.runtime_agents);
+
+  const scopePlannerInstance = scopePlanner || new ScopePlanner();
+  const scopePlan = typeof scopePlannerInstance?.build === "function"
+    ? scopePlannerInstance.build({
+      goal: effectiveGoal,
+      teamPlan,
+      runtimeAgents,
+      effectiveActions: coordinated.route_plan.actions,
+      taskInterpretation,
+      legacyContextPacks: legacyContextResult.context_packs,
+    })
+    : {
+      context_runtime_mode: "shared_memory",
+      scope_specs: [],
+      materialized_scopes: [],
+      visibility_graph: [],
+      scope_grants: [],
+      legacy_context_pack_count: Array.isArray(legacyContextResult.context_packs) ? legacyContextResult.context_packs.length : 0,
+      legacy_context_packs_enabled: false,
+      legacy_context_strategy: "disabled",
+    };
+
+  const runtimeAgentsWithScopes = asArray(runtimeAgents).map((agent) => {
+    const instanceId = normalizeText(agent?.instance_id || agent?.instanceId);
+    const slotId = normalizeText(agent?.slot_id || agent?.slotId);
+    const matchingScope = asArray(scopePlan.scope_specs).find((scope) => normalizeText(scope?.target_instance_id || scope?.targetInstanceId) === instanceId)
+      || asArray(scopePlan.scope_specs).find((scope) => normalizeText(scope?.target_slot_id || scope?.targetSlotId) === slotId)
+      || null;
+    if (!matchingScope) return agent;
+    return {
+      ...agent,
+      scope_id: matchingScope.scope_id,
+      visibility_mode: matchingScope.visibility_mode,
+      memory_grants: matchingScope.memory_grants,
+    };
+  });
+
+  const planningResult = {
+    team_plan: {
+      ...teamPlan,
+      context_runtime_mode: scopePlan.context_runtime_mode,
+      scope_specs: scopePlan.scope_specs,
+      materialized_scopes: scopePlan.materialized_scopes,
+      visibility_graph: scopePlan.visibility_graph,
+      scope_grants: scopePlan.scope_grants,
+      legacy_context_pack_count: scopePlan.legacy_context_pack_count,
+      legacy_context_packs_enabled: scopePlan.legacy_context_packs_enabled,
+      legacy_context_strategy: scopePlan.legacy_context_strategy,
+    },
+    runtime_agents: runtimeAgentsWithScopes,
+    context_packs: legacyContextResult.context_packs || [],
+    selected_skill_ids: legacyContextResult.selected_skill_ids || skillResolution.selected_skill_ids || [],
+    skill_load_levels: legacyContextResult.skill_load_levels || {},
+    scope_specs: scopePlan.scope_specs || [],
+    materialized_scopes: scopePlan.materialized_scopes || [],
+    visibility_graph: scopePlan.visibility_graph || [],
+    scope_grants: scopePlan.scope_grants || [],
+    context_runtime_mode: scopePlan.context_runtime_mode || "shared_memory",
+    legacy_context_pack_count: scopePlan.legacy_context_pack_count,
+    legacy_context_packs_enabled: scopePlan.legacy_context_packs_enabled,
+    legacy_context_strategy: scopePlan.legacy_context_strategy,
+  };
+
+  teamPlan = normalizeTeamPlan({
+    ...(planningResult.team_plan || teamPlan),
+    task_interpretation: taskInterpretation,
+    conversation_preferences: conversationPreferences || undefined,
+    runtime_agents: planningResult.runtime_agents,
+    selection_explanations: combinedSelectionExplanations,
+  });
+  runtimeAgents = asArray(planningResult.runtime_agents);
 
   const rerankedTeam = rerankResolvedTeamComposition({
     teamPlan,
@@ -666,7 +756,7 @@ export function buildRuntimeOrchestration({
   }
 
   const selectedSkillIds = normalizeStringList(
-    contextPackResult.selected_skill_ids || skillResolution.selected_skill_ids || [],
+    planningResult.selected_skill_ids || skillResolution.selected_skill_ids || [],
     { max: 128, lower: true }
   );
   const selectionReasonSummary = buildSelectionReasonSummary({
@@ -688,7 +778,15 @@ export function buildRuntimeOrchestration({
     taskInterpretation,
     teamPlan,
     runtimeAgents,
-    contextPacks: contextPackResult.context_packs,
+    contextPacks: planningResult.context_packs,
+    scopeSpecs: planningResult.scope_specs,
+    materializedScopes: planningResult.materialized_scopes,
+    visibilityGraph: planningResult.visibility_graph,
+    scopeGrants: planningResult.scope_grants,
+    contextRuntimeMode: planningResult.context_runtime_mode,
+    legacyContextPackCount: planningResult.legacy_context_pack_count,
+    legacyContextPacksEnabled: planningResult.legacy_context_packs_enabled,
+    legacyContextStrategy: planningResult.legacy_context_strategy,
     collaborationCells: teamPlan?.collaboration_cells,
     authorityGraph: teamPlan?.authority_graph,
     checkpoints: teamPlan?.checkpoints,
@@ -696,7 +794,7 @@ export function buildRuntimeOrchestration({
     selectionExplanations: combinedSelectionExplanations,
     supervisorRuntime: teamPlan?.supervisor_runtime,
     selectedSkillIds,
-    skillLoadLevels: contextPackResult.skill_load_levels,
+    skillLoadLevels: planningResult.skill_load_levels,
     selectionReasonSummary,
     skillUsageEvents,
     skillUsageSummary,
@@ -706,9 +804,14 @@ export function buildRuntimeOrchestration({
     ...finalizedCoordination.route_plan,
     actions: enrichRouteActionsWithRuntimeSkills(finalizedCoordination.route_plan.actions, runtimeAgents),
     selected_skill_ids: selectedSkillIds,
-    skill_load_levels: contextPackResult.skill_load_levels,
+    skill_load_levels: planningResult.skill_load_levels,
     selection_reason_summary: selectionReasonSummary,
-    context_packs: contextPackResult.context_packs,
+    context_packs: planningResult.context_packs,
+    scope_specs: planningResult.scope_specs,
+    materialized_scopes: planningResult.materialized_scopes,
+    visibility_graph: planningResult.visibility_graph,
+    scope_grants: planningResult.scope_grants,
+    context_runtime_mode: planningResult.context_runtime_mode,
     task_interpretation: taskInterpretation,
     collaboration_cells: teamPlan?.collaboration_cells,
     authority_graph: teamPlan?.authority_graph,
@@ -726,7 +829,15 @@ export function buildRuntimeOrchestration({
     routePlan: routePlanWithSkills,
     teamPlan,
     runtimeAgents,
-    contextPacks: contextPackResult.context_packs,
+    contextPacks: planningResult.context_packs,
+    scopeSpecs: planningResult.scope_specs,
+    materializedScopes: planningResult.materialized_scopes,
+    visibilityGraph: planningResult.visibility_graph,
+    scopeGrants: planningResult.scope_grants,
+    contextRuntimeMode: planningResult.context_runtime_mode,
+    legacyContextPackCount: planningResult.legacy_context_pack_count,
+    legacyContextPacksEnabled: planningResult.legacy_context_packs_enabled,
+    legacyContextStrategy: planningResult.legacy_context_strategy,
     selectedSkillIds,
     missingRoles,
     actionSource: finalizedCoordination.action_source,
@@ -738,9 +849,17 @@ export function buildRuntimeOrchestration({
     interpreted_task: taskInterpretation,
     team_plan: teamPlan,
     runtime_agents: runtimeAgents,
-    context_packs: contextPackResult.context_packs,
+    context_packs: planningResult.context_packs,
+    scope_specs: planningResult.scope_specs,
+    materialized_scopes: planningResult.materialized_scopes,
+    visibility_graph: planningResult.visibility_graph,
+    scope_grants: planningResult.scope_grants,
+    context_runtime_mode: planningResult.context_runtime_mode,
+    legacy_context_pack_count: planningResult.legacy_context_pack_count,
+    legacy_context_packs_enabled: planningResult.legacy_context_packs_enabled,
+    legacy_context_strategy: planningResult.legacy_context_strategy,
     selected_skill_ids: selectedSkillIds,
-    skill_load_levels: contextPackResult.skill_load_levels || {},
+    skill_load_levels: planningResult.skill_load_levels || {},
     selection_reason_summary: selectionReasonSummary,
     skill_usage_events: skillUsageEvents,
     skill_usage_summary: skillUsageSummary,

@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { normalizeLensSpec } from "./lens.js";
+import { normalizeScopeHintCore as normalizeLensSpec } from "./scope_hint_core.js";
 import { normalizeProviderName, normalizeStringList } from "../shared/normalize.js";
 import { normalizeSkillAttachmentList } from "./skill_attachment.js";
 import { normalizeRoleId } from "../compatibility/legacy_roles.js";

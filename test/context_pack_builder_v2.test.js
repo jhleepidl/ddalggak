@@ -1,16 +1,16 @@
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ContextPackBuilder } from "../src/application/context_pack_builder.js";
+import { LegacyContextPackBuilder } from "../src/control_plane/legacy_context_pack_builder.js";
 import { SkillRegistry } from "../src/application/skill_registry.js";
 import { SkillLoader } from "../src/application/skill_loader.js";
 
-test("context pack builder emits slot-specific researcher and reviewer packs with v2 aliases", () => {
+test("legacy context pack builder emits slot-specific researcher and reviewer packs with v2 aliases", () => {
   const registry = new SkillRegistry({
     skillsDir: path.resolve(process.cwd(), "skills"),
   });
   registry.load({ refresh: true });
-  const builder = new ContextPackBuilder({
+  const builder = new LegacyContextPackBuilder({
     registry,
     skillLoader: new SkillLoader({ registry }),
   });

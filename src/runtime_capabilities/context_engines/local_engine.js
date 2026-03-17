@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { clip } from "../textutil.js";
+import { clip } from "../../textutil.js";
 import { ContextEngineBase } from "./base.js";
 
 function asObject(value) {

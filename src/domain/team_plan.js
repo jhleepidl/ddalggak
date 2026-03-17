@@ -4,6 +4,10 @@ import { normalizeTaskInterpretation } from "./task_interpretation.js";
 import { normalizeCollaborationCellList } from "./collaboration_cell.js";
 import { normalizeExecutionCheckpointList } from "./execution_checkpoint.js";
 import { normalizeRuntimeAgentList } from "./runtime_agent.js";
+import { normalizeScopeSpecList } from "./scope_spec.js";
+import { normalizeMaterializedScopeList } from "./materialized_scope.js";
+import { normalizeVisibilityGraph } from "./visibility_graph.js";
+import { deriveScopeGrantRecords } from "./scope_grant.js";
 import {
   CANONICAL_WORKER_ROLE_IDS,
   normalizeRoleId,
@@ -1154,6 +1158,18 @@ export function normalizeTeamPlan(raw = {}) {
   const checkpoints = normalizeExecutionCheckpointList(
     row.checkpoints ?? []
   );
+  const scopeSpecs = normalizeScopeSpecList(
+    row.scope_specs ?? row.scopeSpecs ?? []
+  );
+  const materializedScopes = normalizeMaterializedScopeList(
+    row.materialized_scopes ?? row.materializedScopes ?? []
+  );
+  const visibilityGraph = normalizeVisibilityGraph(
+    row.visibility_graph ?? row.visibilityGraph ?? []
+  );
+  const scopeGrants = deriveScopeGrantRecords(
+    row.scope_grants ?? row.scopeGrants ?? scopeSpecs
+  );
   const selectionExplanations = normalizeSelectionExplanations(
     row.selection_explanations ?? row.selectionExplanations ?? [],
     { plannerRequested }
@@ -1177,6 +1193,14 @@ export function normalizeTeamPlan(raw = {}) {
     authority_graph: authorityGraph,
     execution_graph: executionGraph,
     checkpoints,
+    scope_specs: scopeSpecs,
+    materialized_scopes: materializedScopes,
+    visibility_graph: visibilityGraph,
+    scope_grants: scopeGrants,
+    context_runtime_mode: normalizeText(
+      row.context_runtime_mode || row.contextRuntimeMode || (scopeSpecs.length > 0 ? "scoped_context" : "shared_memory"),
+      { lower: true }
+    ) || (scopeSpecs.length > 0 ? "scoped_context" : "shared_memory"),
     selection_explanations: selectionExplanations,
     conversation_preferences: normalizeConversationPreferences(
       row.conversation_preferences ?? row.conversationPreferences

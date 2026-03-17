@@ -139,6 +139,73 @@ function parseBooleanLike(value, fallback = false) {
   return fallback;
 }
 
+function clampInteger(value, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(num)));
+}
+
+function sanitizeScopeMaterializationSnapshot(snapshot = {}) {
+  const row = asObject(snapshot);
+  const cleanScopeSpecs = asArray(row.scope_specs ?? row.scopeSpecs).slice(0, 64).map((entry, index) => {
+    const item = asObject(entry);
+    const scopeId = String(item.scope_id || item.scopeId || `scope_${index + 1}`).trim();
+    const selection = asObject(item.node_selection || item.nodeSelection);
+    const budget = asObject(item.budget);
+    const grants = asObject(item.memory_grants || item.memoryGrants);
+    return {
+      scope_id: scopeId,
+      target_instance_id: String(item.target_instance_id || item.targetInstanceId || '').trim() || undefined,
+      target_slot_id: String(item.target_slot_id || item.targetSlotId || '').trim() || undefined,
+      role_id: String(item.role_id || item.roleId || '').trim().toLowerCase() || undefined,
+      visibility_mode: String(item.visibility_mode || item.visibilityMode || 'scoped').trim().toLowerCase() || 'scoped',
+      context_types: normalizeStringList(item.context_types || item.contextTypes).slice(0, 16),
+      node_selection: {
+        strategy: String(selection.strategy || selection.mode || 'query_plus_closure').trim() || 'query_plus_closure',
+        query: String(selection.query || '').trim().slice(0, 512) || undefined,
+        closure_edge_types: normalizeStringList(selection.closure_edge_types || selection.closureEdgeTypes).slice(0, 24),
+        max_nodes: clampInteger(selection.max_nodes || selection.maxNodes, 80, { min: 1, max: 128 }),
+      },
+      memory_grants: {
+        shared_summary: grants.shared_summary === true,
+        global_memory: grants.global_memory === true,
+        conversation_tail: grants.conversation_tail === true,
+        upstream_results: grants.upstream_results === true,
+        upstream_summaries: grants.upstream_summaries === true || grants.upstream_summary === true,
+        user_pinned_nodes: grants.user_pinned_nodes === true,
+        explicit_uploaded_files: grants.explicit_uploaded_files === true,
+      },
+      budget: (() => {
+        const softTokens = clampInteger(budget.soft_tokens || budget.softTokens, 1800, { min: 200, max: 6000 });
+        const hardTokens = clampInteger(
+          budget.hard_tokens || budget.hardTokens,
+          Math.max(2600, softTokens + 600),
+          { min: Math.max(200, softTokens), max: 8000 }
+        );
+        return {
+          soft_tokens: softTokens,
+          hard_tokens: hardTokens,
+        };
+      })(),
+      selection_reason: String(item.selection_reason || item.selectionReason || '').trim().slice(0, 512) || undefined,
+    };
+  });
+  const cleanRuntimeAgents = asArray(row.runtime_agents ?? row.runtimeAgents).slice(0, 64).map((entry) => {
+    const item = asObject(entry);
+    return {
+      instance_id: String(item.instance_id || item.instanceId || '').trim() || undefined,
+      slot_id: String(item.slot_id || item.slotId || '').trim() || undefined,
+      role_id: String(item.role_id || item.roleId || item.role_label || '').trim().toLowerCase() || undefined,
+      scope_id: String(item.scope_id || item.scopeId || '').trim() || undefined,
+    };
+  });
+  return {
+    context_runtime_mode: String(row.context_runtime_mode || row.contextRuntimeMode || '').trim().toLowerCase() || undefined,
+    scope_specs: cleanScopeSpecs,
+    runtime_agents: cleanRuntimeAgents,
+  };
+}
+
 function normalizeNodeIdList(raw) {
   if (Array.isArray(raw)) {
     return raw
@@ -649,14 +716,24 @@ function buildAgentCatalogPayload(def = {}, { requireName = false, forPatch = fa
 }
 
 export class GocClient {
-  constructor({ apiBase, serviceKey, actorTelegramUserId } = {}) {
+  constructor({ apiBase, serviceKey, actorTelegramUserId, requestTimeoutMs } = {}) {
     const base = String(apiBase || process.env.GOC_API_BASE || "").trim();
     const key = String(serviceKey || process.env.GOC_SERVICE_KEY || "").trim();
     if (!base) throw new Error("Missing GOC_API_BASE");
     if (!key) throw new Error("Missing GOC_SERVICE_KEY");
+    let parsedBase;
+    try {
+      parsedBase = new URL(base);
+    } catch {
+      throw new Error("Invalid GOC_API_BASE");
+    }
+    if (!["http:", "https:"].includes(parsedBase.protocol)) {
+      throw new Error("GOC_API_BASE must use http or https");
+    }
     this.apiBase = base.replace(/\/+$/, "");
     this.serviceKey = key;
     this.actorTelegramUserId = String(actorTelegramUserId || "").trim();
+    this.requestTimeoutMs = clampInteger(requestTimeoutMs || process.env.GOC_REQUEST_TIMEOUT_MS, 15000, { min: 1000, max: 120000 });
   }
 
   setActorTelegramUserId(telegramUserId) {
@@ -686,17 +763,31 @@ export class GocClient {
       init.body = JSON.stringify(body);
     }
 
-    const response = await fetch(url, init);
-    const text = await response.text();
-    const json = parseJsonMaybe(text);
-    const data = json ?? text;
-    if (!response.ok) {
-      const err = new Error(`GoC API ${method} ${url} failed (${response.status})`);
-      err.status = response.status;
-      err.data = data;
-      throw err;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error('GoC request timed out')), this.requestTimeoutMs);
+    init.signal = controller.signal;
+    try {
+      const response = await fetch(url, init);
+      const text = await response.text();
+      const json = parseJsonMaybe(text);
+      const data = json ?? text;
+      if (!response.ok) {
+        const err = new Error(`GoC API ${method} ${url} failed (${response.status})`);
+        err.status = response.status;
+        err.data = data;
+        throw err;
+      }
+      return data;
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        const err = new Error(`GoC API ${method} ${url} timed out`);
+        err.status = 504;
+        throw err;
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
     }
-    return data;
   }
 
   async _requestAny({ method, attempts = [] }) {
@@ -1591,6 +1682,34 @@ export class GocClient {
 
     if (errors.length) throw errors[errors.length - 1];
     throw new Error("GoC getCompiledContextExplain failed: no attempts");
+  }
+
+
+  async materializeRuntimeScopes(threadId, runtimeSnapshot = {}, options = {}) {
+    const tid = String(threadId || "").trim();
+    if (!tid) throw new Error("materializeRuntimeScopes requires threadId");
+    const payload = {
+      runtime_snapshot: sanitizeScopeMaterializationSnapshot(runtimeSnapshot),
+    };
+    const scopeId = String(options.scopeId || options.scope_id || "").trim();
+    if (scopeId) {
+      payload.scope_id = scopeId;
+      payload.scopeId = scopeId;
+    }
+    const data = await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(tid)}/scope_materialize`, body: payload },
+        { path: `/threads/${encodeURIComponent(tid)}/scope_materialize`, body: payload },
+        { path: "/api/scope_materialize", body: { thread_id: tid, ...payload } },
+      ],
+    });
+    const rows = Array.isArray(asObject(data).materialized_scopes)
+      ? asObject(data).materialized_scopes
+      : normalizeArrayResponse(data);
+    return rows
+      .filter((row) => row && typeof row === "object")
+      .map((row) => ({ ...row }));
   }
 
   async getNode(nodeId) {

@@ -1,4 +1,4 @@
-import { makeContextEngine } from "../context_engine/index.js";
+import { createScopeContextStore } from "../runtime_capabilities/scope_context_store.js";
 import { normalizeActionSource, normalizeRuntimeTeamSnapshot } from "./runtime_metadata.js";
 import { markActionsSkipped, wasInterruptedByReplan } from "./run_status_cleanup.js";
 import {
@@ -343,7 +343,7 @@ export async function handleActionApprovalCallback({
   if (resumeRuntimeTeamSnapshot) {
     runtime.runtimeTeamSnapshot = resumeRuntimeTeamSnapshot;
   }
-  const contextEngine = makeContextEngine({
+  const contextEngine = createScopeContextStore({
     memoryMode: memoryModeWithFallback(),
     jobs,
     gocClient: memoryModeWithFallback() === "goc" ? requireGocClient() : null,

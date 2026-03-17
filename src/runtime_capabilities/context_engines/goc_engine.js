@@ -1,14 +1,14 @@
-import { clip } from "../textutil.js";
+import { clip } from "../../textutil.js";
 import {
-  normalizeLensSpec as normalizeLensSpecDomain,
-  defaultLensSpecForAgent as defaultLensSpecForAgentDomain,
-} from "../domain/lens.js";
+  normalizeScopeHintCore as normalizeLensSpecDomain,
+  defaultScopeHintForAgent as defaultLensSpecForAgentDomain,
+} from "../../domain/scope_hint_core.js";
 import {
   normalizeRuntimeTeamSnapshot,
   normalizeRuntimeAuthority,
   normalizeActionSource,
   buildRuntimeMetadataPatch,
-} from "../application/runtime_metadata.js";
+} from "../../application/runtime_metadata.js";
 import { ContextEngineBase } from "./base.js";
 
 function asObject(value) {

@@ -1,5 +1,5 @@
-import { LocalContextEngine } from "../context_engine/local_engine.js";
-import { GocContextEngine } from "../context_engine/goc_engine.js";
+import { LocalContextEngine } from "./context_engines/local_engine.js";
+import { GocContextEngine } from "./context_engines/goc_engine.js";
 
 function normalizeSource(raw = "") {
   return String(raw || "").trim().toLowerCase() === "goc" ? "goc" : "local";
@@ -103,3 +103,12 @@ export function createContextStore({
   });
 }
 
+
+
+export const ScopeContextStoreAdapter = ContextStoreAdapter;
+export const ScopeLocalContextStore = LocalContextStore;
+export const ScopeGocContextStore = GocContextStore;
+
+export function createScopeContextStore(options = {}) {
+  return createContextStore(options);
+}

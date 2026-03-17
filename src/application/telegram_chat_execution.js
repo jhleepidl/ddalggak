@@ -22,12 +22,13 @@ import {
   normalizeForceMode as normalizeForceModeDomain,
 } from "../domain/route_plan.js";
 import {
-  normalizeLensSpec as normalizeLensSpecDomain,
-  defaultLensSpecForAgent as defaultLensSpecForAgentDomain,
-  resolveEffectiveLensSpec as resolveEffectiveLensSpecDomain,
-  dedupeNodeIds as dedupeLensNodeIds,
-} from "../domain/lens.js";
+  normalizeScopeHintCore as normalizeLensSpecDomain,
+  defaultScopeHintForAgent as defaultLensSpecForAgentDomain,
+  resolveEffectiveScopeHint as resolveEffectiveLensSpecDomain,
+  dedupeScopeNodeIds as dedupeLensNodeIds,
+} from "../domain/scope_hint_core.js";
 import { createDefaultRunRoute } from "./orchestrator.js";
+import { isScopedContextMode, normalizeContextRuntimeMode } from "../domain/context_runtime.js";
 import { sendLong as sendLongAdapter } from "../adapters/telegram/send.js";
 import {
   buildPendingApprovalPrompt as buildPendingApprovalPromptAdapter,
@@ -67,6 +68,7 @@ import {
 } from "./job_runtime.js";
 import { summarizeRuntimeTeamSnapshotLines } from "./runtime_snapshot_display.js";
 import { createRuntimeTeamSnapshot } from "./runtime_metadata.js";
+import { buildScopedPromptAssembly, hydrateRuntimeScopesViaGoC, resolveScopeExecutionState } from "./goc_scope_runtime.js";
 import { markActionsSkipped, wasInterruptedByReplan } from "./run_status_cleanup.js";
 import {
   applyRunAuthority,
@@ -683,11 +685,47 @@ function buildSupervisorExecutionCallbacks({
     lens = null,
     detailContext = "",
     stepNodeId = "",
+    actionInputs = null,
+    runtimeInstanceId = "",
+    slotId = "",
+    scopeId = "",
   } = {}) {
     const cleanAgentId = String(agentId || "").trim().toLowerCase();
     const cleanGoal = String(goal || "").trim();
     const cleanDetail = String(detailContext || "").trim();
     const cleanStepNodeId = String(stepNodeId || "").trim();
+    const runtimeTeamSnapshot = runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
+      ? runtime.runtimeTeamSnapshot
+      : (runtime?.runtime_team_snapshot && typeof runtime.runtime_team_snapshot === "object"
+        ? runtime.runtime_team_snapshot
+        : null);
+    const scopedMode = isScopedContextMode(
+      runtimeTeamSnapshot?.context_runtime_mode
+      || runtime?.contextRuntimeMode
+      || runtime?.context_runtime_mode
+      || "shared_memory"
+    );
+    const scopeBinding = scopedMode
+      ? resolveScopeBinding({
+        runtimeSnapshot: runtimeTeamSnapshot,
+        action: {
+          agent: cleanAgentId,
+          inputs: actionInputs && typeof actionInputs === "object" ? actionInputs : {},
+        },
+        agentId: cleanAgentId,
+        runtimeInstanceId,
+        slotId,
+        scopeId,
+      })
+      : null;
+    if (scopedMode && scopeBinding?.materialized_scope) {
+      return buildScopedPromptAssembly({
+        goal: cleanGoal,
+        detailContext: cleanDetail,
+        runtime,
+        scopeBinding,
+      });
+    }
     if (hasContextEngine) {
       const runtimeAuthority = buildRunAuthority(runtime);
       const prepared = await contextEngine.prepareStepContext({
@@ -979,6 +1017,10 @@ function buildSupervisorExecutionCallbacks({
     detailContext = "",
     stepNodeId = "",
     preparedContext = null,
+    actionInputs = null,
+    runtimeInstanceId = "",
+    slotId = "",
+    scopeId = "",
   }) => {
     const cleanAgentId = String(agentId || "").trim().toLowerCase();
     const cleanGoal = String(goal || "").trim();
@@ -1007,6 +1049,10 @@ function buildSupervisorExecutionCallbacks({
         lens: null,
         detailContext,
         stepNodeId,
+        actionInputs,
+        runtimeInstanceId,
+        slotId,
+        scopeId,
       });
     const nextActionsInstruction = [
       "[OUTPUT CONTRACT]",
@@ -1131,6 +1177,10 @@ function buildSupervisorExecutionCallbacks({
         lens: action?.lens && typeof action.lens === "object" ? action.lens : null,
         detailContext,
         stepNodeId,
+        actionInputs: action?.inputs && typeof action.inputs === "object" ? action.inputs : null,
+        runtimeInstanceId: String(action?.inputs?.runtime_instance_id || action?.inputs?.runtimeInstanceId || "").trim(),
+        slotId: String(action?.inputs?.slot_id || action?.inputs?.slotId || "").trim(),
+        scopeId: String(action?.inputs?.scope_id || action?.inputs?.scopeId || "").trim(),
       })
       : {
         final_prompt: "",
@@ -1266,6 +1316,10 @@ function buildSupervisorExecutionCallbacks({
             : (action?.lens && typeof action.lens === "object" ? action.lens : null),
           detailContext,
           stepNodeId: childStepNodeId,
+          actionInputs: child?.inputs && typeof child.inputs === "object" ? child.inputs : null,
+          runtimeInstanceId: String(child?.inputs?.runtime_instance_id || child?.inputs?.runtimeInstanceId || "").trim(),
+          slotId: String(child?.inputs?.slot_id || child?.inputs?.slotId || "").trim(),
+          scopeId: String(child?.inputs?.scope_id || child?.inputs?.scopeId || "").trim(),
         });
         if (executionGraph && childStepNodeId) {
           await executionGraph.markStepNodeRunning(childStepNodeId, {
@@ -1287,6 +1341,10 @@ function buildSupervisorExecutionCallbacks({
             detailContext,
             stepNodeId: childStepNodeId,
             preparedContext,
+            actionInputs: child?.inputs && typeof child.inputs === "object" ? child.inputs : null,
+            runtimeInstanceId: String(child?.inputs?.runtime_instance_id || child?.inputs?.runtimeInstanceId || "").trim(),
+            slotId: String(child?.inputs?.slot_id || child?.inputs?.slotId || "").trim(),
+            scopeId: String(child?.inputs?.scope_id || child?.inputs?.scopeId || "").trim(),
           });
           if (executionGraph && childStepNodeId) {
             const preview = outputPreviewFromResult(result);
@@ -1394,6 +1452,10 @@ function buildSupervisorExecutionCallbacks({
             detailContext,
             stepNodeId,
             preparedContext,
+            actionInputs: action?.inputs && typeof action.inputs === "object" ? action.inputs : null,
+            runtimeInstanceId: String(action?.inputs?.runtime_instance_id || action?.inputs?.runtimeInstanceId || "").trim(),
+            slotId: String(action?.inputs?.slot_id || action?.inputs?.slotId || "").trim(),
+            scopeId: String(action?.inputs?.scope_id || action?.inputs?.scopeId || "").trim(),
           });
         },
       });
@@ -3123,9 +3185,9 @@ async function executeAgentRun(
 async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts = {}) {
   const runtime = opts?.runtime && typeof opts.runtime === "object" ? opts.runtime : null;
   const runtimeAuthority = buildRunAuthority(runtime);
-  const agentIndex = buildTelegramAgentIndex({ runtime, routePlan: plan, actions: plan?.actions || [] });
+  const agentIndex = buildTelegramAgentIndex({ runtime, routePlan: route, actions: route?.actions || [] });
   const telegramUserId = String(opts?.telegramUserId || "").trim();
-  const runtimeTeamSnapshot = route?.runtime_team_snapshot && typeof route.runtime_team_snapshot === "object"
+  let runtimeTeamSnapshot = route?.runtime_team_snapshot && typeof route.runtime_team_snapshot === "object"
     ? route.runtime_team_snapshot
     : (opts?.runtimeTeamSnapshot && typeof opts.runtimeTeamSnapshot === "object"
       ? opts.runtimeTeamSnapshot
@@ -3134,6 +3196,10 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
         teamPlan: route?.team_plan || null,
         runtimeAgents: route?.runtime_agents || [],
         contextPacks: route?.context_packs || [],
+        scopeSpecs: route?.scope_specs || [],
+        materializedScopes: route?.materialized_scopes || [],
+        visibilityGraph: route?.visibility_graph || [],
+        contextRuntimeMode: route?.context_runtime_mode || null,
         collaborationCells: route?.collaboration_cells || [],
         authorityGraph: route?.authority_graph || [],
         checkpoints: route?.checkpoints || [],
@@ -3151,6 +3217,85 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
   let askedChatGPT = false;
   const actions = Array.isArray(route?.actions) ? route.actions : [];
 
+  const scopedRuntimeMode = isScopedContextMode(runtimeTeamSnapshot?.context_runtime_mode || "shared_memory");
+  let scopeHydrationError = null;
+  if (scopedRuntimeMode) {
+    const threadId = String(runtime?.map?.threadId || "").trim();
+    const hasPreMaterializedScopes = Array.isArray(runtimeTeamSnapshot?.materialized_scopes) && runtimeTeamSnapshot.materialized_scopes.length > 0;
+    if (threadId) {
+      try {
+        runtimeTeamSnapshot = await hydrateRuntimeScopesViaGoC({
+          client: requireGocClient(),
+          threadId,
+          runtimeSnapshot: runtimeTeamSnapshot,
+        });
+      } catch (error) {
+        scopeHydrationError = error;
+      }
+    } else if (!hasPreMaterializedScopes) {
+      scopeHydrationError = new Error("missing GoC thread binding for scoped execution");
+    }
+    if (scopeHydrationError) {
+      runtimeTeamSnapshot = {
+        ...runtimeTeamSnapshot,
+        scope_materialization_error: String(scopeHydrationError?.message || scopeHydrationError || '').trim() || 'scope hydration failed',
+      };
+    }
+  }
+
+  const prepareScopedAction = (action = {}, { finalSynthesis = false } = {}) => {
+    const cleanAction = action && typeof action === "object" ? action : {};
+    const inputs = cleanAction.inputs && typeof cleanAction.inputs === "object" ? cleanAction.inputs : {};
+    const scopedMode = isScopedContextMode(runtimeTeamSnapshot?.context_runtime_mode || "shared_memory");
+    if (!scopedMode) {
+      return {
+        blocked: false,
+        reason: "",
+        action: cleanAction,
+      };
+    }
+    const scopeState = resolveScopeExecutionState({
+      runtimeSnapshot: runtimeTeamSnapshot,
+      action: cleanAction,
+      agentId: String(cleanAction.agent || "").trim().toLowerCase(),
+      runtimeInstanceId: String(inputs.runtime_instance_id || inputs.runtimeInstanceId || "").trim(),
+      slotId: String(inputs.slot_id || inputs.slotId || "").trim(),
+      scopeId: String(inputs.scope_id || inputs.scopeId || "").trim(),
+    });
+    if (scopeState.blocked) {
+      return {
+        blocked: true,
+        reason: scopeState.reason,
+        action: cleanAction,
+        scopeBinding: scopeState.scope_binding,
+      };
+    }
+    const prepared = buildScopedPromptAssembly({
+      goal: String(cleanAction.prompt || "").trim(),
+      detailContext: "",
+      runtime,
+      scopeBinding: scopeState.scope_binding,
+    });
+    return {
+      blocked: false,
+      reason: "",
+      scopeBinding: scopeState.scope_binding,
+      action: {
+        ...cleanAction,
+        prompt: String(prepared?.final_prompt || cleanAction.prompt || "").trim(),
+        inputs: {
+          ...inputs,
+          ...(prepared?.context_info && typeof prepared.context_info === "object"
+            ? {
+              scope_context_info: prepared.context_info,
+            }
+            : {}),
+          final_synthesis: finalSynthesis === true || inputs.final_synthesis === true || undefined,
+        },
+      },
+    };
+  };
+
   if (runtimeTeamSnapshot && Array.isArray(runtimeTeamSnapshot.runtime_agents) && runtimeTeamSnapshot.runtime_agents.length > 0) {
     tracking.append(jobId, "decisions.md", [
       "## Runtime team snapshot",
@@ -3158,6 +3303,64 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
         actionSource: String(route?.action_source || "unknown"),
       }),
     ].join("\n"));
+  }
+
+  const scopedPreflightFailures = [];
+  if (scopedRuntimeMode) {
+    const collectFailure = (label, result) => {
+      if (!result?.blocked) return;
+      scopedPreflightFailures.push({
+        label,
+        reason: String(result.reason || 'scoped execution blocked').trim(),
+      });
+    };
+    for (const rawAct of actions) {
+      const act = normalizeActionShape(rawAct);
+      if (!act?.type) continue;
+      if (act.type === 'agent_run') {
+        collectFailure(formatChatAgentDisplayName(act.agent, agentIndex), prepareScopedAction(act));
+        continue;
+      }
+      if (act.type === 'synthesize_final') {
+        collectFailure(
+          formatChatAgentDisplayName(act.agent, agentIndex),
+          prepareScopedAction({
+            type: 'agent_run',
+            agent: act.agent,
+            prompt: act.prompt,
+            inputs: {
+              ...(act.inputs && typeof act.inputs === 'object' ? act.inputs : {}),
+              final_synthesis: true,
+            },
+          }, { finalSynthesis: true })
+        );
+        continue;
+      }
+      if (act.type === 'spawn_parallel') {
+        for (const child of Array.isArray(act.agents) ? act.agents : []) {
+          collectFailure(formatChatAgentDisplayName(child?.agent || '', agentIndex), prepareScopedAction(child));
+        }
+      }
+    }
+  }
+
+  if (scopedPreflightFailures.length > 0) {
+    const lines = [
+      "⛔️ scoped route blocked before execution",
+      runtimeTeamSnapshot?.scope_materialization_error
+        ? `- hydration: ${runtimeTeamSnapshot.scope_materialization_error}`
+        : "",
+      ...scopedPreflightFailures.map((entry) => `- ${entry.label}: ${entry.reason}`),
+    ].filter(Boolean);
+    await sendLong(bot, chatId, lines.join("\n"));
+    return {
+      askedChatGPT,
+      route_blocked: true,
+      route_block_reason: "scoped_preflight_failed",
+      scope_preflight_failures: scopedPreflightFailures,
+      runtime_team_snapshot: runtimeTeamSnapshot,
+      ...buildRunAuthorityPatch({ runtime_authority: runtimeAuthority }),
+    };
   }
 
   for (const rawAct of actions) {
@@ -3181,8 +3384,13 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
       const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
       const displayName = formatChatAgentDisplayName(act.agent, agentIndex);
       await bot.sendMessage(chatId, `🤖 ${displayName} 실행 중… (${provider})`);
+      const scopedActState = prepareScopedAction(act);
+      if (scopedActState.blocked) {
+        await bot.sendMessage(chatId, `⛔️ scoped execution blocked: ${scopedActState.reason}`);
+        continue;
+      }
       const result = await enqueue(
-        () => executeAgentRun(bot, chatId, jobId, act, {
+        () => executeAgentRun(bot, chatId, jobId, scopedActState.action, {
           signal,
           runtime,
           telegramUserId,
@@ -3199,16 +3407,21 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
       const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
       const displayName = formatChatAgentDisplayName(act.agent, agentIndex);
       await bot.sendMessage(chatId, `🧩 ${displayName} 최종 합성 중… (${provider})`);
+      const scopedSynthesisState = prepareScopedAction({
+        type: "agent_run",
+        agent: act.agent,
+        prompt: act.prompt,
+        inputs: {
+          ...(act.inputs && typeof act.inputs === "object" ? act.inputs : {}),
+          final_synthesis: true,
+        },
+      }, { finalSynthesis: true });
+      if (scopedSynthesisState.blocked) {
+        await bot.sendMessage(chatId, `⛔️ scoped execution blocked: ${scopedSynthesisState.reason}`);
+        continue;
+      }
       const result = await enqueue(
-        () => executeAgentRun(bot, chatId, jobId, {
-          type: "agent_run",
-          agent: act.agent,
-          prompt: act.prompt,
-          inputs: {
-            ...(act.inputs && typeof act.inputs === "object" ? act.inputs : {}),
-            final_synthesis: true,
-          },
-        }, {
+        () => executeAgentRun(bot, chatId, jobId, scopedSynthesisState.action, {
           signal,
           runtime,
           telegramUserId,
@@ -3224,15 +3437,21 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
       const children = Array.isArray(act.agents) ? act.agents : [];
       if (children.length === 0) continue;
       await bot.sendMessage(chatId, `📣 병렬 실행 시작 (${children.length})`);
-      const settled = await Promise.allSettled(children.map((child) => enqueue(
-        () => executeAgentRun(bot, chatId, jobId, child, {
+      const settled = await Promise.allSettled(children.map((child) => {
+        const scopedChildState = prepareScopedAction(child);
+        if (scopedChildState.blocked) {
+          return Promise.reject(new Error(`scoped execution blocked: ${scopedChildState.reason}`));
+        }
+        return enqueue(
+        () => executeAgentRun(bot, chatId, jobId, scopedChildState.action, {
           signal,
           runtime,
           telegramUserId,
           notify: false,
         }),
         { jobId, signal, label: `spawn_parallel_${child.agent}` }
-      )));
+      );
+      }));
       let okCount = 0;
       let errorCount = 0;
       const summaries = [];

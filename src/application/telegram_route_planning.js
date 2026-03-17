@@ -22,11 +22,11 @@ import {
   normalizeForceMode as normalizeForceModeDomain,
 } from "../domain/route_plan.js";
 import {
-  normalizeLensSpec as normalizeLensSpecDomain,
-  defaultLensSpecForAgent as defaultLensSpecForAgentDomain,
-  resolveEffectiveLensSpec as resolveEffectiveLensSpecDomain,
-  dedupeNodeIds as dedupeLensNodeIds,
-} from "../domain/lens.js";
+  normalizeScopeHintCore as normalizeLensSpecDomain,
+  defaultScopeHintForAgent as defaultLensSpecForAgentDomain,
+  resolveEffectiveScopeHint as resolveEffectiveLensSpecDomain,
+  dedupeScopeNodeIds as dedupeLensNodeIds,
+} from "../domain/scope_hint_core.js";
 import { createDefaultRunRoute } from "./orchestrator.js";
 import { sendLong as sendLongAdapter } from "../adapters/telegram/send.js";
 import {

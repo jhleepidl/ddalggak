@@ -6,6 +6,10 @@ export function summarizeRuntimeTeamSnapshotLines(snapshot = null, {
   const runtimeAgents = Array.isArray(row.runtime_agents) ? row.runtime_agents : [];
   const selectedSkills = Array.isArray(row.selected_skill_ids) ? row.selected_skill_ids : [];
   const contextPacks = Array.isArray(row.context_packs) ? row.context_packs : [];
+  const scopeSpecs = Array.isArray(row.scope_specs) ? row.scope_specs : [];
+  const materializedScopes = Array.isArray(row.materialized_scopes) ? row.materialized_scopes : [];
+  const authoritativeScopeCount = materializedScopes.filter((item) => String(item?.lineage?.compiler || '').trim().toLowerCase() === 'goc_scope_materializer').length;
+  const emptyScopeCount = materializedScopes.filter((item) => item?.lineage?.empty_scope === true).length;
   const parallelGroups = Array.isArray(row.execution_graph?.parallel_groups)
     ? row.execution_graph.parallel_groups
     : (Array.isArray(row.parallel_groups) ? row.parallel_groups : []);
@@ -31,6 +35,8 @@ export function summarizeRuntimeTeamSnapshotLines(snapshot = null, {
   }
   lines.push(`- selected_skill_ids: ${selectedSkills.length > 0 ? selectedSkills.join(", ") : "(none)"}`);
   lines.push(`- context_packs: ${contextPacks.length}`);
+  lines.push(`- scopes: ${scopeSpecs.length}`);
+  lines.push(`- materialized_scopes: ${materializedScopes.length} authoritative=${authoritativeScopeCount} empty=${emptyScopeCount}`);
   lines.push(`- parallel_groups: ${parallelGroups.length}`);
   if (collaborationCells.length > 0) {
     lines.push(`- collaboration_cells: ${collaborationCells.map((cell) => `${cell.pattern}:${cell.member_instance_ids?.length || 0}`).join(", ")}`);
