@@ -5,7 +5,7 @@ import {
 
 const HELP_TEXT = [
   "Commands:",
-  "- plain text: 대화/작업 지시 대신 /chat [text]: 대화/작업 지시",
+  "- /chat [text]: 대화/작업 지시",
   "- /context [global]: 현재 job 또는 global 컨텍스트 보기",
   "- /team [registry|public [query]|add <preset_or_role_ref>|remove <preset_or_role_ref>|enable <preset_or_role_ref>|disable <preset_or_role_ref>]: 팀/프리셋 상태 조회 및 변경 (/agents alias)",
   "- /tools: 현재 job의 tool 상태 보기",
@@ -21,7 +21,7 @@ const HELP_TEXT = [
 
 const ADVANCED_HELP_TEXT = [
   "Commands:",
-  "- plain text: 기본 /chat(supervisor) 처리",
+  "- /chat [text]: 대화/작업 지시",
   "- /whoami: 현재 chat_id / user_id 확인",
   "- /running: 실행/대기 job 목록 확인",
   "- /status: 현재 chat/job 상태 보기",
