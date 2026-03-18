@@ -188,11 +188,22 @@ export function ensureGeminiWorkspaceConfig(workspacePath, { overwritePolicy = "
   const workspaceDir = path.resolve(String(workspacePath || process.cwd()));
   fs.mkdirSync(workspaceDir, { recursive: true });
   const geminiDir = path.join(workspaceDir, ".gemini");
-  fs.mkdirSync(geminiDir, { recursive: true });
   const settingsPath = path.join(geminiDir, "settings.json");
   const policy = normalizeOverwritePolicy(overwritePolicy || process.env.GEMINI_SETTINGS_OVERWRITE);
   const workspaceModelOverride = process.env.GEMINI_WORKSPACE_MODEL;
   const defaults = enforceWorkspaceContextSettings(defaultGeminiWorkspaceSettings());
+  const manageWorkspaceConfig = fs.existsSync(settingsPath)
+    || ['1', 'true', 'yes', 'on'].includes(String(process.env.GEMINI_MANAGE_WORKSPACE_CONFIG || '').trim().toLowerCase())
+    || Boolean(String(workspaceModelOverride || '').trim());
+  if (!manageWorkspaceConfig) {
+    return {
+      workspaceDir,
+      settingsPath,
+      policy,
+      skipped: true,
+    };
+  }
+  fs.mkdirSync(geminiDir, { recursive: true });
 
   const existingRaw = fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath, "utf8") : "";
   const existing = parseJsonMaybe(existingRaw);

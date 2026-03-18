@@ -114,11 +114,17 @@ function buildFallbackRuntime() {
   return { agentsCatalog: catalog, agents: catalog, enabledAgentIds: catalog.map((row) => row.id) };
 }
 
-function teamStoreTarget(runtime = null) {
+function teamStoreTarget(runtime = null, { source = '' } = {}) {
   if (!runtime || typeof runtime !== 'object') return {};
+  const teamStore = runtime?.capabilities?.conversationTeamStore;
+  const storeSource = cleanId(teamStore?.source || teamStore?.storeSource || '');
   const threadId = clean(runtime?.map?.threadId || runtime?.threadId || '');
   const jobId = clean(runtime?.jobId || runtime?.currentJobId || '');
-  return threadId ? { threadId } : (jobId ? { jobId } : {});
+  const target = storeSource === 'goc'
+    ? (threadId ? { threadId } : (jobId ? { jobId } : {}))
+    : (jobId ? { jobId } : (threadId ? { threadId } : {}));
+  if (source) target.source = source;
+  return target;
 }
 
 function runtimeCatalog(runtime = null) {
@@ -759,7 +765,7 @@ export async function syncTeamConfigurationToConversationStore({ runtime = null,
   const teamStore = runtime?.capabilities?.conversationTeamStore;
   if (!teamStore || typeof teamStore !== 'object' || !teamConfig) return { ok: false, reason: 'team_store_unavailable' };
   const normalizedTeam = validateTeamConfiguration(teamConfig, { runtime });
-  const target = runtime?.map?.threadId ? { threadId: runtime.map.threadId, source } : { jobId: runtime?.jobId, source };
+  const target = teamStoreTarget(runtime, { source });
   const desiredRows = asArray(normalizedTeam.agents).map((agent, index) => ({
     agent_id: agent.agent_id,
     enabled: true,

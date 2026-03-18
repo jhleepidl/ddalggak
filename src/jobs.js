@@ -3,8 +3,6 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { resolveInside } from "./paths.js";
 
-const WORKSPACE_SUBDIRS = ["uploads", "outputs", "tmp", ".gemini"];
-
 function isInsideRoot(rootAbs, fullAbs) {
   const rootWithSep = rootAbs.endsWith(path.sep) ? rootAbs : `${rootAbs}${path.sep}`;
   return fullAbs === rootAbs || fullAbs.startsWith(rootWithSep);
@@ -24,25 +22,9 @@ export class Jobs {
     return path.join(jobDir, "workspace");
   }
 
-  _workspaceTaskPathByJobDir(jobDir) {
-    return path.join(this._workspaceDirByJobDir(jobDir), "TASK.md");
-  }
-
   _ensureWorkspaceTreeByJobDir(jobDir) {
     const workspaceDir = this._workspaceDirByJobDir(jobDir);
     fs.mkdirSync(workspaceDir, { recursive: true });
-    for (const name of WORKSPACE_SUBDIRS) {
-      fs.mkdirSync(path.join(workspaceDir, name), { recursive: true });
-    }
-    const taskPath = this._workspaceTaskPathByJobDir(jobDir);
-    if (!fs.existsSync(taskPath)) {
-      fs.writeFileSync(taskPath, [
-        "# TASK",
-        "",
-        "- workspace-root only",
-        "- use `uploads/`, `outputs/`, `tmp/`",
-      ].join("\n") + "\n", "utf8");
-    }
     return workspaceDir;
   }
 

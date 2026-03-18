@@ -53,3 +53,16 @@ test('action agent raw ids are not promoted into display labels or name hints', 
   assert.deepEqual(lines, ['- Researcher: analyze']);
   assert.equal(formatChatAgentDisplayName('9c1d31a3', agentIndex), 'Researcher');
 });
+
+
+test('korean configured agent ids are rendered as readable labels instead of Runtime Agent', () => {
+  const actions = [{
+    type: 'run_agent',
+    agent_id: '시장_지도_조사관',
+    goal: '현재 국내 증시 흐름을 분석해줘',
+    inputs: {},
+  }];
+  const agentIndex = buildPreviewAgentIndex({ actions });
+  const lines = buildPlanPreviewLines(actions, { agentIndex });
+  assert.deepEqual(lines, ['- 시장 지도 조사관: 현재 국내 증시 흐름을 분석해줘']);
+});

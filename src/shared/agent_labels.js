@@ -135,9 +135,22 @@ function actionRuntimeRows(actions = []) {
       || action.roleLabel
       || inferRoleIdFromActionAgent(action)
     );
+    const actionAgentIdRaw = firstNonEmpty(
+      action.agent_id,
+      action.agentId,
+      action.agent,
+      inputs.runtime_instance_id,
+      inputs.runtimeInstanceId,
+      action.id,
+    );
+    const humanAgentIdLabel = (() => {
+      const cleanAgentId = normalizeAgentId(actionAgentIdRaw);
+      if (!cleanAgentId || looksOpaqueInternalId(actionAgentIdRaw) || CANONICAL_ROLE_LABELS[cleanAgentId]) return '';
+      return humanizeIdentifier(actionAgentIdRaw);
+    })();
     const inferredDisplayLabel = inferRuntimeDisplayLabel({
       roleId,
-      currentLabel: firstNonEmpty(inputs.display_label, inputs.displayLabel, action.display_label, action.displayLabel, action.label, action.name),
+      currentLabel: firstNonEmpty(inputs.display_label, inputs.displayLabel, action.display_label, action.displayLabel, action.label, action.name, humanAgentIdLabel),
       purpose: firstNonEmpty(inputs.slot_purpose, inputs.slotPurpose, inputs.slot_label, inputs.slotLabel),
       taskSummary: inferActionTaskSummary(action),
       presetDisplayName: firstNonEmpty(inputs.preset_display_name, inputs.presetDisplayName),
@@ -151,6 +164,7 @@ function actionRuntimeRows(actions = []) {
       action.displayLabel,
       action.label,
       action.name,
+      humanAgentIdLabel,
       canonicalRoleDisplayName(roleId),
       inferredDisplayLabel,
     );
@@ -418,6 +432,23 @@ export function resolveActionAgentNameHint(action = {}) {
     taskSummary: inferActionTaskSummary(action),
     presetDisplayName: firstNonEmpty(inputs.preset_display_name, inputs.presetDisplayName),
   });
-  if (inferredLabel) return inferredLabel;
+  if (inferredLabel && !['agent', 'runtime agent'].includes(String(inferredLabel || '').trim().toLowerCase())) return inferredLabel;
+  const rawAgentLabel = firstNonEmpty(
+    inputs.agent_display_label,
+    inputs.agentDisplayLabel,
+    row.agent_display_label,
+    row.agentDisplayLabel,
+    inputs.agent_name,
+    inputs.agentName,
+    row.agent_name,
+    row.agentName,
+    row.agent_id,
+    row.agentId,
+    row.agent,
+  );
+  const cleanRawAgentLabel = normalizeAgentId(rawAgentLabel);
+  if (rawAgentLabel && !looksOpaqueInternalId(rawAgentLabel) && !CANONICAL_ROLE_LABELS[cleanRawAgentLabel]) {
+    return humanizeIdentifier(rawAgentLabel) || rawAgentLabel;
+  }
   return '';
 }

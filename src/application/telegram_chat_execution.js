@@ -247,6 +247,76 @@ function buildTelegramAgentIndex({ runtime = null, routePlan = null, actions = [
   );
 }
 
+function buildRuntimeAgentMetadataIndex(runtime = null) {
+  const index = new Map();
+  const pushRow = (row = {}) => {
+    if (!row || typeof row !== 'object') return;
+    const id = String(row.id || row.agent_id || row.agentId || row.template_id || row.templateId || row.instance_id || row.instanceId || '').trim().toLowerCase();
+    if (!id) return;
+    const next = {
+      id,
+      name: String(row.name || row.display_label || row.displayLabel || row.agent_name || '').trim(),
+      role: String(row.role || row.role_id || row.roleId || row.role_label || row.roleLabel || '').trim().toLowerCase(),
+      provider: String(row.provider || '').trim().toLowerCase(),
+      model: String(row.model || row.configured_model || '').trim(),
+      skills: Array.isArray(row.skills)
+        ? row.skills
+        : (Array.isArray(row.attached_skill_ids) ? row.attached_skill_ids : (Array.isArray(row.attachedSkillIds) ? row.attachedSkillIds : [])),
+      purpose: String(row.purpose || row.assigned_goal || row.assignedGoal || '').trim(),
+    };
+    const prev = index.get(id) || {};
+    index.set(id, {
+      ...prev,
+      ...next,
+      name: next.name || prev.name || '',
+      role: next.role || prev.role || '',
+      provider: next.provider || prev.provider || '',
+      model: next.model || prev.model || '',
+      skills: Array.isArray(next.skills) && next.skills.length > 0 ? next.skills : (Array.isArray(prev.skills) ? prev.skills : []),
+      purpose: next.purpose || prev.purpose || '',
+    });
+  };
+  for (const row of (Array.isArray(runtime?.activeTeamConfig?.agents) ? runtime.activeTeamConfig.agents : [])) pushRow(row);
+  for (const row of (Array.isArray(runtime?.agents) ? runtime.agents : [])) pushRow(row);
+  for (const row of (Array.isArray(runtime?.agentsCatalog) ? runtime.agentsCatalog : [])) pushRow(row);
+  for (const row of (Array.isArray(runtime?.runtimeTeamSnapshot?.runtime_agents) ? runtime.runtimeTeamSnapshot.runtime_agents : [])) pushRow(row);
+  return index;
+}
+
+function decoratePlanActionsWithAgentMetadata(actions = [], runtime = null) {
+  const metadataIndex = buildRuntimeAgentMetadataIndex(runtime);
+  const decorateOne = (action = {}) => {
+    if (!action || typeof action !== 'object') return action;
+    const type = String(action.type || '').trim().toLowerCase();
+    if (type === 'spawn_agents' || type === 'spawn_parallel') {
+      return {
+        ...action,
+        agents: (Array.isArray(action.agents) ? action.agents : []).map((child) => decorateOne(child)),
+      };
+    }
+    if (!['run_agent', 'agent_run', 'synthesize_final'].includes(type)) return action;
+    const agentId = String(action.agent_id || action.agentId || action.agent || '').trim().toLowerCase();
+    const meta = metadataIndex.get(agentId) || null;
+    const inputs = action.inputs && typeof action.inputs === 'object' ? action.inputs : {};
+    const mergedInputs = {
+      ...inputs,
+      display_label: String(inputs.display_label || inputs.displayLabel || action.display_label || action.displayLabel || meta?.name || '').trim() || undefined,
+      agent_name: String(inputs.agent_name || inputs.agentName || meta?.name || '').trim() || undefined,
+      role_id: String(inputs.role_id || inputs.roleId || meta?.role || '').trim().toLowerCase() || undefined,
+      provider: String(inputs.provider || meta?.provider || '').trim().toLowerCase() || undefined,
+      model: String(inputs.model || meta?.model || '').trim() || undefined,
+      attached_skill_ids: (Array.isArray(inputs.attached_skill_ids) ? inputs.attached_skill_ids : (Array.isArray(inputs.attachedSkillIds) ? inputs.attachedSkillIds : (Array.isArray(meta?.skills) ? meta.skills : []))),
+      slot_purpose: String(inputs.slot_purpose || inputs.slotPurpose || meta?.purpose || '').trim() || undefined,
+    };
+    return {
+      ...action,
+      display_label: String(action.display_label || action.displayLabel || meta?.name || '').trim() || undefined,
+      inputs: mergedInputs,
+    };
+  };
+  return (Array.isArray(actions) ? actions : []).map((action) => decorateOne(action));
+}
+
 async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const sectionTitle = String(opts.sectionTitle || "Gemini notes");
   const outputGuide = String(opts.outputGuide || "").trim();
@@ -2315,11 +2385,12 @@ async function runSupervisorChat(
           source: "team_builder",
           runtimeAgents: Array.isArray(runtime?.runtimeTeamSnapshot?.runtime_agents) ? runtime.runtimeTeamSnapshot.runtime_agents : [],
         });
+      const shortcutActions = decoratePlanActionsWithAgentMetadata([shortcutCandidate.action], runtime);
       routePlan = {
         reason: "direct_agent_followup_shortcut",
         action_source: "shortcut_followup",
         plan_source: "local_shortcut",
-        actions: [shortcutCandidate.action],
+        actions: shortcutActions,
         done: true,
         await_user: false,
         deliverables: [],
@@ -2334,7 +2405,7 @@ async function runSupervisorChat(
       };
       chatSessionStore.upsert(chatId, {
         state: "executing",
-        agent_status: buildQueuedAgentStatusFromActions([shortcutCandidate.action]),
+        agent_status: buildQueuedAgentStatusFromActions(shortcutActions),
         last_route: {
           reason: routePlan.reason,
           action_source: routePlan.action_source,
@@ -2352,7 +2423,7 @@ async function runSupervisorChat(
         },
       });
       if (runEventSink && typeof runEventSink.queueMainSteps === "function") {
-        await runEventSink.queueMainSteps(routePlan.actions, {
+        await runEventSink.queueMainSteps(shortcutActions, {
           metadata: {
             runtime_team_snapshot: runtimeTeamSnapshot,
             action_source: routePlan.action_source,
@@ -2362,11 +2433,11 @@ async function runSupervisorChat(
         }).catch(() => null);
       }
       const shortcutResult = await callbacks.runAgent({
-        action: shortcutCandidate.action,
+        action: shortcutActions[0],
         detailContext: "",
       });
       mergedResults = [{
-        label: chatActionLabel(shortcutCandidate.action, { agentIndex: buildTelegramAgentIndex({ runtime, routePlan, actions: routePlan.actions }) }),
+        label: chatActionLabel(shortcutActions[0], { agentIndex: buildTelegramAgentIndex({ runtime, routePlan, actions: routePlan.actions }) }),
         status: "ok",
         note: "shortcut_followup",
       }];
@@ -2469,6 +2540,9 @@ async function runSupervisorChat(
             agent_id: agent.agent_id,
             name: agent.name,
             provider: agent.provider || '',
+            model: agent.model || '',
+            skills: Array.isArray(agent.skills) ? agent.skills : [],
+            purpose: agent.purpose || '',
             source: 'active_team',
             why: agent.purpose || 'configured team member',
           })),
@@ -2513,10 +2587,13 @@ async function runSupervisorChat(
           .map((row) => ({
             instance_id: `chat_role_${String(row?.role || "").trim().toLowerCase() || "role"}_${String(row?.agent_id || "").trim().toLowerCase() || "ephemeral"}`,
             template_id: String(row?.agent_id || "").trim().toLowerCase() || undefined,
+            display_label: String(row?.name || '').trim() || undefined,
+            role_id: String(row?.role || '').trim().toLowerCase() || undefined,
             role_label: String(row?.role || "").trim().toLowerCase() || "role",
             provider: String(row?.provider || "").trim().toLowerCase() || undefined,
-            model: undefined,
-            assigned_goal: String(lastUserText || "").trim() || undefined,
+            model: String(row?.model || '').trim() || undefined,
+            attached_skill_ids: Array.isArray(row?.skills) ? row.skills : [],
+            assigned_goal: String(row?.purpose || lastUserText || "").trim() || undefined,
             capability_tags: [],
             lens_spec: undefined,
             status: "ready",
@@ -2630,7 +2707,11 @@ async function runSupervisorChat(
         return deliverables.some((item) => item.toLowerCase() === String(entry || "").trim().toLowerCase());
       });
 
-      const planActions = Array.isArray(routePlan?.actions) ? routePlan.actions : [];
+      const planActions = decoratePlanActionsWithAgentMetadata(Array.isArray(routePlan?.actions) ? routePlan.actions : [], runtime);
+      routePlan = {
+        ...routePlan,
+        actions: planActions,
+      };
       if ((totalActions + planActions.length) > maxTotalActions) {
         forcedAwaitReason = `자동 실행 한도(${maxTotalActions} actions)에 도달했습니다.`;
         stopReason = "max_total_actions";
