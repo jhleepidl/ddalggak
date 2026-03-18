@@ -619,6 +619,7 @@ function buildRouterPrompt(message, context = {}) {
   const jobConfig = asObject(row.jobConfig);
   const allowChatGPTPlanner = !!row.allowChatGPTPlanner;
   const teamLocked = row.teamLocked === true;
+  const teamCompositionMode = String(row.teamCompositionMode || row.activeTeamConfig?.composition_mode || 'structured').trim().toLowerCase() || 'structured';
   const teamInteractionSpec = normalizeInteractionSpec(row.teamInteractionSpec || row.interaction_spec || {});
   const routerInteractionContract = buildRouterInteractionContract(teamInteractionSpec);
   const interactionSummaryText = buildInteractionSummaryLines(routerInteractionContract).join("\n") || "(none)";
@@ -834,6 +835,7 @@ function buildRouterPrompt(message, context = {}) {
     interactionSummaryText,
     "",
     `team_locked=${teamLocked ? "yes" : "no"}`,
+    `team_composition_mode=${teamCompositionMode}`,
     "",
     "tool_specs:",
     toolText,

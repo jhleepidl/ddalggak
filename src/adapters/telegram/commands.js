@@ -5,6 +5,7 @@ import {
 import {
   applyPendingTeam,
   buildTeamConfigurationTemplate,
+  createFreeformTeamConfiguration,
   buildTeamListMessage,
   formatSupportedModelLines,
   formatTeamProposalMessage,
@@ -22,7 +23,7 @@ const HELP_TEXT = [
   "Commands:",
   "- /chat [text]: 대화/작업 지시",
   "- /context [global]: 현재 job 또는 global 컨텍스트 보기",
-  "- /team [suggest <목적>|refine <자연어 수정>|apply|template|validate <JSON>|reset]: 팀 제안/수정/확정",
+  "- /team [suggest <목적>|create <자연어 팀 설명>|refine <자연어 수정>|apply|template|validate <JSON>|reset|modes]: 팀 제안/생성/수정/확정",
   "- /skills: 현재/예정 agent roster와 대표 skill 보기",
   "- /tools: 현재 job의 tool 상태 보기",
   "- /files [uploads|outputs|all] [limit]: workspace 파일 목록 보기",
@@ -44,7 +45,7 @@ const ADVANCED_HELP_TEXT = [
   "- /stop [jobId]: 현재 실행 또는 지정 job 중단",
   "- /memory [show|md|policy|routing|role|agents|note|lesson|reset]: 런타임 메모리 조회/수정",
   "- /settings ...: /memory alias",
-  "- /team [suggest <목적>|refine <자연어 수정>|apply|template|validate <JSON>|reset]: 팀 제안/수정/확정",
+  "- /team [suggest <목적>|create <자연어 팀 설명>|refine <자연어 수정>|apply|template|validate <JSON>|reset|modes]: 팀 제안/생성/수정/확정",
   "- /skills: 현재/예정 agent roster와 대표 skill 보기",
   "- /tools: 현재 job의 tool 상태 보기",
   "- /files [uploads|outputs|all] [limit]: workspace 파일 목록 보기",
@@ -333,7 +334,25 @@ export function createTelegramCommandHandler(deps = {}) {
           await bot.sendMessage(chatId, 'Usage: /team suggest <목적>');
           return true;
         }
-        const proposal = suggestTeamConfiguration({ taskText: goal, runtime: runtimeForTeam });
+        const freeformMatch = goal.match(/^--mode\s+freeform\s+([\s\S]+)$/i);
+        const effectiveGoal = String(freeformMatch?.[1] || goal).trim();
+        const proposal = freeformMatch
+          ? createFreeformTeamConfiguration({ description: effectiveGoal, runtime: runtimeForTeam })
+          : suggestTeamConfiguration({ taskText: effectiveGoal, runtime: runtimeForTeam });
+        storePendingTeam(chatSessionStore, chatId, proposal);
+        await sendLong(bot, chatId, `${formatTeamProposalMessage(proposal)}
+
+지원 모델:
+${formatSupportedModelLines()}`);
+        return true;
+      }
+      if (sub === 'create') {
+        const description = String(rawArgs.replace(/^create\s+/i, '') || '').trim();
+        if (!description) {
+          await bot.sendMessage(chatId, 'Usage: /team create <자연어 팀 설명>');
+          return true;
+        }
+        const proposal = createFreeformTeamConfiguration({ description, runtime: runtimeForTeam });
         storePendingTeam(chatSessionStore, chatId, proposal);
         await sendLong(bot, chatId, `${formatTeamProposalMessage(proposal)}
 
@@ -345,7 +364,7 @@ ${formatSupportedModelLines()}`);
         const instruction = String(rawArgs.replace(/^refine\s+/i, '') || '').trim();
         const baseTeam = teamState.pending_team || teamState.active_team;
         if (!baseTeam) {
-          await bot.sendMessage(chatId, '수정할 팀이 없습니다. 먼저 /team suggest <목적> 을 실행해 주세요.');
+          await bot.sendMessage(chatId, '수정할 팀이 없습니다. 먼저 /team suggest <목적> 또는 /team create <자연어 팀 설명> 을 실행해 주세요.');
           return true;
         }
         if (!instruction) {
@@ -360,7 +379,7 @@ ${formatSupportedModelLines()}`);
       if (sub === 'template') {
         const baseTeam = teamState.pending_team || teamState.active_team;
         if (!baseTeam) {
-          await bot.sendMessage(chatId, '먼저 /team suggest <목적> 으로 팀을 제안받아 주세요.');
+          await bot.sendMessage(chatId, '먼저 /team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 팀을 제안받아 주세요.');
           return true;
         }
         await sendLong(bot, chatId, buildTeamConfigurationTemplate(baseTeam));
@@ -395,12 +414,24 @@ ${buildTeamListMessage({ active_team: applied })}`);
         }
         return true;
       }
-      if (sub === 'reset') {
-        await resetTeamConfiguration(chatSessionStore, chatId, { runtime: runtimeForTeam });
-        await bot.sendMessage(chatId, '✅ 팀 구성을 초기화했습니다. 다시 /team suggest <목적> 으로 시작해 주세요.');
+
+      if (sub === 'modes') {
+        await sendLong(bot, chatId, [
+          'Team composition modes:',
+          '- structured: /team suggest <목적>',
+          '  canonical role/skill/model 후보를 안전하게 조합합니다.',
+          '- freeform: /team create <자연어 팀 설명>',
+          '  더 자유로운 agent 이름/책임/상호작용을 제안한 뒤 structured contract로 정규화합니다.',
+          '- freeform shortcut: /team suggest --mode freeform <설명>',
+        ].join('\n'));
         return true;
       }
-      await bot.sendMessage(chatId, '지원되는 /team 명령: suggest, refine, apply, template, validate, reset');
+      if (sub === 'reset') {
+        await resetTeamConfiguration(chatSessionStore, chatId, { runtime: runtimeForTeam });
+        await bot.sendMessage(chatId, '✅ 팀 구성을 초기화했습니다. 다시 /team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 시작해 주세요.');
+        return true;
+      }
+      await bot.sendMessage(chatId, '지원되는 /team 명령: suggest, create, refine, apply, template, validate, reset, modes');
       return true;
     }
 
@@ -528,7 +559,7 @@ ${buildTeamListMessage({ active_team: applied })}`);
         }
         if (!teamState.active_team) {
           await bot.sendMessage(chatId, `현재 활성 팀이 없습니다.
-먼저 /team suggest <목적> 으로 팀을 구성한 뒤 /team apply 후 /chat 을 실행해 주세요.`);
+먼저 /team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 팀을 구성한 뒤 /team apply 후 /chat 을 실행해 주세요.`);
           return true;
         }
         await sendRouterAckMessage(bot, chatId, { replyToMessageId: msg.message_id });

@@ -2399,6 +2399,7 @@ async function runSupervisorChat(
         teamRecommendation,
         enabledAgentIds: runtime.enabledAgentIds,
         teamLocked: runtime.teamLocked === true,
+        teamCompositionMode: runtime.teamCompositionMode || runtime.activeTeamConfig?.composition_mode || 'structured',
         teamInteractionSpec: runtime.teamInteractionSpec || runtime.activeTeamConfig?.interaction_spec || null,
         tools: runtime.tools,
         jobConfig: runtime.jobConfig,
