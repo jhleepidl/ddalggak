@@ -72,6 +72,39 @@ function normalizePublicSearchCache(raw) {
   return out;
 }
 
+
+function clipSessionText(value = "", max = 5000) {
+  const text = String(value || "").trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function normalizeRecentAgentTurns(raw) {
+  const rows = Array.isArray(raw) ? raw : [];
+  const out = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const agentId = String(row.agent_id || row.agentId || row.id || "").trim().toLowerCase();
+    if (!agentId) continue;
+    out.push({
+      agent_id: agentId,
+      agent_name: String(row.agent_name || row.agentName || row.name || "").trim(),
+      role: String(row.role || row.role_id || row.roleId || "").trim().toLowerCase(),
+      provider: String(row.provider || "").trim().toLowerCase(),
+      model: String(row.model || "").trim(),
+      goal: clipSessionText(row.goal, 1200),
+      output: clipSessionText(row.output, 5000),
+      runtime_instance_id: String(row.runtime_instance_id || row.runtimeInstanceId || "").trim() || undefined,
+      slot_id: String(row.slot_id || row.slotId || "").trim() || undefined,
+      scope_id: String(row.scope_id || row.scopeId || "").trim() || undefined,
+      ts: String(row.ts || nowIso()),
+      job_id: String(row.job_id || row.jobId || "").trim() || undefined,
+    });
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
 function normalizeAgentStatusMap(raw) {
   const row = raw && typeof raw === "object" ? raw : {};
   const out = {};
@@ -173,6 +206,7 @@ function normalizeSession(chatId, raw = {}) {
     current_turn_ack_message_id: currentTurnAckMessageId,
     current_turn_plan_message_id: currentTurnPlanMessageId,
     agent_status: normalizeAgentStatusMap(row.agent_status),
+    recent_agent_turns: normalizeRecentAgentTurns(row.recent_agent_turns || row.recentAgentTurns),
     last_route: row.last_route && typeof row.last_route === "object" ? row.last_route : null,
     public_search_cache: normalizePublicSearchCache(row.public_search_cache),
     team_config: normalizeSessionTeamConfig(row.team_config),

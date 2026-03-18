@@ -129,6 +129,226 @@ function defaultModelForRole(role = '', provider = '') {
   return 'gemini-2.5-pro';
 }
 
+function defaultContextPolicyForRole(role = '', { taskText = '', purpose = '' } = {}) {
+  const roleId = normalizeTeamRole(role);
+  const task = clean(taskText || purpose);
+  const common = {
+    base_mode: 'scoped_context',
+    default_budget: roleId === 'synthesizer'
+      ? { soft_tokens: 2000, hard_tokens: 3200 }
+      : (roleId === 'reviewer'
+        ? { soft_tokens: 1800, hard_tokens: 2800 }
+        : { soft_tokens: 1600, hard_tokens: 2600 }),
+    can_request_grants: ['conversation_tail', 'explicit_uploaded_files'],
+  };
+  if (roleId === 'builder') {
+    return {
+      ...common,
+      reads: {
+        grants: ['shared_summary', 'explicit_uploaded_files', 'upstream_summaries'],
+        context_types: ['workspace', 'requirements', 'diff', 'evidence'],
+        query_template: task || '구현 대상, 파일 경로, 변경 제약을 읽는다',
+      },
+      writes: {
+        private_targets: ['scratch', 'implementation_notes'],
+        publish_targets: ['patch_plan', 'artifact_delta_summary'],
+      },
+    };
+  }
+  if (roleId === 'reviewer') {
+    return {
+      ...common,
+      reads: {
+        grants: ['shared_summary', 'upstream_results', 'upstream_summaries', 'explicit_uploaded_files'],
+        context_types: ['evidence', 'claims', 'diff', 'risks'],
+        query_template: task || '상위 결과를 검토하고 모순과 리스크를 찾는다',
+      },
+      writes: {
+        private_targets: ['scratch'],
+        publish_targets: ['review_findings', 'blocked_issues'],
+      },
+    };
+  }
+  if (roleId === 'synthesizer') {
+    return {
+      ...common,
+      reads: {
+        grants: ['shared_summary', 'upstream_summaries'],
+        context_types: ['summary', 'evidence', 'decisions'],
+        query_template: task || '공유 요약과 handoff 결과를 묶어 최종 답변을 쓴다',
+      },
+      writes: {
+        private_targets: ['scratch'],
+        publish_targets: ['final_answer_draft', 'handoff_summary'],
+      },
+    };
+  }
+  if (roleId === 'operator') {
+    return {
+      ...common,
+      reads: {
+        grants: ['shared_summary', 'conversation_tail', 'upstream_summaries'],
+        context_types: ['status', 'approval', 'control'],
+        query_template: task || '진행 상태와 승인 상태를 관리한다',
+      },
+      writes: {
+        private_targets: ['scratch'],
+        publish_targets: ['handoff_summary', 'run_control_notes'],
+      },
+    };
+  }
+  return {
+    ...common,
+    reads: {
+      grants: ['shared_summary', 'user_pinned_nodes'],
+      context_types: ['evidence', 'citations', 'notes'],
+      query_template: task || '관련 evidence를 찾고 정리한다',
+    },
+    writes: {
+      private_targets: ['scratch'],
+      publish_targets: ['evidence_bundle', 'handoff_summary'],
+    },
+  };
+}
+
+function normalizeContextPolicy(raw = null, { role = '', taskText = '', purpose = '' } = {}) {
+  const defaults = defaultContextPolicyForRole(role, { taskText, purpose });
+  const row = asObject(raw);
+  const reads = asObject(row.reads);
+  const writes = asObject(row.writes);
+  return {
+    ...defaults,
+    ...row,
+    base_mode: cleanId(row.base_mode || row.baseMode || defaults.base_mode || 'scoped_context') || 'scoped_context',
+    reads: {
+      ...defaults.reads,
+      ...reads,
+      grants: asArray(reads.grants || defaults.reads?.grants).map((entry) => cleanId(entry)).filter(Boolean),
+      context_types: asArray(reads.context_types || reads.contextTypes || defaults.reads?.context_types).map((entry) => cleanId(entry)).filter(Boolean),
+      query_template: clean(reads.query_template || reads.queryTemplate || defaults.reads?.query_template || ''),
+    },
+    writes: {
+      ...defaults.writes,
+      ...writes,
+      private_targets: asArray(writes.private_targets || writes.privateTargets || defaults.writes?.private_targets).map((entry) => cleanId(entry)).filter(Boolean),
+      publish_targets: asArray(writes.publish_targets || writes.publishTargets || defaults.writes?.publish_targets).map((entry) => cleanId(entry)).filter(Boolean),
+    },
+    can_request_grants: asArray(row.can_request_grants || row.canRequestGrants || defaults.can_request_grants).map((entry) => cleanId(entry)).filter(Boolean),
+    default_budget: {
+      soft_tokens: Number.isFinite(Number(row?.default_budget?.soft_tokens ?? row?.defaultBudget?.softTokens))
+        ? Math.max(200, Math.floor(Number(row.default_budget?.soft_tokens ?? row.defaultBudget?.softTokens)))
+        : Number(defaults.default_budget?.soft_tokens || 1600),
+      hard_tokens: Number.isFinite(Number(row?.default_budget?.hard_tokens ?? row?.defaultBudget?.hardTokens))
+        ? Math.max(300, Math.floor(Number(row.default_budget?.hard_tokens ?? row.defaultBudget?.hardTokens)))
+        : Number(defaults.default_budget?.hard_tokens || 2600),
+    },
+  };
+}
+
+function buildDefaultShortcutPolicy() {
+  return {
+    enabled: true,
+    only_for_followups: true,
+    disallow_when_pending_approval: true,
+    max_recent_turns: 6,
+  };
+}
+
+function normalizeShortcutPolicy(raw = null) {
+  const row = asObject(raw);
+  const defaults = buildDefaultShortcutPolicy();
+  return {
+    ...defaults,
+    ...row,
+    enabled: row.enabled !== false,
+    only_for_followups: row.only_for_followups !== false,
+    disallow_when_pending_approval: row.disallow_when_pending_approval !== false,
+    max_recent_turns: Number.isFinite(Number(row.max_recent_turns))
+      ? Math.max(1, Math.min(12, Math.floor(Number(row.max_recent_turns))))
+      : defaults.max_recent_turns,
+  };
+}
+
+function inferTaskStructureHints(taskText = '') {
+  const text = clean(taskText);
+  const lower = text.toLowerCase();
+  return {
+    compare: /비교|상반|찬반|여러 관점|양쪽|trade[- ]?off|pros?\s+and\s+cons?|debate|versus|vs\.?/i.test(text),
+    review: /review|검토|검수|반박|critic|judge|검증|verify|fact check|red[ -]?team/i.test(text),
+    synthesize: /요약|정리|synth|summary|memo|보고서|final/i.test(text),
+    build: /코드|구현|build|builder|refactor|리팩토|patch|fix/i.test(text),
+    news: /뉴스|news|이벤트|발표|headline/i.test(text),
+    filings: /공시|filing|dart|financial|실적|10-k|10q/i.test(text),
+    parallel: /각각|나눠서|분담|병렬|parallel/i.test(text),
+    multiAgentPrompt: /여러\s*agent|여러\s*에이전트|team|팀/i.test(text),
+    explicitGeneralistOnly: /generalist/i.test(lower),
+  };
+}
+
+function mergeBlueprints(base = [], extra = []) {
+  const out = [];
+  const seen = new Set();
+  for (const row of [...asArray(base), ...asArray(extra)]) {
+    const item = asObject(row);
+    const label = clean(item.name || item.display_name || item.agent_name);
+    const key = cleanId(label || item.role || item.agent_id);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      name: label || clean(item.role || item.agent_id || 'Researcher'),
+      role: normalizeTeamRole(item.role || item.role_id || item.roleId || item.agent_id || 'researcher'),
+      purpose: clean(item.purpose || item.why || item.description || ''),
+      model: clean(item.model || ''),
+      provider: cleanId(item.provider || ''),
+      context_policy: item.context_policy || item.contextPolicy || null,
+    });
+  }
+  return out;
+}
+
+function ensureFreeformBlueprintCoverage(blueprints = [], taskText = '', structuredAgents = []) {
+  const hints = inferTaskStructureHints(taskText);
+  let next = mergeBlueprints(blueprints, []);
+  const hasRole = (roleId) => next.some((row) => normalizeTeamRole(row.role) === normalizeTeamRole(roleId));
+  const pushRole = (name, role, purpose, model = '') => {
+    next = mergeBlueprints(next, [{ name, role, purpose, model }]);
+  };
+
+  if ((next.length <= 1 && !hints.explicitGeneralistOnly) || hints.multiAgentPrompt || hints.parallel) {
+    next = mergeBlueprints(next, structuredAgents.map((agent) => ({
+      name: agent.name,
+      role: agent.role,
+      purpose: agent.purpose || 'structured fallback candidate',
+      model: agent.model,
+      provider: agent.provider,
+      context_policy: agent.context_policy || null,
+    })));
+  }
+
+  if (hints.compare && !hasRole('reviewer')) {
+    pushRole('Reviewer', 'reviewer', '여러 관점의 주장과 근거를 검토한다', 'gpt-5.4');
+  }
+  if ((hints.compare || hints.review || hints.parallel || next.length >= 2) && !hasRole('synthesizer')) {
+    pushRole('Synthesizer', 'synthesizer', '병렬 결과와 검토 결과를 최종 답변으로 합친다', 'gpt-5.4');
+  }
+  if (hints.review && !hasRole('reviewer')) {
+    pushRole('Reviewer', 'reviewer', '결과를 검토하고 리스크를 정리한다', 'gpt-5.4');
+  }
+  if (hints.build && !hasRole('builder')) {
+    pushRole('Builder', 'builder', '구현 또는 코드 수정 초안을 만든다', 'gpt-5-codex');
+  }
+  if (hints.news && !next.some((row) => /news/i.test(clean(row.name)) || /news/i.test(clean(row.purpose)))) {
+    pushRole('News Researcher', 'researcher', '최근 뉴스와 이벤트를 수집한다');
+  }
+  if (hints.filings && !next.some((row) => /filing|공시|dart/i.test(`${clean(row.name)} ${clean(row.purpose)}`))) {
+    pushRole('Filings Analyst', 'researcher', '공시와 수치 근거를 확인한다');
+  }
+  if (next.length === 0) {
+    pushRole('Generalist Researcher', 'researcher', '문제를 빠르게 파악하고 필요한 증거를 모은다');
+  }
+  return next.slice(0, 6);
+}
+
 function skillsForRole(role = '', { taskText = '', agentName = '' } = {}) {
   const roleId = cleanId(role);
   const text = `${clean(taskText)} ${clean(agentName)}`.toLowerCase();
@@ -159,6 +379,7 @@ function agentDraft({ name = '', role = 'researcher', model = '', purpose = '', 
       ? asArray(skills).map((skill) => cleanId(skill)).filter(Boolean)
       : skillsForRole(cleanRole, { taskText, agentName: displayName }),
     provider: resolvedProvider,
+    context_policy: normalizeContextPolicy({}, { role: cleanRole, taskText, purpose }),
   };
 }
 
@@ -298,8 +519,14 @@ export function buildTeamConfigurationTemplate(team = {}) {
       model: clean(agent.model),
       purpose: clean(agent.purpose),
       skills: asArray(agent.skills).map((entry) => cleanId(entry)),
+      context_policy: normalizeContextPolicy(agent.context_policy || agent.contextPolicy, {
+        role: agent.role,
+        taskText: row.task_brief || row.taskBrief || row.task || '',
+        purpose: agent.purpose,
+      }),
     })),
     interaction_spec: normalizeInteractionSpec(row.interaction_spec || row.interactions || {}),
+    shortcut_policy: normalizeShortcutPolicy(row.shortcut_policy || row.shortcutPolicy),
   }, null, 2);
 }
 
@@ -322,6 +549,11 @@ function normalizeTeamConfig(raw = {}, { runtime = null } = {}) {
       purpose: clean(entry.purpose || runtimeAgent.description || ''),
       skills: asArray(entry.skills).map((skill) => cleanId(skill)).filter(Boolean),
       provider: cleanId(entry.provider || runtimeAgent.provider || inferProviderForModel(model) || ''),
+      context_policy: normalizeContextPolicy(entry.context_policy || entry.contextPolicy, {
+        role,
+        taskText: taskBrief,
+        purpose: clean(entry.purpose || runtimeAgent.description || ''),
+      }),
       source_agent: runtimeAgent,
     };
   }).filter(Boolean);
@@ -340,6 +572,7 @@ function normalizeTeamConfig(raw = {}, { runtime = null } = {}) {
     agents,
     interaction_spec: interactionSpec,
     interaction_notes: buildInteractionSummaryLines(interactionSpec),
+    shortcut_policy: normalizeShortcutPolicy(row.shortcut_policy || row.shortcutPolicy),
     status: cleanId(row.status || 'draft') || 'draft',
     created_at: clean(row.created_at || nowIso()),
     updated_at: nowIso(),
@@ -381,7 +614,12 @@ export function createFreeformTeamConfiguration({ description = '', runtime = nu
   const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
   const taskText = clean(description);
   const seen = new Set();
-  const blueprints = inferFreeformAgentBlueprints(taskText);
+  const structuredFallback = suggestTeamConfiguration({ taskText, runtime: effectiveRuntime });
+  const blueprints = ensureFreeformBlueprintCoverage(
+    inferFreeformAgentBlueprints(taskText),
+    taskText,
+    asArray(structuredFallback?.agents)
+  );
   const agents = blueprints.map((item) => agentDraft(item, { seen, taskText }));
   const interactionSpec = parseNaturalLanguageInteractionPatch(taskText, {
     current: buildDefaultInteractionSpec(agents, { task: taskText }),
@@ -395,6 +633,7 @@ export function createFreeformTeamConfiguration({ description = '', runtime = nu
     lock_after_apply: true,
     agents,
     interaction_spec: interactionSpec,
+    shortcut_policy: buildDefaultShortcutPolicy(),
     status: 'suggested',
     task_brief: taskText,
     design_prompt: taskText,
@@ -481,11 +720,22 @@ export async function syncTeamConfigurationToConversationStore({ runtime = null,
     enabled: true,
     order_index: index,
     overrides_json: {
+      name: clean(agent.name),
+      purpose: clean(agent.purpose),
       configured_model: agent.model,
       configured_role: agent.role,
       configured_provider: cleanId(agent.provider || inferProviderForModel(agent.model) || ''),
+      attached_skills: asArray(agent.skills)
+        .map((skillId) => ({ skill_id: cleanId(skillId), selected_by: 'team_config' }))
+        .filter((entry) => entry.skill_id),
+      context_policy: normalizeContextPolicy(agent.context_policy || agent.contextPolicy, {
+        role: agent.role,
+        taskText: normalizedTeam.task_brief,
+        purpose: agent.purpose,
+      }),
       local_interaction_contract: buildAgentLocalInteractionContract(normalizedTeam.interaction_spec, agent.name),
       composition_mode: normalizedTeam.composition_mode,
+      proposal_mode: normalizedTeam.proposal_mode,
     },
   }));
   const desiredIds = new Set(desiredRows.map((row) => cleanId(row.agent_id)));
@@ -576,6 +826,11 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       skills: asArray(configAgent.skills).length > 0 ? asArray(configAgent.skills) : asArray(base.skills),
       interaction_contract: buildAgentLocalInteractionContract(team.interaction_spec, clean(configAgent.name || base.name || configAgent.agent_id)),
       prompt: clean(base.prompt || configAgent.prompt || ''),
+      context_policy: normalizeContextPolicy(configAgent.context_policy || configAgent.contextPolicy, {
+        role: configAgent.role || base.role,
+        taskText: team.task_brief,
+        purpose: configAgent.purpose,
+      }),
       enabled: true,
       order_index: index,
     };
@@ -591,6 +846,7 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       attached_skill_ids: asArray(merged.skills),
       assigned_goal: clean(configAgent.purpose),
       interaction_contract: merged.interaction_contract,
+      context_policy: merged.context_policy,
       composition_mode: team.composition_mode,
       status: 'ready',
     });
@@ -607,6 +863,7 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
     interaction_spec: runtime.teamInteractionSpec,
     composition_mode: team.composition_mode,
     proposal_mode: team.proposal_mode,
+    shortcut_policy: normalizeShortcutPolicy(team.shortcut_policy),
     team_locked: true,
   };
   return runtime;

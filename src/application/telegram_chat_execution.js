@@ -89,6 +89,7 @@ import {
 } from "./team_intent.js";
 import { buildExplicitTeamReconfigurationActions } from "./team_config_diff.js";
 import { applyTeamConfigurationToRuntime, getSessionTeamState, hydrateSessionTeamStateFromConversationStore, syncTeamConfigurationToConversationStore, validateTeamConfiguration } from "./team_configuration.js";
+import { appendRecentAgentTurn, planAgentFollowupShortcut } from "./agent_followup_shortcuts.js";
 import { buildAgentLocalInteractionContract } from "../domain/interaction_spec.js";
 import {
   verifyConversationMembershipMutation,
@@ -381,6 +382,10 @@ async function synthesizeChatReply(message, routePlan, execution = {}) {
   if (outputs.length === 0) return buildChatSynthesisFallback(message, execution);
   const special = summarizeSpecialChatOutputs(outputs);
   const hasAgentOutput = outputs.some((row) => String(row?.agentId || "").trim().toLowerCase() !== "system");
+  if (String(routePlan?.reason || "").trim().toLowerCase() === "direct_agent_followup_shortcut") {
+    const direct = outputs.find((row) => String(row?.agentId || "").trim().toLowerCase() !== "system" && String(row?.output || "").trim());
+    if (direct) return clip(String(direct.output || "").trim(), 3800);
+  }
   if (special && !hasAgentOutput) return special;
 
   const outputText = outputs
@@ -478,6 +483,29 @@ function buildSupervisorExecutionCallbacks({
   const formatRuntimeAgentDisplay = (agentId = "") => {
     const index = buildTelegramAgentIndex({ runtime });
     return formatChatAgentDisplayName(agentId, index);
+  };
+  const rememberRecentAgentTurn = ({ agentId = "", goal = "", output = "", provider = "", model = "", runtimeInstanceId = "", slotId = "", scopeId = "" } = {}) => {
+    const cleanAgentId = String(agentId || "").trim().toLowerCase();
+    if (!cleanAgentId || !String(output || "").trim()) return;
+    const configAgent = findAgentConfigInRuntime(cleanAgentId, runtime) || findAgentConfig(cleanAgentId) || {};
+    const maxRecentTurns = Number(runtime?.activeTeamConfig?.shortcut_policy?.max_recent_turns || 6);
+    chatSessionStore.upsert(chatId, (session) => ({
+      ...session,
+      recent_agent_turns: appendRecentAgentTurn(session?.recent_agent_turns || [], {
+        agent_id: cleanAgentId,
+        agent_name: String(configAgent?.name || cleanAgentId).trim(),
+        role: String(configAgent?.role || configAgent?.system_key || "").trim().toLowerCase(),
+        provider: String(provider || configAgent?.provider || "").trim().toLowerCase(),
+        model: String(model || configAgent?.model || "").trim(),
+        goal: String(goal || "").trim(),
+        output: String(output || "").trim(),
+        runtime_instance_id: String(runtimeInstanceId || "").trim(),
+        slot_id: String(slotId || "").trim(),
+        scope_id: String(scopeId || "").trim(),
+        job_id: String(jobId || "").trim(),
+        ts: new Date().toISOString(),
+      }).slice(0, Math.max(1, Math.min(12, maxRecentTurns))),
+    }));
   };
 
   function estimateTokens(text) {
@@ -1109,6 +1137,16 @@ function buildSupervisorExecutionCallbacks({
         ),
         { jobId, signal: controller.signal, label: `chat_v2_run_${String(cleanAgentId || "agent")}` }
       );
+      rememberRecentAgentTurn({
+        agentId: cleanAgentId,
+        goal: cleanGoal,
+        output: String(result?.output || ""),
+        provider: String(result?.provider || "").trim().toLowerCase(),
+        model: String(result?.model || "").trim(),
+        runtimeInstanceId,
+        slotId,
+        scopeId,
+      });
       if (cleanAgentId) {
         updateAgentStatus(chatId, cleanAgentId, {
           state: "done",
@@ -2264,7 +2302,100 @@ async function runSupervisorChat(
     const runThreadId = String(runtime?.map?.threadId || "").trim();
     const sharedCtxId = String(runtime?.map?.ctxSharedId || "").trim();
 
-    while (turn < maxTurns) {
+    const shortcutCandidate = planAgentFollowupShortcut({
+      message,
+      session: sessionAtStart,
+      runtime,
+      teamConfig: normalizedActiveTeamConfig,
+    });
+    if (shortcutCandidate?.matched && shortcutCandidate?.action) {
+      const runtimeTeamSnapshot = runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
+        ? runtime.runtimeTeamSnapshot
+        : createRuntimeTeamSnapshot({
+          source: "team_builder",
+          runtimeAgents: Array.isArray(runtime?.runtimeTeamSnapshot?.runtime_agents) ? runtime.runtimeTeamSnapshot.runtime_agents : [],
+        });
+      routePlan = {
+        reason: "direct_agent_followup_shortcut",
+        action_source: "shortcut_followup",
+        plan_source: "local_shortcut",
+        actions: [shortcutCandidate.action],
+        done: true,
+        await_user: false,
+        deliverables: [],
+        completed_deliverables: [],
+        final_response_style: "concise",
+        runtime_team_snapshot: runtimeTeamSnapshot,
+        shortcut_followup: {
+          target_agent_id: shortcutCandidate.target_agent_id,
+          intent_score: shortcutCandidate?.intent?.score || 0,
+          reason: shortcutCandidate.reason,
+        },
+      };
+      chatSessionStore.upsert(chatId, {
+        state: "executing",
+        agent_status: buildQueuedAgentStatusFromActions([shortcutCandidate.action]),
+        last_route: {
+          reason: routePlan.reason,
+          action_source: routePlan.action_source,
+          plan_source: routePlan.plan_source,
+          actions: routePlan.actions,
+          runtime_team_snapshot: runtimeTeamSnapshot,
+          done: true,
+          await_user: false,
+          deliverables: [],
+          completed_deliverables: [],
+          followup_hint: undefined,
+          turn: 0,
+          total_actions: 1,
+          final_response_style: "concise",
+        },
+      });
+      if (runEventSink && typeof runEventSink.queueMainSteps === "function") {
+        await runEventSink.queueMainSteps(routePlan.actions, {
+          metadata: {
+            runtime_team_snapshot: runtimeTeamSnapshot,
+            action_source: routePlan.action_source,
+            ...buildRunAuthorityPatch(runtime),
+          },
+          jobId: currentJobId,
+        }).catch(() => null);
+      }
+      const shortcutResult = await callbacks.runAgent({
+        action: shortcutCandidate.action,
+        detailContext: "",
+      });
+      mergedResults = [{
+        label: chatActionLabel(shortcutCandidate.action, { agentIndex: buildTelegramAgentIndex({ runtime, routePlan, actions: routePlan.actions }) }),
+        status: "ok",
+        note: "shortcut_followup",
+      }];
+      mergedOutputs = [{
+        agentId: String(shortcutCandidate.target_agent_id || "").trim().toLowerCase(),
+        provider: String(shortcutResult?.provider || "").trim().toLowerCase(),
+        mode: String(shortcutResult?.mode || ""),
+        output: String(shortcutResult?.output || ""),
+        jobId: String(currentJobId || ""),
+      }];
+      execution = {
+        results: mergedResults,
+        outputs: mergedOutputs,
+        currentJobId: String(currentJobId || ""),
+        pendingApproval: null,
+        blocked_index: -1,
+        remaining_actions: [],
+      };
+      stopReason = "direct_shortcut";
+      tracking.append(currentJobId, "decisions.md", [
+        "## /chat shortcut followup",
+        `- message: ${clip(message, 220)}`,
+        `- agent: ${String(shortcutCandidate.target_agent_id || "").trim().toLowerCase()}`,
+        `- score: ${Number(shortcutCandidate?.intent?.score || 0)}`,
+        `- reasons: ${(Array.isArray(shortcutCandidate?.intent?.reasons) ? shortcutCandidate.intent.reasons : []).join(", ") || "(none)"}`,
+      ].join("\n"));
+    }
+
+    while (!execution && turn < maxTurns) {
       turn += 1;
       const runtimeAuthority = buildRunAuthority(runtime);
       const routerRunMeta = {

@@ -44,3 +44,13 @@ test('validateTeamConfiguration accepts composition metadata in template', () =>
   assert.equal(validated.composition_mode, 'freeform');
   assert.equal(validated.agents[0].model, 'gemini-2.5-pro');
 });
+
+
+test('freeform create falls back to multi-agent coverage for compare and review tasks', () => {
+  const team = createFreeformTeamConfiguration({ description: '한 제품 전략을 여러 관점에서 비교하고 검토한 뒤 최종 요약을 써줘' });
+  assert.equal(team.composition_mode, 'freeform');
+  assert.ok(team.agents.some((agent) => agent.role === 'reviewer'));
+  assert.ok(team.agents.some((agent) => agent.role === 'synthesizer'));
+  assert.ok(team.agents.length >= 2);
+  assert.equal(team.shortcut_policy.enabled, true);
+});
