@@ -1996,8 +1996,8 @@ export class GocClient {
     return await this.listTeamMembers(threadTarget);
   }
 
-  async addConversationAgent(threadTarget, agentId, enabled = true) {
-    return await this.addTeamMember(threadTarget, agentId, enabled);
+  async addConversationAgent(threadTarget, agentId, enabled = true, overridesJson = null) {
+    return await this.addTeamMember(threadTarget, agentId, enabled, overridesJson);
   }
 
   async patchConversationAgent(threadTarget, agentId, patch = {}) {
@@ -2006,6 +2006,33 @@ export class GocClient {
 
   async removeConversationAgent(threadTarget, agentId) {
     return await this.removeTeamMember(threadTarget, agentId);
+  }
+
+
+  async getTeamConfig(threadTarget) {
+    const target = summarizeTeamTarget(threadTarget, { client: this });
+    const threadId = String(target.thread_id || '').trim();
+    if (!threadId) throw new Error('threadTarget requires threadId');
+    return await this._requestAny({
+      method: 'GET',
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(threadId)}/team/config` },
+        { path: `/threads/${encodeURIComponent(threadId)}/team/config` },
+      ],
+    });
+  }
+
+  async setTeamConfig(threadTarget, teamConfig = {}) {
+    const target = summarizeTeamTarget(threadTarget, { client: this });
+    const threadId = String(target.thread_id || '').trim();
+    if (!threadId) throw new Error('threadTarget requires threadId');
+    return await this._requestAny({
+      method: 'PUT',
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(threadId)}/team/config`, body: { team_config: teamConfig } },
+        { path: `/threads/${encodeURIComponent(threadId)}/team/config`, body: { team_config: teamConfig } },
+      ],
+    });
   }
 
   async listAgents(scope = "") {

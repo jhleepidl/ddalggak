@@ -88,6 +88,8 @@ import {
   isExplicitTeamConfigurationIntentMessage,
 } from "./team_intent.js";
 import { buildExplicitTeamReconfigurationActions } from "./team_config_diff.js";
+import { applyTeamConfigurationToRuntime, getSessionTeamState, hydrateSessionTeamStateFromConversationStore, syncTeamConfigurationToConversationStore, validateTeamConfiguration } from "./team_configuration.js";
+import { buildAgentLocalInteractionContract } from "../domain/interaction_spec.js";
 import {
   verifyConversationMembershipMutation,
   createMembershipConfirmationError,
@@ -2088,6 +2090,7 @@ async function runSupervisorChat(
     inputKind = "chat_message",
     telegramMessageId = null,
     forceMode = "normal",
+    teamConfig = null,
   } = {}
 ) {
   const chatKey = String(chatId);
@@ -2165,6 +2168,16 @@ async function runSupervisorChat(
       chatMeta: chatInfo,
       telegramUserId: userId,
     });
+    const lockedTeamState = await hydrateSessionTeamStateFromConversationStore({ sessionStore: chatSessionStore, chatId, runtime }).catch(() => getSessionTeamState(chatSessionStore, chatId));
+    const activeTeamConfig = teamConfig && typeof teamConfig === 'object'
+      ? teamConfig
+      : (lockedTeamState?.active_team && typeof lockedTeamState.active_team === 'object' ? lockedTeamState.active_team : null);
+    if (!activeTeamConfig) {
+      throw new Error('active team is required before /chat execution');
+    }
+    const normalizedActiveTeamConfig = validateTeamConfiguration(activeTeamConfig, { runtime });
+    applyTeamConfigurationToRuntime(runtime, normalizedActiveTeamConfig);
+    await syncTeamConfigurationToConversationStore({ runtime, teamConfig: normalizedActiveTeamConfig, source: 'chat_runtime_bootstrap' }).catch(() => null);
     const runtimeCapabilities = runtime?.capabilities && typeof runtime.capabilities === "object"
       ? runtime.capabilities
       : composeCapabilitiesForRun({ jobId: currentJobId, runtime }).capabilities;
@@ -2318,7 +2331,22 @@ async function runSupervisorChat(
         suggestedActions,
         followupHint,
       });
-      const teamRecommendation = recommendTeamForTask(lastUserText, runtime);
+      const teamRecommendation = runtime.activeTeamConfig
+        ? {
+          selected_existing_agents: (Array.isArray(runtime.activeTeamConfig.agents) ? runtime.activeTeamConfig.agents : []).map((agent) => ({
+            role: agent.role,
+            agent_id: agent.agent_id,
+            name: agent.name,
+            provider: agent.provider || '',
+            source: 'active_team',
+            why: agent.purpose || 'configured team member',
+          })),
+          missing_capabilities: [],
+          can_satisfy_without_creation: true,
+          team_composition_intent: false,
+          candidates: [],
+        }
+        : recommendTeamForTask(lastUserText, runtime);
       const runtimeTeamSnapshot = createRuntimeTeamSnapshot({
         source: "team_builder",
         teamPlan: {
@@ -2370,6 +2398,8 @@ async function runSupervisorChat(
         agentsCatalog: runtime.agentsCatalog,
         teamRecommendation,
         enabledAgentIds: runtime.enabledAgentIds,
+        teamLocked: runtime.teamLocked === true,
+        teamInteractionSpec: runtime.teamInteractionSpec || runtime.activeTeamConfig?.interaction_spec || null,
         tools: runtime.tools,
         jobConfig: runtime.jobConfig,
         currentJobId,
@@ -2411,6 +2441,8 @@ async function runSupervisorChat(
         allowReadOnlyControl: false,
         forceMode: cleanForceMode,
       });
+      routePlan.team_locked = runtime.teamLocked === true;
+      routePlan.interaction_spec = runtime.teamInteractionSpec || runtime.activeTeamConfig?.interaction_spec || null;
       let usedSuggestedActionsFallback = false;
       if (
         (!Array.isArray(routePlan?.actions) || routePlan.actions.length === 0)

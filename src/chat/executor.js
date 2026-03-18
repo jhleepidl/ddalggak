@@ -189,6 +189,7 @@ export async function executeSupervisorActions({
   const runtimeSnapshot = plan?.runtime_team_snapshot && typeof plan.runtime_team_snapshot === "object"
     ? plan.runtime_team_snapshot
     : plan;
+  const teamLocked = plan?.team_locked === true || runtimeSnapshot?.team_locked === true;
   const agentDisplayIndex = buildAgentDisplayIndex(agents);
   const maxActions = Number.isFinite(Number(budgetCfg.max_actions))
     ? Math.max(1, Math.floor(Number(budgetCfg.max_actions)))
@@ -217,6 +218,13 @@ export async function executeSupervisorActions({
         max_actions: maxActions,
       },
     });
+  }
+
+  if (teamLocked) {
+    const forbidden = actions.find((action) => isMutatingAction(action));
+    if (forbidden) {
+      throw new Error('team is locked; use /team commands to change composition');
+    }
   }
 
   const mutatingIndex = actions.findIndex((action) => isMutatingAction(action) && !isMutatingApproved(action));

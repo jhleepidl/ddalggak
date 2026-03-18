@@ -7,7 +7,9 @@ import {
 import { isTelegramWebAppHttpsError } from "../adapters/telegram/context_links.js";
 import {
   buildAgentDisplayIndex as buildAgentDisplayIndexShared,
+  buildPreviewAgentDisplayIndex,
   formatChatAgentDisplayName,
+  resolveActionAgentNameHint,
 } from "../shared/agent_labels.js";
 import { clip } from "../textutil.js";
 import {
@@ -73,6 +75,96 @@ function buildAgentDisplayIndex(registry = null, runtime = null) {
 
 function formatAgentRef(agentId, agentIndex = new Map()) {
   return formatChatAgentDisplayName(agentId, agentIndex);
+}
+
+function uniqStrings(values = []) {
+  const out = [];
+  const seen = new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    const clean = String(value || '').trim();
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    out.push(clean);
+  }
+  return out;
+}
+
+function summarizeAgentRuntimeRowsFromActions(actions = [], runtime = null, { limit = 8 } = {}) {
+  const rows = [];
+  const index = buildPreviewAgentDisplayIndex({ runtime, actions });
+  const seen = new Set();
+  for (const action of Array.isArray(actions) ? actions : []) {
+    const normalizedType = String(action?.type || '').trim().toLowerCase();
+    const candidates = normalizedType === 'spawn_parallel' || normalizedType === 'spawn_agents'
+      ? (Array.isArray(action?.agents) ? action.agents : [])
+      : ([action]);
+    for (const child of candidates) {
+      const childType = String(child?.type || normalizedType).trim().toLowerCase();
+      if (!['run_agent', 'agent_run', 'synthesize_final'].includes(childType)) continue;
+      const inputs = child?.inputs && typeof child.inputs === 'object' ? child.inputs : {};
+      const instanceId = String(inputs.runtime_instance_id || inputs.runtimeInstanceId || child?.agent_id || child?.agent || '').trim();
+      const dedupeKey = instanceId || JSON.stringify([child?.agent, child?.goal, inputs.slot_id, inputs.role_id]);
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      const label = String(
+        inputs.display_label
+        || inputs.displayLabel
+        || resolveActionAgentNameHint(child)
+        || formatChatAgentDisplayName(instanceId || child?.agent_id || child?.agent || '', index, { fallbackLabel: 'Agent' })
+      ).trim() || 'Agent';
+      const roleId = String(inputs.role_id || inputs.roleId || inputs.role_label || inputs.roleLabel || child?.agent || '').trim().toLowerCase();
+      const roleText = roleId ? ` [${roleId}]` : '';
+      const model = [String(inputs.provider || '').trim(), String(inputs.model || '').trim()].filter(Boolean).join('/');
+      const skillIds = uniqStrings([
+        ...(Array.isArray(inputs.attached_skill_ids) ? inputs.attached_skill_ids : []),
+        ...(Array.isArray(inputs.attachedSkillIds) ? inputs.attachedSkillIds : []),
+      ]).slice(0, 4);
+      const goal = clip(String(child?.goal || child?.prompt || child?.task || '').trim(), 120);
+      const parts = [`${label}${roleText}`];
+      if (model) parts.push(`model=${model}`);
+      if (skillIds.length > 0) parts.push(`skills=${skillIds.join(', ')}`);
+      if (goal) parts.push(`goal=${goal}`);
+      rows.push(parts.join(' · '));
+      if (rows.length >= Math.max(1, Number(limit) || 8)) return rows;
+    }
+  }
+  return rows;
+}
+
+function summarizeAgentRoster(runtime = null, { actions = [], limit = 8 } = {}) {
+  const snapshot = runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === 'object'
+    ? runtime.runtimeTeamSnapshot
+    : (runtime?.runtime_team_snapshot && typeof runtime.runtime_team_snapshot === 'object' ? runtime.runtime_team_snapshot : null);
+  const rows = Array.isArray(snapshot?.runtime_agents) ? snapshot.runtime_agents : [];
+  if (rows.length > 0) return rows;
+  const actionRows = summarizeAgentRuntimeRowsFromActions(actions, runtime, { limit });
+  return actionRows.map((summary, index) => ({
+    display_label: summary,
+    role_label: '',
+    attached_skill_ids: [],
+    __summary_only: true,
+    instance_id: `planned_${index}`
+  }));
+}
+
+function formatRosterRow(row = {}) {
+  if (row?.__summary_only) return String(row.display_label || '').trim();
+  const roleId = String(row?.role_id || row?.roleId || row?.role_label || row?.roleLabel || '').trim().toLowerCase();
+  const label = String(row?.display_label || row?.displayLabel || formatChatAgentDisplayName(row?.instance_id || row?.agent_id || roleId || '', new Map(), { fallbackLabel: 'Agent' })).trim() || 'Agent';
+  const skillIds = uniqStrings([
+    ...(Array.isArray(row?.attached_skill_ids) ? row.attached_skill_ids : []),
+    ...(Array.isArray(row?.attachedSkillIds) ? row.attachedSkillIds : []),
+    ...(Array.isArray(row?.attached_skills) ? row.attached_skills.map((entry) => entry?.skill_id || entry?.id || entry) : []),
+    ...(Array.isArray(row?.attachedSkills) ? row.attachedSkills.map((entry) => entry?.skill_id || entry?.id || entry) : []),
+  ]).slice(0, 5);
+  const model = [String(row?.provider || '').trim(), String(row?.model || '').trim()].filter(Boolean).join('/');
+  const personality = String(row?.personality_profile?.stance || row?.personalityProfile?.stance || '').trim();
+  const parts = [label];
+  if (roleId) parts.push(`[${roleId}]`);
+  if (model) parts.push(`model=${model}`);
+  if (skillIds.length > 0) parts.push(`skills=${skillIds.join(', ')}`);
+  if (personality) parts.push(`tone=${personality}`);
+  return parts.join(' · ');
 }
 
 export function formatMemorySummary() {
@@ -196,6 +288,8 @@ export function buildChatStatusCard(chatId, runtime = null) {
     ? session.last_route
     : null;
   const manualApprovals = listPendingManualApprovals(currentJobId);
+  const teamConfig = session.team_config && typeof session.team_config === 'object' ? session.team_config : null;
+  const activeTeam = teamConfig?.active_team && typeof teamConfig.active_team === 'object' ? teamConfig.active_team : null;
   const enabledAgents = runtime?.agentSelection?.enabled_ids || runtime?.enabledAgentIds || [];
   const enabledTools = runtime?.toolSelection?.enabled_ids || runtime?.enabledToolIds || [];
   const runtimeAuthority = buildRunAuthority(runtime);
@@ -234,6 +328,16 @@ export function buildChatStatusCard(chatId, runtime = null) {
   if (Array.isArray(enabledTools) && enabledTools.length > 0) {
     lines.push(`- enabled_tools: ${enabledTools.join(", ")}`);
   }
+  if (activeTeam) {
+    lines.push(`- active_team: ${String(activeTeam.team_name || 'configured_team')}`);
+    lines.push(`- team_mode: ${String(activeTeam.mode || 'scoped_context')}`);
+    lines.push(`- team_agents: ${Array.isArray(activeTeam.agents) ? activeTeam.agents.length : 0}`);
+    const interactionSpec = activeTeam.interaction_spec && typeof activeTeam.interaction_spec === 'object' ? activeTeam.interaction_spec : null;
+    if (interactionSpec) {
+      lines.push(`- team_execution_pattern: ${String(interactionSpec.execution_pattern || '(none)')}`);
+      lines.push(`- final_answer_owner: ${String(interactionSpec.final_answer_owner || '(none)')}`);
+    }
+  }
   if (runtimeAuthority) {
     lines.push(`- mode: ${runtimeAuthority.mode}`);
     lines.push(`- plan_source: ${runtimeAuthority.plan_source}`);
@@ -253,6 +357,11 @@ export function buildChatStatusCard(chatId, runtime = null) {
     for (const line of snapshotLines.slice(0, 7)) {
       lines.push(line);
     }
+  }
+  const plannedRosterRows = summarizeAgentRuntimeRowsFromActions(session?.last_route?.actions || [], runtime, { limit: 4 });
+  if (plannedRosterRows.length > 0) {
+    lines.push('- team_preview:');
+    for (const row of plannedRosterRows) lines.push(`  • ${row}`);
   }
   if (runtime?.jobConfigDebugSummary) {
     lines.push(`- job_config(debug): ${clip(String(runtime.jobConfigDebugSummary || ""), 240)}`);
@@ -416,6 +525,7 @@ export async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawA
           sampleRows.length > 0
             ? `등록된 agent(샘플): ${sampleRows.map((row) => formatAgentRef(row?.id, agentIndex)).join(", ")}`
             : "등록된 agent가 없습니다.",
+          "팁: /team skills 로 기본 agent별 역할/스킬을 먼저 볼 수 있습니다.",
           "작업 지시를 보내면 chat별 job이 생성됩니다.",
         ];
         let fallbackAgentsUi = null;
@@ -448,6 +558,25 @@ export async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawA
       });
     } catch (error) {
       await bot.sendMessage(chatId, `❌ 목록 조회 실패: ${String(error?.message ?? error)}`);
+      return;
+    }
+
+    if (cleanKind === "agent" && sub === "skills") {
+      const rosterRows = summarizeAgentRoster(runtime, {
+        actions: runtime?.chatSession?.last_route?.actions || runtime?.last_route?.actions || chatSessionStore.get(chatId)?.last_route?.actions || [],
+        limit: 12,
+      });
+      const textLines = [
+        '현재 agent roster',
+        `- job_id: ${currentJobId}`,
+      ];
+      if (rosterRows.length === 0) {
+        textLines.push('- 아직 계획된 runtime agent가 없습니다.')
+      } else {
+        textLines.push('- agents:')
+        for (const row of rosterRows.slice(0, 12)) textLines.push(`  • ${formatRosterRow(row)}`)
+      }
+      await sendLong(bot, chatId, textLines.join('\n'));
       return;
     }
 

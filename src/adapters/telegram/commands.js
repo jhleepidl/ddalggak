@@ -2,12 +2,28 @@ import {
   executeRunCommand,
   executeContinueCommand,
 } from "../../application/route_executor.js";
+import {
+  applyPendingTeam,
+  buildTeamConfigurationTemplate,
+  buildTeamListMessage,
+  formatSupportedModelLines,
+  formatTeamProposalMessage,
+  getSessionTeamState,
+  hydrateSessionTeamStateFromConversationStore,
+  parseTeamTemplate,
+  refineTeamConfiguration,
+  resetTeamConfiguration,
+  storePendingTeam,
+  suggestTeamConfiguration,
+  validateTeamConfiguration,
+} from "../../application/team_configuration.js";
 
 const HELP_TEXT = [
   "Commands:",
   "- /chat [text]: 대화/작업 지시",
   "- /context [global]: 현재 job 또는 global 컨텍스트 보기",
-  "- /team [registry|public [query]|add <preset_or_role_ref>|remove <preset_or_role_ref>|enable <preset_or_role_ref>|disable <preset_or_role_ref>]: 팀/프리셋 상태 조회 및 변경 (/agents alias)",
+  "- /team [suggest <목적>|refine <자연어 수정>|apply|template|validate <JSON>|reset]: 팀 제안/수정/확정",
+  "- /skills: 현재/예정 agent roster와 대표 skill 보기",
   "- /tools: 현재 job의 tool 상태 보기",
   "- /files [uploads|outputs|all] [limit]: workspace 파일 목록 보기",
   "- /outputs [send]: output 목록 보기 또는 파일 전송",
@@ -28,7 +44,8 @@ const ADVANCED_HELP_TEXT = [
   "- /stop [jobId]: 현재 실행 또는 지정 job 중단",
   "- /memory [show|md|policy|routing|role|agents|note|lesson|reset]: 런타임 메모리 조회/수정",
   "- /settings ...: /memory alias",
-  "- /team [registry|public [query]|add <preset_or_role_ref>|remove <preset_or_role_ref>|enable <preset_or_role_ref>|disable <preset_or_role_ref>]: 팀/프리셋 상태 조회 및 변경 (/agents alias)",
+  "- /team [suggest <목적>|refine <자연어 수정>|apply|template|validate <JSON>|reset]: 팀 제안/수정/확정",
+  "- /skills: 현재/예정 agent roster와 대표 skill 보기",
   "- /tools: 현재 job의 tool 상태 보기",
   "- /files [uploads|outputs|all] [limit]: workspace 파일 목록 보기",
   "- /outputs [send]: output 목록 보기 또는 파일 전송",
@@ -107,8 +124,11 @@ export function createTelegramCommandHandler(deps = {}) {
   return async function handleTelegramCommand({ msg, text, chatId, userId }) {
     if (!String(text || "").startsWith("/")) return false;
 
-    const [cmd, ...rest] = String(text || "").split(/\s+/);
-    const args = rest.join(" ").trim();
+    const rawText = String(text || "");
+    const firstSpaceIndex = rawText.indexOf(" ");
+    const rawArgs = firstSpaceIndex >= 0 ? rawText.slice(firstSpaceIndex + 1).trim() : "";
+    const [cmd, ...rest] = rawText.split(/\s+/);
+    const args = rawArgs || rest.join(" ").trim();
 
     if (cmd === "/help" || cmd === "/commands") {
       const sub = String(args || "").trim().toLowerCase();
@@ -290,7 +310,102 @@ export function createTelegramCommandHandler(deps = {}) {
     }
 
     if (cmd === "/agents" || cmd === "/team") {
-      await sendAgentOrToolListQuick(bot, chatId, "agent", args, { telegramUserId: userId });
+      const sub = String(rest[0] || "").trim().toLowerCase();
+      let teamState = getSessionTeamState(chatSessionStore, chatId);
+      const currentJobId = resolveLiveJobIdForChat(chatId);
+      let runtimeForTeam = null;
+      if (currentJobId && typeof loadSupervisorRuntime === 'function') {
+        try {
+          runtimeForTeam = await loadSupervisorRuntime(currentJobId, { telegramUserId: userId, includeContext: false, includeGlobal: false });
+        } catch {}
+      }
+      if (runtimeForTeam) {
+        await hydrateSessionTeamStateFromConversationStore({ sessionStore: chatSessionStore, chatId, runtime: runtimeForTeam }).catch(() => null);
+        teamState = getSessionTeamState(chatSessionStore, chatId);
+      }
+      if (!sub) {
+        await sendLong(bot, chatId, buildTeamListMessage(teamState));
+        return true;
+      }
+      if (sub === 'suggest') {
+        const goal = String(rawArgs.replace(/^suggest\s+/i, '') || '').trim();
+        if (!goal) {
+          await bot.sendMessage(chatId, 'Usage: /team suggest <목적>');
+          return true;
+        }
+        const proposal = suggestTeamConfiguration({ taskText: goal, runtime: runtimeForTeam });
+        storePendingTeam(chatSessionStore, chatId, proposal);
+        await sendLong(bot, chatId, `${formatTeamProposalMessage(proposal)}
+
+지원 모델:
+${formatSupportedModelLines()}`);
+        return true;
+      }
+      if (sub === 'refine') {
+        const instruction = String(rawArgs.replace(/^refine\s+/i, '') || '').trim();
+        const baseTeam = teamState.pending_team || teamState.active_team;
+        if (!baseTeam) {
+          await bot.sendMessage(chatId, '수정할 팀이 없습니다. 먼저 /team suggest <목적> 을 실행해 주세요.');
+          return true;
+        }
+        if (!instruction) {
+          await bot.sendMessage(chatId, 'Usage: /team refine <자연어 수정>');
+          return true;
+        }
+        const next = refineTeamConfiguration(baseTeam, instruction, { runtime: runtimeForTeam });
+        storePendingTeam(chatSessionStore, chatId, next);
+        await sendLong(bot, chatId, formatTeamProposalMessage(next));
+        return true;
+      }
+      if (sub === 'template') {
+        const baseTeam = teamState.pending_team || teamState.active_team;
+        if (!baseTeam) {
+          await bot.sendMessage(chatId, '먼저 /team suggest <목적> 으로 팀을 제안받아 주세요.');
+          return true;
+        }
+        await sendLong(bot, chatId, buildTeamConfigurationTemplate(baseTeam));
+        return true;
+      }
+      if (sub === 'validate') {
+        const payload = String(rawArgs.replace(/^validate\s+/i, '') || '').trim();
+        if (!payload) {
+          await bot.sendMessage(chatId, 'Usage: /team validate <JSON template>');
+          return true;
+        }
+        try {
+          const parsed = parseTeamTemplate(payload);
+          const validated = validateTeamConfiguration(parsed, { runtime: runtimeForTeam });
+          storePendingTeam(chatSessionStore, chatId, validated);
+          await sendLong(bot, chatId, `✅ 팀 템플릿 검증 완료
+
+${formatTeamProposalMessage(validated)}`);
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ 팀 템플릿 검증 실패: ${String(e?.message ?? e)}`);
+        }
+        return true;
+      }
+      if (sub === 'apply') {
+        try {
+          const applied = await applyPendingTeam({ sessionStore: chatSessionStore, chatId, runtime: runtimeForTeam });
+          await sendLong(bot, chatId, `✅ 활성 팀 적용 완료
+
+${buildTeamListMessage({ active_team: applied })}`);
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ 팀 적용 실패: ${String(e?.message ?? e)}`);
+        }
+        return true;
+      }
+      if (sub === 'reset') {
+        await resetTeamConfiguration(chatSessionStore, chatId, { runtime: runtimeForTeam });
+        await bot.sendMessage(chatId, '✅ 팀 구성을 초기화했습니다. 다시 /team suggest <목적> 으로 시작해 주세요.');
+        return true;
+      }
+      await bot.sendMessage(chatId, '지원되는 /team 명령: suggest, refine, apply, template, validate, reset');
+      return true;
+    }
+
+    if (cmd === "/skills") {
+      await sendAgentOrToolListQuick(bot, chatId, "agent", "skills", { telegramUserId: userId });
       return true;
     }
 
@@ -402,9 +517,21 @@ export function createTelegramCommandHandler(deps = {}) {
       }
 
       try {
-        await sendRouterAckMessage(bot, chatId, {
-          replyToMessageId: msg.message_id,
-        });
+        let teamState = getSessionTeamState(chatSessionStore, chatId);
+        const currentJobId = resolveLiveJobIdForChat(chatId);
+        if (!teamState.active_team && currentJobId && typeof loadSupervisorRuntime === 'function') {
+          try {
+            const runtimeForChat = await loadSupervisorRuntime(currentJobId, { telegramUserId: userId, includeContext: false, includeGlobal: false });
+            await hydrateSessionTeamStateFromConversationStore({ sessionStore: chatSessionStore, chatId, runtime: runtimeForChat }).catch(() => null);
+            teamState = getSessionTeamState(chatSessionStore, chatId);
+          } catch {}
+        }
+        if (!teamState.active_team) {
+          await bot.sendMessage(chatId, `현재 활성 팀이 없습니다.
+먼저 /team suggest <목적> 으로 팀을 구성한 뒤 /team apply 후 /chat 을 실행해 주세요.`);
+          return true;
+        }
+        await sendRouterAckMessage(bot, chatId, { replyToMessageId: msg.message_id });
         if (!parsed.debug) {
           await chatRunManager.handleIncoming({
             chatId,
@@ -412,6 +539,7 @@ export function createTelegramCommandHandler(deps = {}) {
             text: message,
             kind: "normal",
             telegramMessageId: msg.message_id,
+            teamConfig: teamState.active_team,
             chatInfo: {
               chat_id: String(chatId || ""),
               title: String(msg.chat?.title || msg.chat?.username || "").trim(),
@@ -422,6 +550,7 @@ export function createTelegramCommandHandler(deps = {}) {
         }
         await runSupervisorChat(bot, chatId, userId, message, {
           debug: parsed.debug,
+          teamConfig: teamState.active_team,
           chatInfo: {
             chat_id: String(chatId || ""),
             title: String(msg.chat?.title || msg.chat?.username || "").trim(),

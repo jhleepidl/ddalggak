@@ -93,6 +93,19 @@ function normalizeAgentStatusMap(raw) {
   return out;
 }
 
+
+function normalizeSessionTeamConfig(raw) {
+  const row = raw && typeof raw === 'object' ? raw : {};
+  const activeTeam = row.active_team && typeof row.active_team === 'object' ? row.active_team : null;
+  const pendingTeam = row.pending_team && typeof row.pending_team === 'object' ? row.pending_team : null;
+  return {
+    status: String(row.status || (activeTeam ? 'active' : pendingTeam ? 'suggested' : 'none')).trim().toLowerCase() || 'none',
+    active_team: activeTeam,
+    pending_team: pendingTeam,
+    updated_at: String(row.updated_at || nowIso()),
+  };
+}
+
 function normalizeSession(chatId, raw = {}) {
   const row = asObject(raw);
   const budgetRaw = asObject(row.budget);
@@ -162,6 +175,7 @@ function normalizeSession(chatId, raw = {}) {
     agent_status: normalizeAgentStatusMap(row.agent_status),
     last_route: row.last_route && typeof row.last_route === "object" ? row.last_route : null,
     public_search_cache: normalizePublicSearchCache(row.public_search_cache),
+    team_config: normalizeSessionTeamConfig(row.team_config),
     updated_at: String(row.updated_at || nowIso()),
   };
 }

@@ -602,10 +602,13 @@ function summarizeRuntimeAgentRows(runtime = null, { limit = 8 } = {}) {
       ...asArray(row?.attached_skills).map((entry) => entry?.skill_id || entry?.id || entry),
       ...asArray(row?.attachedSkills).map((entry) => entry?.skill_id || entry?.id || entry),
     ]).slice(0, 5);
+    const model = [String(row?.provider || '').trim(), String(row?.model || '').trim()].filter(Boolean).join('/');
     const parts = [label];
     if (roleId) parts.push(`[${canonicalRoleDisplayName(roleId)}]`);
-    if (skillIds.length > 0) parts.push(`— skills: ${skillIds.join(', ')}`);
-    out.push(parts.join(' '));
+    if (model) parts.push(`model=${model}`);
+    if (skillIds.length > 0) parts.push(`skills=${skillIds.join(', ')}`);
+    if (row?.selection_reason) parts.push(`why=${String(row.selection_reason).trim()}`);
+    out.push(parts.join(' · '));
     if (out.length >= Math.max(1, Number(limit) || 8)) break;
   }
   return out;
@@ -1115,8 +1118,8 @@ export async function runConversationAgentTeamCommand({
           ? `- warnings: ${String(runtime.conversationMembershipWarning || "").trim()}`
           : "",
         authority?.mode === "goc"
-          ? "명령: /team registry | /catalog [query] | /team add <preset_or_role_ref> | /team remove <preset_or_role_ref> | /team enable <preset_or_role_ref> | /team disable <preset_or_role_ref>"
-          : "명령: /agents registry | /agents add <preset_or_role_ref> | /agents remove <preset_or_role_ref> | /agents enable <preset_or_role_ref> | /agents disable <preset_or_role_ref>",
+          ? "명령: /team skills | /team registry | /catalog [query] | /team add <preset_or_role_ref> | /team remove <preset_or_role_ref> | /team enable <preset_or_role_ref> | /team disable <preset_or_role_ref>"
+          : "명령: /agents skills | /agents registry | /agents add <preset_or_role_ref> | /agents remove <preset_or_role_ref> | /agents enable <preset_or_role_ref> | /agents disable <preset_or_role_ref>",
       ].filter(Boolean).join("\n"),
       conversation_preferences: preferences,
       baselineDefaultAgentIds: teamView.baselineDefaultAgentIds,

@@ -158,6 +158,7 @@ function normalizeLocalState(raw = {}, { jobId = "" } = {}) {
       created_at: String(entry.created_at || nowIso()),
       updated_at: String(entry.updated_at || nowIso()),
     })),
+    team_config: row.team_config && typeof row.team_config === 'object' ? row.team_config : null,
     updated_at: String(row.updated_at || nowIso()),
   };
 }
@@ -299,22 +300,29 @@ export class LocalConversationTeamStore {
     jobId = "",
     agentId = "",
     enabled = true,
+    orderIndex = null,
+    overridesJson = null,
   } = {}) {
     const cleanAgentId = cleanId(agentId);
     if (!cleanAgentId) throw new Error("addAgent requires agentId");
     const state = this._readState(jobId);
     const rows = this._rowsFromState(state);
     const now = nowIso();
+    const requestedOrderRaw = orderIndex ?? null;
+    const requestedOrder = requestedOrderRaw === null || requestedOrderRaw === undefined ? null : (Number.isFinite(Number(requestedOrderRaw)) ? Math.max(0, Math.floor(Number(requestedOrderRaw))) : null);
+    const requestedOverrides = asObject(overridesJson);
     const existing = rows.find((row) => row.agent_id === cleanAgentId);
     if (existing) {
       existing.enabled = enabled !== false;
       existing.updated_at = now;
+      if (requestedOrder !== null) existing.order_index = requestedOrder;
+      if (Object.keys(requestedOverrides).length > 0) existing.overrides_json = requestedOverrides;
     } else {
       rows.push(normalizeTeamRow({
         agent_id: cleanAgentId,
         enabled: enabled !== false,
-        order_index: rows.length,
-        overrides_json: {},
+        order_index: requestedOrder !== null ? requestedOrder : rows.length,
+        overrides_json: Object.keys(requestedOverrides).length > 0 ? requestedOverrides : {},
         created_at: now,
         updated_at: now,
       }, {
@@ -326,7 +334,7 @@ export class LocalConversationTeamStore {
     state.agents = sortTeamRows(rows).map((row, index) => ({
       agent_id: row.agent_id,
       enabled: row.enabled !== false,
-      order_index: index,
+      order_index: Number.isFinite(Number(row.order_index)) ? Math.max(0, Math.floor(Number(row.order_index))) : index,
       overrides_json: asObject(row.overrides_json),
       created_at: String(row.created_at || now),
       updated_at: String(row.updated_at || now),
@@ -376,12 +384,46 @@ export class LocalConversationTeamStore {
     jobId = "",
     agentId = "",
     enabled = true,
+    orderIndex = null,
+    overridesJson = null,
   } = {}) {
     return await this.addAgent({
       jobId,
       agentId,
       enabled,
+      orderIndex,
+      overridesJson,
     });
+  }
+
+  async patchAgent({
+    jobId = "",
+    agentId = "",
+    patch = {},
+  } = {}) {
+    const row = asObject(patch);
+    return await this.addAgent({
+      jobId,
+      agentId,
+      enabled: typeof row.enabled === "boolean" ? row.enabled : true,
+      orderIndex: row.order_index ?? row.orderIndex ?? row.order ?? null,
+      overridesJson: row.overrides_json ?? row.overridesJson ?? row.overrides ?? null,
+    });
+  }
+
+  async getTeamConfig({ jobId = "" } = {}) {
+    const state = this._readState(jobId);
+    return state.team_config && typeof state.team_config === 'object'
+      ? state.team_config
+      : { status: 'none', active_team: null, pending_team: null, updated_at: state.updated_at };
+  }
+
+  async setTeamConfig({ jobId = "", teamConfig = null } = {}) {
+    const state = this._readState(jobId);
+    state.team_config = teamConfig && typeof teamConfig === 'object' ? teamConfig : null;
+    state.updated_at = nowIso();
+    this._writeState(jobId, state);
+    return this.getTeamConfig({ jobId });
   }
 }
 
@@ -411,6 +453,17 @@ export class GocConversationTeamStore {
   _requireClient() {
     if (!this.client) throw new Error("GoC conversation team store requires client");
     return this.client;
+  }
+
+
+  async getTeamConfig({ threadId = "", jobId = "" } = {}) {
+    const target = await this._resolveTarget({ threadId, jobId });
+    return this.client.getTeamConfig(target);
+  }
+
+  async setTeamConfig({ threadId = "", jobId = "", teamConfig = null, source = "conversation_team_store" } = {}) {
+    const target = await this._resolveTarget({ threadId, jobId, source });
+    return this.client.setTeamConfig(target, teamConfig && typeof teamConfig === 'object' ? teamConfig : {});
   }
 
   _normalizeRows(rows = [], {
@@ -616,6 +669,8 @@ export class GocConversationTeamStore {
     source = "",
     agentId = "",
     enabled = true,
+    orderIndex = null,
+    overridesJson = null,
   } = {}) {
     const client = this._requireClient();
     const addMember = typeof client.addTeamMember === "function"
@@ -636,6 +691,16 @@ export class GocConversationTeamStore {
     if (!cleanAgentId) throw new Error("addAgent requires agentId");
     if (!addMember) throw new Error("addTeamMember API unavailable");
     const mutationResponse = await addMember(target, cleanAgentId, enabled !== false);
+    const requestedOrderRaw = orderIndex ?? null;
+    const requestedOrder = requestedOrderRaw === null || requestedOrderRaw === undefined ? null : (Number.isFinite(Number(requestedOrderRaw)) ? Math.max(0, Math.floor(Number(requestedOrderRaw))) : null);
+    const requestedOverrides = asObject(overridesJson);
+    if ((requestedOrder !== null || Object.keys(requestedOverrides).length > 0 || enabled === false) && typeof client.patchTeamMember === "function") {
+      await client.patchTeamMember(target, cleanAgentId, {
+        enabled: enabled !== false,
+        order_index: requestedOrder,
+        overrides_json: Object.keys(requestedOverrides).length > 0 ? requestedOverrides : undefined,
+      }).catch(() => null);
+    }
     const rows = await this._listStrict(target);
     return {
       target,
@@ -712,17 +777,14 @@ export class GocConversationTeamStore {
     source = "",
     agentId = "",
     enabled = true,
+    orderIndex = null,
+    overridesJson = null,
   } = {}) {
     const client = this._requireClient();
-    const patchMember = typeof client.patchTeamMember === "function"
+    const setEnabled = typeof client.patchTeamMember === "function"
       ? client.patchTeamMember.bind(client)
       : (typeof client.patchConversationAgent === "function"
         ? client.patchConversationAgent.bind(client)
-        : null);
-    const addMember = typeof client.addTeamMember === "function"
-      ? client.addTeamMember.bind(client)
-      : (typeof client.addConversationAgent === "function"
-        ? client.addConversationAgent.bind(client)
         : null);
     const target = membershipTarget
       ? summarizeTarget(membershipTarget, { source: "goc" })
@@ -735,22 +797,12 @@ export class GocConversationTeamStore {
       });
     const cleanAgentId = cleanId(agentId);
     if (!cleanAgentId) throw new Error("setAgentEnabled requires agentId");
-
-    let mutationResponse = null;
-    if (patchMember) {
-      mutationResponse = await patchMember(target, cleanAgentId, {
-        enabled: enabled !== false,
-      }).catch(async () => {
-        if (addMember) {
-          return await addMember(target, cleanAgentId, enabled !== false);
-        }
-        throw new Error("team member patch is not supported");
-      });
-    } else if (addMember) {
-      mutationResponse = await addMember(target, cleanAgentId, enabled !== false);
-    } else {
-      throw new Error("team member patch is not supported");
-    }
+    if (!setEnabled) throw new Error("patchTeamMember API unavailable");
+    const mutationResponse = await setEnabled(target, cleanAgentId, {
+      enabled: enabled !== false,
+      order_index: (() => { const rawOrder = orderIndex ?? null; return rawOrder === null || rawOrder === undefined ? undefined : (Number.isFinite(Number(rawOrder)) ? Math.max(0, Math.floor(Number(rawOrder))) : undefined); })(),
+      overrides_json: Object.keys(asObject(overridesJson)).length > 0 ? asObject(overridesJson) : undefined,
+    });
     const rows = await this._listStrict(target);
     return {
       target,
@@ -765,13 +817,31 @@ export class GocConversationTeamStore {
         threadId: target.thread_id,
         conversationId: target.conversation_id,
         source: "goc",
-      }) || {
-        agent_id: cleanAgentId,
-        thread_id: target.thread_id,
-        conversation_id: target.conversation_id,
-        enabled: enabled !== false,
-      },
+      }),
     };
+  }
+
+  async patchAgent({
+    threadId = "",
+    conversationId = "",
+    membershipTarget = null,
+    jobId = "",
+    source = "",
+    agentId = "",
+    patch = {},
+  } = {}) {
+    const row = asObject(patch);
+    return await this.setAgentEnabled({
+      threadId,
+      conversationId,
+      membershipTarget,
+      jobId,
+      source,
+      agentId,
+      enabled: typeof row.enabled === 'boolean' ? row.enabled : true,
+      orderIndex: row.order_index ?? row.orderIndex ?? row.order ?? null,
+      overridesJson: row.overrides_json ?? row.overridesJson ?? row.overrides ?? null,
+    });
   }
 
   async getPreferences({

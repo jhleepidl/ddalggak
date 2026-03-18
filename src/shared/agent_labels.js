@@ -166,6 +166,10 @@ function actionRuntimeRows(actions = []) {
         role_label: canonicalRoleDisplayName(roleId) || undefined,
         display_label: displayLabel || undefined,
         purpose: firstNonEmpty(inputs.slot_purpose, inputs.slotPurpose),
+        provider: firstNonEmpty(inputs.provider),
+        model: firstNonEmpty(inputs.model),
+        attached_skill_ids: asArray(inputs.attached_skill_ids || inputs.attachedSkillIds),
+        personality_profile: inputs.personality_profile || inputs.personalityProfile || undefined,
       });
     }
     if (normalizeAgentId(action.type) === 'spawn_parallel' || normalizeAgentId(action.type) === 'spawn_agents') {

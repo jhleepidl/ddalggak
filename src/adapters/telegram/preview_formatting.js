@@ -18,6 +18,20 @@ function isAgentActionType(type = '') {
   return ['run_agent', 'agent_run', 'synthesize_final'].includes(type);
 }
 
+function isMostlyBackendOnlyAction(type = '') {
+  return ['summarize', 'checkpoint', 'supervisor_decision'].includes(String(type || '').trim().toLowerCase())
+}
+
+function formatActionMeta(action = {}) {
+  const inputs = action && typeof action.inputs === 'object' ? action.inputs : {}
+  const skillIds = asArray(inputs.attached_skill_ids || inputs.attachedSkillIds).map((item) => String(item || '').trim()).filter(Boolean).slice(0, 3)
+  const model = [String(inputs.provider || '').trim(), String(inputs.model || '').trim()].filter(Boolean).join('/')
+  const parts = []
+  if (skillIds.length > 0) parts.push(`skills=${skillIds.join(', ')}`)
+  if (model) parts.push(`model=${model}`)
+  return parts.join(' · ')
+}
+
 export function getActionGoal(action = {}) {
   if (!action || typeof action !== 'object') return '';
   return String(action.goal || action.prompt || action.task || '').trim();
@@ -81,37 +95,41 @@ export function formatChatActionLabel(action = {}, {
 export function buildPlanPreviewLines(actions = [], {
   agentIndex = new Map(),
   actionLabel = null,
-  goalClipMax = 220,
+  goalClipMax = 160,
 } = {}) {
   const index = asMap(agentIndex);
   const labelFn = typeof actionLabel === 'function'
     ? actionLabel
     : (action) => formatChatActionLabel(action, { agentIndex: index });
   const lines = [];
+  const systemNotes = [];
   for (const action of asArray(actions)) {
     const type = String(action?.type || '').trim().toLowerCase();
     if (isAgentActionType(type)) {
       const agentId = formatActionAgentLabel(action, { agentIndex: index });
       const goal = clip(getActionGoal(action) || '(goal 없음)', goalClipMax);
-      lines.push(`- ${agentId}: ${goal}`);
+      const meta = formatActionMeta(action);
+      lines.push(`- ${agentId}${meta ? ` · ${meta}` : ''}: ${goal}`);
       continue;
     }
     if (type === 'spawn_agents' || type === 'spawn_parallel') {
       const children = asArray(action?.agents);
-      if (children.length === 0) {
-        lines.push(`- (system) ${labelFn(action)}`);
-        continue;
-      }
       for (const child of children) {
         const childId = formatActionAgentLabel(child, { agentIndex: index });
         const goal = clip(String(child?.goal || child?.prompt || child?.task || '(goal 없음)'), goalClipMax);
-        lines.push(`- ${childId}: ${goal}`);
+        const meta = formatActionMeta(child);
+        lines.push(`- ${childId}${meta ? ` · ${meta}` : ''}: ${goal}`);
       }
       continue;
     }
-    lines.push(`- (system) ${labelFn(action)}`);
+    if (isMostlyBackendOnlyAction(type)) {
+      systemNotes.push(labelFn(action));
+      continue;
+    }
+    systemNotes.push(labelFn(action));
   }
-  if (lines.length === 0) lines.push('- (system) no actions');
+  if (lines.length === 0) lines.push('- 실행할 agent action이 아직 없습니다');
+  if (systemNotes.length > 0) lines.push(`- system: ${systemNotes.slice(0, 2).join(', ')}`);
   return lines;
 }
 
@@ -179,8 +197,8 @@ export function buildRoutedDashboardText({ actions = [], agentStatus = {}, actio
   });
   const statusLines = buildAgentStatusLines(agentStatus, { agentIndex });
   return [
-    '🧭 분담(아래) + 상태판(아래)',
-    '🧭 분담',
+    '🧭 분담 · 이번 턴 팀 구성',
+    '🧭 핵심 agent',
     ...planLines,
     '',
     '📡 상태',

@@ -3,6 +3,7 @@ import { runGeminiPrompt } from "../gemini.js";
 import { clip } from "../textutil.js";
 import { normalizeActionPlan } from "./actions.js";
 import { parseJsonObjectFromText } from "../shared/json_extract.js";
+import { buildInteractionSummaryLines, buildRouterInteractionContract, normalizeInteractionSpec } from "../domain/interaction_spec.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -617,6 +618,10 @@ function buildRouterPrompt(message, context = {}) {
   const tools = Array.isArray(row.tools) ? row.tools : [];
   const jobConfig = asObject(row.jobConfig);
   const allowChatGPTPlanner = !!row.allowChatGPTPlanner;
+  const teamLocked = row.teamLocked === true;
+  const teamInteractionSpec = normalizeInteractionSpec(row.teamInteractionSpec || row.interaction_spec || {});
+  const routerInteractionContract = buildRouterInteractionContract(teamInteractionSpec);
+  const interactionSummaryText = buildInteractionSummaryLines(routerInteractionContract).join("\n") || "(none)";
   const agentText = agents.length
     ? agents
       .map((agent) => `- id=${agent.id}, provider=${agent.provider}, model=${agent.model}, desc=${agent.description || ""}`)
@@ -699,6 +704,42 @@ function buildRouterPrompt(message, context = {}) {
   const canSatisfyWithoutCreation = teamRecommendation?.can_satisfy_without_creation === true;
   const teamCompositionIntent = teamRecommendation?.team_composition_intent === true;
 
+  const actionSchemaLines = teamLocked
+    ? [
+      `    {"type":"run_agent","agent_id":"...","goal":"...","inputs":{},"scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes","query":"optional","add_node_ids":["..."],"remove_node_ids":["..."],"budget_tokens":1200,"closure_edge_types":["..."],"closure_direction":"both|forward|backward","max_closure_nodes":180},"risk":"L0|L1|L2|L3"},`,
+      `    {"type":"need_more_detail","context_set_id":"...","node_ids":["..."],"depth":1,"max_chars":7000},`,
+      `    {"type":"get_status","detail":"summary|full"},`,
+      `    {"type":"interrupt","mode":"cancel|replan","note":"..."},`,
+      `    {"type":"spawn_agents","summary":"...","scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes"},"agents":[{"agent_id":"...","goal":"...","scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes"},"risk":"L1"}],"max_parallel":2},`,
+      `    {"type":"open_context","scope":"current|global"},`,
+      `    {"type":"summarize","hint":"..."}`
+    ]
+    : [
+      `    {"type":"run_agent","agent_id":"...","goal":"...","inputs":{},"scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes","query":"optional","add_node_ids":["..."],"remove_node_ids":["..."],"budget_tokens":1200,"closure_edge_types":["..."],"closure_direction":"both|forward|backward","max_closure_nodes":180},"risk":"L0|L1|L2|L3"},`,
+      `    {"type":"propose_agent","agent_id":"...","name":"...","description":"...","provider":"gemini|codex|chatgpt","model":"...","prompt":"...","meta":{},"risk":"L2|L3"},`,
+      `    {"type":"need_more_detail","context_set_id":"...","node_ids":["..."],"depth":1,"max_chars":7000},`,
+      `    {"type":"search_public_agents","query":"...","limit":5},`,
+      `    {"type":"install_agent_blueprint","blueprint_id":"optional","public_node_id":"optional","agent_id_override":"optional"},`,
+      `    {"type":"add_agent_to_conversation","agent_id":"...","enabled":true},`,
+      `    {"type":"remove_agent_from_conversation","agent_id":"..."},`,
+      `    {"type":"create_agent_definition","agent_spec":{"id":"optional","name":"...","description":"...","provider":"gemini|codex|chatgpt","model":"...","prompt":"...","tools":["..."],"meta":{}},"add_to_conversation":true},`,
+      `    {"type":"fork_agent","agent_id":"..."},`,
+      `    {"type":"publish_agent","agent_node_id":"optional","agent_id":"optional"},`,
+      `    {"type":"disable_agent","agent_id":"..."},`,
+      `    {"type":"enable_agent","agent_id":"..."},`,
+      `    {"type":"disable_tool","tool_id":"..."},`,
+      `    {"type":"enable_tool","tool_id":"..."},`,
+      `    {"type":"list_agents","include_disabled":true},`,
+      `    {"type":"list_tools","include_disabled":true},`,
+      `    {"type":"create_agent","agent":{"id":"...","name":"...","provider":"gemini|codex|chatgpt","model":"...","prompt":"...","description":"...","meta":{}},"format":"json"},`,
+      `    {"type":"update_agent","agent_id":"...","patch":{"prompt":"...","description":"..."},"format":"json"},`,
+      `    {"type":"get_status","detail":"summary|full"},`,
+      `    {"type":"interrupt","mode":"cancel|replan","note":"..."},`,
+      `    {"type":"spawn_agents","summary":"...","scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes"},"agents":[{"agent_id":"...","goal":"...","scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes"},"risk":"L1"}],"max_parallel":2},`,
+      `    {"type":"open_context","scope":"current|global"},`,
+      `    {"type":"summarize","hint":"..."}`
+    ];
+
   return [
     "너는 Telegram /chat supervisor_router다.",
     "반드시 JSON 객체 1개만 출력한다. JSON 외 텍스트 금지.",
@@ -711,34 +752,13 @@ function buildRouterPrompt(message, context = {}) {
     "  \"completed_deliverables\": [\"...\"],",
     "  \"followup_hint\": \"optional\",",
     "  \"actions\": [",
-    "    {\"type\":\"run_agent\",\"agent_id\":\"...\",\"goal\":\"...\",\"inputs\":{},\"scope\":{\"mode\":\"shared_only|unfold_query|add_nodes|remove_nodes\",\"query\":\"optional\",\"add_node_ids\":[\"...\"],\"remove_node_ids\":[\"...\"],\"budget_tokens\":1200,\"closure_edge_types\":[\"...\"],\"closure_direction\":\"both|forward|backward\",\"max_closure_nodes\":180},\"risk\":\"L0|L1|L2|L3\"},",
-    "    {\"type\":\"propose_agent\",\"agent_id\":\"...\",\"name\":\"...\",\"description\":\"...\",\"provider\":\"gemini|codex|chatgpt\",\"model\":\"...\",\"prompt\":\"...\",\"meta\":{},\"risk\":\"L2|L3\"},",
-    "    {\"type\":\"need_more_detail\",\"context_set_id\":\"...\",\"node_ids\":[\"...\"],\"depth\":1,\"max_chars\":7000},",
-    "    {\"type\":\"search_public_agents\",\"query\":\"...\",\"limit\":5},",
-    "    {\"type\":\"install_agent_blueprint\",\"blueprint_id\":\"optional\",\"public_node_id\":\"optional\",\"agent_id_override\":\"optional\"},",
-    "    {\"type\":\"add_agent_to_conversation\",\"agent_id\":\"...\",\"enabled\":true},",
-    "    {\"type\":\"remove_agent_from_conversation\",\"agent_id\":\"...\"},",
-    "    {\"type\":\"create_agent_definition\",\"agent_spec\":{\"id\":\"optional\",\"name\":\"...\",\"description\":\"...\",\"provider\":\"gemini|codex|chatgpt\",\"model\":\"...\",\"prompt\":\"...\",\"tools\":[\"...\"],\"meta\":{}},\"add_to_conversation\":true},",
-    "    {\"type\":\"fork_agent\",\"agent_id\":\"...\"},",
-    "    {\"type\":\"publish_agent\",\"agent_node_id\":\"optional\",\"agent_id\":\"optional\"},",
-    "    {\"type\":\"disable_agent\",\"agent_id\":\"...\"},",
-    "    {\"type\":\"enable_agent\",\"agent_id\":\"...\"},",
-    "    {\"type\":\"disable_tool\",\"tool_id\":\"...\"},",
-    "    {\"type\":\"enable_tool\",\"tool_id\":\"...\"},",
-    "    {\"type\":\"list_agents\",\"include_disabled\":true},",
-    "    {\"type\":\"list_tools\",\"include_disabled\":true},",
-    "    {\"type\":\"create_agent\",\"agent\":{\"id\":\"...\",\"name\":\"...\",\"provider\":\"gemini|codex|chatgpt\",\"model\":\"...\",\"prompt\":\"...\",\"description\":\"...\",\"meta\":{}},\"format\":\"json\"},",
-    "    {\"type\":\"update_agent\",\"agent_id\":\"...\",\"patch\":{\"prompt\":\"...\",\"description\":\"...\"},\"format\":\"json\"},",
-    "    {\"type\":\"get_status\",\"detail\":\"summary|full\"},",
-    "    {\"type\":\"interrupt\",\"mode\":\"cancel|replan\",\"note\":\"...\"},",
-    "    {\"type\":\"spawn_agents\",\"summary\":\"...\",\"scope\":{\"mode\":\"shared_only|unfold_query|add_nodes|remove_nodes\"},\"agents\":[{\"agent_id\":\"...\",\"goal\":\"...\",\"scope\":{\"mode\":\"shared_only|unfold_query|add_nodes|remove_nodes\"},\"risk\":\"L1\"}],\"max_parallel\":2},",
-    "    {\"type\":\"open_context\",\"scope\":\"current|global\"},",
-    "    {\"type\":\"summarize\",\"hint\":\"...\"}",
+    ...actionSchemaLines,
   "  ],",
     "  \"final_response_style\": \"concise|detailed\"",
     "}",
     "",
     "핵심 규칙:",
+    ...(teamLocked ? ["- 현재 /chat 은 locked team 모드다. add/remove/enable/disable/create/propose/fork/publish/install/search_public_agents 같은 팀 변경 action 을 절대 내지 마라.", "- 반드시 현재 활성 팀 안에서만 실행 순서와 handoff 를 결정한다.", "- 사용자가 팀 변경을 요청해도 이 plan 안에서는 절대 mutation action으로 답하지 말고, summarize 또는 get_status로 현재 팀 한계를 설명하라.", "- team_locked=yes 이면 run_agent / need_more_detail / spawn_agents / summarize / get_status / interrupt / open_context 만 사용하라."] : []),
     "- action은 필요한 최소만 선택한다 (최대 4개).",
     "- run_agent/spawn_agents에서 agent_id는 enabled_agents_for_this_conversation 목록 안에서만 선택한다.",
     "- 일반 요청은 run_agent 1개로 우선 처리한다.",
@@ -810,6 +830,11 @@ function buildRouterPrompt(message, context = {}) {
     `can_satisfy_without_creation=${canSatisfyWithoutCreation ? "yes" : "no"}`,
     `team_composition_intent=${teamCompositionIntent ? "yes" : "no"}`,
     "",
+    "team_interaction_contract:",
+    interactionSummaryText,
+    "",
+    `team_locked=${teamLocked ? "yes" : "no"}`,
+    "",
     "tool_specs:",
     toolText,
     "",
@@ -834,6 +859,8 @@ export async function routeWithSupervisor(message, {
   agents = [],
   agentsCatalog = [],
   teamRecommendation = null,
+  teamLocked = false,
+  teamInteractionSpec = null,
   enabledAgentIds = [],
   tools = [],
   jobConfig = {},
@@ -879,6 +906,8 @@ export async function routeWithSupervisor(message, {
     routerPolicy,
     allowChatGPTPlanner,
     contextSummary,
+    teamLocked,
+    teamInteractionSpec,
   });
 
   try {

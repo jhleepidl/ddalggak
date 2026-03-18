@@ -474,6 +474,12 @@ function buildSlotActionInputs({
     slot_label: normalizeText(slot?.display_label) || undefined,
     slot_purpose: normalizeText(slot?.purpose) || undefined,
     preset_id: normalizeText(runtimeAgent?.preset_id || runtimeAgent?.presetId, { lower: true }) || undefined,
+    attached_skill_ids: asArray(runtimeAgent?.attached_skill_ids ?? runtimeAgent?.attachedSkillIds).filter(Boolean),
+    provider: normalizeText(runtimeAgent?.provider, { lower: true }) || undefined,
+    model: normalizeText(runtimeAgent?.model) || undefined,
+    personality_profile: runtimeAgent?.personality_profile && typeof runtimeAgent.personality_profile === 'object'
+      ? runtimeAgent.personality_profile
+      : (runtimeAgent?.personalityProfile && typeof runtimeAgent.personalityProfile === 'object' ? runtimeAgent.personalityProfile : undefined),
     parallel_group_id: parallelGroupId || undefined,
     dependency_slot_ids: asArray(dependencyMap.get(slotId)).filter(Boolean),
     collaboration_cell_ids: slotCollaborationCells.map((cell) => cell.cell_id).filter(Boolean),
