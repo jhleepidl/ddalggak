@@ -9,6 +9,16 @@ import {
   parseNaturalLanguageInteractionPatch,
   validateInteractionSpec,
 } from '../domain/interaction_spec.js';
+import {
+  autoPurposeForAgent,
+  buildReadableInteractionLines,
+  defaultSkillsForAgent,
+  formatSkillLabels,
+  humanizeModel,
+  roleLabel,
+  shouldAutoRenameAgent,
+  suggestAgentDisplayName,
+} from './team_presentation.js';
 
 function asArray(v){return Array.isArray(v)?v:[]}
 function asObject(v){return v&&typeof v==='object'?v:{}}
@@ -62,6 +72,18 @@ function uniqueSlug(base = '', seen = new Set()) {
   const out = `${candidate}_${idx}`;
   seen.add(out);
   return out;
+}
+
+function ensureUniqueDisplayName(name = '', seen = new Set()) {
+  const base = clean(name) || 'Agent';
+  let candidate = base;
+  let idx = 2;
+  while (seen.has(cleanId(candidate))) {
+    candidate = `${base} ${idx}`;
+    idx += 1;
+  }
+  seen.add(cleanId(candidate));
+  return candidate;
 }
 
 function normalizeStoredTeamEnvelope(raw = {}) {
@@ -315,7 +337,22 @@ function ensureFreeformBlueprintCoverage(blueprints = [], taskText = '', structu
   };
 
   if ((next.length <= 1 && !hints.explicitGeneralistOnly) || hints.multiAgentPrompt || hints.parallel) {
-    next = mergeBlueprints(next, structuredAgents.map((agent) => ({
+    const filteredStructuredAgents = asArray(structuredAgents).filter((agent) => {
+      const roleId = normalizeTeamRole(agent?.role);
+      if (roleId === 'builder') return hints.build;
+      if (roleId === 'reviewer') return hints.review || hints.compare || hints.parallel;
+      if (roleId === 'synthesizer') return hints.synthesize || hints.review || hints.compare || hints.parallel || next.length >= 2;
+      if (roleId === 'operator') return /approve|승인|gate|operator|배포/i.test(taskText);
+      return roleId === 'researcher';
+    });
+    if (
+      next.length === 1
+      && /generalist research/i.test(clean(next[0]?.name))
+      && filteredStructuredAgents.some((agent) => normalizeTeamRole(agent?.role) === 'researcher')
+    ) {
+      next = [];
+    }
+    next = mergeBlueprints(next, filteredStructuredAgents.map((agent) => ({
       name: agent.name,
       role: agent.role,
       purpose: agent.purpose || 'structured fallback candidate',
@@ -349,24 +386,18 @@ function ensureFreeformBlueprintCoverage(blueprints = [], taskText = '', structu
   return next.slice(0, 6);
 }
 
-function skillsForRole(role = '', { taskText = '', agentName = '' } = {}) {
-  const roleId = cleanId(role);
-  const text = `${clean(taskText)} ${clean(agentName)}`.toLowerCase();
-  if (roleId === 'builder') return ['code_editing', 'implementation_planning'];
-  if (roleId === 'reviewer') return text.includes('red-team') || text.includes('반박')
-    ? ['contradiction_check', 'adversarial_review']
-    : ['evidence_validation', 'contradiction_check'];
-  if (roleId === 'synthesizer') return ['structured_summary', 'report_synthesis'];
-  if (roleId === 'operator') return ['approval_gate', 'run_control'];
-  if (text.includes('news') || text.includes('뉴스')) return ['web_search', 'source_triage', 'news_clustering'];
-  if (text.includes('filing') || text.includes('dart') || text.includes('공시')) return ['dart_analysis', 'table_extraction', 'financial_comparison'];
-  if (text.includes('bear') || text.includes('bull') || text.includes('낙관') || text.includes('비관')) return ['evidence_mapping', 'argument_structuring'];
-  return ['web_search', 'source_triage', 'evidence_mapping'];
+function skillsForRole(role = '', { taskText = '', agentName = '', purpose = '' } = {}) {
+  return defaultSkillsForAgent({ role, taskText, purpose, name: agentName });
 }
 
-function agentDraft({ name = '', role = 'researcher', model = '', purpose = '', skills = [], provider = '' } = {}, { seen = new Set(), taskText = '' } = {}) {
+function agentDraft({ name = '', role = 'researcher', model = '', purpose = '', skills = [], provider = '' } = {}, { seen = new Set(), taskText = '', index = 1 } = {}) {
   const cleanRole = normalizeTeamRole(role);
-  const displayName = clean(name) || cleanRole.replace(/^./, (c) => c.toUpperCase());
+  const proposedName = suggestAgentDisplayName({ name, role: cleanRole, purpose, taskText, skills, index }) || cleanRole.replace(/^./, (c) => c.toUpperCase());
+  const displayName = ensureUniqueDisplayName(proposedName, seen.__displayNames || (seen.__displayNames = new Set()));
+  const resolvedPurpose = autoPurposeForAgent({ role: cleanRole, purpose, taskText, name: displayName, skills });
+  const resolvedSkills = asArray(skills).map((skill) => cleanId(skill)).filter(Boolean).length > 0
+    ? asArray(skills).map((skill) => cleanId(skill)).filter(Boolean)
+    : skillsForRole(cleanRole, { taskText, agentName: displayName, purpose: resolvedPurpose });
   const resolvedModel = resolveSupportedModel(model || '') || defaultModelForRole(cleanRole, provider);
   const resolvedProvider = cleanId(provider || inferProviderForModel(resolvedModel) || '');
   return {
@@ -374,13 +405,21 @@ function agentDraft({ name = '', role = 'researcher', model = '', purpose = '', 
     name: displayName,
     role: cleanRole,
     model: resolvedModel,
-    purpose: clean(purpose),
-    skills: asArray(skills).map((skill) => cleanId(skill)).filter(Boolean).length > 0
-      ? asArray(skills).map((skill) => cleanId(skill)).filter(Boolean)
-      : skillsForRole(cleanRole, { taskText, agentName: displayName }),
+    purpose: clean(resolvedPurpose),
+    skills: resolvedSkills,
     provider: resolvedProvider,
-    context_policy: normalizeContextPolicy({}, { role: cleanRole, taskText, purpose }),
+    context_policy: normalizeContextPolicy({}, { role: cleanRole, taskText, purpose: resolvedPurpose }),
   };
+}
+
+function remapInteractionSpecAgentNames(rawSpec = {}, aliasMap = new Map()) {
+  const spec = normalizeInteractionSpec(rawSpec);
+  const mapName = (value = '') => aliasMap.get(cleanId(value)) || clean(value);
+  return normalizeInteractionSpec({
+    ...spec,
+    final_answer_owner: mapName(spec.final_answer_owner),
+    handoffs: asArray(spec.handoffs).map((handoff) => ({ ...handoff, from: mapName(handoff.from), to: mapName(handoff.to) })),
+  });
 }
 
 function parseNaturalLanguageModelPreference(text = '', role = '') {
@@ -530,37 +569,43 @@ export function buildTeamConfigurationTemplate(team = {}) {
   }, null, 2);
 }
 
-function normalizeTeamConfig(raw = {}, { runtime = null } = {}) {
+function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames = true } = {}) {
   const row = asObject(raw);
   const compositionMode = normalizeCompositionMode(row.composition_mode || row.compositionMode || 'structured');
   const proposalMode = normalizeProposalMode(row.proposal_mode || row.proposalMode || (compositionMode === 'freeform' ? 'create' : 'suggest'));
   const taskBrief = clean(row.task_brief || row.taskBrief || row.task || row.design_prompt || row.designPrompt || '');
-  const agents = asArray(row.agents).map((entry) => {
+  const interactionAliasMap = new Map();
+  const seenDisplayNames = new Set();
+  const agents = asArray(row.agents).map((entry, index) => {
     const agentId = cleanId(entry.agent_id || entry.agentId || entry.id);
     if (!agentId) return null;
     const runtimeAgent = findCatalogAgent(runtime || {}, agentId) || {};
     const role = normalizeTeamRole(entry.role || entry.role_id || runtimeAgent.role || runtimeAgent.system_key || agentId);
     const model = resolveSupportedModel(entry.model || runtimeAgent.model || '') || defaultModelForRole(role, runtimeAgent.provider || entry.provider);
+    const rawName = clean(entry.name || runtimeAgent.name || agentId);
+    const rawPurpose = clean(entry.purpose || runtimeAgent.description || '');
+    const autoRenamed = autoRenameGenericNames && shouldAutoRenameAgent(rawName);
+    const suggestedName = autoRenamed ? suggestAgentDisplayName({ name: rawName, role, purpose: rawPurpose, taskText: taskBrief, skills: entry.skills, index: index + 1 }) : rawName;
+    const name = autoRenamed ? ensureUniqueDisplayName(suggestedName, seenDisplayNames) : suggestedName;
+    if (!autoRenamed) seenDisplayNames.add(cleanId(name));
+    interactionAliasMap.set(cleanId(rawName), name);
+    interactionAliasMap.set(agentId, name);
+    const purpose = autoPurposeForAgent({ role, purpose: rawPurpose, taskText: taskBrief, name, skills: entry.skills });
+    const resolvedSkills = asArray(entry.skills).map((skill) => cleanId(skill)).filter(Boolean);
     return {
       agent_id: agentId,
-      name: clean(entry.name || runtimeAgent.name || agentId),
+      name,
       role,
       model: model || '',
-      purpose: clean(entry.purpose || runtimeAgent.description || ''),
-      skills: asArray(entry.skills).map((skill) => cleanId(skill)).filter(Boolean),
+      purpose,
+      skills: resolvedSkills.length > 0 ? resolvedSkills : skillsForRole(role, { taskText: taskBrief, agentName: name, purpose }),
       provider: cleanId(entry.provider || runtimeAgent.provider || inferProviderForModel(model) || ''),
-      context_policy: normalizeContextPolicy(entry.context_policy || entry.contextPolicy, {
-        role,
-        taskText: taskBrief,
-        purpose: clean(entry.purpose || runtimeAgent.description || ''),
-      }),
+      context_policy: normalizeContextPolicy(entry.context_policy || entry.contextPolicy, { role, taskText: taskBrief, purpose }),
       source_agent: runtimeAgent,
     };
   }).filter(Boolean);
-  const interactionSpec = validateInteractionSpec(
-    row.interaction_spec || row.interactions || buildDefaultInteractionSpec(agents, { task: taskBrief }),
-    { agentRoster: agents.map((agent) => ({ name: agent.name })) }
-  );
+  const rawInteractionSpec = row.interaction_spec || row.interactions || buildDefaultInteractionSpec(agents, { task: taskBrief });
+  const interactionSpec = validateInteractionSpec(remapInteractionSpecAgentNames(rawInteractionSpec, interactionAliasMap), { agentRoster: agents.map((agent) => ({ name: agent.name })) });
   return {
     team_name: clean(row.team_name || row.teamName || 'configured_team'),
     mode: cleanId(row.mode || 'scoped_context') || 'scoped_context',
@@ -620,7 +665,7 @@ export function createFreeformTeamConfiguration({ description = '', runtime = nu
     taskText,
     asArray(structuredFallback?.agents)
   );
-  const agents = blueprints.map((item) => agentDraft(item, { seen, taskText }));
+  const agents = blueprints.map((item, index) => agentDraft(item, { seen, taskText, index: index + 1 }));
   const interactionSpec = parseNaturalLanguageInteractionPatch(taskText, {
     current: buildDefaultInteractionSpec(agents, { task: taskText }),
     agentRoster: agents.map((agent) => ({ name: agent.name })),
@@ -661,7 +706,7 @@ export function refineTeamConfiguration(team = {}, instruction = '', { runtime =
       });
     } else {
       const seen = new Set(next.agents.map((agent) => cleanId(agent.agent_id)));
-      const draft = agentDraft({ name: 'Builder', role: 'builder', purpose: 'Implement changes', model: 'gpt-5-codex' }, { seen, taskText: current.task_brief || text });
+      const draft = agentDraft({ name: 'Builder', role: 'builder', purpose: 'Implement changes', model: 'gpt-5-codex' }, { seen, taskText: current.task_brief || text, index: next.agents.length + 1 });
       next.agents.push(draft);
     }
   }
@@ -669,7 +714,7 @@ export function refineTeamConfiguration(team = {}, instruction = '', { runtime =
     const seen = new Set(next.agents.map((agent) => cleanId(agent.agent_id)));
     for (const blueprint of inferFreeformAgentBlueprints(text)) {
       if (next.agents.some((agent) => cleanId(agent.name) === cleanId(blueprint.name))) continue;
-      next.agents.push(agentDraft(blueprint, { seen, taskText: current.task_brief || text }));
+      next.agents.push(agentDraft(blueprint, { seen, taskText: current.task_brief || text, index: next.agents.length + 1 }));
     }
   }
   next.interaction_spec = parseNaturalLanguageInteractionPatch(text, { current: current.interaction_spec, agentRoster: next.agents.map((agent) => ({ name: agent.name })) });
@@ -687,7 +732,7 @@ export function parseTeamTemplate(raw = '') {
 }
 
 export function validateTeamConfiguration(raw = {}, { runtime = null } = {}) {
-  const team = normalizeTeamConfig(raw, { runtime });
+  const team = normalizeTeamConfig(raw, { runtime, autoRenameGenericNames: false });
   if (team.agents.length === 0) throw new Error('team must include at least one agent');
   if (!COMPOSITION_MODES.has(team.composition_mode)) throw new Error(`unsupported composition_mode: ${team.composition_mode}`);
   const seenIds = new Set();
@@ -873,13 +918,23 @@ export function buildTeamListMessage(teamState = {}) {
   const active = teamState?.active_team;
   if (!active) return '현재 활성 팀이 없습니다.\n/team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 팀을 먼저 구성해 주세요.';
   const lines = [
-    `Team: ${clean(active.team_name || 'active_team')}`,
-    `Mode: ${cleanId(active.mode || 'scoped_context')}`,
-    `Composition: ${normalizeCompositionMode(active.composition_mode || 'structured')}`,
-    `Agents: ${asArray(active.agents).length}`,
-    ...asArray(active.agents).map((agent) => `- ${agent.name} [${agent.role}] · model=${agent.model} · provider=${cleanId(agent.provider || inferProviderForModel(agent.model) || '(unknown)')} · skills=${asArray(agent.skills).slice(0,4).join(', ') || '(none)'}`),
+    `팀 이름: ${clean(active.team_name || 'active_team')}`,
+    `구성 방식: ${normalizeCompositionMode(active.composition_mode || 'structured')}`,
+    `agent 수: ${asArray(active.agents).length}`,
     '',
-    ...buildInteractionSummaryLines(active.interaction_spec || {}),
+    'Agents',
+    ...asArray(active.agents).flatMap((agent, index) => {
+      const skillLabels = formatSkillLabels(agent.skills, { max: 3 });
+      return [
+        `${index + 1}. ${agent.name} · ${roleLabel(agent.role)}`,
+        `   - 맡은 일: ${clean(agent.purpose) || '설명 없음'}`,
+        `   - 주력 skill: ${skillLabels.join(', ') || '(none)'}`,
+        `   - 모델: ${humanizeModel(agent.provider || inferProviderForModel(agent.model || ''), agent.model)}`,
+      ];
+    }),
+    '',
+    'Interaction',
+    ...buildReadableInteractionLines(active.interaction_spec || {}, active.shortcut_policy || {}),
   ];
   return lines.join('\n');
 }
@@ -889,22 +944,28 @@ export function formatTeamProposalMessage(team = {}) {
   const compositionMode = normalizeCompositionMode(row.composition_mode || 'structured');
   const proposalMode = normalizeProposalMode(row.proposal_mode || (compositionMode === 'freeform' ? 'create' : 'suggest'));
   const lines = [
-    `Team proposal: ${clean(row.team_name || 'team_config')}`,
-    `mode=${cleanId(row.mode || 'scoped_context')}`,
-    `composition_mode=${compositionMode}`,
-    `proposal_mode=${proposalMode}`,
-    row.task_brief ? `task=${clean(row.task_brief)}` : null,
+    `Team proposal · ${clean(row.team_name || 'team_config')}`,
+    `구성 방식: ${compositionMode} · 제안 모드: ${proposalMode}`,
+    row.task_brief ? `목표: ${clean(row.task_brief)}` : null,
     '',
-    'Agents:',
-    ...asArray(row.agents).map((agent) => `- ${agent.name} [${agent.role}] · model=${agent.model} · provider=${cleanId(agent.provider || inferProviderForModel(agent.model) || '(unknown)')} · skills=${asArray(agent.skills).slice(0,4).join(', ') || '(none)'}${agent.purpose ? ` · why=${agent.purpose}` : ''}`),
+    'Agents',
+    ...asArray(row.agents).flatMap((agent, index) => {
+      const skillLabels = formatSkillLabels(agent.skills, { max: 3 });
+      return [
+        `${index + 1}. ${agent.name} · ${roleLabel(agent.role)}`,
+        `   - 맡은 일: ${clean(agent.purpose) || '설명 없음'}`,
+        `   - 주력 skill: ${skillLabels.join(', ') || '(none)'}`,
+        `   - 모델: ${humanizeModel(agent.provider || inferProviderForModel(agent.model || ''), agent.model)}`,
+      ];
+    }),
     '',
-    'Interaction:',
-    ...buildInteractionSummaryLines(row.interaction_spec || {}),
+    'Interaction',
+    ...buildReadableInteractionLines(row.interaction_spec || {}, row.shortcut_policy || {}),
     '',
-    '다음 단계:',
-    '/team apply',
-    '/team refine <자연어 수정>',
-    '/team template',
+    '다음 단계',
+    '- /team apply',
+    '- /team refine <자연어 수정>',
+    '- /team template',
   ].filter(Boolean);
   return lines.join('\n');
 }

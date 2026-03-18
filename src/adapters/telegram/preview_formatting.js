@@ -1,4 +1,5 @@
 import { clip } from '../../textutil.js';
+import { formatSkillLabels, humanizeModel } from '../../application/team_presentation.js';
 import {
   buildPreviewAgentDisplayIndex,
   formatChatAgentDisplayName,
@@ -25,10 +26,11 @@ function isMostlyBackendOnlyAction(type = '') {
 function formatActionMeta(action = {}) {
   const inputs = action && typeof action.inputs === 'object' ? action.inputs : {}
   const skillIds = asArray(inputs.attached_skill_ids || inputs.attachedSkillIds).map((item) => String(item || '').trim()).filter(Boolean).slice(0, 3)
-  const model = [String(inputs.provider || '').trim(), String(inputs.model || '').trim()].filter(Boolean).join('/')
+  const skillLabels = formatSkillLabels(skillIds, { max: 3 })
+  const model = humanizeModel(String(inputs.provider || '').trim(), String(inputs.model || '').trim())
   const parts = []
-  if (skillIds.length > 0) parts.push(`skills=${skillIds.join(', ')}`)
-  if (model) parts.push(`model=${model}`)
+  if (skillLabels.length > 0) parts.push(`skills=${skillLabels.join(', ')}`)
+  if (model && model !== '(미지정)') parts.push(`model=${model}`)
   return parts.join(' · ')
 }
 

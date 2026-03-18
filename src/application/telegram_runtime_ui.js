@@ -48,6 +48,7 @@ import {
   buildRunAuthorityPatch,
 } from "./run_authority.js";
 import { summarizeRuntimeTeamSnapshotLines } from "./runtime_snapshot_display.js";
+import { formatSkillLabels, humanizeModel, roleLabel } from "./team_presentation.js";
 
 async function sendTextWithOptionalGocButton(
   bot,
@@ -113,16 +114,17 @@ function summarizeAgentRuntimeRowsFromActions(actions = [], runtime = null, { li
         || formatChatAgentDisplayName(instanceId || child?.agent_id || child?.agent || '', index, { fallbackLabel: 'Agent' })
       ).trim() || 'Agent';
       const roleId = String(inputs.role_id || inputs.roleId || inputs.role_label || inputs.roleLabel || child?.agent || '').trim().toLowerCase();
-      const roleText = roleId ? ` [${roleId}]` : '';
-      const model = [String(inputs.provider || '').trim(), String(inputs.model || '').trim()].filter(Boolean).join('/');
+      const roleText = roleId ? ` · ${roleLabel(roleId)}` : '';
       const skillIds = uniqStrings([
         ...(Array.isArray(inputs.attached_skill_ids) ? inputs.attached_skill_ids : []),
         ...(Array.isArray(inputs.attachedSkillIds) ? inputs.attachedSkillIds : []),
       ]).slice(0, 4);
       const goal = clip(String(child?.goal || child?.prompt || child?.task || '').trim(), 120);
       const parts = [`${label}${roleText}`];
-      if (model) parts.push(`model=${model}`);
-      if (skillIds.length > 0) parts.push(`skills=${skillIds.join(', ')}`);
+      const skillLabels = formatSkillLabels(skillIds, { max: 3 });
+      const modelLabel = humanizeModel(String(inputs.provider || '').trim(), String(inputs.model || '').trim());
+      if (skillLabels.length > 0) parts.push(`skills=${skillLabels.join(', ')}`);
+      if (modelLabel && modelLabel !== '(미지정)') parts.push(`model=${modelLabel}`);
       if (goal) parts.push(`goal=${goal}`);
       rows.push(parts.join(' · '));
       if (rows.length >= Math.max(1, Number(limit) || 8)) return rows;
@@ -157,12 +159,13 @@ function formatRosterRow(row = {}) {
     ...(Array.isArray(row?.attached_skills) ? row.attached_skills.map((entry) => entry?.skill_id || entry?.id || entry) : []),
     ...(Array.isArray(row?.attachedSkills) ? row.attachedSkills.map((entry) => entry?.skill_id || entry?.id || entry) : []),
   ]).slice(0, 5);
-  const model = [String(row?.provider || '').trim(), String(row?.model || '').trim()].filter(Boolean).join('/');
   const personality = String(row?.personality_profile?.stance || row?.personalityProfile?.stance || '').trim();
   const parts = [label];
-  if (roleId) parts.push(`[${roleId}]`);
-  if (model) parts.push(`model=${model}`);
-  if (skillIds.length > 0) parts.push(`skills=${skillIds.join(', ')}`);
+  if (roleId) parts.push(roleLabel(roleId));
+  const skillLabels = formatSkillLabels(skillIds, { max: 3 });
+  const modelLabel = humanizeModel(String(row?.provider || '').trim(), String(row?.model || '').trim());
+  if (modelLabel && modelLabel !== '(미지정)') parts.push(`model=${modelLabel}`);
+  if (skillLabels.length > 0) parts.push(`skills=${skillLabels.join(', ')}`);
   if (personality) parts.push(`tone=${personality}`);
   return parts.join(' · ');
 }

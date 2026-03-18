@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   createFreeformTeamConfiguration,
+  formatTeamProposalMessage,
   suggestTeamConfiguration,
   validateTeamConfiguration,
 } from '../src/application/team_configuration.js';
@@ -53,4 +54,18 @@ test('freeform create falls back to multi-agent coverage for compare and review 
   assert.ok(team.agents.some((agent) => agent.role === 'synthesizer'));
   assert.ok(team.agents.length >= 2);
   assert.equal(team.shortcut_policy.enabled, true);
+});
+
+
+test('freeform create generates readable agent names and display-friendly proposal text', () => {
+  const team = createFreeformTeamConfiguration({ description: '한국 주식시장 투자에 도움을 받고 싶은데, 팀을 구체적으로 구성해줘' });
+  assert.ok(team.agents.every((agent) => !['Researcher', 'Reviewer', 'Synthesizer', 'Operator', 'Builder', 'Generalist Researcher'].includes(agent.name)));
+  const message = formatTeamProposalMessage(team);
+  assert.match(message, /Agents/);
+  assert.match(message, /맡은 일:/);
+  assert.match(message, /주력 skill:/);
+  assert.match(message, /Interaction/);
+  assert.match(message, /흐름:/);
+  assert.doesNotMatch(message, /skills=/);
+  assert.doesNotMatch(message, /execution_pattern=/);
 });
