@@ -753,6 +753,65 @@ function remapInteractionSpecAgentNames(rawSpec = {}, aliasMap = new Map()) {
   });
 }
 
+function reconcileInteractionSpecWithRoster(rawSpec = {}, agents = [], aliasMap = new Map()) {
+  const remapped = remapInteractionSpecAgentNames(rawSpec, aliasMap);
+  const roster = asArray(agents);
+  const rosterNames = roster.map((agent) => clean(agent?.name)).filter(Boolean);
+  const aliasToRoster = new Map();
+
+  for (const agent of roster) {
+    const canonical = clean(agent?.name);
+    if (!canonical) continue;
+    for (const candidate of [
+      canonical,
+      agent?.agent_id,
+      agent?.agentId,
+      agent?.id,
+      agent?.role,
+      agent?.role_id,
+      agent?.roleId,
+    ]) {
+      const key = cleanId(candidate);
+      if (!key || aliasToRoster.has(key)) continue;
+      aliasToRoster.set(key, canonical);
+    }
+  }
+
+  for (const [alias, mapped] of aliasMap.entries()) {
+    const canonical = aliasToRoster.get(cleanId(mapped));
+    if (!alias || !canonical || aliasToRoster.has(alias)) continue;
+    aliasToRoster.set(alias, canonical);
+  }
+
+  const resolveRosterName = (value = '') => {
+    const cleanValue = clean(value);
+    if (!cleanValue) return '';
+    if (rosterNames.includes(cleanValue)) return cleanValue;
+    return aliasToRoster.get(cleanId(cleanValue)) || '';
+  };
+
+  // Planner/freeform drafts can reference agents that were renamed or pruned.
+  // Reconcile to the actual roster here so validation only sees executable handoffs.
+  const handoffs = asArray(remapped.handoffs)
+    .map((handoff) => ({
+      ...handoff,
+      from: resolveRosterName(handoff.from),
+      to: resolveRosterName(handoff.to),
+    }))
+    .filter((handoff) => handoff.from && handoff.to);
+
+  const finalAnswerOwner = resolveRosterName(remapped.final_answer_owner)
+    || clean(roster.find((agent) => normalizeTeamRole(agent?.role) === 'synthesizer')?.name)
+    || clean(roster.find((agent) => normalizeTeamRole(agent?.role) === 'reviewer')?.name)
+    || clean(roster[roster.length - 1]?.name);
+
+  return normalizeInteractionSpec({
+    ...remapped,
+    final_answer_owner: finalAnswerOwner,
+    handoffs,
+  });
+}
+
 
 function inferCounterpartRoleBlueprints(description = '') {
   const text = clean(description);
@@ -1126,7 +1185,10 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
     };
   }).filter(Boolean);
   const rawInteractionSpec = row.interaction_spec || row.interactions || buildDefaultInteractionSpec(agents, { task: taskBrief });
-  const interactionSpec = validateInteractionSpec(remapInteractionSpecAgentNames(rawInteractionSpec, interactionAliasMap), { agentRoster: agents.map((agent) => ({ name: agent.name })) });
+  const interactionSpec = validateInteractionSpec(
+    reconcileInteractionSpecWithRoster(rawInteractionSpec, agents, interactionAliasMap),
+    { agentRoster: agents.map((agent) => ({ name: agent.name, agent_id: agent.agent_id, role: agent.role })) }
+  );
   return {
     team_name: clean(row.team_name || row.teamName || 'configured_team'),
     mode: cleanId(row.mode || 'scoped_context') || 'scoped_context',

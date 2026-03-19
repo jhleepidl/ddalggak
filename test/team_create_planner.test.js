@@ -80,3 +80,40 @@ test('advanced freeform team creation respects planner-provided debate structure
   assert.match(message, /설계 엔진: codex_cli · gpt-5.4/i);
   assert.match(message, /생성 skill:/);
 });
+
+test('advanced freeform team creation reconciles planner handoffs that target pruned agents', async () => {
+  const team = await createFreeformTeamConfigurationAdvanced({
+    description: '상반된 투자 의견을 비교하고 reviewer가 판정한 뒤 최종 요약을 작성해줘',
+    planner: async () => ({
+      ok: true,
+      planner_metadata: {
+        planner_type: 'codex_cli',
+        planner_model: 'gpt-5.4',
+        planning_source: 'codex_gpt_5_4',
+      },
+      plan: {
+        team_name: 'debate_team_with_builder_handoff',
+        agents: [
+          { name: 'Core Bull Researcher', role: 'researcher', purpose: '강세 논리 전개', model: 'gpt-5.4', provider: 'chatgpt' },
+          { name: 'Contrarian Bear Researcher', role: 'researcher', purpose: '약세 논리 전개', model: 'gpt-5.4', provider: 'chatgpt' },
+          { name: 'Assignment Builder', role: 'builder', purpose: '과제 산출물 작성', model: 'gpt-5.4', provider: 'chatgpt' },
+          { name: 'Debate Reviewer', role: 'reviewer', purpose: '논리 비교와 판정', model: 'gpt-5.4', provider: 'chatgpt' },
+          { name: 'Decision Synthesizer', role: 'synthesizer', purpose: '최종 요약', model: 'gpt-5.4', provider: 'chatgpt' },
+        ],
+        interaction_spec: {
+          execution_pattern: 'multi_research_adjudication',
+          final_answer_owner: 'Decision Synthesizer',
+          handoffs: [
+            { from: 'Core Bull Researcher', to: 'Assignment Builder', payload: 'summary_plus_key_evidence' },
+            { from: 'Assignment Builder', to: 'Debate Reviewer', payload: 'draft_plus_change_summary' },
+            { from: 'Debate Reviewer', to: 'Decision Synthesizer', payload: 'review_summary_only' },
+          ],
+        },
+      },
+    }),
+  });
+
+  assert.equal(team.agents.some((agent) => agent.name === 'Assignment Builder'), false);
+  assert.equal(team.interaction_spec.handoffs.some((handoff) => handoff.to === 'Assignment Builder' || handoff.from === 'Assignment Builder'), false);
+  assert.equal(team.interaction_spec.handoffs.some((handoff) => handoff.to === 'Decision Synthesizer'), true);
+});
