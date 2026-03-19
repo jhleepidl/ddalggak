@@ -6,7 +6,7 @@ import { SkillResolver } from './skill_resolver.js';
 import { PresetRegistry } from '../catalog/preset_registry.js';
 import { PresetResolver } from '../control_plane/preset_resolver.js';
 import { interpretTask } from '../control_plane/task_interpreter.js';
-import { planFreeformTeamWithCodex } from './freeform_team_planner.js';
+import { planFreeformTeamWithCodex, planTeamRefinementWithCodex } from './freeform_team_planner.js';
 import {
   buildDefaultInteractionSpec,
   buildAgentLocalInteractionContract,
@@ -1307,6 +1307,42 @@ function buildPlannerDrivenFreeformAgents({ taskText = '', runtime = null, plann
   return pruneAgentLineup(drafts, taskText, planning);
 }
 
+
+function buildPlannerDrivenRefinedAgents({ taskText = '', runtime = null, plannerPlan = null, currentAgents = [] } = {}) {
+  const planning = buildPlanningContext(taskText, runtime);
+  const plannerAgents = asArray(plannerPlan?.agents).map((agent) => ({
+    name: clean(agent?.name),
+    role: normalizeTeamRole(agent?.role),
+    purpose: clean(agent?.purpose),
+    model: clean(agent?.model),
+    provider: cleanId(agent?.provider || ''),
+    capabilities: uniqueIds(agent?.capabilities || []),
+    attached_skill_ids: uniqueIds(agent?.attached_skill_ids || agent?.attachedSkillIds || []),
+    generated_skill_briefs: normalizeGeneratedSkillBriefs(agent?.generated_skill_briefs || agent?.generatedSkillBriefs || []),
+    recommended_tool_ids: uniqueIds(agent?.recommended_tool_ids || agent?.recommendedToolIds || []),
+    context_policy: agent?.context_policy || agent?.contextPolicy || null,
+  })).filter((agent) => agent.name);
+  if (plannerAgents.length === 0) return pruneAgentLineup(asArray(currentAgents), taskText, planning);
+  const seen = new Set();
+  const usedCurrentIndexes = new Set();
+  const drafts = plannerAgents.map((plannerAgent, index) => {
+    const matchedIndex = asArray(currentAgents).findIndex((row, idx) => !usedCurrentIndexes.has(idx) && (
+      cleanId(row?.name) === cleanId(plannerAgent.name)
+      || normalizeTeamRole(row?.role) === normalizeTeamRole(plannerAgent.role)
+    ));
+    const matched = matchedIndex >= 0 ? currentAgents[matchedIndex] : null;
+    if (matchedIndex >= 0) usedCurrentIndexes.add(matchedIndex);
+    const base = matched
+      ? enrichAgentDraft({
+          ...matched,
+          context_policy: matched.context_policy || matched.contextPolicy || null,
+        }, planning)
+      : enrichAgentDraft(agentDraft(plannerAgent, { seen, taskText, index: index + 1 }), planning);
+    return overlayPlannerAgentDraft(base, plannerAgent, { taskText });
+  });
+  return pruneAgentLineup(drafts, taskText, planning);
+}
+
 export async function createFreeformTeamConfigurationAdvanced({ description = '', runtime = null, planner = null } = {}) {
   const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
   const taskText = clean(description);
@@ -1407,6 +1443,62 @@ export function createFreeformTeamConfiguration({ description = '', runtime = nu
     task_brief: taskText,
     design_prompt: taskText,
   }, { runtime: effectiveRuntime });
+}
+
+
+export async function refineTeamConfigurationAdvanced(team = {}, instruction = '', { runtime = null, planner = null } = {}) {
+  const fallbackRuntime = runtime || { agentsCatalog: asArray(team?.agents).map((agent) => ({ id: agent.agent_id, name: agent.name, role: agent.role, model: agent.model, provider: agent.provider, skills: agent.skills })) };
+  const current = normalizeTeamConfig(team, { runtime: fallbackRuntime });
+  const text = clean(instruction);
+  const heuristicNext = refineTeamConfiguration(current, text, { runtime: fallbackRuntime });
+  const activePlanner = typeof planner === 'function' ? planner : planTeamRefinementWithCodex;
+  let plannerResult = null;
+  try {
+    plannerResult = await activePlanner({
+      currentTeam: current,
+      instruction: text,
+      runtime: fallbackRuntime,
+      availableToolIds: collectAvailableToolIds(fallbackRuntime, loadAgents()),
+      skillRegistry: getSkillRegistry(),
+      presetRegistry: getPresetRegistry(),
+    });
+  } catch (error) {
+    plannerResult = { ok: false, reason: `planner_exception:${String(error?.message || error)}` };
+  }
+  if (!plannerResult?.ok || !plannerResult?.plan) {
+    return normalizeTeamConfig({
+      ...heuristicNext,
+      planner_metadata: normalizePlannerMetadata({
+        planner_type: 'heuristic_rule_based',
+        planner_model: '',
+        planning_source: 'heuristic_refine_fallback',
+        reasoning_summary: [clean(plannerResult?.reason || 'freeform refine heuristics applied') || 'freeform refine heuristics applied'],
+      }),
+    }, { runtime: fallbackRuntime });
+  }
+  const combinedTaskText = [current.task_brief, text].filter(Boolean).join('\n\nRefinement:\n');
+  const agents = buildPlannerDrivenRefinedAgents({
+    taskText: combinedTaskText,
+    runtime: fallbackRuntime,
+    plannerPlan: plannerResult.plan,
+    currentAgents: asArray(current.agents),
+  });
+  const interactionSpec = buildInteractionSpecForTeam({
+    taskText: combinedTaskText,
+    agents,
+    current: plannerResult.plan.interaction_spec || current.interaction_spec,
+  });
+  return normalizeTeamConfig({
+    ...current,
+    team_name: clean(plannerResult.plan.team_name || current.team_name || current.task_brief).slice(0, 48).replace(/\s+/g, '_') || current.team_name || 'refined_team',
+    proposal_mode: 'refine',
+    status: 'suggested',
+    design_prompt: [current.design_prompt, text].filter(Boolean).join('\n\nRefinement instruction:\n'),
+    agents,
+    interaction_spec: interactionSpec,
+    shortcut_policy: normalizeShortcutPolicy(plannerResult.plan.shortcut_policy || current.shortcut_policy),
+    planner_metadata: normalizePlannerMetadata(plannerResult.planner_metadata),
+  }, { runtime: fallbackRuntime });
 }
 
 export function refineTeamConfiguration(team = {}, instruction = '', { runtime = null } = {}) {

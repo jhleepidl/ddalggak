@@ -14,6 +14,7 @@ import {
   hydrateSessionTeamStateFromConversationStore,
   parseTeamTemplate,
   refineTeamConfiguration,
+  refineTeamConfigurationAdvanced,
   resetTeamConfiguration,
   storePendingTeam,
   suggestTeamConfiguration,
@@ -373,7 +374,8 @@ ${formatSupportedModelLines()}`);
           await bot.sendMessage(chatId, 'Usage: /team refine <자연어 수정>');
           return true;
         }
-        const next = refineTeamConfiguration(baseTeam, instruction, { runtime: runtimeForTeam });
+        await bot.sendMessage(chatId, '기존 팀 구성을 바탕으로 수정안을 다시 설계하겠습니다. 잠시만 기다려주세요.');
+        const next = await refineTeamConfigurationAdvanced(baseTeam, instruction, { runtime: runtimeForTeam });
         storePendingTeam(chatSessionStore, chatId, next);
         await sendLong(bot, chatId, formatTeamProposalMessage(next));
         return true;
