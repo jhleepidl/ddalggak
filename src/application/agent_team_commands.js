@@ -477,6 +477,36 @@ export function detectConversationTeamAuthoritySource(runtime = null) {
   return teamStoreSource === "goc" ? "goc" : "local";
 }
 
+
+function buildDynamicAgentFromConversationRow(row = {}, runtime = {}) {
+  const cleanAgentId = cleanId(row?.agent_id || row?.agentId || row?.id);
+  if (!cleanAgentId) return null;
+  const overrides = row?.overrides_json && typeof row.overrides_json === "object"
+    ? row.overrides_json
+    : (row?.overridesJson && typeof row.overridesJson === "object" ? row.overridesJson : {});
+  const capabilities = uniqIds(overrides.capabilities || overrides.skills || []);
+  const attachedSkillIds = uniqIds([
+    ...asArray(overrides.attached_skill_ids || overrides.attachedSkillIds || []),
+    ...asArray(overrides.attached_skills || overrides.attachedSkills).map((entry) => entry?.skill_id || entry?.id || entry),
+  ]);
+  return {
+    id: cleanAgentId,
+    agent_id: cleanAgentId,
+    name: String(overrides.name || cleanAgentId).trim() || cleanAgentId,
+    role: normalizeWorkerRoleId(overrides.configured_role || overrides.role || overrides.role_id || cleanAgentId),
+    provider: cleanId(overrides.configured_provider || overrides.provider || ""),
+    model: String(overrides.configured_model || overrides.model || "").trim(),
+    capabilities,
+    skills: capabilities,
+    attached_skill_ids: attachedSkillIds,
+    recommended_tool_ids: uniqIds(overrides.recommended_tool_ids || overrides.recommendedToolIds || []),
+    context_policy: overrides.context_policy && typeof overrides.context_policy === "object" ? overrides.context_policy : undefined,
+    prompt: String(overrides.purpose || "").trim(),
+    enabled: row?.enabled !== false,
+    custom_team_agent: true,
+  };
+}
+
 export function syncRuntimeConversationTeamState(runtime = {}, {
   conversationRows = [],
   membershipTarget = null,
@@ -527,7 +557,17 @@ export function syncRuntimeConversationTeamState(runtime = {}, {
     warnings.push(`unknown_explicit_members:${runtime.unknownConversationAgentIds.join(",")}`);
   }
   runtime.conversationMembershipWarning = warnings.join(" | ");
-  runtime.agents = view.enabledAgents;
+  const dynamicConversationAgents = convRows
+    .map((row) => buildDynamicAgentFromConversationRow(row, runtime))
+    .filter(Boolean)
+    .filter((row) => !view.enabledAgents.some((entry) => cleanId(entry?.id || entry?.agent_id || entry?.agentId) === cleanId(row.id)));
+  if (dynamicConversationAgents.length > 0) {
+    runtime.agentsCatalog = [
+      ...asArray(runtime?.agentsCatalog),
+      ...dynamicConversationAgents.filter((row) => !asArray(runtime?.agentsCatalog).some((entry) => cleanId(entry?.id || entry?.agent_id || entry?.agentId) === cleanId(row.id))),
+    ];
+  }
+  runtime.agents = [...view.enabledAgents, ...dynamicConversationAgents];
   runtime.agentSelection = summarizeSelection({
     catalog: asArray(runtime?.agentsCatalog),
     enabled: runtime.agents,

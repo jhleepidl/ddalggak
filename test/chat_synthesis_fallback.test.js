@@ -25,3 +25,18 @@ test('buildChatSynthesisFallback summarizes execution errors when outputs are mi
   assert.match(text, /gemini auth failed/);
   assert.match(text, /authority denied/);
 });
+
+
+test('buildChatSynthesisFallback surfaces missing tool and credential gaps before partial summaries', () => {
+  const text = buildChatSynthesisFallback('ignored message', {
+    outputs: [
+      { agentId: 'course_researcher', output: "Tool 'write_file' not found. Please provide OPENAI_API_KEY." },
+    ],
+    results: [
+      { label: 'run_agent:Notebook Builder', status: 'error', note: 'Unknown agent: notebook_builder' },
+    ],
+  });
+  assert.match(text, /필요한 도구\/자격 정보가 부족/);
+  assert.match(text, /write_file/);
+  assert.match(text, /API 키|환경 변수/);
+});

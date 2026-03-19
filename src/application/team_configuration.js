@@ -138,7 +138,7 @@ function buildFallbackSelectionSlot(agent = {}, planning = {}) {
   const requiredContextTypes = uniqueIds(agent?.context_policy?.reads?.context_types || agent?.contextPolicy?.reads?.context_types || []);
   if (roleId === 'operator') preferredSkillIds.push('skill.thread_team_reconciliation.v1', 'skill.context_selection_policy.v1');
   if (roleId === 'reviewer' && /claim|evidence|citation|fact|투자|주식|공시|뉴스/i.test(`${taskText} ${purpose}`)) preferredSkillIds.push('skill.claim_evidence_audit.v1');
-  if (roleId === 'researcher' && /주식|증시|시장|투자|종목|equity|market|filing|공시|earnings|실적/i.test(`${taskText} ${purpose}`)) preferredSkillIds.push('skill.kr_equity_analysis.v1');
+  if (roleId === 'researcher' && /주식시장|증시|금융시장|투자|종목|equity|stock|filing|공시|earnings|실적/i.test(`${taskText} ${purpose}`)) preferredSkillIds.push('skill.kr_equity_analysis.v1');
   if (roleId === 'synthesizer' && /brief|telegram|요약|브리핑/i.test(`${taskText} ${purpose}`)) preferredSkillIds.push('skill.telegram_briefing.v1');
   if ((roleId === 'reviewer' || roleId === 'operator') && /debug|stalled|queued|reroute|trace|run/i.test(`${taskText} ${purpose}`)) preferredSkillIds.push('skill.run_trace_debugging.v1');
   return {
@@ -214,10 +214,18 @@ function isSkillCompatibleWithAgentRole(skill = {}, role = '') {
   return compatibleRoles.some((entry) => aliases.has(cleanId(entry)));
 }
 
+
+function requiresExplicitDomainMatch(skill = {}) {
+  const category = cleanId(skill?.category || '');
+  const tags = uniqueIds([...(skill?.capability_tags || []), ...(skill?.tags || [])], { max: 24 });
+  return category === 'finance'
+    || tags.some((entry) => /equity|valuation|ticker|earnings|kr_equity|financial/.test(String(entry || '').toLowerCase()));
+}
+
 function hasExplicitSkillDomainMatch(skillId = '', text = '') {
   const haystack = clean(text).toLowerCase();
   if (!haystack) return false;
-  if (skillId === 'skill.kr_equity_analysis.v1') return /주식|증시|코스피|투자|종목|equity|stock|valuation|kospi|financial|earnings|공시|실적/.test(haystack);
+  if (skillId === 'skill.kr_equity_analysis.v1') return /주식시장|증시|코스피|투자|종목|equity|stock|valuation|kospi|financial|earnings|공시|실적/.test(haystack);
   if (skillId === 'skill.claim_evidence_audit.v1') return /claim|evidence|citation|fact|support|contradiction|근거|출처|주장|검증|모순/.test(haystack);
   if (skillId === 'skill.context_selection_policy.v1') return /context|scope|grant|memory|selection|문맥|스코프|그랜트|메모리/.test(haystack);
   if (skillId === 'skill.thread_team_reconciliation.v1') return /team|agent|membership|reconciliation|apply|refine|handoff|coord|멤버십|동기화|팀/.test(haystack);
@@ -264,6 +272,7 @@ function filterRelevantAttachedSkillIds(skillIds = [], { role = '', taskText = '
     const reasons = asArray(scored?.reasons || []);
     const semanticMatch = reasons.some((entry) => /^trigger_matches:|^capability_matches:|^name_matches:/.test(String(entry || '')));
     const explicitMatch = hasExplicitSkillDomainMatch(skillId, [taskText, purpose, ...hints].join('\n'));
+    if (requiresExplicitDomainMatch(skill) && !explicitMatch) continue;
     const score = Number(scored?.score || 0);
     if (semanticMatch || explicitMatch || score >= 58) out.push(skillId);
   }
@@ -271,6 +280,7 @@ function filterRelevantAttachedSkillIds(skillIds = [], { role = '', taskText = '
 }
 
 function resolveAgentExecutionProfile(agent = {}, planning = {}) {
+  const roleId = normalizeTeamRole(agent.role);
   const slot = matchSelectionSlot(agent, planning);
   const presetResult = planning.presetResolver.resolveForSlot({
     slot,
@@ -305,10 +315,13 @@ function resolveAgentExecutionProfile(agent = {}, planning = {}) {
     const skill = planning.skillRegistry.resolve?.(skillId);
     requiredToolIds.push(...asArray(skill?.required_tools));
   }
+  const codeLikeTask = /ipynb|notebook|jupyter|file|json|python|script|workspace|코드|노트북|파일/.test(`${planning.taskText} ${agent.purpose}`.toLowerCase());
+  const autoToolIds = roleId === 'builder' && codeLikeTask ? ['workspace_fs'] : [];
   const recommendedToolIds = uniqueIds([
     ...asArray(slot?.required_tool_ids),
     ...asArray(preset?.selection_features?.tool_hints),
     ...requiredToolIds,
+    ...autoToolIds,
   ], { max: 5 });
   const capabilities = deriveCapabilityLabels({ role: agent.role, taskText: planning.taskText, purpose: agent.purpose, name: agent.name });
   return {

@@ -391,6 +391,36 @@ export function summarizeSpecialChatOutputs(outputs = []) {
   return ['생성된 결과물:', ...bulletLines].join('\n');
 }
 
+
+function detectCapabilityGapLines(executionLike = {}, { maxLines = 4 } = {}) {
+  const outputs = asArray(executionLike?.outputs);
+  const results = asArray(executionLike?.results);
+  const gaps = [];
+  const pushGap = (line = '') => {
+    const cleanLine = String(line || '').trim();
+    if (!cleanLine || gaps.includes(cleanLine)) return;
+    gaps.push(cleanLine);
+  };
+  const inspectText = (text = '', label = 'agent') => {
+    const raw = String(text || '').trim();
+    if (!raw) return;
+    const toolMatch = raw.match(/Tool ['"]?([a-zA-Z0-9_.-]+)['"]? not found/i);
+    if (toolMatch) {
+      const toolId = String(toolMatch[1] || '').trim();
+      const suggestion = /write_file|create_file|save_file|ipynb/i.test(toolId)
+        ? 'workspace_fs 도구 또는 파일 생성 helper가 필요합니다.'
+        : `${toolId} 도구 정의가 필요합니다.`;
+      pushGap(`- ${label}: ${toolId} 도구가 없어 작업을 완료하지 못했습니다. ${suggestion}`);
+    }
+    if (/api[_ -]?key|OPENAI_API_KEY|GEMINI_API_KEY|ANTHROPIC_API_KEY/i.test(raw)) {
+      pushGap(`- ${label}: 외부 API 자격 증명이 필요합니다. 사용 가능한 API 키 또는 환경 변수를 제공해 주세요.`);
+    }
+  };
+  for (const row of outputs) inspectText(row?.output || row?.text || row?.summary || '', String(row?.agentId || row?.agent || 'agent'));
+  for (const row of results) inspectText(row?.note || row?.error || row?.reason || '', String(row?.label || row?.agent || row?.agentId || 'step'));
+  return gaps.slice(0, Math.max(1, Number(maxLines) || 4));
+}
+
 export function buildChatSynthesisFallback(outputs = [], options = {}) {
   const opts = options && typeof options === 'object' ? options : {};
   const executionLike = (!Array.isArray(outputs) && outputs && typeof outputs === 'object' && Array.isArray(outputs.outputs))
@@ -410,6 +440,10 @@ export function buildChatSynthesisFallback(outputs = [], options = {}) {
     })
     .filter(Boolean)
     .slice(-maxLines);
+  const capabilityGapLines = executionLike ? detectCapabilityGapLines(executionLike, { maxLines }) : [];
+  if (capabilityGapLines.length > 0) {
+    return ['실행 중 필요한 도구/자격 정보가 부족했습니다.', ...capabilityGapLines].join('\n');
+  }
   if (rows.length > 0) return ['현재까지 결과 요약:', ...rows].join('\n');
 
   const resultRows = executionLike

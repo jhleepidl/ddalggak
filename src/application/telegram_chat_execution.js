@@ -475,7 +475,14 @@ function buildChatSynthesisFallback(message, execution = {}) {
 
 async function synthesizeChatReply(message, routePlan, execution = {}) {
   const outputs = Array.isArray(execution.outputs) ? execution.outputs : [];
-  if (outputs.length === 0) return buildChatSynthesisFallback(message, execution);
+  const hardFailures = Array.isArray(execution?.results)
+    ? execution.results.filter((row) => ['error', 'blocked'].includes(String(row?.status || '').trim().toLowerCase()))
+    : [];
+  const outputTextBlob = outputs.map((row) => String(row?.output || '').trim()).join('\n');
+  const capabilityGapDetected = /Tool ['"]?[a-zA-Z0-9_.-]+['"]? not found|OPENAI_API_KEY|GEMINI_API_KEY|ANTHROPIC_API_KEY|api[_ -]?key/i.test(outputTextBlob);
+  if (outputs.length === 0 || hardFailures.length > 0 || capabilityGapDetected) {
+    return buildChatSynthesisFallback(message, execution);
+  }
   const special = summarizeSpecialChatOutputs(outputs);
   const hasAgentOutput = outputs.some((row) => String(row?.agentId || "").trim().toLowerCase() !== "system");
   if (String(routePlan?.reason || "").trim().toLowerCase() === "direct_agent_followup_shortcut") {

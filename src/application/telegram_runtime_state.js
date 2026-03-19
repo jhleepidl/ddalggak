@@ -251,6 +251,26 @@ function findAgentConfigInRuntime(agentId, runtime = null) {
   const rows = [
     ...(Array.isArray(runtime?.agentsCatalog) ? runtime.agentsCatalog : []),
     ...(Array.isArray(runtime?.agents) ? runtime.agents : []),
+    ...(Array.isArray(runtime?.activeTeamConfig?.agents) ? runtime.activeTeamConfig.agents : []),
+    ...(Array.isArray(runtime?.conversationAgents) ? runtime.conversationAgents.map((row) => ({
+      id: row?.agent_id || row?.agentId || row?.id,
+      ...(row?.overrides_json && typeof row.overrides_json === "object" ? row.overrides_json : (row?.overridesJson && typeof row.overridesJson === "object" ? row.overridesJson : {})),
+      provider: row?.overrides_json?.configured_provider || row?.overridesJson?.configured_provider || row?.overrides_json?.provider || row?.overridesJson?.provider,
+      model: row?.overrides_json?.configured_model || row?.overridesJson?.configured_model || row?.overrides_json?.model || row?.overridesJson?.model,
+      role: row?.overrides_json?.configured_role || row?.overridesJson?.configured_role || row?.overrides_json?.role || row?.overridesJson?.role,
+    })) : []),
+    ...(Array.isArray(runtime?.runtimeTeamSnapshot?.runtime_agents)
+      ? runtime.runtimeTeamSnapshot.runtime_agents.map((row) => ({
+          id: row?.template_id || row?.templateId || row?.agent_id || row?.agentId,
+          name: row?.display_label || row?.displayLabel,
+          provider: row?.provider,
+          model: row?.model,
+          role: row?.role_id || row?.roleId || row?.role_label || row?.roleLabel,
+          attached_skill_ids: row?.attached_skill_ids || row?.attachedSkillIds,
+          capabilities: row?.capability_tags || row?.capabilityTags,
+          context_policy: row?.context_policy || row?.contextPolicy,
+        }))
+      : []),
   ];
   for (const row of rows) {
     const rowId = String(row?.id || row?.agent_id || row?.agentId || "").trim().toLowerCase();

@@ -17,7 +17,7 @@ function normalizeText(raw = "", {
 const WORKFLOW_TERMS = ["workflow", "membership", "runtime", "polling", "shutdown", "operator", "thread team", "운영"];
 const CODE_REQUEST_TERMS = ["code", "implement", "fix", "bug", "patch", "refactor", "ipynb", "notebook", "script", "repository", "repo", "workspace", "python", "javascript", "typescript", "sql", "bash", "shell", "commit", "pull request", "코드", "구현", "리팩터", "패치", "노트북", "스크립트", "파이썬", "자바스크립트", "타입스크립트", "레포"];
 const CODE_ARTIFACT_TERMS = ["ipynb", "notebook", "jupyter", "script", "patch", "commit", "workspace", "repo", "repository", "python", "javascript", "typescript", "sql", "bash", "shell", "pr", "pull request", "주피터", "노트북", "스크립트", "패치", "커밋", "파이썬", "자바스크립트", "타입스크립트", "레포"];
-const FINANCE_RESEARCH_TERMS = ["stock", "equity", "market", "news", "filing", "valuation", "invest", "investment", "주식", "시장", "뉴스", "공시", "투자", "밸류"];
+const FINANCE_RESEARCH_TERMS = ["stock", "equity", "stock market", "market news", "filing", "valuation", "invest", "investment", "주식", "주식시장", "증시", "뉴스", "공시", "투자", "밸류"];
 
 function includesAny(text = "", needles = []) {
   const source = normalizeText(text, { lower: true });
@@ -62,7 +62,7 @@ function collectDomainHints(text = "") {
   if (includesAny(text, ["dart", "filing", "공시"])) hints.push("filings");
   if (includesAny(text, ["market", "news", "headline", "macro", "시장", "뉴스"])) hints.push("market_news");
   if (includesAny(text, ["claim", "evidence", "citation", "근거", "주장"])) hints.push("claims");
-  if (includesAny(text, ["stock", "equity", "valuation", "주식", "밸류"])) hints.push("finance");
+  if (includesAny(text, ["stock", "equity", "valuation", "주식", "주식시장", "증시", "밸류"])) hints.push("finance");
   if (includesAnyToken(text, CODE_REQUEST_TERMS)) hints.push("codebase");
   if (includesAny(text, ["workflow", "membership", "runtime", "polling", "shutdown", "team", "context", "운영"])) hints.push("workflow");
   if (includesAny(text, ["test", "qa", "verify", "regression", "검토", "테스트"])) hints.push("quality");

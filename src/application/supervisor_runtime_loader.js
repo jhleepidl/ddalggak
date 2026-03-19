@@ -45,6 +45,47 @@ async function loadAgentRegistry({
   return registry;
 }
 
+
+function buildLocalToolCatalog() {
+  return [
+    {
+      id: "read_only_fs",
+      name: "Read-only Filesystem",
+      description: "Read files from the current workspace without modifying them.",
+      action_types: ["read", "inspect", "cite"],
+      risk: "L1",
+    },
+    {
+      id: "workspace_fs",
+      name: "Workspace Filesystem",
+      description: "Create and update files inside the current run workspace.",
+      action_types: ["write", "create", "edit"],
+      risk: "L2",
+    },
+    {
+      id: "shell",
+      name: "Workspace Shell",
+      description: "Run local shell commands inside the workspace when explicitly allowed.",
+      action_types: ["execute", "test", "build"],
+      risk: "L3",
+    },
+    {
+      id: "web",
+      name: "Web",
+      description: "Search and read public web sources.",
+      action_types: ["search", "browse", "cite"],
+      risk: "L1",
+    },
+    {
+      id: "control_plane",
+      name: "Control Plane",
+      description: "Coordinate workers, approvals, and runtime control actions.",
+      action_types: ["coordinate", "checkpoint", "spawn"],
+      risk: "L2",
+    },
+  ];
+}
+
 function buildLocalRuntimeResult({
   jobId = "",
   runtimeAuthority = null,
@@ -74,7 +115,7 @@ function buildLocalRuntimeResult({
     : (() => "");
   const fallbackNormalized = normalizeJobConfig(
     { job_id: String(jobId || "").trim() },
-    { agentsCatalog: asArray(registry?.agents), toolsCatalog: [] }
+    { agentsCatalog: asArray(registry?.agents), toolsCatalog: buildLocalToolCatalog() }
   );
   const fallbackAgentIds = Array.isArray(fallbackNormalized.enabledAgentIds)
     ? fallbackNormalized.enabledAgentIds
@@ -269,16 +310,16 @@ export function createSupervisorRuntimeLoader({
           jobConfigDebugSummary: localDeps.summarizeJobConfigText(localDeps.fallbackNormalized.configNormalized),
           jobConfigNodeId: "",
           agentsCatalog: asArray(registry?.agents),
-          toolsCatalog: [],
+          toolsCatalog: buildLocalToolCatalog(),
           enabledAgentIds: [],
           enabledToolIds: localDeps.fallbackNormalized.enabledToolIds,
           agentSelection: localDeps.summarizeSelection({
             catalog: asArray(registry?.agents),
             enabled: [],
           }),
-          toolSelection: localDeps.summarizeSelection({ catalog: [], enabled: [] }),
+          toolSelection: localDeps.summarizeSelection({ catalog: buildLocalToolCatalog(), enabled: buildLocalToolCatalog().filter((tool) => new Set(asArray(localDeps.fallbackNormalized.enabledToolIds).map((id) => cleanId(id))).has(cleanId(tool.id))) }),
           agents: [],
-          tools: [],
+          tools: buildLocalToolCatalog().filter((tool) => new Set(asArray(localDeps.fallbackNormalized.enabledToolIds).map((id) => cleanId(id))).has(cleanId(tool.id))),
           recentArtifactNodeIds: [],
           sharedActiveTypeBreakdown: {},
           contextSummary: includeContext ? localDeps.localDocs(cleanJobId, trackedDocNames, 2200) : "",
