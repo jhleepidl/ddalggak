@@ -1,6 +1,13 @@
+import path from "node:path";
+import process from "node:process";
+
 import { ChatSessionStore } from "../chat/session.js";
 
-const chatSessionStore = new ChatSessionStore();
+const chatSessionStore = new ChatSessionStore({
+  baseDir: process.env.RUNS_DIR
+    ? path.resolve(process.env.RUNS_DIR)
+    : path.resolve("runs"),
+});
 
 export function updateAgentStatus(chatId, agentId, patch = {}) {
   const cleanAgentId = String(agentId || "").trim().toLowerCase();

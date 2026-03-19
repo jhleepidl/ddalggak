@@ -353,6 +353,7 @@ ${formatSupportedModelLines()}`);
           await bot.sendMessage(chatId, 'Usage: /team create <자연어 팀 설명>');
           return true;
         }
+        await bot.sendMessage(chatId, '해당 요청에 맞는 팀을 구성하겠습니다. 잠시만 기다려주세요.');
         const proposal = await createFreeformTeamConfigurationAdvanced({ description, runtime: runtimeForTeam });
         storePendingTeam(chatSessionStore, chatId, proposal);
         await sendLong(bot, chatId, `${formatTeamProposalMessage(proposal)}

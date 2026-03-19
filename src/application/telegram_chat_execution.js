@@ -285,6 +285,30 @@ function buildRuntimeAgentMetadataIndex(runtime = null) {
   return index;
 }
 
+function extractChatUpdateBlock(text = "") {
+  const src = String(text || "");
+  if (!src) return "";
+  const regexes = [
+    /CHAT_UPDATE\s*[:：]?\s*```(?:text)?\s*([\s\S]*?)```/i,
+    /CHAT_UPDATE\s*[:：]?\s*([\s\S]*?)(?:\n[A-Z0-9_]+_JSON\b|$)/i,
+  ];
+  for (const re of regexes) {
+    const match = src.match(re);
+    const candidate = String(match?.[1] || "").trim();
+    if (candidate) return candidate;
+  }
+  return "";
+}
+
+function buildAgentChatUpdateText({ agentId = "", output = "" } = {}) {
+  const displayName = formatChatAgentDisplayName(agentId, buildTelegramAgentIndex());
+  const explicit = extractChatUpdateBlock(output);
+  if (explicit) return `🧾 ${displayName} 중간 결과\n${clip(explicit, 2400)}`;
+  const cleanOutput = String(output || "").trim();
+  if (!cleanOutput) return `🧾 ${displayName} 완료`;
+  return `🧾 ${displayName} 중간 결과\n${clip(cleanOutput, 2400)}`;
+}
+
 function decoratePlanActionsWithAgentMetadata(actions = [], runtime = null) {
   const metadataIndex = buildRuntimeAgentMetadataIndex(runtime);
   const decorateOne = (action = {}) => {
@@ -1158,6 +1182,15 @@ function buildSupervisorExecutionCallbacks({
       });
     const nextActionsInstruction = [
       "[OUTPUT CONTRACT]",
+      "- 사용자에게 채팅방에 바로 공유할 중간 결과가 있으면 CHAT_UPDATE 블록을 포함하라.",
+      "- CHAT_UPDATE는 3~6줄의 자연어 요약으로 쓰고, 근거/핵심 판단/다음 포인트만 남겨라.",
+      "- 형식:",
+      "CHAT_UPDATE",
+      "```text",
+      "핵심 발견 2~3개",
+      "왜 중요한지",
+      "다음으로 넘길 포인트",
+      "```",
       "- 필요하면 마지막에 NEXT_ACTIONS_JSON 블록으로 후속 작업을 제안하라.",
       "- 형식:",
       "NEXT_ACTIONS_JSON",
@@ -1219,6 +1252,16 @@ function buildSupervisorExecutionCallbacks({
         slotId,
         scopeId,
       });
+      if (String(result?.output || "").trim()) {
+        await sendLong(
+          bot,
+          chatId,
+          buildAgentChatUpdateText({
+            agentId: cleanAgentId,
+            output: String(result.output || ""),
+          })
+        );
+      }
       if (cleanAgentId) {
         updateAgentStatus(chatId, cleanAgentId, {
           state: "done",
