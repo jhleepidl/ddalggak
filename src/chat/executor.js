@@ -17,6 +17,7 @@ import { formatChatActionLabel } from "../adapters/telegram/preview_formatting.j
 import {
   evaluateActionAuthority,
 } from "../application/run_authority.js";
+import { sanitizeExecutablePlan } from "./route_execution_contract.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -189,6 +190,15 @@ export async function executeSupervisorActions({
   const runtimeSnapshot = plan?.runtime_team_snapshot && typeof plan.runtime_team_snapshot === "object"
     ? plan.runtime_team_snapshot
     : plan;
+  const sanitizedPlan = sanitizeExecutablePlan({
+    plan: {
+      ...plan,
+      actions,
+    },
+    runtimeSnapshot,
+  });
+  const executionContractNotes = Array.isArray(sanitizedPlan?.notes) ? sanitizedPlan.notes : [];
+  const executableActions = Array.isArray(sanitizedPlan?.plan?.actions) ? sanitizedPlan.plan.actions : actions;
   const teamLocked = plan?.team_locked === true || runtimeSnapshot?.team_locked === true;
   const agentDisplayIndex = buildAgentDisplayIndex(agents);
   const maxActions = Number.isFinite(Number(budgetCfg.max_actions))
@@ -209,6 +219,21 @@ export async function executeSupervisorActions({
     ? "work"
     : "normal";
 
+  for (const note of executionContractNotes) {
+    results.push({
+      label: "route_contract",
+      status: "ok",
+      note: `${note.action_type} downgraded to sequential run_agent: ${note.reason}`,
+    });
+    outputs.push({
+      agentId: "system",
+      provider: "system",
+      mode: "execution_contract",
+      output: `parallel spawn downgraded to sequential execution (${note.child_count} children): ${note.reason}`,
+      jobId: String(jobId || ""),
+    });
+  }
+
   if (sessionStore) {
     sessionStore.upsert(chatId, {
       jobId: String(jobId || "").trim(),
@@ -221,18 +246,18 @@ export async function executeSupervisorActions({
   }
 
   if (teamLocked) {
-    const forbidden = actions.find((action) => isMutatingAction(action));
+    const forbidden = executableActions.find((action) => isMutatingAction(action));
     if (forbidden) {
       throw new Error('team is locked; use /team commands to change composition');
     }
   }
 
-  const mutatingIndex = actions.findIndex((action) => isMutatingAction(action) && !isMutatingApproved(action));
+  const mutatingIndex = executableActions.findIndex((action) => isMutatingAction(action) && !isMutatingApproved(action));
   if (mutatingIndex >= 0) {
     blockedActions += 1;
     blockedIndex = mutatingIndex;
-    remainingActions = actions.slice(mutatingIndex);
-    const mutatingAction = actions[mutatingIndex];
+    remainingActions = executableActions.slice(mutatingIndex);
+    const mutatingAction = executableActions[mutatingIndex];
     const workLikeHint = looksLikeWorkRequest(cleanOriginalUserText);
     pendingApproval = {
       id: nextApprovalId(),
@@ -242,12 +267,12 @@ export async function executeSupervisorActions({
       action_display_label: actionLabel(mutatingAction, { agentIndex: agentDisplayIndex }),
       reason: "관리 변경 적용 전 확인이 필요합니다.",
       preview_reason: approvalReasonCategory(mutatingAction, "관리 변경 적용 전 확인이 필요합니다."),
-      actions_summary: approvalActionSummary(actions, { agentIndex: agentDisplayIndex }),
+      actions_summary: approvalActionSummary(executableActions, { agentIndex: agentDisplayIndex }),
       cancel_impact: "취소 시 영향 없음",
       gate_type: "mutating_confirm",
       mode_choice_required: true,
       blocked_index: mutatingIndex,
-      remaining_actions: actions,
+      remaining_actions: executableActions,
       already_done: {
         results: [...results],
         outputs: [...outputs],
@@ -257,7 +282,7 @@ export async function executeSupervisorActions({
       original_user_text: cleanOriginalUserText,
       force_mode: cleanForceMode,
       work_like_hint: workLikeHint,
-      preview_lines: mutatingPreviewLines(actions, { agentIndex: agentDisplayIndex }),
+      preview_lines: mutatingPreviewLines(executableActions, { agentIndex: agentDisplayIndex }),
     };
     results.push({
       label: actionLabel(mutatingAction, { agentIndex: agentDisplayIndex }),
@@ -272,8 +297,8 @@ export async function executeSupervisorActions({
     }
   }
 
-  for (let i = 0; i < actions.length && !pendingApproval; i += 1) {
-    const action = actions[i];
+  for (let i = 0; i < executableActions.length && !pendingApproval; i += 1) {
+    const action = executableActions[i];
     const label = actionLabel(action, { agentIndex: agentDisplayIndex });
     const interruptBefore = readInterruptState(sessionStore, chatId);
     if (interruptBefore?.requested) {
@@ -281,7 +306,7 @@ export async function executeSupervisorActions({
         throw makeCancelledError(interruptBefore.reason || `interrupt(cancel) before ${label}`);
       }
       blockedIndex = i;
-      remainingActions = actions.slice(i);
+      remainingActions = executableActions.slice(i);
       interruptedByReplan = true;
       results.push({
         label: "interrupt",
@@ -309,7 +334,7 @@ export async function executeSupervisorActions({
     if (authority.requires_approval) {
       blockedActions += 1;
       blockedIndex = i;
-      remainingActions = actions.slice(i);
+        remainingActions = executableActions.slice(i);
       pendingApproval = {
         id: nextApprovalId(),
         chat_id: String(chatId || ""),
@@ -364,7 +389,7 @@ export async function executeSupervisorActions({
     if (approval.required) {
       blockedActions += 1;
       blockedIndex = i;
-      remainingActions = actions.slice(i);
+        remainingActions = executableActions.slice(i);
       pendingApproval = {
         id: nextApprovalId(),
         chat_id: String(chatId || ""),
@@ -396,7 +421,7 @@ export async function executeSupervisorActions({
     if (action.type === "checkpoint" && action?.inputs?.approval_required === true) {
       blockedActions += 1;
       blockedIndex = i;
-      remainingActions = actions.slice(i);
+        remainingActions = executableActions.slice(i);
       pendingApproval = {
         id: nextApprovalId(),
         chat_id: String(chatId || ""),
@@ -995,7 +1020,7 @@ export async function executeSupervisorActions({
         usedActions += 1;
         const immediateApply = kind === "agent"
           && String(updated?.source || "").trim().toLowerCase() === "conversation_agents";
-        if (!immediateApply && i < actions.length - 1) {
+        if (!immediateApply && i < executableActions.length - 1) {
           results.push({
             label: "selection_update",
             status: "skip",
@@ -1117,7 +1142,7 @@ export async function executeSupervisorActions({
         results.push({ label, status: "ok", note: `mode=${mode}` });
         usedActions += 1;
         blockedIndex = i;
-        remainingActions = actions.slice(i + 1);
+        remainingActions = executableActions.slice(i + 1);
         interruptedByReplan = true;
         break;
       }
@@ -1191,7 +1216,7 @@ export async function executeSupervisorActions({
       if (membershipConfirmationFailed) {
         blockedActions += 1;
         blockedIndex = i;
-        remainingActions = actions.slice(i + 1);
+        remainingActions = executableActions.slice(i + 1);
         results.push({
           label: "membership_confirmation",
           status: "blocked",
@@ -1207,7 +1232,7 @@ export async function executeSupervisorActions({
         throw makeCancelledError(interruptAfter.reason || `interrupt(cancel) after ${label}`);
       }
       blockedIndex = i;
-      remainingActions = actions.slice(i + 1);
+      remainingActions = executableActions.slice(i + 1);
       interruptedByReplan = true;
       results.push({
         label: "interrupt",

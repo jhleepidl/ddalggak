@@ -127,6 +127,7 @@ import { normalizeActionPlan } from "../chat/actions.js";
 import { expandDetailContext } from "../chat/unfold.js";
 import { ChatRunManager } from "../chat/run_manager.js";
 import { GocExecutionGraphRecorder } from "../chat/goc_execution_graph.js";
+import { updateAgentStatus } from "./agent_status_store.js";
 
 import * as runtimeState from "./telegram_runtime_state.js";
 import * as runtimeIo from "./telegram_runtime_io.js";
@@ -913,40 +914,6 @@ async function sendGeminiGiveUpMessage(
     buildGeminiGiveUpNoticeTextShared({ reason, agentId, agentLabel }),
     replyId ? { reply_to_message_id: replyId } : undefined
   );
-}
-
-function updateAgentStatus(chatId, agentId, patch = {}) {
-  const cleanAgentId = String(agentId || "").trim().toLowerCase();
-  if (!cleanAgentId) return { changed: false, previousState: "", nextState: "" };
-  let previousState = "";
-  let nextState = "";
-  chatSessionStore.upsert(chatId, (session) => {
-    const currentMap = session?.agent_status && typeof session.agent_status === "object"
-      ? session.agent_status
-      : {};
-    const previous = currentMap[cleanAgentId] && typeof currentMap[cleanAgentId] === "object"
-      ? currentMap[cleanAgentId]
-      : {};
-    previousState = String(previous.state || "").trim().toLowerCase();
-    const nextRow = {
-      ...previous,
-      ...patch,
-    };
-    if (!nextRow.goal && previous.goal) nextRow.goal = previous.goal;
-    nextState = String(nextRow.state || "").trim().toLowerCase();
-    return {
-      ...session,
-      agent_status: {
-        ...currentMap,
-        [cleanAgentId]: nextRow,
-      },
-    };
-  });
-  return {
-    changed: previousState !== nextState,
-    previousState,
-    nextState,
-  };
 }
 
 function normalizeDeliverableList(raw, { max = 24 } = {}) {

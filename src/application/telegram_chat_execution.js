@@ -133,6 +133,8 @@ import { normalizeActionPlan } from "../chat/actions.js";
 import { expandDetailContext } from "../chat/unfold.js";
 import { ChatRunManager } from "../chat/run_manager.js";
 import { GocExecutionGraphRecorder } from "../chat/goc_execution_graph.js";
+import { mergePreferredRuntimeTeamSnapshot, sanitizeExecutablePlan } from "../chat/route_execution_contract.js";
+import { updateAgentStatus } from "./agent_status_store.js";
 
 import * as runtimeState from "./telegram_runtime_state.js";
 import * as runtimeIo from "./telegram_runtime_io.js";
@@ -2661,6 +2663,7 @@ async function runSupervisorChat(
             replyToMessageId: getCurrentTurnReplyMessageId(chatId),
           });
         },
+        runtimeTeamSnapshot,
       });
       routePlan = sanitizeSupervisorRoutePlan(rawRoutePlan, {
         message: lastUserText,
@@ -3460,35 +3463,32 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
   const runtimeAuthority = buildRunAuthority(runtime);
   const agentIndex = buildTelegramAgentIndex({ runtime, routePlan: route, actions: route?.actions || [] });
   const telegramUserId = String(opts?.telegramUserId || "").trim();
-  let runtimeTeamSnapshot = route?.runtime_team_snapshot && typeof route.runtime_team_snapshot === "object"
-    ? route.runtime_team_snapshot
-    : (opts?.runtimeTeamSnapshot && typeof opts.runtimeTeamSnapshot === "object"
-      ? opts.runtimeTeamSnapshot
-      : createRuntimeTeamSnapshot({
-        taskInterpretation: route?.task_interpretation || null,
-        teamPlan: route?.team_plan || null,
-        runtimeAgents: route?.runtime_agents || [],
-        contextPacks: route?.context_packs || [],
-        scopeSpecs: route?.scope_specs || [],
-        materializedScopes: route?.materialized_scopes || [],
-        visibilityGraph: route?.visibility_graph || [],
-        contextRuntimeMode: route?.context_runtime_mode || null,
-        collaborationCells: route?.collaboration_cells || [],
-        authorityGraph: route?.authority_graph || [],
-        checkpoints: route?.checkpoints || [],
-        executionGraph: route?.execution_graph || null,
-        selectionExplanations: route?.selection_explanations || [],
-        selectedSkillIds: route?.selected_skill_ids || [],
-        skillLoadLevels: route?.skill_load_levels || {},
-        selectionReasonSummary: route?.selection_reason_summary || {},
-        skillUsageEvents: route?.skill_usage_events || [],
-        skillUsageSummary: route?.skill_usage_summary || {},
-        supervisorRuntime: route?.supervisor_runtime || null,
-        runtimeAuthority,
-        source: "team_builder",
-      }));
+  const baseRuntimeTeamSnapshot = opts?.runtimeTeamSnapshot && typeof opts.runtimeTeamSnapshot === "object"
+    ? opts.runtimeTeamSnapshot
+    : (runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
+      ? runtime.runtimeTeamSnapshot
+      : (runtime?.runtime_team_snapshot && typeof runtime.runtime_team_snapshot === "object"
+        ? runtime.runtime_team_snapshot
+        : null));
+  let runtimeTeamSnapshot = mergePreferredRuntimeTeamSnapshot({
+    baseSnapshot: baseRuntimeTeamSnapshot,
+    routePlan: route,
+    runtimeAuthority,
+    source: "team_builder",
+  });
   let askedChatGPT = false;
-  const actions = Array.isArray(route?.actions) ? route.actions : [];
+  const sanitizedRoute = sanitizeExecutablePlan({
+    plan: route,
+    runtimeSnapshot: runtimeTeamSnapshot,
+  });
+  const actions = Array.isArray(sanitizedRoute?.plan?.actions) ? sanitizedRoute.plan.actions : [];
+  const executionContractNotes = Array.isArray(sanitizedRoute?.notes) ? sanitizedRoute.notes : [];
+  if (executionContractNotes.length > 0) {
+    tracking.append(jobId, "decisions.md", [
+      "## route execution contract",
+      ...executionContractNotes.map((note) => `- ${note.action_type} downgraded to sequential run_agent: ${note.reason}`),
+    ].join("\n"));
+  }
 
   const scopedRuntimeMode = isScopedContextMode(runtimeTeamSnapshot?.context_runtime_mode || "shared_memory");
   let scopeHydrationError = null;

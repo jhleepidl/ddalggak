@@ -4,6 +4,7 @@ import { clip } from "../textutil.js";
 import { normalizeActionPlan } from "./actions.js";
 import { parseJsonObjectFromText } from "../shared/json_extract.js";
 import { buildInteractionSummaryLines, buildRouterInteractionContract, normalizeInteractionSpec } from "../domain/interaction_spec.js";
+import { canParallelSpawnInRuntime, sanitizeExecutablePlan } from "./route_execution_contract.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -362,7 +363,7 @@ function normalizePublicSearchQuery(message) {
     .trim();
 }
 
-function fallbackPlan(message, { agents = [], tools = [], jobConfig = {} } = {}) {
+function fallbackPlan(message, { agents = [], tools = [], jobConfig = {}, parallelSpawnAllowed = true } = {}) {
   const msg = String(message || "").trim();
   const config = asObject(jobConfig);
   const defaultAgent = pickDefaultAgent(agents);
@@ -444,6 +445,18 @@ function fallbackPlan(message, { agents = [], tools = [], jobConfig = {} } = {})
   }
 
   if (isSpawnRequest(msg) && mentionedAgents.length >= 2) {
+    if (!parallelSpawnAllowed) {
+      return {
+        reason: "parallel spawn unavailable fallback",
+        actions: mentionedAgents.slice(0, 4).map((agentId) => ({
+          type: "run_agent",
+          agent_id: agentId,
+          goal: msg,
+          risk: "L1",
+        })),
+        final_response_style: "concise",
+      };
+    }
     return {
       reason: "parallel spawn fallback",
       actions: [{
@@ -704,6 +717,7 @@ function buildRouterPrompt(message, context = {}) {
   })();
   const canSatisfyWithoutCreation = teamRecommendation?.can_satisfy_without_creation === true;
   const teamCompositionIntent = teamRecommendation?.team_composition_intent === true;
+  const parallelSpawnAllowed = row.parallelSpawnAllowed !== false;
 
   const actionSchemaLines = teamLocked
     ? [
@@ -711,7 +725,7 @@ function buildRouterPrompt(message, context = {}) {
       `    {"type":"need_more_detail","context_set_id":"...","node_ids":["..."],"depth":1,"max_chars":7000},`,
       `    {"type":"get_status","detail":"summary|full"},`,
       `    {"type":"interrupt","mode":"cancel|replan","note":"..."},`,
-      `    {"type":"spawn_agents","summary":"...","scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes"},"agents":[{"agent_id":"...","goal":"...","scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes"},"risk":"L1"}],"max_parallel":2},`,
+      ...(parallelSpawnAllowed ? [`    {"type":"spawn_agents","summary":"...","scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes"},"agents":[{"agent_id":"...","goal":"...","scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes"},"risk":"L1"}],"max_parallel":2},`] : []),
       `    {"type":"open_context","scope":"current|global"},`,
       `    {"type":"summarize","hint":"..."}`
     ]
@@ -736,7 +750,7 @@ function buildRouterPrompt(message, context = {}) {
       `    {"type":"update_agent","agent_id":"...","patch":{"prompt":"...","description":"..."},"format":"json"},`,
       `    {"type":"get_status","detail":"summary|full"},`,
       `    {"type":"interrupt","mode":"cancel|replan","note":"..."},`,
-      `    {"type":"spawn_agents","summary":"...","scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes"},"agents":[{"agent_id":"...","goal":"...","scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes"},"risk":"L1"}],"max_parallel":2},`,
+      ...(parallelSpawnAllowed ? [`    {"type":"spawn_agents","summary":"...","scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes"},"agents":[{"agent_id":"...","goal":"...","scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes"},"risk":"L1"}],"max_parallel":2},`] : []),
       `    {"type":"open_context","scope":"current|global"},`,
       `    {"type":"summarize","hint":"..."}`
     ];
@@ -781,7 +795,9 @@ function buildRouterPrompt(message, context = {}) {
     "- 중단/취소/멈춤 요청은 interrupt를 사용한다.",
     "- 컨텍스트/GoC 링크 요청은 open_context를 사용한다.",
     "- agent를 생성/수정해달라는 요청은 create_agent/update_agent를 사용한다.",
-    "- 병렬/동시 실행 요청이고 @agent가 2개 이상이면 spawn_agents를 고려한다.",
+    parallelSpawnAllowed
+      ? "- 병렬/동시 실행 요청이고 @agent가 2개 이상이면 spawn_agents를 고려한다."
+      : "- 현재 runtime에서는 supervisor runtime/approval 제약으로 spawn_agents를 실행할 수 없다. 병렬 의도도 여러 run_agent 순차 action으로 계획하라.",
     "- 현재 job에서 비활성화된 agent가 명시되면 run_agent 대신 enable_agent를 우선 제안한다.",
     "- provider=chatgpt(planner) run_agent는 기본 금지다.",
     allowChatGPTPlanner
@@ -883,11 +899,16 @@ export async function routeWithSupervisor(message, {
   onGeminiGiveUp = null,
   geminiConcurrencyKey = "",
   geminiModel = "",
+  runtimeTeamSnapshot = null,
 } = {}) {
   const msg = String(message || "").trim();
   const allowChatGPTPlanner = isExplicitChatGptPlannerRequest(msg);
+  const parallelSpawnAllowed = canParallelSpawnInRuntime({
+    runtimeSnapshot: runtimeTeamSnapshot,
+    childCount: 2,
+  });
   const fallback = normalizeActionPlan(
-    fallbackPlan(msg, { agents, tools, jobConfig }),
+    fallbackPlan(msg, { agents, tools, jobConfig, parallelSpawnAllowed }),
     { maxActions: 4 }
   );
 
@@ -910,6 +931,7 @@ export async function routeWithSupervisor(message, {
     contextSummary,
     teamLocked,
     teamInteractionSpec,
+    parallelSpawnAllowed,
   });
 
   try {
@@ -969,9 +991,15 @@ export async function routeWithSupervisor(message, {
       }
       return action;
     });
+    const contractSafe = sanitizeExecutablePlan({
+      plan: {
+        actions: hardened,
+      },
+      runtimeSnapshot: runtimeTeamSnapshot,
+    });
     return {
       reason: normalized.reason || "supervisor route",
-      actions: hardened,
+      actions: Array.isArray(contractSafe?.plan?.actions) ? contractSafe.plan.actions : hardened,
       final_response_style: normalized.final_response_style,
       done: normalized.done === true,
       await_user: normalized.await_user === true,
