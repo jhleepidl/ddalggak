@@ -53,26 +53,51 @@ const SKILL_LABELS = {
   growth_signal_mapping: { label: '성장 신호 추적', detail: '긍정 신호를 정리' },
   investment_synthesis: { label: '투자 결론 정리', detail: '판단 포인트를 한 장으로 정리' },
   portfolio_briefing: { label: '포트폴리오 브리핑', detail: '의사결정 포인트를 짧게 브리핑' },
+  'skill.claim_evidence_audit.v1': { label: '주장-근거 감사', detail: '주장과 근거를 대조해 허점을 찾음' },
+  'skill.context_selection_policy.v1': { label: '문맥 선택 정책', detail: '어떤 context를 볼지 선택 규칙을 세움' },
+  'skill.kr_equity_analysis.v1': { label: '한국 주식 분석', detail: '한국 주식 분석 체크리스트를 적용' },
+  'skill.run_trace_debugging.v1': { label: '런 트레이스 디버깅', detail: 'stalled run과 reroute 문제를 추적' },
+  'skill.telegram_briefing.v1': { label: '텔레그램 브리핑', detail: '짧고 안정적인 채팅 응답 형식으로 정리' },
+  'skill.thread_team_reconciliation.v1': { label: '스레드 팀 동기화', detail: '팀 멤버십과 실행 상태를 안전하게 맞춤' },
+};
+const TOOL_LABELS = {
+  web_search: { label: '웹 검색' },
+  news_scan: { label: '뉴스 스캔' },
+  spreadsheet_reasoning: { label: '스프레드시트 추론' },
+  workspace_fs: { label: '워크스페이스 파일 읽기/쓰기' },
+  code_exec: { label: '코드 실행' },
+  context_graph: { label: 'GoC context 그래프' },
+  conversation_team_store: { label: '대화 팀 저장소' },
+  runtime_trace: { label: '런타임 트레이스' },
+  uploaded_files: { label: '업로드 파일' },
 };
 const GENERIC_AGENT_NAMES = new Set(['generalist researcher','researcher','operator','builder','reviewer','synthesizer','planner','coder','critic','critic_or_reviewer']);
-function inferTaskDomain(text = '') {
+export function inferTaskDomain(text = '') {
   const lower = clean(text).toLowerCase();
   if (/주식|증시|시장|투자|종목|기업|실적|밸류|공시|뉴스|리포트|sector|stock|market|invest|equity|earnings|filing/.test(lower)) return 'investing';
   if (/코드|구현|리팩토|버그|에러|테스트|패치|refactor|code|bug|test|implementation|patch|repo|commit/.test(lower)) return 'engineering';
   if (/법률|계약|규제|compliance|policy|legal/.test(lower)) return 'compliance';
   return 'general';
 }
-function inferAgentSpecialty({ name = '', purpose = '', taskText = '', skills = [] } = {}) {
-  const lower = `${clean(name)} ${clean(purpose)} ${clean(taskText)} ${asArray(skills).join(' ')}`.toLowerCase();
-  if (/bull|낙관|upside|growth/.test(lower)) return 'bull';
-  if (/bear|비관|risk|downside/.test(lower)) return 'bear';
-  if (/news|뉴스|catalyst/.test(lower)) return 'news';
-  if (/filing|공시|dart|financial|실적/.test(lower)) return 'filings';
-  if (/compare|비교|screen|발굴/.test(lower)) return 'compare';
-  if (/review|검토|critic|stress/.test(lower)) return 'review';
-  if (/synth|summary|정리|memo|보고서|final/.test(lower)) return 'synthesis';
-  if (/operator|gate|승인|coord/.test(lower)) return 'ops';
-  if (/code|구현|build|patch/.test(lower)) return 'build';
+export function inferAgentSpecialty({ name = '', purpose = '', taskText = '', skills = [] } = {}) {
+  const local = `${clean(name)} ${clean(purpose)} ${asArray(skills).join(' ')}`.toLowerCase();
+  const global = clean(taskText).toLowerCase();
+  if (/bull|낙관|upside|growth/.test(local)) return 'bull';
+  if (/bear|비관|risk|downside/.test(local)) return 'bear';
+  if (/news|뉴스|catalyst/.test(local)) return 'news';
+  if (/filing|공시|dart|financial|실적/.test(local)) return 'filings';
+  if (/compare|비교|screen|발굴/.test(local)) return 'compare';
+  if (/review|검토|critic|stress/.test(local)) return 'review';
+  if (/synth|summary|정리|memo|보고서|final/.test(local)) return 'synthesis';
+  if (/operator|gate|승인|coord/.test(local)) return 'ops';
+  if (/code|구현|build|patch/.test(local)) return 'build';
+  if (/news|뉴스|catalyst/.test(global)) return 'news';
+  if (/filing|공시|dart|financial|실적/.test(global)) return 'filings';
+  if (/compare|비교|screen|발굴/.test(global)) return 'compare';
+  if (/review|검토|critic|stress/.test(global)) return 'review';
+  if (/synth|summary|정리|memo|보고서|final/.test(global)) return 'synthesis';
+  if (/operator|gate|승인|coord/.test(global)) return 'ops';
+  if (/code|구현|build|patch/.test(global)) return 'build';
   return '';
 }
 function isGenericAgentName(name = '') { return GENERIC_AGENT_NAMES.has(clean(name).toLowerCase()); }
@@ -91,6 +116,15 @@ export function describeSkill(skillId = '') {
 }
 export function formatSkillLabels(skillIds = [], { max = 4, includeDetails = false } = {}) {
   return asArray(skillIds).map((skillId) => describeSkill(skillId)).slice(0, Math.max(1, Number(max) || 4)).map((meta) => includeDetails && meta.detail ? `${meta.label} (${meta.detail})` : meta.label);
+}
+export function describeTool(toolId = '') {
+  const key = cleanId(toolId);
+  const meta = TOOL_LABELS[key];
+  if (meta) return { tool_id: key, ...meta };
+  return { tool_id: key, label: clean(toolId).replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) };
+}
+export function formatToolLabels(toolIds = [], { max = 4 } = {}) {
+  return asArray(toolIds).map((toolId) => describeTool(toolId)).slice(0, Math.max(1, Number(max) || 4)).map((meta) => meta.label);
 }
 export function roleLabel(roleId = '') { return ROLE_LABELS[cleanId(roleId)] || clean(roleId) || '역할 미지정'; }
 export function humanizeExecutionPattern(pattern = '') { return EXECUTION_PATTERN_LABELS[cleanId(pattern)] || clean(pattern) || '미정'; }

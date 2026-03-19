@@ -1,6 +1,11 @@
 import { loadAgents } from '../agents.js';
 import { recommendTeamForTask } from './telegram_route_planning.js';
 import { inferProviderForModel, listSupportedModels, resolveSupportedModel } from '../catalog/model_catalog.js';
+import { SkillRegistry } from './skill_registry.js';
+import { SkillResolver } from './skill_resolver.js';
+import { PresetRegistry } from '../catalog/preset_registry.js';
+import { PresetResolver } from '../control_plane/preset_resolver.js';
+import { interpretTask } from '../control_plane/task_interpreter.js';
 import {
   buildDefaultInteractionSpec,
   buildAgentLocalInteractionContract,
@@ -14,7 +19,10 @@ import {
   buildReadableInteractionLines,
   defaultSkillsForAgent,
   formatSkillLabels,
+  formatToolLabels,
   humanizeModel,
+  inferAgentSpecialty,
+  inferTaskDomain,
   roleLabel,
   shouldAutoRenameAgent,
   suggestAgentDisplayName,
@@ -30,6 +38,305 @@ const COMPOSITION_MODES = new Set(['structured', 'freeform']);
 const PROPOSAL_MODES = new Set(['suggest', 'create', 'refine', 'validate', 'apply']);
 const SUPPORTED_ROLES = new Set(['researcher', 'builder', 'reviewer', 'synthesizer', 'operator']);
 
+let _skillRegistry = null;
+let _presetRegistry = null;
+let _skillResolver = null;
+let _presetResolver = null;
+
+function uniqueIds(values = [], { max = 16 } = {}) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of asArray(values)) {
+    const value = cleanId(raw);
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function tokenize(text = '') {
+  return uniqueIds(clean(text).split(/[^a-z0-9가-힣._-]+/g), { max: 64 });
+}
+
+function overlapScore(left = '', right = '') {
+  const a = new Set(tokenize(left));
+  let score = 0;
+  for (const token of tokenize(right)) {
+    if (a.has(token)) score += 1;
+  }
+  return score;
+}
+
+function getSkillRegistry() {
+  if (!_skillRegistry) {
+    _skillRegistry = new SkillRegistry();
+    _skillRegistry.load?.();
+  }
+  return _skillRegistry;
+}
+
+function getPresetRegistry() {
+  if (!_presetRegistry) {
+    _presetRegistry = new PresetRegistry();
+    _presetRegistry.load?.();
+  }
+  return _presetRegistry;
+}
+
+function getSkillResolver() {
+  if (!_skillResolver) _skillResolver = new SkillResolver({ registry: getSkillRegistry(), maxSkillsPerRole: 3, minScore: 12 });
+  return _skillResolver;
+}
+
+function getPresetResolver() {
+  if (!_presetResolver) _presetResolver = new PresetResolver({ presetRegistry: getPresetRegistry(), registry: loadAgents(), threshold: 18 });
+  return _presetResolver;
+}
+
+function collectAvailableToolIds(runtime = null, registry = null) {
+  const out = [];
+  const rows = runtime && typeof runtime === 'object' ? runtimeCatalog(runtime) : [];
+  for (const row of rows) out.push(...asArray(row.tools));
+  for (const toolId of asArray(runtime?.availableToolIds || runtime?.toolIds || runtime?.tool_ids)) out.push(toolId);
+  const reg = registry && typeof registry === 'object' ? registry : loadAgents();
+  for (const agent of asArray(reg?.agents)) out.push(...asArray(agent?.tools || agent?.tool_ids || agent?.toolIds));
+  for (const template of asArray(reg?.templates)) out.push(...asArray(template?.tools || template?.tool_ids || template?.toolIds));
+  return uniqueIds(out, { max: 32 });
+}
+
+function buildPlanningContext(taskText = '', runtime = null) {
+  const registry = loadAgents();
+  const availableToolIds = collectAvailableToolIds(runtime, registry);
+  const taskInterpretation = interpretTask({
+    goal: taskText,
+    task: taskText,
+    message: taskText,
+    mode: 'run',
+    registry,
+    toolHints: availableToolIds,
+  });
+  return {
+    registry,
+    availableToolIds,
+    taskInterpretation,
+    skillRegistry: getSkillRegistry(),
+    presetRegistry: getPresetRegistry(),
+    skillResolver: getSkillResolver(),
+    presetResolver: getPresetResolver(),
+    taskText,
+  };
+}
+
+function buildFallbackSelectionSlot(agent = {}, planning = {}) {
+  const roleId = normalizeTeamRole(agent.role);
+  const purpose = clean(agent.purpose || planning.taskText || roleId) || roleId;
+  const taskText = clean(planning.taskText);
+  const preferredSkillIds = [];
+  const requiredContextTypes = uniqueIds(agent?.context_policy?.reads?.context_types || agent?.contextPolicy?.reads?.context_types || []);
+  if (roleId === 'operator') preferredSkillIds.push('skill.thread_team_reconciliation.v1', 'skill.context_selection_policy.v1');
+  if (roleId === 'reviewer' && /claim|evidence|citation|fact|투자|주식|공시|뉴스/i.test(`${taskText} ${purpose}`)) preferredSkillIds.push('skill.claim_evidence_audit.v1');
+  if (roleId === 'researcher' && /주식|증시|시장|투자|종목|equity|market|filing|공시|earnings|실적/i.test(`${taskText} ${purpose}`)) preferredSkillIds.push('skill.kr_equity_analysis.v1');
+  if (roleId === 'synthesizer' && /brief|telegram|요약|브리핑/i.test(`${taskText} ${purpose}`)) preferredSkillIds.push('skill.telegram_briefing.v1');
+  if ((roleId === 'reviewer' || roleId === 'operator') && /debug|stalled|queued|reroute|trace|run/i.test(`${taskText} ${purpose}`)) preferredSkillIds.push('skill.run_trace_debugging.v1');
+  return {
+    slot_id: `draft_${cleanId(agent.agent_id || agent.name || roleId) || roleId}`,
+    role_id: roleId,
+    purpose,
+    preferred_skill_ids: uniqueIds(preferredSkillIds),
+    required_skill_ids: [],
+    forbidden_skill_ids: [],
+    required_context_types: requiredContextTypes,
+    required_tool_ids: [],
+    parallelizable: roleId === 'researcher',
+    deliverable_type: roleId === 'builder' ? 'code_patch' : (roleId === 'reviewer' ? 'review_findings' : (roleId === 'synthesizer' ? 'report' : 'research_notes')),
+    selection_reason: 'team_config_fallback_slot',
+  };
+}
+
+function scoreSlotForAgent(slot = {}, agent = {}, taskText = '') {
+  const roleScore = normalizeTeamRole(slot?.role_id || slot?.roleId) === normalizeTeamRole(agent?.role) ? 20 : -20;
+  const semantic = overlapScore(`${taskText} ${agent?.purpose || ''} ${agent?.name || ''}`, `${slot?.purpose || ''} ${(slot?.required_context_types || []).join(' ')} ${(slot?.preferred_skill_ids || []).join(' ')}`);
+  const specialty = inferAgentSpecialty({ name: agent?.name, purpose: agent?.purpose, taskText, skills: agent?.skills || agent?.capabilities || [] });
+  let bonus = 0;
+  const bag = `${slot?.purpose || ''} ${(slot?.required_context_types || []).join(' ')} ${(slot?.preferred_skill_ids || []).join(' ')}`.toLowerCase();
+  if (specialty === 'news' && /news/.test(bag)) bonus += 10;
+  if (specialty === 'filings' && /filing|financial/.test(bag)) bonus += 10;
+  if (specialty === 'review' && /risk|contradiction/.test(bag)) bonus += 8;
+  return roleScore + semantic + bonus;
+}
+
+function matchSelectionSlot(agent = {}, planning = {}) {
+  const candidates = asArray(planning?.taskInterpretation?.candidate_capability_slots);
+  let best = null;
+  for (const slot of candidates) {
+    const score = scoreSlotForAgent(slot, agent, planning.taskText || '');
+    if (!best || score > best.score) best = { slot, score };
+  }
+  if (best && best.score >= 8) return best.slot;
+  return buildFallbackSelectionSlot(agent, planning);
+}
+
+function deriveCapabilityLabels({ role = '', taskText = '', purpose = '', name = '' } = {}) {
+  return uniqueIds(defaultSkillsForAgent({ role, taskText, purpose, name }), { max: 4 });
+}
+
+function resolveAgentExecutionProfile(agent = {}, planning = {}) {
+  const slot = matchSelectionSlot(agent, planning);
+  const presetResult = planning.presetResolver.resolveForSlot({
+    slot,
+    taskInterpretation: planning.taskInterpretation,
+    goal: planning.taskText,
+    registry: planning.registry,
+    availableToolIds: planning.availableToolIds,
+    reusePresetIds: planning.taskInterpretation?.pinned_preset_ids || [],
+  });
+  const preset = presetResult?.preset || null;
+  const skillResult = planning.skillResolver.resolveForRole({
+    roleType: agent.role,
+    goal: planning.taskText,
+    contextHints: [agent.purpose, ...(slot?.required_context_types || [])],
+    taskInterpretation: planning.taskInterpretation,
+    slot,
+    availableToolIds: planning.availableToolIds,
+  });
+  const attachmentIds = uniqueIds([
+    ...asArray(preset?.default_skill_ids),
+    ...asArray(skillResult?.attachments).map((row) => row?.skill_id),
+  ], { max: 6 });
+  const requiredToolIds = [];
+  for (const skillId of attachmentIds) {
+    const skill = planning.skillRegistry.resolve?.(skillId);
+    requiredToolIds.push(...asArray(skill?.required_tools));
+  }
+  const recommendedToolIds = uniqueIds([
+    ...asArray(slot?.required_tool_ids),
+    ...asArray(preset?.selection_features?.tool_hints),
+    ...requiredToolIds,
+  ], { max: 5 });
+  const capabilities = deriveCapabilityLabels({ role: agent.role, taskText: planning.taskText, purpose: agent.purpose, name: agent.name });
+  return {
+    capabilities,
+    attached_skill_ids: attachmentIds,
+    recommended_tool_ids: recommendedToolIds,
+    matched_preset_id: cleanId(preset?.preset_id || ''),
+    matched_preset_name: clean(preset?.display_name || ''),
+    slot,
+  };
+}
+
+function agentSpecialtyKey(agent = {}, taskText = '') {
+  const specialty = inferAgentSpecialty({ name: agent?.name, purpose: agent?.purpose, taskText, skills: [...asArray(agent?.skills), ...asArray(agent?.capabilities), ...asArray(agent?.attached_skill_ids)] });
+  return specialty || normalizeTeamRole(agent?.role);
+}
+
+function shouldKeepRole(roleId = '', taskText = '', planning = null) {
+  const role = normalizeTeamRole(roleId);
+  const hints = inferTaskStructureHints(taskText);
+  const interpretedType = cleanId(planning?.taskInterpretation?.task_type || '');
+  const controlMode = cleanId(planning?.taskInterpretation?.control_mode || '');
+  if (role === 'operator') return /operator|승인|gate|workflow|context|handoff|coord|run state/i.test(taskText) || controlMode === 'supervised' || controlMode === 'checkpointed';
+  if (role === 'builder') return hints.build || interpretedType === 'code_change';
+  return true;
+}
+
+function pruneAgentLineup(agents = [], taskText = '', planning = null) {
+  const kept = [];
+  const researcherKeys = new Set();
+  const singletons = new Set();
+  const allowMultiResearch = planning?.taskInterpretation?.parallelism_preference === 'parallel' || inferTaskStructureHints(taskText).compare;
+  for (const agent of asArray(agents)) {
+    const roleId = normalizeTeamRole(agent.role);
+    if (!shouldKeepRole(roleId, taskText, planning)) continue;
+    if (roleId === 'researcher') {
+      const key = agentSpecialtyKey(agent, taskText);
+      if (researcherKeys.has(key)) continue;
+      researcherKeys.add(key);
+      if (!allowMultiResearch && researcherKeys.size > 2) continue;
+      kept.push(agent);
+      continue;
+    }
+    if (singletons.has(roleId)) continue;
+    singletons.add(roleId);
+    kept.push(agent);
+  }
+  return kept.slice(0, 6);
+}
+
+function enrichAgentDraft(agent = {}, planning = {}) {
+  const executionProfile = resolveAgentExecutionProfile(agent, planning);
+  return {
+    ...agent,
+    capabilities: executionProfile.capabilities,
+    skills: executionProfile.capabilities,
+    attached_skill_ids: executionProfile.attached_skill_ids,
+    recommended_tool_ids: executionProfile.recommended_tool_ids,
+    matched_preset_id: executionProfile.matched_preset_id || undefined,
+    matched_preset_name: executionProfile.matched_preset_name || undefined,
+    planning_slot: executionProfile.slot,
+  };
+}
+
+function buildStructuredAgentDrafts({ taskText = '', runtime = null } = {}) {
+  const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
+  const recommendation = recommendTeamForTask(taskText, effectiveRuntime);
+  const planning = buildPlanningContext(taskText, effectiveRuntime);
+  const selectedExisting = asArray(recommendation?.selected_existing_agents).map((entry) => {
+    const runtimeAgent = findCatalogAgent(effectiveRuntime, entry.agent_id) || {};
+    return {
+      agent_id: cleanId(entry.agent_id),
+      name: clean(entry.name || runtimeAgent.name || entry.agent_id),
+      role: normalizeTeamRole(runtimeAgent.role || runtimeAgent.system_key || entry.role || 'researcher'),
+      model: resolveSupportedModel(runtimeAgent.model || '') || defaultModelForRole(runtimeAgent.role || entry.role, runtimeAgent.provider),
+      purpose: clean(entry.why || runtimeAgent.description || ''),
+      skills: asArray(runtimeAgent.skills).map((skill) => cleanId(skill?.id || skill)),
+      provider: cleanId(runtimeAgent.provider || inferProviderForModel(runtimeAgent.model || '') || ''),
+    };
+  });
+  const reuseBuckets = new Map();
+  for (const row of selectedExisting) {
+    const roleId = normalizeTeamRole(row.role);
+    const bucket = reuseBuckets.get(roleId) || [];
+    bucket.push(row);
+    reuseBuckets.set(roleId, bucket);
+  }
+  const drafts = [];
+  const seen = new Set();
+  const slots = asArray(planning.taskInterpretation?.candidate_capability_slots);
+  for (const [index, slot] of slots.entries()) {
+    const roleId = normalizeTeamRole(slot?.role_id || slot?.roleId);
+    const bucket = reuseBuckets.get(roleId) || [];
+    const reused = bucket.shift();
+    if (bucket.length === 0) reuseBuckets.delete(roleId); else reuseBuckets.set(roleId, bucket);
+    const draft = reused
+      ? agentDraft({
+          name: reused.name,
+          role: reused.role,
+          model: reused.model,
+          purpose: clean(slot?.purpose || reused.purpose || taskText),
+          skills: reused.skills,
+          provider: reused.provider,
+        }, { seen, taskText, index: index + 1 })
+      : agentDraft({
+          name: roleId,
+          role: roleId,
+          model: defaultModelForRole(roleId),
+          purpose: clean(slot?.purpose || taskText),
+          provider: '',
+        }, { seen, taskText, index: index + 1 });
+    drafts.push(enrichAgentDraft(draft, planning));
+  }
+  return pruneAgentLineup(drafts, taskText, planning);
+}
+
+function buildFreeformAgentDrafts({ taskText = '', runtime = null, blueprints = [], structuredAgents = [] } = {}) {
+  const seen = new Set();
+  const planning = buildPlanningContext(taskText, runtime);
+  const covered = ensureFreeformBlueprintCoverage(blueprints, taskText, structuredAgents);
+  const drafts = covered.map((item, index) => enrichAgentDraft(agentDraft(item, { seen, taskText, index: index + 1 }), planning));
+  return pruneAgentLineup(drafts, taskText, planning);
+}
 
 function normalizeTeamRole(raw = '') {
   const value = cleanId(raw);
@@ -45,6 +352,12 @@ function normalizeCompositionMode(raw = '', fallback = 'structured') {
   const value = cleanId(raw);
   if (COMPOSITION_MODES.has(value)) return value;
   return COMPOSITION_MODES.has(cleanId(fallback)) ? cleanId(fallback) : 'structured';
+}
+
+function shouldAutoRewritePurposeText(text = '') {
+  const value = clean(text);
+  if (!value) return false;
+  return /^(research the task and gather supporting evidence|collect evidence to validate claims|assemble upstream findings into a concise final output|stress-test claims, risks, and quality before final output|coordinate workflow, runtime state, and tool-heavy execution details|implement the requested code or artifact changes|review the implementation for regressions and missing tests|gather upstream evidence needed before implementation|collect filing-based evidence)$/i.test(value);
 }
 
 function normalizeProposalMode(raw = '', fallback = 'suggest') {
@@ -400,7 +713,7 @@ function agentDraft({ name = '', role = 'researcher', model = '', purpose = '', 
   const cleanRole = normalizeTeamRole(role);
   const proposedName = suggestAgentDisplayName({ name, role: cleanRole, purpose, taskText, skills, index }) || cleanRole.replace(/^./, (c) => c.toUpperCase());
   const displayName = ensureUniqueDisplayName(proposedName, seen.__displayNames || (seen.__displayNames = new Set()));
-  const resolvedPurpose = autoPurposeForAgent({ role: cleanRole, purpose, taskText, name: displayName, skills });
+  const resolvedPurpose = autoPurposeForAgent({ role: cleanRole, purpose: shouldAutoRewritePurposeText(purpose) ? '' : purpose, taskText, name: displayName, skills });
   const resolvedSkills = asArray(skills).map((skill) => cleanId(skill)).filter(Boolean).length > 0
     ? asArray(skills).map((skill) => cleanId(skill)).filter(Boolean)
     : skillsForRole(cleanRole, { taskText, agentName: displayName, purpose: resolvedPurpose });
@@ -563,7 +876,10 @@ export function buildTeamConfigurationTemplate(team = {}) {
       role: cleanId(agent.role || agent.role_id || agent.roleId),
       model: clean(agent.model),
       purpose: clean(agent.purpose),
-      skills: asArray(agent.skills).map((entry) => cleanId(entry)),
+      capabilities: uniqueIds(agent.capabilities || []),
+      skills: uniqueIds(agent.skills || []),
+      attached_skill_ids: uniqueIds(agent.attached_skill_ids || agent.attachedSkillIds || []),
+      recommended_tool_ids: uniqueIds(agent.recommended_tool_ids || agent.recommendedToolIds || []),
       context_policy: normalizeContextPolicy(agent.context_policy || agent.contextPolicy, {
         role: agent.role,
         taskText: row.task_brief || row.taskBrief || row.task || '',
@@ -589,22 +905,33 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
     const role = normalizeTeamRole(entry.role || entry.role_id || runtimeAgent.role || runtimeAgent.system_key || agentId);
     const model = resolveSupportedModel(entry.model || runtimeAgent.model || '') || defaultModelForRole(role, runtimeAgent.provider || entry.provider);
     const rawName = clean(entry.name || runtimeAgent.name || agentId);
-    const rawPurpose = clean(entry.purpose || runtimeAgent.description || '');
+    const rawPurpose = shouldAutoRewritePurposeText(entry.purpose || runtimeAgent.description || '') ? '' : clean(entry.purpose || runtimeAgent.description || '');
     const autoRenamed = autoRenameGenericNames && shouldAutoRenameAgent(rawName);
     const suggestedName = autoRenamed ? suggestAgentDisplayName({ name: rawName, role, purpose: rawPurpose, taskText: taskBrief, skills: entry.skills, index: index + 1 }) : rawName;
     const name = autoRenamed ? ensureUniqueDisplayName(suggestedName, seenDisplayNames) : suggestedName;
     if (!autoRenamed) seenDisplayNames.add(cleanId(name));
     interactionAliasMap.set(cleanId(rawName), name);
     interactionAliasMap.set(agentId, name);
-    const purpose = autoPurposeForAgent({ role, purpose: rawPurpose, taskText: taskBrief, name, skills: entry.skills });
-    const resolvedSkills = asArray(entry.skills).map((skill) => cleanId(skill)).filter(Boolean);
+    const rawCapabilityLabels = uniqueIds(entry.capabilities || entry.skill_labels || []);
+    const rawSkills = uniqueIds(entry.skills || []);
+    const rawAttachedSkillIds = uniqueIds(entry.attached_skill_ids || entry.attachedSkillIds || rawSkills.filter((skillId) => String(skillId || '').trim().toLowerCase().startsWith('skill.')));
+    const capabilityLabels = rawCapabilityLabels.length > 0
+      ? rawCapabilityLabels
+      : uniqueIds(rawSkills.filter((skillId) => !String(skillId || '').trim().toLowerCase().startsWith('skill.')));
+    const purpose = autoPurposeForAgent({ role, purpose: rawPurpose, taskText: taskBrief, name, skills: capabilityLabels });
+    const resolvedCapabilities = capabilityLabels.length > 0 ? capabilityLabels : skillsForRole(role, { taskText: taskBrief, agentName: name, purpose });
     return {
       agent_id: agentId,
       name,
       role,
       model: model || '',
       purpose,
-      skills: resolvedSkills.length > 0 ? resolvedSkills : skillsForRole(role, { taskText: taskBrief, agentName: name, purpose }),
+      capabilities: resolvedCapabilities,
+      skills: resolvedCapabilities,
+      attached_skill_ids: rawAttachedSkillIds,
+      recommended_tool_ids: uniqueIds(entry.recommended_tool_ids || entry.recommendedToolIds || []),
+      matched_preset_id: cleanId(entry.matched_preset_id || entry.matchedPresetId || '' ) || undefined,
+      matched_preset_name: clean(entry.matched_preset_name || entry.matchedPresetName || '' ) || undefined,
       provider: cleanId(entry.provider || runtimeAgent.provider || inferProviderForModel(model) || ''),
       context_policy: normalizeContextPolicy(entry.context_policy || entry.contextPolicy, { role, taskText: taskBrief, purpose }),
       source_agent: runtimeAgent,
@@ -632,20 +959,7 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
 
 export function suggestTeamConfiguration({ taskText = '', runtime = null } = {}) {
   const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
-  const recommendation = recommendTeamForTask(taskText, effectiveRuntime);
-  const selected = asArray(recommendation?.selected_existing_agents).map((entry) => {
-    const runtimeAgent = findCatalogAgent(effectiveRuntime, entry.agent_id) || {};
-    return {
-      agent_id: cleanId(entry.agent_id),
-      name: clean(entry.name || runtimeAgent.name || entry.role || entry.agent_id),
-      role: normalizeTeamRole(entry.role || runtimeAgent.role || runtimeAgent.system_key || 'researcher'),
-      model: resolveSupportedModel(runtimeAgent.model || '') || defaultModelForRole(entry.role, runtimeAgent.provider),
-      purpose: clean(entry.why || ''),
-      skills: asArray(runtimeAgent.skills).map((skill) => cleanId(skill?.id || skill)),
-      provider: cleanId(runtimeAgent.provider || inferProviderForModel(runtimeAgent.model || '') || ''),
-    };
-  });
-  const agents = selected.length > 0 ? selected : defaultAgentsFromCatalog(effectiveRuntime, taskText);
+  const agents = buildStructuredAgentDrafts({ taskText, runtime: effectiveRuntime });
   const interactionSpec = buildDefaultInteractionSpec(agents, { task: taskText });
   return normalizeTeamConfig({
     team_name: clean(taskText).slice(0, 36).replace(/\s+/g, '_') || 'team_config',
@@ -655,6 +969,7 @@ export function suggestTeamConfiguration({ taskText = '', runtime = null } = {})
     lock_after_apply: true,
     agents,
     interaction_spec: interactionSpec,
+    shortcut_policy: buildDefaultShortcutPolicy(),
     status: 'suggested',
     task_brief: taskText,
     design_prompt: taskText,
@@ -664,14 +979,13 @@ export function suggestTeamConfiguration({ taskText = '', runtime = null } = {})
 export function createFreeformTeamConfiguration({ description = '', runtime = null } = {}) {
   const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
   const taskText = clean(description);
-  const seen = new Set();
   const structuredFallback = suggestTeamConfiguration({ taskText, runtime: effectiveRuntime });
-  const blueprints = ensureFreeformBlueprintCoverage(
-    inferFreeformAgentBlueprints(taskText),
+  const agents = buildFreeformAgentDrafts({
     taskText,
-    asArray(structuredFallback?.agents)
-  );
-  const agents = blueprints.map((item, index) => agentDraft(item, { seen, taskText, index: index + 1 }));
+    runtime: effectiveRuntime,
+    blueprints: inferFreeformAgentBlueprints(taskText),
+    structuredAgents: asArray(structuredFallback?.agents),
+  });
   const interactionSpec = parseNaturalLanguageInteractionPatch(taskText, {
     current: buildDefaultInteractionSpec(agents, { task: taskText }),
     agentRoster: agents.map((agent) => ({ name: agent.name })),
@@ -728,7 +1042,7 @@ export function refineTeamConfiguration(team = {}, instruction = '', { runtime =
   next.proposal_mode = 'refine';
   next.status = 'suggested';
   next.updated_at = nowIso();
-  return next;
+  return normalizeTeamConfig(next, { runtime: fallbackRuntime });
 }
 
 export function parseTeamTemplate(raw = '') {
@@ -776,7 +1090,11 @@ export async function syncTeamConfigurationToConversationStore({ runtime = null,
       configured_model: agent.model,
       configured_role: agent.role,
       configured_provider: cleanId(agent.provider || inferProviderForModel(agent.model) || ''),
-      attached_skills: asArray(agent.skills)
+      capabilities: uniqueIds(agent.capabilities || agent.skills || []),
+      recommended_tool_ids: uniqueIds(agent.recommended_tool_ids || agent.recommendedToolIds || []),
+      matched_preset_id: cleanId(agent.matched_preset_id || agent.matchedPresetId || '' ) || undefined,
+      matched_preset_name: clean(agent.matched_preset_name || agent.matchedPresetName || '' ) || undefined,
+      attached_skills: uniqueIds(agent.attached_skill_ids || agent.attachedSkillIds || agent.skills || [])
         .map((skillId) => ({ skill_id: cleanId(skillId), selected_by: 'team_config' }))
         .filter((entry) => entry.skill_id),
       context_policy: normalizeContextPolicy(agent.context_policy || agent.contextPolicy, {
@@ -874,7 +1192,10 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       model: clean(configAgent.model || base.model),
       provider: cleanId(configAgent.provider || base.provider || inferProviderForModel(configAgent.model || base.model || '') || ''),
       configured_model: clean(configAgent.model || base.model),
-      skills: asArray(configAgent.skills).length > 0 ? asArray(configAgent.skills) : asArray(base.skills),
+      capabilities: uniqueIds(configAgent.capabilities || configAgent.skills || []),
+      skills: asArray(configAgent.capabilities || configAgent.skills).length > 0 ? uniqueIds(configAgent.capabilities || configAgent.skills) : asArray(base.skills),
+      attached_skill_ids: uniqueIds(configAgent.attached_skill_ids || configAgent.attachedSkillIds || []),
+      recommended_tool_ids: uniqueIds(configAgent.recommended_tool_ids || configAgent.recommendedToolIds || []),
       interaction_contract: buildAgentLocalInteractionContract(team.interaction_spec, clean(configAgent.name || base.name || configAgent.agent_id)),
       prompt: clean(base.prompt || configAgent.prompt || ''),
       context_policy: normalizeContextPolicy(configAgent.context_policy || configAgent.contextPolicy, {
@@ -894,7 +1215,9 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       role_id: merged.role,
       provider: cleanId(merged.provider || inferProviderForModel(merged.model) || ''),
       model: merged.model,
-      attached_skill_ids: asArray(merged.skills),
+      attached_skill_ids: uniqueIds(merged.attached_skill_ids || merged.attachedSkillIds || merged.skills),
+      capability_tags: uniqueIds(merged.capabilities || merged.skills),
+      recommended_tool_ids: uniqueIds(merged.recommended_tool_ids || merged.recommendedToolIds || []),
       assigned_goal: clean(configAgent.purpose),
       interaction_contract: merged.interaction_contract,
       context_policy: merged.context_policy,
@@ -930,12 +1253,16 @@ export function buildTeamListMessage(teamState = {}) {
     '',
     'Agents',
     ...asArray(active.agents).flatMap((agent, index) => {
-      const skillLabels = formatSkillLabels(agent.skills, { max: 3 });
+      const capabilityLabels = formatSkillLabels(agent.capabilities || agent.skills, { max: 3 });
+      const packageLabels = formatSkillLabels(agent.attached_skill_ids || [], { max: 3 });
+      const toolLabels = formatToolLabels(agent.recommended_tool_ids || [], { max: 3 });
       return [
         `${index + 1}. ${agent.name} · ${roleLabel(agent.role)}`,
         `   - 맡은 일: ${clean(agent.purpose) || '설명 없음'}`,
-        `   - 주력 skill: ${skillLabels.join(', ') || '(none)'}`,
-        `   - 모델: ${humanizeModel(agent.provider || inferProviderForModel(agent.model || ''), agent.model)}`,
+        `   - 주력 역량: ${capabilityLabels.join(', ') || '(none)'}`,
+        `   - 실행 skill: ${packageLabels.join(', ') || '(none)'}`,
+        `   - 추천 tool: ${toolLabels.join(', ') || '(none)'}`,
+        `   - 모델: ${humanizeModel(agent.provider || inferProviderForModel(agent.model || ''), agent.model)}` + (agent.matched_preset_name ? ` · preset=${agent.matched_preset_name}` : ''),
       ];
     }),
     '',
@@ -956,12 +1283,16 @@ export function formatTeamProposalMessage(team = {}) {
     '',
     'Agents',
     ...asArray(row.agents).flatMap((agent, index) => {
-      const skillLabels = formatSkillLabels(agent.skills, { max: 3 });
+      const capabilityLabels = formatSkillLabels(agent.capabilities || agent.skills, { max: 3 });
+      const packageLabels = formatSkillLabels(agent.attached_skill_ids || [], { max: 3 });
+      const toolLabels = formatToolLabels(agent.recommended_tool_ids || [], { max: 3 });
       return [
         `${index + 1}. ${agent.name} · ${roleLabel(agent.role)}`,
         `   - 맡은 일: ${clean(agent.purpose) || '설명 없음'}`,
-        `   - 주력 skill: ${skillLabels.join(', ') || '(none)'}`,
-        `   - 모델: ${humanizeModel(agent.provider || inferProviderForModel(agent.model || ''), agent.model)}`,
+        `   - 주력 역량: ${capabilityLabels.join(', ') || '(none)'}`,
+        `   - 실행 skill: ${packageLabels.join(', ') || '(none)'}`,
+        `   - 추천 tool: ${toolLabels.join(', ') || '(none)'}`,
+        `   - 모델: ${humanizeModel(agent.provider || inferProviderForModel(agent.model || ''), agent.model)}` + (agent.matched_preset_name ? ` · preset=${agent.matched_preset_name}` : ''),
       ];
     }),
     '',

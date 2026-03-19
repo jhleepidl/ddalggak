@@ -20,8 +20,8 @@ test('freeform create uses freeform composition mode and custom agents', () => {
   const team = createFreeformTeamConfiguration({ description: '낙관론 분석가와 비관론 분석가를 두고 reviewer가 비교한 뒤 synthesizer가 최종 메모를 작성해줘' });
   assert.equal(team.composition_mode, 'freeform');
   assert.equal(team.proposal_mode, 'create');
-  assert.ok(team.agents.some((agent) => /bull analyst/i.test(agent.name)));
-  assert.ok(team.agents.some((agent) => /bear analyst/i.test(agent.name)));
+  assert.ok(team.agents.some((agent) => /상승|bull/i.test(`${agent.name} ${agent.purpose}`)));
+  assert.ok(team.agents.some((agent) => /리스크|비관|bear/i.test(`${agent.name} ${agent.purpose}`)));
   assert.equal(team.interaction_spec.execution_pattern, 'parallel_research_then_review_then_synthesize');
 });
 
@@ -63,7 +63,7 @@ test('freeform create generates readable agent names and display-friendly propos
   const message = formatTeamProposalMessage(team);
   assert.match(message, /Agents/);
   assert.match(message, /맡은 일:/);
-  assert.match(message, /주력 skill:/);
+  assert.match(message, /주력 역량:/);
   assert.match(message, /Interaction/);
   assert.match(message, /흐름:/);
   assert.doesNotMatch(message, /skills=/);
