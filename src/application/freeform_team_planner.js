@@ -26,16 +26,8 @@ export function resetFreeformPlannerAvailabilityCache() {
   codexAvailabilityCache = null;
 }
 
-function resolvePlannerMode(envKey = 'TEAM_CREATE_PLANNER_MODE') {
-  return cleanId(process.env[envKey] || process.env.TEAM_CREATE_PLANNER_MODE || 'auto');
-}
-
-function resolvePlannerModel(envKey = 'TEAM_CREATE_PLANNER_MODEL') {
-  return clean(process.env[envKey] || process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4') || 'gpt-5.4';
-}
-
-export function isCodexPlannerEnabled(envKey = 'TEAM_CREATE_PLANNER_MODE') {
-  const mode = resolvePlannerMode(envKey);
+export function isCodexPlannerEnabled() {
+  const mode = cleanId(process.env.TEAM_CREATE_PLANNER_MODE || 'auto');
   if (mode === 'off' || mode === 'disabled' || mode === 'false' || mode === '0') return false;
   if (mode === 'on' || mode === 'enabled' || mode === 'true' || mode === '1' || mode === 'codex') return true;
   if (codexAvailabilityCache !== null) return codexAvailabilityCache;
@@ -117,6 +109,7 @@ function buildPlannerPrompt({
     '- if the user asks for opposing views, counterarguments, debate, discussion, devil\'s advocate, or back-and-forth, DO NOT collapse to a single generalist researcher',
     '- if multiple upstream agents exist, include a synthesizer unless the user explicitly rejects it',
     '- prefer existing executable skill ids from the registry for attached_skill_ids',
+    '- do not attach irrelevant domain-specific skills (for example KR equity analysis) unless the request actually targets that domain',
     '- when the registry does not fully cover the task, create generated_skill_briefs as inline non-executable protocols',
     '- choose models only from the supported model list',
     '- reviewer and synthesizer should usually prefer gpt-5.4; builder should usually prefer gpt-5-codex; researchers usually prefer gemini-2.5-pro unless the task requires heavier reasoning',
@@ -156,6 +149,104 @@ function buildPlannerPrompt({
     '}',
     '',
     `User request: ${clean(taskText)}`,
+    '',
+    `Supported models: ${models.join(', ')}`,
+    `Available tools: ${asArray(availableToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 24).join(', ') || '(none listed)'}`,
+    '',
+    `Runtime catalog: ${JSON.stringify(catalog)}`,
+    `Skill registry sample: ${JSON.stringify(skills)}`,
+    `Preset registry sample: ${JSON.stringify(presets)}`,
+  ].join('\n');
+}
+
+
+function summarizeTeamForPlanner(team = null) {
+  const row = asObject(team);
+  return {
+    team_name: clean(row.team_name || row.teamName || ''),
+    task_brief: clean(row.task_brief || row.taskBrief || row.task || row.design_prompt || row.designPrompt || ''),
+    agents: asArray(row.agents).map((agent) => ({
+      name: clean(agent?.name),
+      role: cleanId(agent?.role || agent?.role_id || agent?.roleId || 'researcher') || 'researcher',
+      purpose: clean(agent?.purpose),
+      model: clean(agent?.model),
+      provider: cleanId(agent?.provider || ''),
+      capabilities: asArray(agent?.capabilities || agent?.skills).map((entry) => clean(entry)).filter(Boolean).slice(0, 5),
+      attached_skill_ids: asArray(agent?.attached_skill_ids || agent?.attachedSkillIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 6),
+      generated_skill_briefs: asArray(agent?.generated_skill_briefs || agent?.generatedSkillBriefs).map((entry) => ({
+        label: clean(entry?.label || entry?.name || entry?.title),
+        goal: clean(entry?.goal || entry?.objective || entry?.description),
+      })).filter((entry) => entry.label).slice(0, 3),
+      recommended_tool_ids: asArray(agent?.recommended_tool_ids || agent?.recommendedToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 6),
+    })).filter((agent) => agent.name),
+    interaction_spec: asObject(row.interaction_spec || row.interactionSpec),
+    shortcut_policy: asObject(row.shortcut_policy || row.shortcutPolicy),
+  };
+}
+
+function buildRefinementPlannerPrompt({
+  currentTeam = null,
+  instruction = '',
+  runtime = null,
+  availableToolIds = [],
+  skillRegistry = null,
+  presetRegistry = null,
+} = {}) {
+  const catalog = summarizeRuntimeAgents(runtime);
+  const skills = summarizeSkills(skillRegistry);
+  const presets = summarizePresets(presetRegistry);
+  const models = listSupportedModels().map((row) => clean(row.id)).filter(Boolean);
+  const current = summarizeTeamForPlanner(currentTeam);
+  return [
+    'You are refining an existing ddalggak multi-agent team.',
+    'Return JSON only. No markdown. No commentary outside JSON.',
+    'Goal: update the current team in response to the refinement instruction while preserving useful existing agents and revising both agent roster and interaction design when necessary.',
+    '',
+    'Refinement rules:',
+    '- return the full next team, not a patch',
+    '- preserve existing strong agents unless the instruction clearly asks to remove or replace them',
+    '- if the user asks for coding, notebook work, IPython, Jupyter, implementation, or a Coder Agent, include a builder agent with a concrete coding/notebook purpose',
+    '- consider interaction_spec as first-class: update handoffs, execution_pattern, and final_answer_owner when the refinement implies a new workflow',
+    '- if multiple upstream agents remain, keep or add a synthesizer unless the user rejects it',
+    '- prefer existing executable skill ids from the registry for attached_skill_ids',
+    '- do not attach irrelevant domain-specific skills (for example KR equity analysis) unless the refinement actually asks for that domain',
+    '- when the registry does not fully cover the task, create generated_skill_briefs as inline non-executable protocols',
+    '- choose models only from the supported model list',
+    '',
+    'Output schema:',
+    '{',
+    '  "team_name": "...",',
+    '  "reasoning_summary": ["..."],',
+    '  "agents": [',
+    '    {',
+    '      "name": "...",',
+    '      "role": "researcher|builder|reviewer|synthesizer|operator",',
+    '      "purpose": "...",',
+    '      "model": "...",',
+    '      "provider": "gemini|codex|chatgpt",',
+    '      "capabilities": ["human-readable capability labels"],',
+    '      "attached_skill_ids": ["skill...."],',
+    '      "generated_skill_briefs": [{"label":"...","goal":"...","checklist":["...","..."]}],',
+    '      "recommended_tool_ids": ["..."],',
+    '      "context_policy": {',
+    '        "reads": {"grants": ["shared_summary"], "context_types": ["evidence"], "query_template": "..."},',
+    '        "writes": {"private_targets": ["scratch"], "publish_targets": ["handoff_summary"]},',
+    '        "can_request_grants": ["conversation_tail"],',
+    '        "default_budget": {"soft_tokens": 1600, "hard_tokens": 2600}',
+    '      }',
+    '    }',
+    '  ],',
+    '  "interaction_spec": {',
+    '    "execution_pattern": "parallel_research_then_review_then_synthesize|multi_research_adjudication|sequential_pipeline|builder_reviewer_loop",',
+    '    "final_answer_owner": "agent name",',
+    '    "handoffs": [{"from":"...","to":"...","payload":"summary_plus_key_evidence"}],',
+    '    "policies": {"reviewer_visibility":"...","synthesizer_visibility":"...","builder_direct_response":false}',
+    '  },',
+    '  "shortcut_policy": {"enabled": true, "only_for_followups": true}',
+    '}',
+    '',
+    `Current team: ${JSON.stringify(current)}`,
+    `Refinement instruction: ${clean(instruction)}`,
     '',
     `Supported models: ${models.join(', ')}`,
     `Available tools: ${asArray(availableToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 24).join(', ') || '(none listed)'}`,
@@ -212,67 +303,6 @@ function normalizePlannerPlan(raw = {}) {
   };
 }
 
-
-function summarizeCurrentTeam(currentTeam = null) {
-  const team = asObject(currentTeam);
-  return {
-    team_name: clean(team.team_name || team.teamName || ''),
-    task_brief: clean(team.task_brief || team.taskBrief || team.task || ''),
-    composition_mode: cleanId(team.composition_mode || team.compositionMode || ''),
-    proposal_mode: cleanId(team.proposal_mode || team.proposalMode || ''),
-    agents: asArray(team.agents).map((agent) => ({
-      agent_id: cleanId(agent?.agent_id || agent?.agentId || agent?.id || ''),
-      name: clean(agent?.name || agent?.display_name || ''),
-      role: cleanId(agent?.role || agent?.role_id || agent?.roleId || 'researcher') || 'researcher',
-      purpose: clean(agent?.purpose || ''),
-      model: clean(agent?.model || ''),
-      provider: cleanId(agent?.provider || ''),
-      capabilities: asArray(agent?.capabilities || agent?.skills).map((entry) => clean(entry)).filter(Boolean).slice(0, 6),
-      attached_skill_ids: asArray(agent?.attached_skill_ids || agent?.attachedSkillIds || []).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 6),
-      generated_skill_briefs: normalizeGeneratedSkillBriefs(agent?.generated_skill_briefs || agent?.generatedSkillBriefs || []),
-      recommended_tool_ids: asArray(agent?.recommended_tool_ids || agent?.recommendedToolIds || []).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 6),
-      context_policy: asObject(agent?.context_policy || agent?.contextPolicy),
-    })),
-    interaction_spec: asObject(team.interaction_spec || team.interactionSpec),
-    shortcut_policy: asObject(team.shortcut_policy || team.shortcutPolicy),
-  };
-}
-
-function buildRefinementPlannerPrompt({
-  currentTeam = null,
-  instruction = '',
-  runtime = null,
-  availableToolIds = [],
-  skillRegistry = null,
-  presetRegistry = null,
-} = {}) {
-  const basePrompt = buildPlannerPrompt({
-    taskText: clean(instruction),
-    runtime,
-    availableToolIds,
-    skillRegistry,
-    presetRegistry,
-  });
-  const summarizedTeam = summarizeCurrentTeam(currentTeam);
-  return [
-    basePrompt,
-    '',
-    'You are revising an EXISTING team proposal, not creating from scratch unless the instruction clearly demands a full redesign.',
-    'Revise the full team configuration so that it respects the user refinement instruction.',
-    'Important refinement rules:',
-    '- preserve good existing agents unless the instruction clearly implies removal or replacement',
-    '- consider BOTH agent lineup changes and interaction changes',
-    '- if the instruction asks for debate, opposition, counterargument, rebuttal, adjudication, or discussion, update interaction_spec and handoffs accordingly',
-    '- if the instruction asks for a simpler team, you may remove agents and simplify handoffs',
-    '- if the instruction asks for a new specialist, add that agent and reflect the new handoffs',
-    '- final_answer_owner must remain executable and must reference a real agent name in the revised roster',
-    '- return the FULL revised team, not a patch',
-    '',
-    `Current team: ${JSON.stringify(summarizedTeam)}`,
-    `Refinement instruction: ${clean(instruction)}`,
-  ].join('\n');
-}
-
 export async function planFreeformTeamWithCodex({
   taskText = '',
   runtime = null,
@@ -292,7 +322,7 @@ export async function planFreeformTeamWithCodex({
       cwd: workspaceRoot,
       prompt,
       jobId: 'team-create-planner',
-      model: resolvePlannerModel('TEAM_CREATE_PLANNER_MODEL'),
+      model: process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4',
     });
   } catch (error) {
     return { ok: false, reason: `planner_exec_exception:${String(error?.message || error)}` };
@@ -313,12 +343,13 @@ export async function planFreeformTeamWithCodex({
     plan: normalized,
     planner_metadata: {
       planner_type: 'codex_cli',
-      planner_model: resolvePlannerModel('TEAM_CREATE_PLANNER_MODEL'),
+      planner_model: clean(process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4') || 'gpt-5.4',
       planning_source: 'codex_gpt_5_4',
       reasoning_summary: normalized.reasoning_summary,
     },
   };
 }
+
 
 export async function planTeamRefinementWithCodex({
   currentTeam = null,
@@ -329,7 +360,7 @@ export async function planTeamRefinementWithCodex({
   presetRegistry = null,
   workspaceRoot = process.cwd(),
 } = {}) {
-  if (!isCodexPlannerEnabled('TEAM_REFINE_PLANNER_MODE')) {
+  if (!isCodexPlannerEnabled()) {
     return { ok: false, reason: 'planner_disabled_or_codex_unavailable' };
   }
   const prompt = buildRefinementPlannerPrompt({ currentTeam, instruction, runtime, availableToolIds, skillRegistry, presetRegistry });
@@ -340,7 +371,7 @@ export async function planTeamRefinementWithCodex({
       cwd: workspaceRoot,
       prompt,
       jobId: 'team-refine-planner',
-      model: resolvePlannerModel('TEAM_REFINE_PLANNER_MODEL'),
+      model: process.env.TEAM_REFINE_PLANNER_MODEL || process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4',
     });
   } catch (error) {
     return { ok: false, reason: `planner_exec_exception:${String(error?.message || error)}` };
@@ -361,10 +392,9 @@ export async function planTeamRefinementWithCodex({
     plan: normalized,
     planner_metadata: {
       planner_type: 'codex_cli',
-      planner_model: resolvePlannerModel('TEAM_REFINE_PLANNER_MODEL'),
+      planner_model: clean(process.env.TEAM_REFINE_PLANNER_MODEL || process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4') || 'gpt-5.4',
       planning_source: 'codex_gpt_5_4_refine',
       reasoning_summary: normalized.reasoning_summary,
     },
   };
 }
-

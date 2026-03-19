@@ -2,7 +2,7 @@ import { loadAgents } from '../agents.js';
 import { recommendTeamForTask } from './telegram_route_planning.js';
 import { inferProviderForModel, listSupportedModels, resolveSupportedModel } from '../catalog/model_catalog.js';
 import { SkillRegistry } from './skill_registry.js';
-import { SkillResolver } from './skill_resolver.js';
+import { SkillResolver, scoreSkillForTask } from './skill_resolver.js';
 import { PresetRegistry } from '../catalog/preset_registry.js';
 import { PresetResolver } from '../control_plane/preset_resolver.js';
 import { interpretTask } from '../control_plane/task_interpreter.js';
@@ -183,6 +183,93 @@ function deriveCapabilityLabels({ role = '', taskText = '', purpose = '', name =
   return uniqueIds(defaultSkillsForAgent({ role, taskText, purpose, name }), { max: 4 });
 }
 
+
+function roleAliasesForSkillCompatibility(role = '') {
+  const roleId = normalizeTeamRole(role);
+  const aliases = new Set([cleanId(role), roleId]);
+  if (roleId === 'synthesizer') {
+    aliases.add('writer');
+    aliases.add('summarizer');
+    aliases.add('messenger');
+    aliases.add('planner');
+  }
+  if (roleId === 'operator') {
+    aliases.add('planner');
+    aliases.add('context_curator');
+  }
+  if (roleId === 'builder') aliases.add('coder');
+  if (roleId === 'reviewer') {
+    aliases.add('critic');
+    aliases.add('critic_or_reviewer');
+    aliases.add('verifier');
+  }
+  if (roleId === 'researcher') aliases.add('planner');
+  return aliases;
+}
+
+function isSkillCompatibleWithAgentRole(skill = {}, role = '') {
+  const compatibleRoles = uniqueIds(asArray(skill?.compatible_roles || skill?.compatibleRoles || []), { max: 12 });
+  if (compatibleRoles.length === 0) return true;
+  const aliases = roleAliasesForSkillCompatibility(role);
+  return compatibleRoles.some((entry) => aliases.has(cleanId(entry)));
+}
+
+function hasExplicitSkillDomainMatch(skillId = '', text = '') {
+  const haystack = clean(text).toLowerCase();
+  if (!haystack) return false;
+  if (skillId === 'skill.kr_equity_analysis.v1') return /주식|증시|코스피|투자|종목|equity|stock|valuation|kospi|financial|earnings|공시|실적/.test(haystack);
+  if (skillId === 'skill.claim_evidence_audit.v1') return /claim|evidence|citation|fact|support|contradiction|근거|출처|주장|검증|모순/.test(haystack);
+  if (skillId === 'skill.context_selection_policy.v1') return /context|scope|grant|memory|selection|문맥|스코프|그랜트|메모리/.test(haystack);
+  if (skillId === 'skill.thread_team_reconciliation.v1') return /team|agent|membership|reconciliation|apply|refine|handoff|coord|멤버십|동기화|팀/.test(haystack);
+  if (skillId === 'skill.run_trace_debugging.v1') return /debug|trace|stalled|queued|reroute|runtime|실행|디버그|트레이스|끊겨|오류/.test(haystack);
+  if (skillId === 'skill.telegram_briefing.v1') return /telegram|brief|summary|status update|브리핑|요약|채팅/.test(haystack);
+  return false;
+}
+
+function filterRelevantAttachedSkillIds(skillIds = [], { role = '', taskText = '', purpose = '', capabilities = [], contextPolicy = null, planning = null } = {}) {
+  const registry = planning?.skillRegistry || getSkillRegistry();
+  const interpretation = planning?.taskInterpretation || interpretTask({
+    goal: taskText,
+    task: taskText,
+    message: taskText,
+    mode: 'run',
+    registry: planning?.registry || loadAgents(),
+    toolHints: planning?.availableToolIds || [],
+  });
+  const hints = [purpose, ...asArray(capabilities)].filter(Boolean);
+  const slot = {
+    purpose,
+    required_context_types: uniqueIds(
+      contextPolicy?.reads?.context_types
+      || contextPolicy?.reads?.contextTypes
+      || contextPolicy?.required_context_types
+      || contextPolicy?.requiredContextTypes
+      || [],
+      { max: 12 }
+    ),
+  };
+  const out = [];
+  for (const skillId of uniqueIds(skillIds || [], { max: 8 })) {
+    const skill = registry.resolve?.(skillId);
+    if (!skill) continue;
+    if (!isSkillCompatibleWithAgentRole(skill, role)) continue;
+    const scored = scoreSkillForTask({
+      skill,
+      goal: taskText,
+      roleType: role,
+      contextHints: hints,
+      taskInterpretation: interpretation,
+      slot,
+    });
+    const reasons = asArray(scored?.reasons || []);
+    const semanticMatch = reasons.some((entry) => /^trigger_matches:|^capability_matches:|^name_matches:/.test(String(entry || '')));
+    const explicitMatch = hasExplicitSkillDomainMatch(skillId, [taskText, purpose, ...hints].join('\n'));
+    const score = Number(scored?.score || 0);
+    if (semanticMatch || explicitMatch || score >= 58) out.push(skillId);
+  }
+  return out;
+}
+
 function resolveAgentExecutionProfile(agent = {}, planning = {}) {
   const slot = matchSelectionSlot(agent, planning);
   const presetResult = planning.presetResolver.resolveForSlot({
@@ -202,10 +289,17 @@ function resolveAgentExecutionProfile(agent = {}, planning = {}) {
     slot,
     availableToolIds: planning.availableToolIds,
   });
-  const attachmentIds = uniqueIds([
+  const attachmentIds = filterRelevantAttachedSkillIds(uniqueIds([
     ...asArray(preset?.default_skill_ids),
     ...asArray(skillResult?.attachments).map((row) => row?.skill_id),
-  ], { max: 6 });
+  ], { max: 6 }), {
+    role: agent.role,
+    taskText: planning.taskText,
+    purpose: agent.purpose,
+    capabilities: deriveCapabilityLabels({ role: agent.role, taskText: planning.taskText, purpose: agent.purpose, name: agent.name }),
+    contextPolicy: agent.context_policy || agent.contextPolicy || {},
+    planning,
+  });
   const requiredToolIds = [];
   for (const skillId of attachmentIds) {
     const skill = planning.skillRegistry.resolve?.(skillId);
@@ -629,7 +723,7 @@ function inferTaskStructureHints(taskText = '') {
     discussion: /서로\s*(토의|논의|질의응답)|back[- ]?and[- ]?forth|토의하듯|discuss with each other|debate each other/i.test(text),
     review: /review|검토|검수|반박|critic|judge|검증|verify|fact check|red[ -]?team/i.test(text),
     synthesize: /요약|정리|synth|summary|memo|보고서|final/i.test(text),
-    build: /코드|구현|build|builder|refactor|리팩토|patch|fix/i.test(text),
+    build: /코드|구현|build|builder|coder|coding|programming|notebook|ipython|jupyter|refactor|리팩토|patch|fix/i.test(text),
     news: /뉴스|news|이벤트|발표|headline/i.test(text),
     filings: /공시|filing|dart|financial|실적|10-k|10q/i.test(text),
     parallel: /각각|나눠서|분담|병렬|parallel/i.test(text),
@@ -1160,7 +1254,18 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
     interactionAliasMap.set(agentId, name);
     const rawCapabilityLabels = uniqueIds(entry.capabilities || entry.skill_labels || []);
     const rawSkills = uniqueIds(entry.skills || []);
-    const rawAttachedSkillIds = uniqueIds(entry.attached_skill_ids || entry.attachedSkillIds || rawSkills.filter((skillId) => String(skillId || '').trim().toLowerCase().startsWith('skill.')));
+    const rawAttachedSkillIds = filterRelevantAttachedSkillIds(
+      uniqueIds(entry.attached_skill_ids || entry.attachedSkillIds || rawSkills.filter((skillId) => String(skillId || '').trim().toLowerCase().startsWith('skill.'))),
+      {
+        role,
+        taskText: taskBrief,
+        purpose: rawPurpose,
+        capabilities: rawCapabilityLabels.length > 0
+          ? rawCapabilityLabels
+          : uniqueIds(rawSkills.filter((skillId) => !String(skillId || '').trim().toLowerCase().startsWith('skill.'))),
+        contextPolicy: entry.context_policy || entry.contextPolicy || {},
+      },
+    );
     const capabilityLabels = rawCapabilityLabels.length > 0
       ? rawCapabilityLabels
       : uniqueIds(rawSkills.filter((skillId) => !String(skillId || '').trim().toLowerCase().startsWith('skill.')));
@@ -1308,7 +1413,7 @@ function buildPlannerDrivenFreeformAgents({ taskText = '', runtime = null, plann
 }
 
 
-function buildPlannerDrivenRefinedAgents({ taskText = '', runtime = null, plannerPlan = null, currentAgents = [] } = {}) {
+function buildPlannerDrivenRefineAgents({ taskText = '', runtime = null, plannerPlan = null, currentAgents = [] } = {}) {
   const planning = buildPlanningContext(taskText, runtime);
   const plannerAgents = asArray(plannerPlan?.agents).map((agent) => ({
     name: clean(agent?.name),
@@ -1322,25 +1427,91 @@ function buildPlannerDrivenRefinedAgents({ taskText = '', runtime = null, planne
     recommended_tool_ids: uniqueIds(agent?.recommended_tool_ids || agent?.recommendedToolIds || []),
     context_policy: agent?.context_policy || agent?.contextPolicy || null,
   })).filter((agent) => agent.name);
-  if (plannerAgents.length === 0) return pruneAgentLineup(asArray(currentAgents), taskText, planning);
+  const currentRows = asArray(currentAgents).map((agent) => ({
+    name: clean(agent?.name),
+    role: normalizeTeamRole(agent?.role),
+    purpose: clean(agent?.purpose),
+    model: clean(agent?.model),
+    provider: cleanId(agent?.provider || ''),
+    capabilities: uniqueIds(agent?.capabilities || agent?.skills || []),
+    attached_skill_ids: uniqueIds(agent?.attached_skill_ids || agent?.attachedSkillIds || []),
+    generated_skill_briefs: normalizeGeneratedSkillBriefs(agent?.generated_skill_briefs || agent?.generatedSkillBriefs || []),
+    recommended_tool_ids: uniqueIds(agent?.recommended_tool_ids || agent?.recommendedToolIds || []),
+    context_policy: agent?.context_policy || agent?.contextPolicy || null,
+  })).filter((agent) => agent.name);
+  const preserveMissing = !/(remove|delete|drop|replace|빼|제거|삭제|교체)/i.test(taskText);
   const seen = new Set();
-  const usedCurrentIndexes = new Set();
-  const drafts = plannerAgents.map((plannerAgent, index) => {
-    const matchedIndex = asArray(currentAgents).findIndex((row, idx) => !usedCurrentIndexes.has(idx) && (
-      cleanId(row?.name) === cleanId(plannerAgent.name)
-      || normalizeTeamRole(row?.role) === normalizeTeamRole(plannerAgent.role)
-    ));
-    const matched = matchedIndex >= 0 ? currentAgents[matchedIndex] : null;
-    if (matchedIndex >= 0) usedCurrentIndexes.add(matchedIndex);
-    const base = matched
-      ? enrichAgentDraft({
-          ...matched,
-          context_policy: matched.context_policy || matched.contextPolicy || null,
-        }, planning)
-      : enrichAgentDraft(agentDraft(plannerAgent, { seen, taskText, index: index + 1 }), planning);
-    return overlayPlannerAgentDraft(base, plannerAgent, { taskText });
-  });
+  const drafts = [];
+  const matchedCurrent = new Set();
+  for (const [index, item] of plannerAgents.entries()) {
+    const currentIndex = currentRows.findIndex((row, idx) => !matchedCurrent.has(idx) && (cleanId(row.name) === cleanId(item.name) || normalizeTeamRole(row.role) === normalizeTeamRole(item.role)));
+    const current = currentIndex >= 0 ? currentRows[currentIndex] : null;
+    if (currentIndex >= 0) matchedCurrent.add(currentIndex);
+    const baseSource = current || item;
+    const base = enrichAgentDraft(agentDraft(baseSource, { seen, taskText, index: index + 1 }), planning);
+    drafts.push(overlayPlannerAgentDraft(base, item, { taskText }));
+  }
+  if (preserveMissing) {
+    for (const [index, row] of currentRows.entries()) {
+      if (matchedCurrent.has(index)) continue;
+      drafts.push(enrichAgentDraft(agentDraft(row, { seen, taskText, index: drafts.length + 1 }), planning));
+    }
+  }
   return pruneAgentLineup(drafts, taskText, planning);
+}
+
+export async function refineTeamConfigurationAdvanced({ team = {}, instruction = '', runtime = null, planner = null } = {}) {
+  const fallbackRuntime = runtime || { agentsCatalog: asArray(team?.agents).map((agent) => ({ id: agent.agent_id, name: agent.name, role: agent.role, model: agent.model, provider: agent.provider, skills: agent.skills })) };
+  const current = normalizeTeamConfig(team, { runtime: fallbackRuntime });
+  const instructionText = clean(instruction);
+  const taskText = [clean(current.task_brief), instructionText].filter(Boolean).join('\nRefinement instruction: ');
+  const activePlanner = typeof planner === 'function' ? planner : planTeamRefinementWithCodex;
+  let plannerResult = null;
+  try {
+    plannerResult = await activePlanner({
+      currentTeam: current,
+      instruction: instructionText,
+      runtime: fallbackRuntime,
+      availableToolIds: collectAvailableToolIds(fallbackRuntime, loadAgents()),
+      skillRegistry: getSkillRegistry(),
+      presetRegistry: getPresetRegistry(),
+    });
+  } catch (error) {
+    plannerResult = { ok: false, reason: `planner_exception:${String(error?.message || error)}` };
+  }
+  if (!plannerResult?.ok || !plannerResult?.plan) {
+    const heuristic = refineTeamConfiguration(current, instructionText, { runtime: fallbackRuntime });
+    heuristic.planner_metadata = normalizePlannerMetadata({
+      planner_type: 'heuristic_rule_based',
+      planner_model: '',
+      planning_source: 'heuristic_refine_fallback',
+      reasoning_summary: [clean(plannerResult?.reason || 'refine heuristics applied') || 'refine heuristics applied'],
+    });
+    return normalizeTeamConfig(heuristic, { runtime: fallbackRuntime });
+  }
+  const agents = buildPlannerDrivenRefineAgents({
+    taskText,
+    runtime: fallbackRuntime,
+    plannerPlan: plannerResult.plan,
+    currentAgents: current.agents,
+  });
+  const interactionSpec = buildInteractionSpecForTeam({
+    taskText,
+    agents,
+    current: plannerResult.plan.interaction_spec || current.interaction_spec,
+  });
+  return normalizeTeamConfig({
+    ...current,
+    team_name: clean(plannerResult.plan.team_name || current.team_name || 'refined_team'),
+    composition_mode: current.composition_mode || 'freeform',
+    proposal_mode: 'refine',
+    agents,
+    interaction_spec: interactionSpec,
+    shortcut_policy: normalizeShortcutPolicy(plannerResult.plan.shortcut_policy || current.shortcut_policy),
+    planner_metadata: normalizePlannerMetadata(plannerResult.planner_metadata),
+    status: 'suggested',
+    updated_at: nowIso(),
+  }, { runtime: fallbackRuntime });
 }
 
 export async function createFreeformTeamConfigurationAdvanced({ description = '', runtime = null, planner = null } = {}) {
@@ -1445,69 +1616,13 @@ export function createFreeformTeamConfiguration({ description = '', runtime = nu
   }, { runtime: effectiveRuntime });
 }
 
-
-export async function refineTeamConfigurationAdvanced(team = {}, instruction = '', { runtime = null, planner = null } = {}) {
-  const fallbackRuntime = runtime || { agentsCatalog: asArray(team?.agents).map((agent) => ({ id: agent.agent_id, name: agent.name, role: agent.role, model: agent.model, provider: agent.provider, skills: agent.skills })) };
-  const current = normalizeTeamConfig(team, { runtime: fallbackRuntime });
-  const text = clean(instruction);
-  const heuristicNext = refineTeamConfiguration(current, text, { runtime: fallbackRuntime });
-  const activePlanner = typeof planner === 'function' ? planner : planTeamRefinementWithCodex;
-  let plannerResult = null;
-  try {
-    plannerResult = await activePlanner({
-      currentTeam: current,
-      instruction: text,
-      runtime: fallbackRuntime,
-      availableToolIds: collectAvailableToolIds(fallbackRuntime, loadAgents()),
-      skillRegistry: getSkillRegistry(),
-      presetRegistry: getPresetRegistry(),
-    });
-  } catch (error) {
-    plannerResult = { ok: false, reason: `planner_exception:${String(error?.message || error)}` };
-  }
-  if (!plannerResult?.ok || !plannerResult?.plan) {
-    return normalizeTeamConfig({
-      ...heuristicNext,
-      planner_metadata: normalizePlannerMetadata({
-        planner_type: 'heuristic_rule_based',
-        planner_model: '',
-        planning_source: 'heuristic_refine_fallback',
-        reasoning_summary: [clean(plannerResult?.reason || 'freeform refine heuristics applied') || 'freeform refine heuristics applied'],
-      }),
-    }, { runtime: fallbackRuntime });
-  }
-  const combinedTaskText = [current.task_brief, text].filter(Boolean).join('\n\nRefinement:\n');
-  const agents = buildPlannerDrivenRefinedAgents({
-    taskText: combinedTaskText,
-    runtime: fallbackRuntime,
-    plannerPlan: plannerResult.plan,
-    currentAgents: asArray(current.agents),
-  });
-  const interactionSpec = buildInteractionSpecForTeam({
-    taskText: combinedTaskText,
-    agents,
-    current: plannerResult.plan.interaction_spec || current.interaction_spec,
-  });
-  return normalizeTeamConfig({
-    ...current,
-    team_name: clean(plannerResult.plan.team_name || current.team_name || current.task_brief).slice(0, 48).replace(/\s+/g, '_') || current.team_name || 'refined_team',
-    proposal_mode: 'refine',
-    status: 'suggested',
-    design_prompt: [current.design_prompt, text].filter(Boolean).join('\n\nRefinement instruction:\n'),
-    agents,
-    interaction_spec: interactionSpec,
-    shortcut_policy: normalizeShortcutPolicy(plannerResult.plan.shortcut_policy || current.shortcut_policy),
-    planner_metadata: normalizePlannerMetadata(plannerResult.planner_metadata),
-  }, { runtime: fallbackRuntime });
-}
-
 export function refineTeamConfiguration(team = {}, instruction = '', { runtime = null } = {}) {
   const fallbackRuntime = runtime || { agentsCatalog: asArray(team?.agents).map((agent) => ({ id: agent.agent_id, name: agent.name, role: agent.role, model: agent.model, provider: agent.provider, skills: agent.skills })) };
   const current = normalizeTeamConfig(team, { runtime: fallbackRuntime });
   const next = { ...current, agents: [...current.agents] };
   const text = clean(instruction);
   const lower = text.toLowerCase();
-  if (/builder\s+추가|builder\s+add/i.test(text)) {
+  if (/builder\s+추가|builder\s+add|coder\s+agent|coder\s+add|코더\s*agent|코더\s*추가|ipython|jupyter|notebook/i.test(text)) {
     const existingIds = new Set(next.agents.map((agent) => cleanId(agent.agent_id)));
     const builderCandidate = runtimeCatalog(runtime).find((agent) => agent.role === 'builder' && !existingIds.has(agent.id));
     if (builderCandidate) {
@@ -1516,13 +1631,13 @@ export function refineTeamConfiguration(team = {}, instruction = '', { runtime =
         name: builderCandidate.name || 'Builder',
         role: normalizeTeamRole(builderCandidate.role || 'builder'),
         model: resolveSupportedModel(builderCandidate.model || '') || defaultModelForRole('builder', builderCandidate.provider),
-        purpose: 'Implement changes',
+        purpose: /ipython|jupyter|notebook/i.test(text) ? 'IPython/Jupyter notebook 실습과 과제 초안을 구현한다' : 'Implement changes',
         skills: builderCandidate.skills || [],
         provider: cleanId(builderCandidate.provider || inferProviderForModel(builderCandidate.model || '') || 'codex'),
       });
     } else {
       const seen = new Set(next.agents.map((agent) => cleanId(agent.agent_id)));
-      const draft = agentDraft({ name: 'Builder', role: 'builder', purpose: 'Implement changes', model: 'gpt-5-codex' }, { seen, taskText: current.task_brief || text, index: next.agents.length + 1 });
+      const draft = agentDraft({ name: 'Builder', role: 'builder', purpose: /ipython|jupyter|notebook/i.test(text) ? 'IPython/Jupyter notebook 실습과 과제 초안을 구현한다' : 'Implement changes', model: 'gpt-5-codex' }, { seen, taskText: current.task_brief || text, index: next.agents.length + 1 });
       next.agents.push(draft);
     }
   }

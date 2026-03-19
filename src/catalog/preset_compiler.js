@@ -28,7 +28,25 @@ function inferSkillIds(spec = {}) {
   if (source.includes("claim") || source.includes("evidence") || source.includes("skeptical")) {
     defaults.push("skill.claim_evidence_audit.v1");
   }
-  if (source.includes("dart") || source.includes("financial") || source.includes("equity") || source.includes("market")) {
+  const financeSignals = [
+    "dart",
+    "financial",
+    "equity",
+    "stock",
+    "valuation",
+    "earnings",
+    "invest",
+    "kospi",
+    "korea stock",
+    "kr equity",
+    "주식",
+    "증시",
+    "코스피",
+    "투자",
+    "공시",
+    "실적",
+  ];
+  if (financeSignals.some((signal) => source.includes(signal))) {
     defaults.push("skill.kr_equity_analysis.v1");
   }
   if (source.includes("telegram") || source.includes("brief")) {
