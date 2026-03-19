@@ -6,6 +6,7 @@ import { SkillResolver } from './skill_resolver.js';
 import { PresetRegistry } from '../catalog/preset_registry.js';
 import { PresetResolver } from '../control_plane/preset_resolver.js';
 import { interpretTask } from '../control_plane/task_interpreter.js';
+import { planFreeformTeamWithCodex } from './freeform_team_planner.js';
 import {
   buildDefaultInteractionSpec,
   buildAgentLocalInteractionContract,
@@ -1073,6 +1074,7 @@ export function buildTeamConfigurationTemplate(team = {}) {
     })),
     interaction_spec: normalizeInteractionSpec(row.interaction_spec || row.interactions || {}),
     shortcut_policy: normalizeShortcutPolicy(row.shortcut_policy || row.shortcutPolicy),
+    planner_metadata: normalizePlannerMetadata(row.planner_metadata || row.plannerMetadata),
   }, null, 2);
 }
 
@@ -1137,10 +1139,167 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
     interaction_spec: interactionSpec,
     interaction_notes: buildInteractionSummaryLines(interactionSpec),
     shortcut_policy: normalizeShortcutPolicy(row.shortcut_policy || row.shortcutPolicy),
+    planner_metadata: normalizePlannerMetadata(row.planner_metadata || row.plannerMetadata),
     status: cleanId(row.status || 'draft') || 'draft',
     created_at: clean(row.created_at || nowIso()),
     updated_at: nowIso(),
   };
+}
+
+function normalizePlannerMetadata(raw = null) {
+  const row = asObject(raw);
+  const reasoning = asArray(row.reasoning_summary || row.reasoningSummary || []).map((entry) => clean(entry)).filter(Boolean).slice(0, 5);
+  return {
+    planner_type: cleanId(row.planner_type || row.plannerType || 'heuristic_rule_based') || 'heuristic_rule_based',
+    planner_model: clean(row.planner_model || row.plannerModel || ''),
+    planning_source: cleanId(row.planning_source || row.plan_source || row.planSource || '') || undefined,
+    reasoning_summary: reasoning,
+  };
+}
+
+function summarizePlannerMetadata(metadata = null) {
+  const row = normalizePlannerMetadata(metadata);
+  const engine = row.planner_model ? `${clean(row.planner_type || 'planner')} · ${clean(row.planner_model)}` : clean(row.planner_type || 'planner');
+  if (row.reasoning_summary.length === 0) return engine;
+  return `${engine} · ${row.reasoning_summary[0]}`;
+}
+
+function findPlannerAgentMatch(plannerAgents = [], candidate = {}, used = new Set()) {
+  const byName = asArray(plannerAgents).find((row, idx) => !used.has(idx) && cleanId(row?.name) === cleanId(candidate?.name));
+  if (byName) return byName;
+  const byRole = asArray(plannerAgents).find((row, idx) => !used.has(idx) && normalizeTeamRole(row?.role) === normalizeTeamRole(candidate?.role));
+  return byRole || null;
+}
+
+function overlayPlannerAgentDraft(base = {}, plannerAgent = {}, { taskText = '' } = {}) {
+  if (!plannerAgent || typeof plannerAgent !== 'object') return base;
+  const role = normalizeTeamRole(plannerAgent.role || base.role);
+  const name = clean(plannerAgent.name || base.name || 'Agent');
+  const purpose = clean(plannerAgent.purpose || base.purpose);
+  const model = resolveSupportedModel(plannerAgent.model || '') || base.model || defaultModelForRole(role, plannerAgent.provider || base.provider);
+  const capabilities = uniqueIds([
+    ...asArray(plannerAgent.capabilities),
+    ...asArray(base.capabilities || base.skills),
+  ], { max: 5 });
+  const attachedSkillIds = uniqueIds([
+    ...asArray(plannerAgent.attached_skill_ids || plannerAgent.attachedSkillIds),
+    ...asArray(base.attached_skill_ids),
+  ], { max: 6 });
+  const generatedSkillBriefs = normalizeGeneratedSkillBriefs([
+    ...asArray(plannerAgent.generated_skill_briefs || plannerAgent.generatedSkillBriefs),
+    ...asArray(base.generated_skill_briefs || base.generatedSkillBriefs),
+  ]);
+  return {
+    ...base,
+    name,
+    role,
+    model,
+    provider: cleanId(plannerAgent.provider || base.provider || inferProviderForModel(model) || ''),
+    purpose: autoPurposeForAgent({ role, purpose, taskText, name, skills: capabilities }),
+    capabilities: capabilities.length > 0 ? capabilities : asArray(base.capabilities || base.skills),
+    skills: capabilities.length > 0 ? capabilities : asArray(base.capabilities || base.skills),
+    attached_skill_ids: attachedSkillIds,
+    recommended_tool_ids: uniqueIds([
+      ...asArray(plannerAgent.recommended_tool_ids || plannerAgent.recommendedToolIds),
+      ...asArray(base.recommended_tool_ids),
+    ], { max: 6 }),
+    generated_skill_briefs: generatedSkillBriefs,
+    context_policy: normalizeContextPolicy(plannerAgent.context_policy || plannerAgent.contextPolicy || base.context_policy, { role, taskText, purpose }),
+    matched_preset_id: cleanId(plannerAgent.matched_preset_id || plannerAgent.matchedPresetId || base.matched_preset_id || '' ) || undefined,
+    matched_preset_name: clean(plannerAgent.matched_preset_name || plannerAgent.matchedPresetName || base.matched_preset_name || '' ) || undefined,
+  };
+}
+
+function buildPlannerDrivenFreeformAgents({ taskText = '', runtime = null, plannerPlan = null, structuredAgents = [] } = {}) {
+  const planning = buildPlanningContext(taskText, runtime);
+  const plannerAgents = asArray(plannerPlan?.agents).map((agent) => ({
+    name: clean(agent?.name),
+    role: normalizeTeamRole(agent?.role),
+    purpose: clean(agent?.purpose),
+    model: clean(agent?.model),
+    provider: cleanId(agent?.provider || ''),
+    capabilities: uniqueIds(agent?.capabilities || []),
+    attached_skill_ids: uniqueIds(agent?.attached_skill_ids || agent?.attachedSkillIds || []),
+    generated_skill_briefs: normalizeGeneratedSkillBriefs(agent?.generated_skill_briefs || agent?.generatedSkillBriefs || []),
+    recommended_tool_ids: uniqueIds(agent?.recommended_tool_ids || agent?.recommendedToolIds || []),
+    context_policy: agent?.context_policy || agent?.contextPolicy || null,
+  })).filter((agent) => agent.name);
+  const blueprints = plannerAgents.map((agent) => ({
+    name: agent.name,
+    role: agent.role,
+    purpose: agent.purpose,
+    model: agent.model,
+    provider: agent.provider,
+    context_policy: agent.context_policy,
+  }));
+  const covered = ensureFreeformBlueprintCoverage(blueprints, taskText, structuredAgents);
+  const seen = new Set();
+  const usedPlannerIndexes = new Set();
+  const drafts = covered.map((item, index) => {
+    const base = enrichAgentDraft(agentDraft(item, { seen, taskText, index: index + 1 }), planning);
+    const matchedIndex = plannerAgents.findIndex((row, idx) => !usedPlannerIndexes.has(idx) && (cleanId(row.name) === cleanId(item.name) || normalizeTeamRole(row.role) === normalizeTeamRole(item.role)));
+    const matched = matchedIndex >= 0 ? plannerAgents[matchedIndex] : null;
+    if (matchedIndex >= 0) usedPlannerIndexes.add(matchedIndex);
+    return overlayPlannerAgentDraft(base, matched || null, { taskText });
+  });
+  return pruneAgentLineup(drafts, taskText, planning);
+}
+
+export async function createFreeformTeamConfigurationAdvanced({ description = '', runtime = null, planner = null } = {}) {
+  const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
+  const taskText = clean(description);
+  const structuredFallback = suggestTeamConfiguration({ taskText, runtime: effectiveRuntime });
+  const heuristicTeam = createFreeformTeamConfiguration({ description: taskText, runtime: effectiveRuntime });
+  const activePlanner = typeof planner === 'function' ? planner : planFreeformTeamWithCodex;
+  let plannerResult = null;
+  try {
+    plannerResult = await activePlanner({
+      taskText,
+      runtime: effectiveRuntime,
+      availableToolIds: collectAvailableToolIds(effectiveRuntime, loadAgents()),
+      skillRegistry: getSkillRegistry(),
+      presetRegistry: getPresetRegistry(),
+    });
+  } catch (error) {
+    plannerResult = { ok: false, reason: `planner_exception:${String(error?.message || error)}` };
+  }
+  if (!plannerResult?.ok || !plannerResult?.plan) {
+    return {
+      ...heuristicTeam,
+      planner_metadata: normalizePlannerMetadata({
+        planner_type: 'heuristic_rule_based',
+        planner_model: '',
+        planning_source: 'heuristic_fallback',
+        reasoning_summary: [clean(plannerResult?.reason || 'freeform heuristics applied') || 'freeform heuristics applied'],
+      }),
+    };
+  }
+  const agents = buildPlannerDrivenFreeformAgents({
+    taskText,
+    runtime: effectiveRuntime,
+    plannerPlan: plannerResult.plan,
+    structuredAgents: asArray(structuredFallback?.agents),
+  });
+  const interactionSpec = buildInteractionSpecForTeam({
+    taskText,
+    agents,
+    current: plannerResult.plan.interaction_spec || heuristicTeam.interaction_spec,
+  });
+  const normalized = normalizeTeamConfig({
+    team_name: clean(plannerResult.plan.team_name || heuristicTeam.team_name || taskText).slice(0, 48).replace(/\s+/g, '_') || 'freeform_team',
+    mode: 'scoped_context',
+    composition_mode: 'freeform',
+    proposal_mode: 'create',
+    lock_after_apply: true,
+    agents,
+    interaction_spec: interactionSpec,
+    shortcut_policy: normalizeShortcutPolicy(plannerResult.plan.shortcut_policy || heuristicTeam.shortcut_policy),
+    status: 'suggested',
+    task_brief: taskText,
+    design_prompt: taskText,
+    planner_metadata: normalizePlannerMetadata(plannerResult.planner_metadata),
+  }, { runtime: effectiveRuntime });
+  return normalized;
 }
 
 export function suggestTeamConfiguration({ taskText = '', runtime = null } = {}) {
@@ -1435,6 +1594,7 @@ export function buildTeamListMessage(teamState = {}) {
     `팀 이름: ${clean(active.team_name || 'active_team')}`,
     `구성 방식: ${normalizeCompositionMode(active.composition_mode || 'structured')}`,
     `agent 수: ${asArray(active.agents).length}`,
+    active.planner_metadata ? `설계 엔진: ${summarizePlannerMetadata(active.planner_metadata)}` : null,
     '',
     'Agents',
     ...asArray(active.agents).flatMap((agent, index) => {
@@ -1467,6 +1627,7 @@ export function formatTeamProposalMessage(team = {}) {
     `Team proposal · ${clean(row.team_name || 'team_config')}`,
     `구성 방식: ${compositionMode} · 제안 모드: ${proposalMode}`,
     row.task_brief ? `목표: ${clean(row.task_brief)}` : null,
+    row.planner_metadata ? `설계 엔진: ${summarizePlannerMetadata(row.planner_metadata)}` : null,
     '',
     'Agents',
     ...asArray(row.agents).flatMap((agent, index) => {

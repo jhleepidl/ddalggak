@@ -6,6 +6,7 @@ import {
   applyPendingTeam,
   buildTeamConfigurationTemplate,
   createFreeformTeamConfiguration,
+  createFreeformTeamConfigurationAdvanced,
   buildTeamListMessage,
   formatSupportedModelLines,
   formatTeamProposalMessage,
@@ -337,7 +338,7 @@ export function createTelegramCommandHandler(deps = {}) {
         const freeformMatch = goal.match(/^--mode\s+freeform\s+([\s\S]+)$/i);
         const effectiveGoal = String(freeformMatch?.[1] || goal).trim();
         const proposal = freeformMatch
-          ? createFreeformTeamConfiguration({ description: effectiveGoal, runtime: runtimeForTeam })
+          ? await createFreeformTeamConfigurationAdvanced({ description: effectiveGoal, runtime: runtimeForTeam })
           : suggestTeamConfiguration({ taskText: effectiveGoal, runtime: runtimeForTeam });
         storePendingTeam(chatSessionStore, chatId, proposal);
         await sendLong(bot, chatId, `${formatTeamProposalMessage(proposal)}
@@ -352,7 +353,7 @@ ${formatSupportedModelLines()}`);
           await bot.sendMessage(chatId, 'Usage: /team create <자연어 팀 설명>');
           return true;
         }
-        const proposal = createFreeformTeamConfiguration({ description, runtime: runtimeForTeam });
+        const proposal = await createFreeformTeamConfigurationAdvanced({ description, runtime: runtimeForTeam });
         storePendingTeam(chatSessionStore, chatId, proposal);
         await sendLong(bot, chatId, `${formatTeamProposalMessage(proposal)}
 
