@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-03-19T05:53:00.443Z",
+  "updated_at": "2026-03-19T05:57:31.184Z",
   "sessions": {
     "4101": {
       "chat_id": "4101",
@@ -36,6 +36,45 @@
         "updated_at": "2026-03-19T05:47:23.524Z"
       },
       "updated_at": "2026-03-19T05:53:00.443Z"
+    },
+    "-5058056583": {
+      "chat_id": "-5058056583",
+      "jobId": "",
+      "state": "idle",
+      "active_run_id": null,
+      "budget": {
+        "max_actions": 4,
+        "used_actions": 0,
+        "blocked_actions": 0
+      },
+      "pending_approval": null,
+      "pending_user_messages": [],
+      "interrupt": null,
+      "dashboard": null,
+      "current_turn_ack_message_id": 0,
+      "current_turn_plan_message_id": 0,
+      "agent_status": {
+        "core_bull_researcher": {
+          "state": "running",
+          "goal": "현재 한국 주식시장에서 가장 유망한 섹터와 종목을 선정하고, 실적, 수급, 밸류에이션 기반의 강력한 매수 논거를 제시하세요.",
+          "started_at": "2026-03-19T05:57:31.182Z"
+        },
+        "contrarian_bear_researcher": {
+          "state": "running",
+          "goal": "Core Bull Researcher가 제시한 섹터와 종목들에 대해 매크로 불안 요소, 산업 내 부정적 변수, 하락 시나리오 등 반대 논거를 분석하세요.",
+          "started_at": "2026-03-19T05:57:31.184Z"
+        }
+      },
+      "recent_agent_turns": [],
+      "last_route": null,
+      "public_search_cache": [],
+      "team_config": {
+        "status": "none",
+        "active_team": null,
+        "pending_team": null,
+        "updated_at": "2026-03-19T05:57:31.182Z"
+      },
+      "updated_at": "2026-03-19T05:57:31.184Z"
     }
   }
 }
