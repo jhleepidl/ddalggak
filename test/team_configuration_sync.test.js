@@ -82,3 +82,31 @@ test('syncTeamConfigurationToConversationStore uses job target for local convers
   assert.equal('threadId' in listPayload, false);
   assert.equal('threadId' in setPayload, false);
 });
+
+
+test('syncTeamConfigurationToConversationStore infers local job target from local thread ids', async () => {
+  const calls = [];
+  const store = {
+    source: 'local',
+    async listAgents(payload) { calls.push(['list', payload]); return { rows: [] }; },
+    async addAgent(payload) { calls.push(['add', payload]); return { ok: true }; },
+    async setTeamConfig(payload) { calls.push(['set', payload]); return { ok: true }; },
+  };
+  const runtime = {
+    map: { threadId: 'local:job-local-2' },
+    capabilities: { conversationTeamStore: store },
+    agentsCatalog: [],
+  };
+  const teamConfig = {
+    team_name: 'local-team-2',
+    agents: [
+      { agent_id: 'researcher_1', name: 'Researcher 1', role: 'researcher', model: 'gemini-2.5-pro' },
+    ],
+    interaction_spec: { execution_pattern: 'sequential_pipeline', final_answer_owner: 'Researcher 1' },
+  };
+  await syncTeamConfigurationToConversationStore({ runtime, teamConfig, source: 'test_local_thread_infer' });
+  const listPayload = calls.find(([kind]) => kind === 'list')?.[1] || {};
+  const setPayload = calls.find(([kind]) => kind === 'set')?.[1] || {};
+  assert.equal(listPayload.jobId, 'job-local-2');
+  assert.equal(setPayload.jobId, 'job-local-2');
+});

@@ -2541,7 +2541,8 @@ async function runSupervisorChat(
             name: agent.name,
             provider: agent.provider || '',
             model: agent.model || '',
-            skills: Array.isArray(agent.skills) ? agent.skills : [],
+            skills: Array.isArray(agent.attached_skill_ids) ? agent.attached_skill_ids : (Array.isArray(agent.skills) ? agent.skills : []),
+            capabilities: Array.isArray(agent.capabilities) ? agent.capabilities : (Array.isArray(agent.skills) ? agent.skills : []),
             purpose: agent.purpose || '',
             source: 'active_team',
             why: agent.purpose || 'configured team member',
@@ -2552,54 +2553,71 @@ async function runSupervisorChat(
           candidates: [],
         }
         : recommendTeamForTask(lastUserText, runtime);
-      const runtimeTeamSnapshot = createRuntimeTeamSnapshot({
-        source: "team_builder",
-        teamPlan: {
-          mode: "chat_supervisor",
-          roles: (Array.isArray(teamRecommendation?.selected_existing_agents)
-            ? teamRecommendation.selected_existing_agents
-            : [])
-            .map((row) => ({
-              id: String(row?.role || "").trim().toLowerCase(),
-              role_type: String(row?.role || "").trim().toLowerCase(),
-              role_label: String(row?.role || "").trim().toLowerCase(),
-              template_id: String(row?.agent_id || "").trim().toLowerCase(),
-              provider: String(row?.provider || "").trim().toLowerCase() || undefined,
-              model: undefined,
-              assigned_goal: String(lastUserText || "").trim() || undefined,
-              capability_tags: [],
-            }))
-            .filter((row) => row.id),
-          dependencies: [],
-          execution_order: (Array.isArray(teamRecommendation?.selected_existing_agents)
-            ? teamRecommendation.selected_existing_agents
-            : [])
-            .map((row) => String(row?.role || "").trim().toLowerCase())
-            .filter(Boolean),
-          reason: String(teamRecommendation?.can_satisfy_without_creation === true
-            ? "selected_existing_agents"
-            : "missing_capabilities").trim(),
-          budget: {},
-        },
-        runtimeAgents: (Array.isArray(teamRecommendation?.selected_existing_agents)
-          ? teamRecommendation.selected_existing_agents
-          : [])
+      const selectedExistingAgents = Array.isArray(teamRecommendation?.selected_existing_agents)
+        ? teamRecommendation.selected_existing_agents
+        : [];
+      const existingRuntimeSnapshot = runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === 'object'
+        ? runtime.runtimeTeamSnapshot
+        : (runtime?.runtime_team_snapshot && typeof runtime.runtime_team_snapshot === 'object'
+          ? runtime.runtime_team_snapshot
+          : null);
+      const fallbackTeamPlan = {
+        mode: "chat_supervisor",
+        roles: selectedExistingAgents
           .map((row) => ({
-            instance_id: `chat_role_${String(row?.role || "").trim().toLowerCase() || "role"}_${String(row?.agent_id || "").trim().toLowerCase() || "ephemeral"}`,
-            template_id: String(row?.agent_id || "").trim().toLowerCase() || undefined,
-            display_label: String(row?.name || '').trim() || undefined,
-            role_id: String(row?.role || '').trim().toLowerCase() || undefined,
-            role_label: String(row?.role || "").trim().toLowerCase() || "role",
+            id: String(row?.role || "").trim().toLowerCase(),
+            role_type: String(row?.role || "").trim().toLowerCase(),
+            role_label: String(row?.role || "").trim().toLowerCase(),
+            template_id: String(row?.agent_id || "").trim().toLowerCase(),
             provider: String(row?.provider || "").trim().toLowerCase() || undefined,
-            model: String(row?.model || '').trim() || undefined,
-            attached_skill_ids: Array.isArray(row?.skills) ? row.skills : [],
-            assigned_goal: String(row?.purpose || lastUserText || "").trim() || undefined,
-            capability_tags: [],
-            lens_spec: undefined,
-            status: "ready",
-            ephemeral: false,
-            fallback: false,
-          })),
+            model: String(row?.model || "").trim() || undefined,
+            assigned_goal: String(lastUserText || "").trim() || undefined,
+            capability_tags: Array.isArray(row?.capabilities)
+              ? row.capabilities
+              : (Array.isArray(row?.skills) ? row.skills : []),
+          }))
+          .filter((row) => row.id),
+        dependencies: [],
+        execution_order: selectedExistingAgents
+          .map((row) => String(row?.role || "").trim().toLowerCase())
+          .filter(Boolean),
+        reason: String(teamRecommendation?.can_satisfy_without_creation === true
+          ? "selected_existing_agents"
+          : "missing_capabilities").trim(),
+        budget: {},
+      };
+      const fallbackRuntimeAgents = selectedExistingAgents
+        .map((row) => ({
+          instance_id: `chat_role_${String(row?.role || "").trim().toLowerCase() || "role"}_${String(row?.agent_id || "").trim().toLowerCase() || "ephemeral"}`,
+          template_id: String(row?.agent_id || "").trim().toLowerCase() || undefined,
+          display_label: String(row?.name || '').trim() || undefined,
+          role_id: String(row?.role || '').trim().toLowerCase() || undefined,
+          role_label: String(row?.role || "").trim().toLowerCase() || "role",
+          provider: String(row?.provider || "").trim().toLowerCase() || undefined,
+          model: String(row?.model || '').trim() || undefined,
+          attached_skill_ids: Array.isArray(row?.skills) ? row.skills : [],
+          assigned_goal: String(row?.purpose || lastUserText || "").trim() || undefined,
+          capability_tags: Array.isArray(row?.capabilities)
+            ? row.capabilities
+            : (Array.isArray(row?.skills) ? row.skills : []),
+          lens_spec: undefined,
+          status: "ready",
+          ephemeral: false,
+          fallback: false,
+        }));
+      const runtimeTeamSnapshot = createRuntimeTeamSnapshot({
+        runtime_team_snapshot: {
+          ...(existingRuntimeSnapshot && typeof existingRuntimeSnapshot === 'object' ? existingRuntimeSnapshot : {}),
+          source: 'team_builder',
+          generated_at: new Date().toISOString(),
+          team_plan: (existingRuntimeSnapshot?.team_plan && typeof existingRuntimeSnapshot.team_plan === 'object')
+            ? existingRuntimeSnapshot.team_plan
+            : fallbackTeamPlan,
+          runtime_agents: Array.isArray(existingRuntimeSnapshot?.runtime_agents) && existingRuntimeSnapshot.runtime_agents.length > 0
+            ? existingRuntimeSnapshot.runtime_agents
+            : fallbackRuntimeAgents,
+          runtime_authority: buildRunAuthority(runtime),
+        },
       });
       const rawRoutePlan = await routeWithSupervisor(lastUserText, {
         agents: runtime.agents,
@@ -3042,11 +3060,21 @@ async function runSupervisorChat(
       replyTo: String(userMessageGoc?.id || "").trim(),
     });
     if (runEventSink && typeof runEventSink.finishRun === "function") {
+      const resultRows = Array.isArray(mergedExecution.results) ? mergedExecution.results : [];
+      const errorCount = resultRows.filter((row) => String(row?.status || '').trim().toLowerCase() === 'error').length;
+      const blockedCount = resultRows.filter((row) => ['blocked', 'skip'].includes(String(row?.status || '').trim().toLowerCase())).length;
       await runEventSink.finishRun({
         status: (mergedExecution.pendingApproval || routePlan.await_user === true)
           ? "await_user"
-          : "done",
-        summary: clip(replyText, 900),
+          : ((errorCount > 0 && !hasAgentOutput)
+            ? "error"
+            : "done"),
+        summary: clip(replyText || (blockedCount > 0 ? 'run finished with blocked steps' : 'run finished'), 900),
+        result_summary: {
+          errors: errorCount,
+          blocked: blockedCount,
+          outputs: Array.isArray(mergedExecution.outputs) ? mergedExecution.outputs.length : 0,
+        },
       }, {
         jobId: currentJobId,
       });

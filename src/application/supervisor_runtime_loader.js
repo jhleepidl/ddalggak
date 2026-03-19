@@ -239,6 +239,8 @@ export function createSupervisorRuntimeLoader({
         });
         const runtimeResult = {
           mode: "local",
+          jobId: cleanJobId,
+          currentJobId: cleanJobId,
           ...buildRunAuthorityEnvelope(
             { runtime_authority: runtimeAuthority },
             {},
@@ -532,6 +534,8 @@ export function createSupervisorRuntimeLoader({
 
       const runtimeResult = {
         mode: "goc",
+        jobId: cleanJobId,
+        currentJobId: cleanJobId,
         ...buildRunAuthorityEnvelope(
           { runtime_authority: runtimeAuthority },
           {},

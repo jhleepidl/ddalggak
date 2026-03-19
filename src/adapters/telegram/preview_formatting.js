@@ -391,8 +391,16 @@ export function summarizeSpecialChatOutputs(outputs = []) {
   return ['생성된 결과물:', ...bulletLines].join('\n');
 }
 
-export function buildChatSynthesisFallback(outputs = [], { maxLines = 6 } = {}) {
-  const rows = asArray(outputs)
+export function buildChatSynthesisFallback(outputs = [], options = {}) {
+  const opts = options && typeof options === 'object' ? options : {};
+  const executionLike = (!Array.isArray(outputs) && outputs && typeof outputs === 'object' && Array.isArray(outputs.outputs))
+    ? outputs
+    : ((!Array.isArray(outputs) && opts && typeof opts === 'object' && Array.isArray(opts.outputs)) ? opts : null);
+  const rowsSource = executionLike ? asArray(executionLike.outputs) : asArray(outputs);
+  const maxLines = Number.isFinite(Number(opts.maxLines))
+    ? Math.max(1, Math.floor(Number(opts.maxLines)))
+    : 6;
+  const rows = rowsSource
     .map((row) => {
       if (!row || typeof row !== 'object') return '';
       const agent = String(row.agentId || row.agent || '').trim() || 'system';
@@ -401,7 +409,28 @@ export function buildChatSynthesisFallback(outputs = [], { maxLines = 6 } = {}) 
       return `- ${agent}: ${clip(text, 260)}`;
     })
     .filter(Boolean)
-    .slice(-Math.max(1, Math.floor(maxLines)));
-  if (rows.length === 0) return '';
-  return ['현재까지 결과 요약:', ...rows].join('\n');
+    .slice(-maxLines);
+  if (rows.length > 0) return ['현재까지 결과 요약:', ...rows].join('\n');
+
+  const resultRows = executionLike
+    ? asArray(executionLike.results)
+      .map((row) => {
+        if (!row || typeof row !== 'object') return '';
+        const status = String(row.status || '').trim().toLowerCase();
+        if (!['error', 'blocked', 'skip'].includes(status)) return '';
+        const label = String(row.label || row.agent || row.agentId || 'step').trim();
+        const note = String(row.note || row.error || row.reason || '').trim();
+        if (!note) return '';
+        return `- ${label}: ${clip(note, 220)}`;
+      })
+      .filter(Boolean)
+      .slice(-maxLines)
+    : [];
+  if (resultRows.length > 0) {
+    return ['실행 중 일부 단계가 완료되지 않았습니다.', ...resultRows].join('\n');
+  }
+
+  return executionLike
+    ? '실행 결과를 아직 확보하지 못했습니다. 다시 시도하거나 /status 로 상태를 확인해 주세요.'
+    : '';
 }

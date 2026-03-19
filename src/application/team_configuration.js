@@ -437,7 +437,11 @@ function teamStoreTarget(runtime = null, { source = '' } = {}) {
   const teamStore = runtime?.capabilities?.conversationTeamStore;
   const storeSource = cleanId(teamStore?.source || teamStore?.storeSource || '');
   const threadId = clean(runtime?.map?.threadId || runtime?.threadId || '');
-  const jobId = clean(runtime?.jobId || runtime?.currentJobId || '');
+  const explicitJobId = clean(runtime?.jobId || runtime?.currentJobId || '');
+  const inferredLocalJobId = storeSource === 'local' && threadId.startsWith('local:')
+    ? clean(threadId.slice('local:'.length))
+    : '';
+  const jobId = explicitJobId || inferredLocalJobId;
   const target = storeSource === 'goc'
     ? (threadId ? { threadId } : (jobId ? { jobId } : {}))
     : (jobId ? { jobId } : (threadId ? { threadId } : {}));
