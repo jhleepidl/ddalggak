@@ -1283,7 +1283,7 @@ function buildSupervisorExecutionCallbacks({
     const preparedContext = (actionType === "run_agent" || actionType === "spawn_agents")
       ? await prepareStepLensContext({
         agentId: defaultAgentId,
-        goal: getActionGoal(action),
+        goal: getActionGoalShared(action),
         lens: action?.lens && typeof action.lens === "object" ? action.lens : null,
         detailContext,
         stepNodeId,
