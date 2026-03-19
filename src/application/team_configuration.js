@@ -227,6 +227,9 @@ function resolveAgentExecutionProfile(agent = {}, planning = {}) {
 }
 
 function agentSpecialtyKey(agent = {}, taskText = '') {
+  const local = `${clean(agent?.name)} ${clean(agent?.purpose)}`.toLowerCase();
+  if (/counter|skeptic|반대\s*의견|반론|devil'?s advocate|adversarial/i.test(local)) return 'counterpoint';
+  if (/lead|thesis|핵심\s*주장/i.test(local)) return 'lead_thesis';
   const specialty = inferAgentSpecialty({ name: agent?.name, purpose: agent?.purpose, taskText, skills: [...asArray(agent?.skills), ...asArray(agent?.capabilities), ...asArray(agent?.attached_skill_ids)] });
   return specialty || normalizeTeamRole(agent?.role);
 }
@@ -245,7 +248,8 @@ function pruneAgentLineup(agents = [], taskText = '', planning = null) {
   const kept = [];
   const researcherKeys = new Set();
   const singletons = new Set();
-  const allowMultiResearch = planning?.taskInterpretation?.parallelism_preference === 'parallel' || inferTaskStructureHints(taskText).compare;
+  const structureHints = inferTaskStructureHints(taskText);
+  const allowMultiResearch = planning?.taskInterpretation?.parallelism_preference === 'parallel' || structureHints.compare || structureHints.debate || structureHints.discussion;
   for (const agent of asArray(agents)) {
     const roleId = normalizeTeamRole(agent.role);
     if (!shouldKeepRole(roleId, taskText, planning)) continue;
@@ -274,6 +278,7 @@ function enrichAgentDraft(agent = {}, planning = {}) {
     recommended_tool_ids: executionProfile.recommended_tool_ids,
     matched_preset_id: executionProfile.matched_preset_id || undefined,
     matched_preset_name: executionProfile.matched_preset_name || undefined,
+    generated_skill_briefs: inferGeneratedSkillBriefs({ ...agent, attached_skill_ids: executionProfile.attached_skill_ids, capabilities: executionProfile.capabilities }, planning),
     planning_slot: executionProfile.slot,
   };
 }
@@ -615,6 +620,8 @@ function inferTaskStructureHints(taskText = '') {
   const lower = text.toLowerCase();
   return {
     compare: /비교|상반|찬반|여러 관점|양쪽|trade[- ]?off|pros?\s+and\s+cons?|debate|versus|vs\.?/i.test(text),
+    debate: /반대\s*의견|반론|반박\s*의견|악마의\s*변호인|devil'?s advocate|counter(?:-?| )argument|opposing view|skeptic|adversarial|토론|토의|논쟁/i.test(text),
+    discussion: /서로\s*(토의|논의|질의응답)|back[- ]?and[- ]?forth|토의하듯|discuss with each other|debate each other/i.test(text),
     review: /review|검토|검수|반박|critic|judge|검증|verify|fact check|red[ -]?team/i.test(text),
     synthesize: /요약|정리|synth|summary|memo|보고서|final/i.test(text),
     build: /코드|구현|build|builder|refactor|리팩토|patch|fix/i.test(text),
@@ -655,12 +662,12 @@ function ensureFreeformBlueprintCoverage(blueprints = [], taskText = '', structu
     next = mergeBlueprints(next, [{ name, role, purpose, model }]);
   };
 
-  if ((next.length <= 1 && !hints.explicitGeneralistOnly) || hints.multiAgentPrompt || hints.parallel) {
+  if ((next.length <= 1 && !hints.explicitGeneralistOnly) || hints.multiAgentPrompt || hints.parallel || hints.debate || hints.discussion) {
     const filteredStructuredAgents = asArray(structuredAgents).filter((agent) => {
       const roleId = normalizeTeamRole(agent?.role);
       if (roleId === 'builder') return hints.build;
-      if (roleId === 'reviewer') return hints.review || hints.compare || hints.parallel;
-      if (roleId === 'synthesizer') return hints.synthesize || hints.review || hints.compare || hints.parallel || next.length >= 2;
+      if (roleId === 'reviewer') return hints.review || hints.compare || hints.parallel || hints.debate || hints.discussion;
+      if (roleId === 'synthesizer') return hints.synthesize || hints.review || hints.compare || hints.parallel || hints.debate || hints.discussion || next.length >= 2;
       if (roleId === 'operator') return /approve|승인|gate|operator|배포/i.test(taskText);
       return roleId === 'researcher';
     });
@@ -684,10 +691,10 @@ function ensureFreeformBlueprintCoverage(blueprints = [], taskText = '', structu
   if (hints.compare && !hasRole('reviewer')) {
     pushRole('Reviewer', 'reviewer', '여러 관점의 주장과 근거를 검토한다', 'gpt-5.4');
   }
-  if ((hints.compare || hints.review || hints.parallel || next.length >= 2) && !hasRole('synthesizer')) {
+  if ((hints.compare || hints.debate || hints.discussion || hints.review || hints.parallel || next.length >= 2) && !hasRole('synthesizer')) {
     pushRole('Synthesizer', 'synthesizer', '병렬 결과와 검토 결과를 최종 답변으로 합친다', 'gpt-5.4');
   }
-  if (hints.review && !hasRole('reviewer')) {
+  if ((hints.review || hints.debate || hints.discussion) && !hasRole('reviewer')) {
     pushRole('Reviewer', 'reviewer', '결과를 검토하고 리스크를 정리한다', 'gpt-5.4');
   }
   if (hints.build && !hasRole('builder')) {
@@ -741,6 +748,165 @@ function remapInteractionSpecAgentNames(rawSpec = {}, aliasMap = new Map()) {
   });
 }
 
+
+function inferCounterpartRoleBlueprints(description = '') {
+  const text = clean(description);
+  const hints = inferTaskStructureHints(text);
+  if (!hints.debate && !hints.discussion && !/반대\s*의견|counter(?:-?| )argument|devil'?s advocate|skeptic/i.test(text)) {
+    return [];
+  }
+  return [
+    {
+      name: 'Lead Thesis Researcher',
+      role: 'researcher',
+      purpose: '핵심 주장과 투자 thesis를 가장 강한 형태로 구조화한다',
+      model: parseNaturalLanguageModelPreference(text, 'researcher'),
+    },
+    {
+      name: 'Counterpoint Researcher',
+      role: 'researcher',
+      purpose: '다른 조사 agent의 핵심 주장에 대한 반대 의견과 깨지는 조건을 제시한다',
+      model: parseNaturalLanguageModelPreference(text, 'researcher'),
+    },
+  ];
+}
+
+function normalizeGeneratedSkillBriefs(list = []) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of asArray(list)) {
+    const row = asObject(raw);
+    const label = clean(row.label || row.name || row.title);
+    if (!label) continue;
+    const skillId = cleanId(row.skill_id || row.skillId || `inline.${slugify(label).replace(/_/g, '.')}`) || `inline.${slugify(label).replace(/_/g, '.')}`;
+    if (seen.has(skillId)) continue;
+    seen.add(skillId);
+    out.push({
+      skill_id: skillId,
+      label,
+      goal: clean(row.goal || row.objective || row.description),
+      checklist: uniqueIds(row.checklist || row.steps || row.bullets || [], { max: 5 }),
+      selected_by: clean(row.selected_by || row.selectedBy || 'team_generator') || 'team_generator',
+      executable: row.executable === true,
+    });
+  }
+  return out.slice(0, 3);
+}
+
+function inferGeneratedSkillBriefs(agent = {}, planning = {}) {
+  const taskText = clean(planning?.taskText || '');
+  const hints = inferTaskStructureHints(taskText);
+  const specialty = agentSpecialtyKey(agent, taskText);
+  const roleId = normalizeTeamRole(agent?.role);
+  const out = [];
+  const push = (label, goal, checklist = []) => {
+    out.push({ label, goal, checklist, selected_by: 'team_generator', executable: false });
+  };
+  if (roleId === 'researcher' && (hints.debate || hints.discussion)) {
+    if (/counter|skeptic|반대|리스크|bear/i.test(`${clean(agent?.name)} ${clean(agent?.purpose)}`) || specialty === 'bear' || specialty === 'review') {
+      push('반대 논리 생성 프로토콜', '다른 agent의 주장을 strongest form으로 요약한 뒤 가장 치명적인 반대 근거와 무효화 조건을 제시한다', [
+        '상대 주장을 왜곡 없이 한 문장으로 재구성',
+        '주장을 깨는 핵심 가정 2~3개 식별',
+        '반례와 리스크 신호를 분리해 제시',
+      ]);
+    } else {
+      push('핵심 논지 구조화 프로토콜', '자신의 핵심 thesis를 반박 가능한 형태로 구조화하고 근거 우선순위를 정리한다', [
+        '핵심 주장 1개와 보조 주장 2개 이하로 정리',
+        '주장별 근거와 불확실성을 분리',
+        '상대 반박에 대비한 취약 지점 표시',
+      ]);
+    }
+  }
+  if (roleId === 'reviewer' && (hints.debate || hints.compare || hints.review)) {
+    push('상반 관점 판정 루브릭', '충돌하는 주장 사이에서 근거 강도, 누락, 모순, 의사결정 영향을 판정한다', [
+      '양측이 공유하는 사실과 갈리는 가정 분리',
+      '가장 load-bearing한 근거 3개 우선 검토',
+      '판정과 남는 불확실성 구분',
+    ]);
+  }
+  if (roleId === 'synthesizer' && (hints.debate || hints.compare || hints.synthesize)) {
+    push('찬반 결론 통합 루브릭', '서로 다른 관점의 결론을 사용자가 바로 판단할 수 있는 형태로 통합한다', [
+      '합의점/쟁점/판단 포인트 3단으로 정리',
+      '즉시 행동과 관찰 포인트를 분리',
+      '최종 추천과 보류 조건을 함께 제시',
+    ]);
+  }
+  if (roleId === 'researcher' && hints.filings && specialty === 'filings') {
+    push('공시 숫자 검증 체크리스트', '공시와 실적 숫자를 해석할 때 비교 기준과 왜곡 가능성을 먼저 점검한다', [
+      '전년/전분기 비교 기준 명시',
+      '일회성 요인과 지속 요인 분리',
+      '시장 기대와 숫자의 차이 확인',
+    ]);
+  }
+  return normalizeGeneratedSkillBriefs(out);
+}
+
+function composeAssignedGoalText(purpose = '', generatedSkillBriefs = []) {
+  const lines = [clean(purpose)].filter(Boolean);
+  const briefs = normalizeGeneratedSkillBriefs(generatedSkillBriefs);
+  if (briefs.length > 0) {
+    lines.push('추가 수행 프로토콜:');
+    for (const brief of briefs.slice(0, 2)) {
+      lines.push(`- ${brief.label}: ${brief.goal || 'task-specific protocol'}`);
+    }
+  }
+  return lines.join('\n').trim();
+}
+
+function mergeHandoffs(base = [], patch = []) {
+  const out = [];
+  const seen = new Set();
+  for (const row of [...asArray(base), ...asArray(patch)]) {
+    const entry = {
+      from: clean(row?.from),
+      to: clean(row?.to),
+      payload: cleanId(row?.payload || 'summary_only') || 'summary_only',
+    };
+    if (!entry.from || !entry.to) continue;
+    const key = `${cleanId(entry.from)}|${cleanId(entry.to)}|${entry.payload}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(entry);
+  }
+  return out;
+}
+
+function buildInteractionSpecForTeam({ taskText = '', agents = [], current = null } = {}) {
+  const roster = asArray(agents).map((agent) => ({ name: agent?.name }));
+  let spec = parseNaturalLanguageInteractionPatch(taskText, {
+    current: current || buildDefaultInteractionSpec(agents, { task: taskText }),
+    agentRoster: roster,
+  });
+  const hints = inferTaskStructureHints(taskText);
+  const researchers = asArray(agents).filter((agent) => normalizeTeamRole(agent?.role) === 'researcher');
+  const reviewer = asArray(agents).find((agent) => normalizeTeamRole(agent?.role) === 'reviewer') || null;
+  const synthesizer = asArray(agents).find((agent) => normalizeTeamRole(agent?.role) === 'synthesizer') || null;
+  if ((hints.debate || hints.discussion) && researchers.length >= 2) {
+    const counter = researchers.find((agent) => /counter|skeptic|반대|bear|리스크/i.test(`${clean(agent?.name)} ${clean(agent?.purpose)}`)) || researchers[1];
+    const lead = researchers.find((agent) => agent !== counter) || researchers[0];
+    spec = normalizeInteractionSpec({
+      ...spec,
+      execution_pattern: reviewer ? 'multi_research_adjudication' : 'sequential_pipeline',
+      final_answer_owner: clean(synthesizer?.name || reviewer?.name || counter?.name || lead?.name),
+      handoffs: mergeHandoffs([
+        lead && counter ? { from: lead.name, to: counter.name, payload: 'claim_plus_supporting_evidence' } : null,
+        counter && reviewer ? { from: counter.name, to: reviewer.name, payload: 'counterargument_plus_risks' } : null,
+        lead && reviewer ? { from: lead.name, to: reviewer.name, payload: 'summary_plus_key_evidence' } : null,
+        reviewer && synthesizer ? { from: reviewer.name, to: synthesizer.name, payload: 'review_summary_only' } : null,
+        !reviewer && lead && synthesizer ? { from: lead.name, to: synthesizer.name, payload: 'summary_plus_key_evidence' } : null,
+        !reviewer && counter && synthesizer ? { from: counter.name, to: synthesizer.name, payload: 'counterargument_plus_risks' } : null,
+      ], spec.handoffs),
+      policies: {
+        ...asObject(spec.policies),
+        reviewer_visibility: reviewer ? 'summaries_plus_selected_evidence' : spec?.policies?.reviewer_visibility,
+        synthesizer_visibility: reviewer ? 'upstream_outputs_only' : 'full_context',
+        require_reviewer_before_final: reviewer ? true : spec?.policies?.require_reviewer_before_final,
+      },
+    });
+  }
+  return spec;
+}
+
 function parseNaturalLanguageModelPreference(text = '', role = '') {
   const lower = clean(text).toLowerCase();
   const roleId = cleanId(role);
@@ -759,6 +925,7 @@ function parseNaturalLanguageModelPreference(text = '', role = '') {
 function inferFreeformAgentBlueprints(description = '') {
   const text = clean(description);
   const lower = text.toLowerCase();
+  const hints = inferTaskStructureHints(text);
   const blueprints = [];
   const seenLabels = new Set();
   function pushIfMissing(label, role, purpose) {
@@ -788,6 +955,19 @@ function inferFreeformAgentBlueprints(description = '') {
       : /synth|writer|요약|정리/i.test(label) ? 'synthesizer'
       : 'researcher';
     pushIfMissing(label, role, `${label} 역할을 수행한다`);
+  }
+
+  if ((hints.debate || hints.discussion) && !/bull|bear|낙관|비관/i.test(text)) {
+    for (const blueprint of inferCounterpartRoleBlueprints(text)) {
+      pushIfMissing(blueprint.name, blueprint.role, blueprint.purpose);
+    }
+  }
+
+  if ((hints.debate || hints.discussion) && !blueprints.some((item) => /reviewer|검증|judge|조정|moderator/i.test(`${clean(item.name)} ${clean(item.purpose)}`))) {
+    pushIfMissing('Debate Adjudicator', 'reviewer', '서로 충돌하는 주장과 근거를 비교하고 판정한다');
+  }
+  if ((hints.debate || hints.discussion) && !blueprints.some((item) => normalizeTeamRole(item.role) === 'synthesizer')) {
+    pushIfMissing('Decision Synthesizer', 'synthesizer', '토의 결과와 판정 결과를 사용자가 바로 이해할 결론으로 정리한다');
   }
 
   if (blueprints.length === 0) {
@@ -879,6 +1059,7 @@ export function buildTeamConfigurationTemplate(team = {}) {
       capabilities: uniqueIds(agent.capabilities || []),
       skills: uniqueIds(agent.skills || []),
       attached_skill_ids: uniqueIds(agent.attached_skill_ids || agent.attachedSkillIds || []),
+      generated_skill_briefs: normalizeGeneratedSkillBriefs(agent.generated_skill_briefs || agent.generatedSkillBriefs || []),
       recommended_tool_ids: uniqueIds(agent.recommended_tool_ids || agent.recommendedToolIds || []),
       context_policy: normalizeContextPolicy(agent.context_policy || agent.contextPolicy, {
         role: agent.role,
@@ -929,6 +1110,7 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
       capabilities: resolvedCapabilities,
       skills: resolvedCapabilities,
       attached_skill_ids: rawAttachedSkillIds,
+      generated_skill_briefs: normalizeGeneratedSkillBriefs(entry.generated_skill_briefs || entry.generatedSkillBriefs || []),
       recommended_tool_ids: uniqueIds(entry.recommended_tool_ids || entry.recommendedToolIds || []),
       matched_preset_id: cleanId(entry.matched_preset_id || entry.matchedPresetId || '' ) || undefined,
       matched_preset_name: clean(entry.matched_preset_name || entry.matchedPresetName || '' ) || undefined,
@@ -986,10 +1168,7 @@ export function createFreeformTeamConfiguration({ description = '', runtime = nu
     blueprints: inferFreeformAgentBlueprints(taskText),
     structuredAgents: asArray(structuredFallback?.agents),
   });
-  const interactionSpec = parseNaturalLanguageInteractionPatch(taskText, {
-    current: buildDefaultInteractionSpec(agents, { task: taskText }),
-    agentRoster: agents.map((agent) => ({ name: agent.name })),
-  });
+  const interactionSpec = buildInteractionSpecForTeam({ taskText, agents });
   return normalizeTeamConfig({
     team_name: clean(taskText).slice(0, 36).replace(/\s+/g, '_') || 'freeform_team',
     mode: 'scoped_context',
@@ -1037,7 +1216,7 @@ export function refineTeamConfiguration(team = {}, instruction = '', { runtime =
       next.agents.push(agentDraft(blueprint, { seen, taskText: current.task_brief || text, index: next.agents.length + 1 }));
     }
   }
-  next.interaction_spec = parseNaturalLanguageInteractionPatch(text, { current: current.interaction_spec, agentRoster: next.agents.map((agent) => ({ name: agent.name })) });
+  next.interaction_spec = buildInteractionSpecForTeam({ taskText: text, agents: next.agents, current: current.interaction_spec });
   next.interaction_notes = buildInteractionSummaryLines(next.interaction_spec);
   next.proposal_mode = 'refine';
   next.status = 'suggested';
@@ -1097,6 +1276,7 @@ export async function syncTeamConfigurationToConversationStore({ runtime = null,
       attached_skills: uniqueIds(agent.attached_skill_ids || agent.attachedSkillIds || agent.skills || [])
         .map((skillId) => ({ skill_id: cleanId(skillId), selected_by: 'team_config' }))
         .filter((entry) => entry.skill_id),
+      generated_skill_briefs: normalizeGeneratedSkillBriefs(agent.generated_skill_briefs || agent.generatedSkillBriefs || []),
       context_policy: normalizeContextPolicy(agent.context_policy || agent.contextPolicy, {
         role: agent.role,
         taskText: normalizedTeam.task_brief,
@@ -1195,6 +1375,7 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       capabilities: uniqueIds(configAgent.capabilities || configAgent.skills || []),
       skills: asArray(configAgent.capabilities || configAgent.skills).length > 0 ? uniqueIds(configAgent.capabilities || configAgent.skills) : asArray(base.skills),
       attached_skill_ids: uniqueIds(configAgent.attached_skill_ids || configAgent.attachedSkillIds || []),
+      generated_skill_briefs: normalizeGeneratedSkillBriefs(configAgent.generated_skill_briefs || configAgent.generatedSkillBriefs || []),
       recommended_tool_ids: uniqueIds(configAgent.recommended_tool_ids || configAgent.recommendedToolIds || []),
       interaction_contract: buildAgentLocalInteractionContract(team.interaction_spec, clean(configAgent.name || base.name || configAgent.agent_id)),
       prompt: clean(base.prompt || configAgent.prompt || ''),
@@ -1218,7 +1399,7 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       attached_skill_ids: uniqueIds(merged.attached_skill_ids || merged.attachedSkillIds || merged.skills),
       capability_tags: uniqueIds(merged.capabilities || merged.skills),
       recommended_tool_ids: uniqueIds(merged.recommended_tool_ids || merged.recommendedToolIds || []),
-      assigned_goal: clean(configAgent.purpose),
+      assigned_goal: composeAssignedGoalText(configAgent.purpose, merged.generated_skill_briefs),
       interaction_contract: merged.interaction_contract,
       context_policy: merged.context_policy,
       composition_mode: team.composition_mode,
@@ -1256,14 +1437,16 @@ export function buildTeamListMessage(teamState = {}) {
       const capabilityLabels = formatSkillLabels(agent.capabilities || agent.skills, { max: 3 });
       const packageLabels = formatSkillLabels(agent.attached_skill_ids || [], { max: 3 });
       const toolLabels = formatToolLabels(agent.recommended_tool_ids || [], { max: 3 });
+      const generatedSkillLabels = normalizeGeneratedSkillBriefs(agent.generated_skill_briefs || agent.generatedSkillBriefs || []).map((entry) => entry.label).slice(0, 2);
       return [
         `${index + 1}. ${agent.name} · ${roleLabel(agent.role)}`,
         `   - 맡은 일: ${clean(agent.purpose) || '설명 없음'}`,
         `   - 주력 역량: ${capabilityLabels.join(', ') || '(none)'}`,
         `   - 실행 skill: ${packageLabels.join(', ') || '(none)'}`,
+        generatedSkillLabels.length > 0 ? `   - 생성 skill: ${generatedSkillLabels.join(', ')}` : null,
         `   - 추천 tool: ${toolLabels.join(', ') || '(none)'}`,
         `   - 모델: ${humanizeModel(agent.provider || inferProviderForModel(agent.model || ''), agent.model)}` + (agent.matched_preset_name ? ` · preset=${agent.matched_preset_name}` : ''),
-      ];
+      ].filter(Boolean);
     }),
     '',
     'Interaction',
@@ -1286,14 +1469,16 @@ export function formatTeamProposalMessage(team = {}) {
       const capabilityLabels = formatSkillLabels(agent.capabilities || agent.skills, { max: 3 });
       const packageLabels = formatSkillLabels(agent.attached_skill_ids || [], { max: 3 });
       const toolLabels = formatToolLabels(agent.recommended_tool_ids || [], { max: 3 });
+      const generatedSkillLabels = normalizeGeneratedSkillBriefs(agent.generated_skill_briefs || agent.generatedSkillBriefs || []).map((entry) => entry.label).slice(0, 2);
       return [
         `${index + 1}. ${agent.name} · ${roleLabel(agent.role)}`,
         `   - 맡은 일: ${clean(agent.purpose) || '설명 없음'}`,
         `   - 주력 역량: ${capabilityLabels.join(', ') || '(none)'}`,
         `   - 실행 skill: ${packageLabels.join(', ') || '(none)'}`,
+        generatedSkillLabels.length > 0 ? `   - 생성 skill: ${generatedSkillLabels.join(', ')}` : null,
         `   - 추천 tool: ${toolLabels.join(', ') || '(none)'}`,
         `   - 모델: ${humanizeModel(agent.provider || inferProviderForModel(agent.model || ''), agent.model)}` + (agent.matched_preset_name ? ` · preset=${agent.matched_preset_name}` : ''),
-      ];
+      ].filter(Boolean);
     }),
     '',
     'Interaction',

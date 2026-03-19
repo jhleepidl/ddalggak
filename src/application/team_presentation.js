@@ -7,7 +7,7 @@ const EXECUTION_PATTERN_LABELS = {
   sequential_pipeline: '순차 파이프라인',
   parallel_research_then_review_then_synthesize: '병렬 조사 → 검토 → 최종 정리',
   builder_reviewer_loop: '구현 ↔ 검토 반복',
-  multi_research_adjudication: '다중 조사 → 조정',
+  multi_research_adjudication: '상반된 관점 토의 → 판정 → 최종 정리',
   operator_gated_workflow: '운영 게이트 포함 워크플로우',
 };
 const VISIBILITY_LABELS = {
@@ -23,6 +23,8 @@ const PAYLOAD_LABELS = {
   approved_summary_only: '승인된 요약',
   draft_plus_change_summary: '초안 + 변경 요약',
   evidence_bundle: '근거 묶음',
+  claim_plus_supporting_evidence: '핵심 주장 + 지지 근거',
+  counterargument_plus_risks: '반대 의견 + 리스크 근거',
 };
 const SKILL_LABELS = {
   web_search: { label: '웹 조사', detail: '필요한 공개 자료를 빠르게 찾음' },

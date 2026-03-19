@@ -32,7 +32,19 @@ export function buildDefaultInteractionSpec(agents = [], { task = '' } = {}) {
   const handoffs = [];
   let finalOwner = clean(researchers[0]?.name || researchers[0]?.display_name || researchers[0]?.agent_id || builders[0]?.agent_id || '');
 
-  if (researchers.length >= 2 && reviewers.length > 0 && synthesizers.length > 0) {
+  const debateMode = hasDebateSignals(task) || researchers.some((row) => /반대|counter|skeptic|devil|adversarial/i.test(`${agentDisplayName(row)} ${clean(row?.purpose || '')}`));
+
+  if (debateMode && researchers.length >= 2 && reviewers.length > 0 && synthesizers.length > 0) {
+    executionPattern = 'multi_research_adjudication';
+    const lead = researchers[0];
+    const counter = researchers.find((row) => row !== lead && /반대|counter|skeptic|devil|adversarial/i.test(`${agentDisplayName(row)} ${clean(row?.purpose || '')}`)) || researchers[1];
+    handoffs.push({ from: agentDisplayName(lead), to: agentDisplayName(counter), payload: 'claim_plus_supporting_evidence' });
+    for (const row of researchers) {
+      handoffs.push({ from: agentDisplayName(row), to: agentDisplayName(reviewers[0]), payload: row === counter ? 'counterargument_plus_risks' : 'summary_plus_key_evidence' });
+    }
+    handoffs.push({ from: agentDisplayName(reviewers[0]), to: agentDisplayName(synthesizers[0]), payload: 'review_summary_only' });
+    finalOwner = agentDisplayName(synthesizers[0]);
+  } else if (researchers.length >= 2 && reviewers.length > 0 && synthesizers.length > 0) {
     executionPattern = 'parallel_research_then_review_then_synthesize';
     for (const row of researchers) {
       handoffs.push({ from: agentDisplayName(row), to: agentDisplayName(reviewers[0]), payload: 'summary_plus_key_evidence' });
@@ -72,6 +84,10 @@ export function buildDefaultInteractionSpec(agents = [], { task = '' } = {}) {
 
 function agentDisplayName(row = {}) {
   return clean(row.name || row.display_name || row.displayLabel || row.display_label || row.agent_id || row.agentId || row.id || row.role || 'Agent');
+}
+
+function hasDebateSignals(text = '') {
+  return /반대\s*의견|반론|토론|토의|논쟁|debate|counter(?:-?| )argument|devil'?s advocate|adversarial|skeptic/i.test(clean(text));
 }
 
 export function normalizeInteractionSpec(raw = {}) {
@@ -120,6 +136,7 @@ export function parseNaturalLanguageInteractionPatch(instruction = '', { current
   const base = normalizeInteractionSpec(current || buildDefaultInteractionSpec(agentRoster));
   const next = JSON.parse(JSON.stringify(base));
   if (/병렬|parallel/.test(text)) next.execution_pattern = 'parallel_research_then_review_then_synthesize';
+  if (hasDebateSignals(text)) next.execution_pattern = 'multi_research_adjudication';
   if (/순차|pipeline|sequential/.test(text)) next.execution_pattern = 'sequential_pipeline';
   if (/builder.*reviewer.*loop|수정.*검토.*반복/.test(text)) next.execution_pattern = 'builder_reviewer_loop';
   if (/reviewer.*raw.*못\s*보|reviewer.*summary\s*only|reviewer.*summary만/.test(text)) {
