@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   buildSupervisorExecutionCallbacks,
 } from "../src/application/telegram_chat_execution.js";
+import { sendAgentStatusTransitionMessage } from "../src/application/telegram_route_planning.js";
 import { executeSupervisorActions } from "../src/chat/executor.js";
 import { Jobs } from "../src/jobs.js";
 import { Tracking } from "../src/tracking.js";
@@ -47,6 +48,27 @@ test("buildSupervisorExecutionCallbacks runAgent no longer crashes on updateAgen
     }),
     /Unsupported provider/
   );
+});
+
+test("sendAgentStatusTransitionMessage uses shared status throttle state without ReferenceError", async () => {
+  const sent = [];
+  await sendAgentStatusTransitionMessage(
+    {
+      sendMessage: async (chatId, text) => {
+        sent.push({ chatId, text });
+        return { ok: true };
+      },
+    },
+    4105,
+    {
+      agentId: "researcher",
+      state: "running",
+      goal: "status helper probe",
+    }
+  );
+
+  assert.equal(sent.length, 1);
+  assert.equal(String(sent[0].text || "").includes("Researcher"), true);
 });
 
 test("executeSupervisorActions degrades spawn_agents to sequential run_agent without supervisor runtime", async () => {

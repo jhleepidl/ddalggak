@@ -142,6 +142,7 @@ const {
   chatSessionStore,
   agentRegistry,
   AGENT_STATUS_MESSAGE_THROTTLE_MS,
+  agentStatusMessageStateByChat,
   runWorkspaceDir,
   resolveAgentId,
   findAgentConfig,
