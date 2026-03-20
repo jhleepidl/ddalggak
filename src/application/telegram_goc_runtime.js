@@ -11,6 +11,7 @@ import { runGeminiPrompt } from "../gemini.js";
 import { OrchestratorMemory } from "../settings.js";
 import { orchestratorNotes, buildChatGPTNextStepPrompt } from "../prompts.js";
 import { clip, extractCodexInstruction, extractJsonPlan } from "../textutil.js";
+import { deriveKnowledgeBaseDesign, deriveKnowledgeBaseProfile } from "../knowledge_base/profile.js";
 import { loadAgents, getAgent } from "../agents.js";
 import {
   parseAutoSuggestDecision as parseAutoSuggestDecisionShared,
@@ -297,7 +298,8 @@ const loadSupervisorRuntime = createSupervisorRuntimeLoader({
 function installTrackingGocHook() {
   tracking.setAppendHook(async ({ jobId, docName, chunk }) => {
     if (memoryModeWithFallback() !== "goc") return;
-    if (!TRACK_DOC_NAMES.includes(docName)) return;
+    const trackedDocs = tracking.listDocs(jobId).map((entry) => String(entry?.file_name || '').trim()).filter(Boolean);
+    if (!trackedDocs.includes(docName) && !TRACK_DOC_NAMES.includes(docName)) return;
     try {
       await appendTrackingChunkToGoc(requireGocClient(), {
         jobId,
@@ -335,17 +337,29 @@ async function getRegisteredAgentsText() {
     .join("\n");
 }
 
-async function createJob(goal, { ownerUserId = null, ownerChatId = null } = {}) {
+async function createJob(goal, { ownerUserId = null, ownerChatId = null, teamConfig = null } = {}) {
   await refreshAgentRegistry();
   const job = jobs.createJob({
     title: goal.slice(0, 80),
     ownerUserId,
     ownerChatId,
   });
-  tracking.init(job.jobId);
-  tracking.append(job.jobId, "plan.md", orchestratorNotes({ goal }), { timestamp: false });
-  tracking.append(job.jobId, "research.md", `## Goal\n\n${goal}\n`, { timestamp: false });
-  tracking.append(job.jobId, "progress.md", `## Started\n- goal: ${goal}\n`, { timestamp: false });
+  const knowledgeDesign = deriveKnowledgeBaseDesign({ goal, teamConfig });
+  const knowledgeBaseProfile = knowledgeDesign.profile;
+  tracking.init(job.jobId, knowledgeBaseProfile);
+  tracking.append(job.jobId, "plan", orchestratorNotes({ goal, knowledgeBaseProfile }), { timestamp: false });
+  tracking.append(job.jobId, "research", `## Goal
+
+${goal}
+`, { timestamp: false });
+  tracking.append(job.jobId, "progress", `## Started
+- goal: ${goal}
+`, { timestamp: false });
+  tracking.append(job.jobId, "artifacts", [
+    "## Artifact policy",
+    "- uploads, generated files, exports, and delivery references should be indexed here.",
+    `- kb_profile: ${knowledgeBaseProfile.profile_id}`,
+  ].join("\n"), { timestamp: false });
   jobs.appendConversation(job.jobId, "user", goal, { kind: "goal" });
   return job;
 }
@@ -828,7 +842,7 @@ async function refreshSharedContextForRuntime(runtime, {
     ? refreshed.active_type_breakdown
     : {};
   if (jobId) {
-    tracking.append(jobId, "decisions.md", [
+    tracking.append(jobId, "decisions", [
       "## shared_context_refresh",
       `- reason: ${reason || "manual"}`,
       `- selected_count: ${refreshed.selected_count}`,
@@ -1192,7 +1206,7 @@ async function createAgentDraftProposal(bot, chatId, userId, jobId, action) {
 
   const cleanJobId = String(jobId || "").trim();
   if (cleanJobId) {
-    tracking.append(cleanJobId, "decisions.md", [
+    tracking.append(cleanJobId, "decisions", [
       "## /chat propose_agent",
       `- agent_id: ${profile.id}`,
       `- draft_node: ${created?.id || "unknown"}`,
@@ -1378,7 +1392,7 @@ function recordMembershipMutationDiagnostic(jobId, diagnostic = {}, { stage = ""
   const stageLabel = String(stage || "").trim() || "membership_mutation";
   const text = JSON.stringify(row);
   if (cleanJobId) {
-    tracking.append(cleanJobId, "decisions.md", [
+    tracking.append(cleanJobId, "decisions", [
       `## /chat ${stageLabel}`,
       `- diagnostic: ${text}`,
     ].join("\n"));
@@ -1636,7 +1650,7 @@ async function updateJobConfigSelection(client, {
     });
   }
 
-  tracking.append(cleanJobId, "decisions.md", [
+  tracking.append(cleanJobId, "decisions", [
     "## /chat update_job_config_selection",
     `- op: ${cleanOp}`,
     `- kind: ${cleanKind}`,

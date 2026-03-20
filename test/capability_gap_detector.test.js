@@ -1,0 +1,47 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  detectCapabilityGapsFromExecution,
+  detectTeamCapabilityGaps,
+  formatCapabilityGapLines,
+} from '../src/application/capability_gap_detector.js';
+import { SkillRegistry } from '../src/application/skill_registry.js';
+import path from 'node:path';
+
+test('detectCapabilityGapsFromExecution extracts missing tool and credential requirements', () => {
+  const gaps = detectCapabilityGapsFromExecution({
+    outputs: [
+      { agentId: 'Notebook Builder', output: "Tool 'write_file' not found. Please provide OPENAI_API_KEY." },
+    ],
+  });
+
+  assert.ok(gaps.some((gap) => gap.kind === 'missing_tool' && gap.tool_id === 'write_file'));
+  assert.ok(gaps.some((gap) => gap.kind === 'missing_credential' && /OPENAI_API_KEY|API_KEY/.test(gap.credential_key)));
+
+  const lines = formatCapabilityGapLines(gaps, { maxLines: 4 });
+  assert.ok(lines.some((line) => /write_file/.test(line)));
+  assert.ok(lines.some((line) => /API_KEY/.test(line)));
+});
+
+test('detectTeamCapabilityGaps flags notebook builders without workspace_fs', () => {
+  const registry = new SkillRegistry({ skillsDir: path.resolve(process.cwd(), 'skills') });
+  registry.load({ refresh: true });
+
+  const gaps = detectTeamCapabilityGaps({
+    team: {
+      agents: [
+        {
+          name: 'Notebook Builder',
+          role: 'builder',
+          purpose: 'Jupyter notebook 실습과 과제를 구현한다',
+          recommended_tool_ids: ['workspace_fs'],
+        },
+      ],
+    },
+    runtime: { availableToolIds: [] },
+    skillRegistry: registry,
+  });
+
+  assert.ok(gaps.some((gap) => gap.kind === 'missing_tool' && gap.tool_id === 'workspace_fs'));
+});

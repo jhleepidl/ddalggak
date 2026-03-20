@@ -52,7 +52,7 @@ function createAppChatRunManager(bot) {
       if (runtimeCore.isCancelledError(error)) return;
       await bot.sendMessage(chatId, `❌ /chat 실패: ${String(error?.message ?? error)}`);
     },
-    runChat: async ({ chatId, userId, message, inputKind, pendingCount, telegramMessageId, forceMode, chatInfo }) => {
+    runChat: async ({ chatId, userId, message, inputKind, pendingCount, telegramMessageId, userReplyToMessageId, forceMode, chatInfo }) => {
       await runtimeCore.runSupervisorChat(
         bot,
         chatId,
@@ -65,6 +65,7 @@ function createAppChatRunManager(bot) {
             : { chat_id: String(chatId || "") },
           inputKind: inputKind || (pendingCount > 1 ? "interrupt_update" : "chat_message"),
           telegramMessageId,
+          userReplyToMessageId,
           forceMode: runtimeCore.normalizeForceMode(forceMode),
         }
       );
@@ -100,6 +101,7 @@ function buildGroupedDeps({ bot, botUsername, chatRunManager, uploadService }) {
     sendRouterAckMessage: runtimeCore.sendRouterAckMessage,
     chatRunManager,
     executeActions: runtimeCore.executeActions,
+    normalizeForceMode: runtimeCore.normalizeForceMode,
     isCancelledError: runtimeCore.isCancelledError,
     actionApprovalDeps: {
       chatSessionStore: runtimeCore.chatSessionStore,

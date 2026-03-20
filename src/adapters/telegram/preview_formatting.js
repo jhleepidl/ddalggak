@@ -1,5 +1,6 @@
 import { clip } from '../../textutil.js';
 import { formatSkillLabels, humanizeModel } from '../../application/team_presentation.js';
+import { buildTeamInstallProposal } from '../../application/install_proposal.js';
 import {
   buildPreviewAgentDisplayIndex,
   formatChatAgentDisplayName,
@@ -20,7 +21,7 @@ function isAgentActionType(type = '') {
 }
 
 function isMostlyBackendOnlyAction(type = '') {
-  return ['summarize', 'checkpoint', 'supervisor_decision'].includes(String(type || '').trim().toLowerCase())
+  return ['summarize', 'checkpoint', 'supervisor_decision', 'gate_wait', 'human_checkpoint', 'tool_proxy_call', 'memory_sync', 'committee_consensus'].includes(String(type || '').trim().toLowerCase())
 }
 
 function formatActionMeta(action = {}) {
@@ -90,6 +91,11 @@ export function formatChatActionLabel(action = {}, {
   if (type === 'spawn_agents' || type === 'spawn_parallel') return `${type}:${Array.isArray(action.agents) ? action.agents.length : 0}`;
   if (type === 'checkpoint') return `checkpoint:${action.label || action.inputs?.checkpoint_id || 'pending'}`;
   if (type === 'supervisor_decision') return `supervisor_decision:${action.label || 'Supervisor'}`;
+  if (type === 'gate_wait') return `gate_wait:${action.label || action.inputs?.slot_id || 'gate'}`;
+  if (type === 'human_checkpoint') return `human_checkpoint:${action.label || action.inputs?.slot_id || 'human'}`;
+  if (type === 'tool_proxy_call') return `tool_proxy_call:${action.label || action.inputs?.slot_id || 'tool_proxy'}`;
+  if (type === 'memory_sync') return `memory_sync:${action.label || action.inputs?.slot_id || 'memory'}`;
+  if (type === 'committee_consensus') return `committee_consensus:${action.label || action.inputs?.consensus_mode || 'committee'}`;
   if (type === 'open_context') return `open_context:${action.scope || openContextFallback}`;
   return type;
 }
@@ -392,33 +398,13 @@ export function summarizeSpecialChatOutputs(outputs = []) {
 }
 
 
-function detectCapabilityGapLines(executionLike = {}, { maxLines = 4 } = {}) {
-  const outputs = asArray(executionLike?.outputs);
-  const results = asArray(executionLike?.results);
-  const gaps = [];
-  const pushGap = (line = '') => {
-    const cleanLine = String(line || '').trim();
-    if (!cleanLine || gaps.includes(cleanLine)) return;
-    gaps.push(cleanLine);
-  };
-  const inspectText = (text = '', label = 'agent') => {
-    const raw = String(text || '').trim();
-    if (!raw) return;
-    const toolMatch = raw.match(/Tool ['"]?([a-zA-Z0-9_.-]+)['"]? not found/i);
-    if (toolMatch) {
-      const toolId = String(toolMatch[1] || '').trim();
-      const suggestion = /write_file|create_file|save_file|ipynb/i.test(toolId)
-        ? 'workspace_fs 도구 또는 파일 생성 helper가 필요합니다.'
-        : `${toolId} 도구 정의가 필요합니다.`;
-      pushGap(`- ${label}: ${toolId} 도구가 없어 작업을 완료하지 못했습니다. ${suggestion}`);
-    }
-    if (/api[_ -]?key|OPENAI_API_KEY|GEMINI_API_KEY|ANTHROPIC_API_KEY/i.test(raw)) {
-      pushGap(`- ${label}: 외부 API 자격 증명이 필요합니다. 사용 가능한 API 키 또는 환경 변수를 제공해 주세요.`);
-    }
-  };
-  for (const row of outputs) inspectText(row?.output || row?.text || row?.summary || '', String(row?.agentId || row?.agent || 'agent'));
-  for (const row of results) inspectText(row?.note || row?.error || row?.reason || '', String(row?.label || row?.agent || row?.agentId || 'step'));
-  return gaps.slice(0, Math.max(1, Number(maxLines) || 4));
+function detectCapabilityGapLines(executionLike = {}, { maxLines = 4, runtime = null } = {}) {
+  const proposal = buildTeamInstallProposal({ execution: executionLike, runtime });
+  return [
+    ...proposal.gap_preview_lines.slice(0, Math.max(1, Number(maxLines) || 4)),
+    ...((proposal.requirements?.install_hints || []).slice(0, Math.max(1, Number(maxLines) || 4)).map((entry) => `- hint: ${entry}`)),
+    ...((proposal.suggested_commands || []).slice(0, 3).map((entry) => `- command: ${entry}`)),
+  ].slice(0, Math.max(2, Number(maxLines) || 4) + 3);
 }
 
 export function buildChatSynthesisFallback(outputs = [], options = {}) {
@@ -440,7 +426,7 @@ export function buildChatSynthesisFallback(outputs = [], options = {}) {
     })
     .filter(Boolean)
     .slice(-maxLines);
-  const capabilityGapLines = executionLike ? detectCapabilityGapLines(executionLike, { maxLines }) : [];
+  const capabilityGapLines = executionLike ? detectCapabilityGapLines(executionLike, { maxLines, runtime: opts.runtime }) : [];
   if (capabilityGapLines.length > 0) {
     return ['실행 중 필요한 도구/자격 정보가 부족했습니다.', ...capabilityGapLines].join('\n');
   }

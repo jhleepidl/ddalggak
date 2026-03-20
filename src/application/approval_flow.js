@@ -6,6 +6,7 @@ import {
   isTeamMembershipMutationAction,
 } from "../chat/action_classification.js";
 import { isTeamSetupOnlyRequest } from "./team_intent.js";
+import { writeRuntimeCheckpointBundle } from "./runtime_checkpointing.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -214,7 +215,7 @@ export async function handleActionApprovalCallback({
       interrupt: null,
     });
     if (pendingJobId) {
-      tracking.append(pendingJobId, "decisions.md", [
+      tracking.append(pendingJobId, "decisions", [
         "## /chat approval switched_to_work",
         `- approval_id: ${approvalId}`,
         `- action: ${String(pending?.action_display_label || "").trim() || chatActionLabel(pending.action)}`,
@@ -234,6 +235,7 @@ export async function handleActionApprovalCallback({
       userId,
       text: originalText,
       telegramMessageId: msg.message_id,
+      userReplyToMessageId: Number.isFinite(Number(msg?.reply_to_message?.message_id)) ? Number(msg.reply_to_message.message_id) : null,
       kind: "normal",
       forceMode: "work",
       chatInfo: {
@@ -258,7 +260,7 @@ export async function handleActionApprovalCallback({
       state: "idle",
       pending_approval: null,
     });
-    tracking.append(pendingJobId, "decisions.md", [
+    tracking.append(pendingJobId, "decisions", [
       "## /chat approval rejected",
       `- approval_id: ${approvalId}`,
       `- action: ${String(pending?.action_display_label || "").trim() || chatActionLabel(pending.action)}`,
@@ -298,6 +300,7 @@ export async function handleActionApprovalCallback({
     ? normalizeForceMode
     : normalizeForceModeValue;
   const resumeForceMode = normalizeForceModeFn(pending.force_mode || "normal");
+  let resumeCheckpoint = null;
   const runtime = await loadSupervisorRuntime(pendingJobId, {
     chatMeta: { chat_id: String(chatId || ""), telegram_user_id: String(userId || "") },
     telegramUserId: userId,
@@ -342,6 +345,24 @@ export async function handleActionApprovalCallback({
   ) || "explicit_route_plan";
   if (resumeRuntimeTeamSnapshot) {
     runtime.runtimeTeamSnapshot = resumeRuntimeTeamSnapshot;
+  }
+  try {
+    resumeCheckpoint = writeRuntimeCheckpointBundle({
+      sharedDir: `${jobs.jobDir(pendingJobId)}/shared`,
+      jobId: pendingJobId,
+      stage: 'approval_resume',
+      trigger: 'resume_after_approval',
+      userText: String(pending.original_user_text || '승인된 액션 재개'),
+      reason: String(pending?.reason || '').trim(),
+      results: pending?.already_done?.results || [],
+      outputs: pending?.already_done?.outputs || [],
+      remainingActions: resumedActions,
+      pendingApproval: pending,
+      metadata: { approval_id: approvalId, action_source: resumeActionSource },
+    });
+  } catch {}
+  if (resumeCheckpoint) {
+    runtime.latest_runtime_checkpoint = resumeCheckpoint;
   }
   const contextEngine = createScopeContextStore({
     memoryMode: memoryModeWithFallback(),
@@ -462,7 +483,7 @@ export async function handleActionApprovalCallback({
     };
     if (resumeExecutionGraph) {
       await resumeExecutionGraph.startRun({
-        userText: resumeUserText,
+        userText: String(pending.original_user_text || '승인된 액션 재개'),
         metadata: {
           runtime_team_snapshot: resumeRuntimeTeamSnapshot,
           action_source: resumeActionSource,
@@ -488,6 +509,8 @@ export async function handleActionApprovalCallback({
         : runtime.agents,
       tools: runtime.tools,
       sessionStore: chatSessionStore,
+      initialResults: Array.isArray(pending?.already_done?.results) ? pending.already_done.results : [],
+      initialOutputs: Array.isArray(pending?.already_done?.outputs) ? pending.already_done.outputs : [],
       callbacks: buildSupervisorExecutionCallbacks({
         bot,
         chatId,
@@ -543,7 +566,7 @@ export async function handleActionApprovalCallback({
     }
     const rerouteKey = buildPostMutationRerouteKey({
       jobId: pendingJobId,
-      userText: resumeUserText,
+      userText: String(pending.original_user_text || '승인된 액션 재개'),
     });
     const membershipConfirmation = summarizeMembershipMutationConfirmation({
       actions: resumedActions,
@@ -584,7 +607,7 @@ export async function handleActionApprovalCallback({
     resumeFinalAssistantText = replyText;
     await sendLong(bot, chatId, replyText);
 
-    tracking.append(pendingJobId, "decisions.md", [
+    tracking.append(pendingJobId, "decisions", [
       "## /chat approval resumed",
       `- approval_id: ${approvalId}`,
       `- action_source: ${resumeActionSource}`,
@@ -656,6 +679,7 @@ export async function handleActionApprovalCallback({
           userId,
           text: resumeUserText,
           telegramMessageId: msg?.message_id,
+          userReplyToMessageId: Number.isFinite(Number(msg?.reply_to_message?.message_id)) ? Number(msg.reply_to_message.message_id) : null,
           kind: "normal",
           forceMode: "work",
           chatInfo: {

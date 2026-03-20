@@ -1,6 +1,7 @@
 import { normalizeStringList } from "../shared/normalize.js";
 import { normalizeSkillAttachmentList } from "../domain/skill_attachment.js";
 import { normalizeRoleId } from "../compatibility/legacy_roles.js";
+import { hasExplicitSkillDomainMatch, requiresExplicitDomainMatch } from "../shared/skill_relevance.js";
 
 function asArray(raw) {
   return Array.isArray(raw) ? raw : [];
@@ -44,6 +45,18 @@ function historicalScore(skill = {}) {
     + (Number.isFinite(usageCount) ? Math.min(8, Math.log10(Math.max(1, usageCount + 1)) * 4) : 0)
   );
   return Math.round(score * 10) / 10;
+}
+
+function documentationProfileScore(skill = {}) {
+  const profile = skill?.documentation_profile && typeof skill.documentation_profile === "object"
+    ? skill.documentation_profile
+    : {};
+  const band = normalizeText(profile?.complexity_band, { lower: true });
+  if (band === "compact") return 8;
+  if (band === "detailed") return 6;
+  if (band === "standard") return 3;
+  if (band === "comprehensive") return -8;
+  return 0;
 }
 
 function lowRiskPreference(skill = {}) {
@@ -144,6 +157,7 @@ export function scoreSkillForTask({
   const roleScore = roleCompatibilityScore(roleType, skill.compatible_roles || []);
   const history = historicalScore(skill);
   const risk = lowRiskPreference(skill);
+  const docs = documentationProfileScore(skill);
   const requested = collectRequestedSkillIds(slot);
   const requiredBoost = requested.required.includes(skill.id) ? 60 : 0;
   const preferredBoost = requested.preferred.includes(skill.id) ? 20 : 0;
@@ -159,6 +173,7 @@ export function scoreSkillForTask({
     + (titleMatches * 4)
     + history
     + risk
+    + docs
   );
   const reasons = [
     roleScore.reason,
@@ -169,6 +184,7 @@ export function scoreSkillForTask({
     titleMatches > 0 ? `name_matches:${titleMatches}` : "",
     history > 0 ? `historical:${history}` : "",
     risk > 0 ? `risk_pref:${risk}` : "",
+    docs !== 0 ? `doc_profile:${docs}` : "",
   ].filter(Boolean);
   return {
     score,
@@ -221,6 +237,11 @@ export class SkillResolver {
       if (requested.forbidden.includes(skill.id)) continue;
       if (!hasRequiredTools(skill, availableToolIds)) continue;
       if (!hasRequiredContextTypes(skill, slot.required_context_types || [])) continue;
+      if (requiresExplicitDomainMatch(skill) && !requested.required.includes(skill.id) && !hasExplicitSkillDomainMatch({
+        skill,
+        text: [goal, ...asArray(contextHints), taskInterpretation?.task_summary, slot?.purpose].filter(Boolean).join('\n'),
+        taskInterpretation,
+      })) continue;
       const score = scoreSkillForTask({
         skill,
         goal,
@@ -258,9 +279,11 @@ export class SkillResolver {
       });
     }
 
+    const softSkillBudget = Math.min(this.maxSkillsPerRole, 2);
     for (const row of scored) {
       if (selectedRows.length >= this.maxSkillsPerRole) break;
       if (row.score < this.minScore && !requested.preferred.includes(row.skill.id)) continue;
+      if (selectedRows.length >= softSkillBudget && !requested.required.includes(row.skill.id) && !requested.preferred.includes(row.skill.id)) continue;
       selectedRows.push({
         attachment: {
           skill_id: row.skill.id,

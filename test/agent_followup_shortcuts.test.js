@@ -26,7 +26,7 @@ test("appendRecentAgentTurn keeps newest unique agent turns first", () => {
   assert.equal(turns[1].agent_id, "researcher");
 });
 
-test("planAgentFollowupShortcut targets the most recent eligible agent turn", () => {
+test("planAgentFollowupShortcut targets the most recent eligible agent turn when reply is used", () => {
   const shortcut = planAgentFollowupShortcut({
     message: "그 답변의 이유를 조금 더 자세히 설명해줘",
     session: {
@@ -46,6 +46,7 @@ test("planAgentFollowupShortcut targets the most recent eligible agent turn", ()
       agentsCatalog: [{ id: "researcher", name: "Researcher", role: "researcher", provider: "gemini" }],
     },
     teamConfig: { shortcut_policy: { enabled: true } },
+    replyToMessageId: 123,
   });
 
   assert.equal(shortcut.matched, true);
@@ -73,8 +74,34 @@ test("planAgentFollowupShortcut ignores recent codex builder turns", () => {
       agentsCatalog: [{ id: "builder", name: "Builder", role: "builder", provider: "codex" }],
     },
     teamConfig: { shortcut_policy: { enabled: true } },
+    replyToMessageId: 123,
   });
 
   assert.equal(shortcut.matched, false);
   assert.equal(shortcut.reason, "no_eligible_recent_agent_turn");
+});
+
+test("planAgentFollowupShortcut now requires an explicit Telegram reply target", () => {
+  const shortcut = planAgentFollowupShortcut({
+    message: "그 답변의 이유를 조금 더 자세히 설명해줘",
+    session: {
+      recent_agent_turns: [
+        {
+          agent_id: "researcher",
+          agent_name: "Researcher",
+          role: "researcher",
+          provider: "gemini",
+          goal: "분석",
+          output: "요약",
+        },
+      ],
+    },
+    runtime: {
+      agentsCatalog: [{ id: "researcher", name: "Researcher", role: "researcher", provider: "gemini" }],
+    },
+    teamConfig: { shortcut_policy: { enabled: true } },
+  });
+
+  assert.equal(shortcut.matched, false);
+  assert.equal(shortcut.reason, "reply_required");
 });

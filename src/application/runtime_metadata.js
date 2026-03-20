@@ -12,6 +12,7 @@ import { normalizeTeamPlan } from "../domain/team_plan.js";
 import { normalizeContextRuntimeMode, summarizeLegacyContextState } from "../domain/context_runtime.js";
 import { normalizeSkillUsageEvent, summarizeSkillUsageEvents } from "./skill_feedback.js";
 import { AuthorityRegistry } from "../catalog/authority_registry.js";
+import { normalizeTeamStructureV2 } from '../shared/team_structure_v2.js';
 
 function asObject(value) {
   return value && typeof value === "object" ? value : {};
@@ -398,6 +399,14 @@ function hasSnapshotFields(row = {}) {
     || row.generated_at
     || row.generatedAt
     || row.source
+    || row.structure_v2
+    || row.structureV2
+    || Array.isArray(row.runtime_participants)
+    || Array.isArray(row.runtimeParticipants)
+    || row.topology_pattern
+    || row.topologyPattern
+    || Array.isArray(row.non_executable_participants)
+    || Array.isArray(row.nonExecutableParticipants)
   );
 }
 
@@ -424,6 +433,33 @@ export function normalizeRuntimeTeamSnapshot(input = null, {
   const runtimeAgents = runtimeAgentsRaw
     .map((agent) => normalizeRuntimeAgent(agent))
     .filter((agent) => agent.instance_id || agent.template_id || agent.role_label);
+  const structureV2 = (() => {
+    const rawStructure = row.structure_v2 ?? row.structureV2 ?? null;
+    return rawStructure && typeof rawStructure === 'object' ? normalizeTeamStructureV2(rawStructure) : null;
+  })();
+  const runtimeParticipants = (Array.isArray(row.runtime_participants) ? row.runtime_participants : (Array.isArray(row.runtimeParticipants) ? row.runtimeParticipants : (Array.isArray(structureV2?.participants) ? structureV2.participants : [])))
+    .map((entry) => {
+      const item = asObject(entry);
+      const participantId = String(item.participant_id || item.participantId || item.id || '').trim().toLowerCase();
+      if (!participantId) return null;
+      return omitUndefinedFields({
+        participant_id: participantId,
+        kind: String(item.kind || 'agent').trim().toLowerCase() || 'agent',
+        executable: item.executable === true,
+        name: String(item.name || item.label || '').trim() || undefined,
+        role: String(item.role || '').trim().toLowerCase() || undefined,
+        model: String(item.model || '').trim() || undefined,
+      });
+    })
+    .filter(Boolean);
+  const nonExecutableParticipants = (Array.isArray(row.non_executable_participants) ? row.non_executable_participants : (Array.isArray(row.nonExecutableParticipants) ? row.nonExecutableParticipants : []))
+    .map((entry) => omitUndefinedFields({
+      participant_id: String(entry?.participant_id || entry?.participantId || entry?.id || '').trim().toLowerCase() || undefined,
+      kind: String(entry?.kind || '').trim().toLowerCase() || undefined,
+      name: String(entry?.name || entry?.label || '').trim() || undefined,
+    }))
+    .filter((entry) => entry.participant_id || entry.kind || entry.name);
+  const topologyPattern = String(row.topology_pattern || row.topologyPattern || structureV2?.topology?.pattern || '').trim().toLowerCase() || undefined;
   const teamPlan = (() => {
     const rawPlan = row.team_plan && typeof row.team_plan === "object"
       ? row.team_plan
@@ -582,6 +618,10 @@ export function normalizeRuntimeTeamSnapshot(input = null, {
     skill_usage_summary: skillUsageSummary,
     supervisor_runtime: supervisorRuntime,
     runtime_authority: runtimeAuthority,
+    structure_v2: structureV2 || undefined,
+    runtime_participants: runtimeParticipants,
+    topology_pattern: topologyPattern,
+    non_executable_participants: nonExecutableParticipants,
     generated_at: String(row.generated_at || row.generatedAt || defaultGeneratedAt || new Date().toISOString()),
     source: String(row.source || defaultSource || "team_builder").trim() || "team_builder",
   };

@@ -31,3 +31,17 @@ test("task interpreter splits multi-source analysis into multiple researcher slo
   assert.ok(interpreted.pinned_preset_ids.includes("dart_financial_researcher"));
   assert.ok(interpreted.pinned_preset_ids.includes("market_news_researcher"));
 });
+
+
+test('task interpreter does not pin KR filing preset for generic non-Korean filings tasks', () => {
+  const interpreted = interpretTask({
+    goal: 'Compare the latest SEC filing with market news headlines and summarize the risks',
+    seedInstruction: 'focus on 10-K and earnings call materials',
+  });
+
+  assert.equal(interpreted.pinned_preset_ids.includes('dart_financial_researcher'), false);
+  assert.equal(
+    interpreted.candidate_capability_slots.some((slot) => (slot.preferred_skill_ids || []).includes('skill.kr_equity_analysis.v1')),
+    false,
+  );
+});

@@ -245,7 +245,7 @@ function resolveAuthorityEntryForActor({
   const registry = new AuthorityRegistry();
   const runtimeAgent = resolveRuntimeAgentForAction(action, snapshot);
 
-  if (["spawn_parallel", "spawn_agents", "checkpoint", "pause_children", "cancel_child", "reroute_child", "supervisor_decision"].includes(type)) {
+  if (["spawn_parallel", "spawn_agents", "checkpoint", "pause_children", "cancel_child", "reroute_child", "supervisor_decision", "gate_wait", "human_checkpoint", "tool_proxy_call", "memory_sync", "committee_consensus"].includes(type)) {
     const supervisorInstanceId = normalizeText(supervisorRuntime?.instance_id || supervisorRuntime?.instanceId);
     const existing = authorityGraph.find((entry) => normalizeText(entry?.instance_id || entry?.instanceId) === supervisorInstanceId)
       || authorityGraph.find((entry) => normalizeText(entry?.role_id || entry?.roleId, { lower: true }) === "supervisor_runtime")
@@ -344,12 +344,39 @@ function describeActionAuthority(action = {}, runtimeAgent = null) {
     };
   }
 
-  if (["checkpoint", "pause_children", "cancel_child", "reroute_child", "supervisor_decision"].includes(type)) {
+  if (["pause_children", "cancel_child", "reroute_child", "supervisor_decision"].includes(type)) {
     return {
       action_tags: ["coordinate"],
       approval_tags: [type],
       tools: ["control_plane"],
       supervisor_only: true,
+    };
+  }
+
+  if (["checkpoint", "gate_wait", "human_checkpoint", "committee_consensus"].includes(type)) {
+    return {
+      action_tags: ["coordinate"],
+      approval_tags: [type],
+      tools: ["control_plane"],
+      supervisor_only: false,
+    };
+  }
+
+  if (type === "tool_proxy_call") {
+    return {
+      action_tags: ["coordinate", "read"],
+      approval_tags: [],
+      tools: ["control_plane"],
+      supervisor_only: false,
+    };
+  }
+
+  if (type === "memory_sync") {
+    return {
+      action_tags: ["coordinate", "read"],
+      approval_tags: [],
+      tools: ["control_plane"],
+      supervisor_only: false,
     };
   }
 

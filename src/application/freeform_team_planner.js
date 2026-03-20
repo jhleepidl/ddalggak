@@ -3,6 +3,8 @@ import { spawnSync } from 'node:child_process';
 import { runCodexExec } from '../codex.js';
 import { parseJsonObjectFromText } from '../shared/json_extract.js';
 import { listSupportedModels } from '../catalog/model_catalog.js';
+import { normalizeTeamStructureV2, deriveTeamConfigFromStructureV2 } from '../shared/team_structure_v2.js';
+import { buildPlannerSchemaHintText } from '../shared/team_schema_catalog.js';
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -104,6 +106,7 @@ function buildPlannerPrompt({
     'Goal: translate the user\'s natural-language team request into a concrete team configuration that preserves interaction requirements, opposition requirements, and handoff structure.',
     '',
     'Hard constraints:',
+    buildPlannerSchemaHintText(),
     '- team must have 1 to 6 agents',
     '- each agent role must be one of: researcher, builder, reviewer, synthesizer, operator',
     '- if the user asks for opposing views, counterarguments, debate, discussion, devil\'s advocate, or back-and-forth, DO NOT collapse to a single generalist researcher',
@@ -145,7 +148,18 @@ function buildPlannerPrompt({
     '    "handoffs": [{"from":"...","to":"...","payload":"summary_plus_key_evidence"}],',
     '    "policies": {"reviewer_visibility":"...","synthesizer_visibility":"..."}',
     '  },',
-    '  "shortcut_policy": {"enabled": true, "only_for_followups": true}',
+    '  "shortcut_policy": {"enabled": true, "only_for_followups": true, "disallow_when_pending_approval": true},',
+    '  "structure_v2": {',
+    '    "kind": "team_structure_v2",',
+    '    "version": 2,',
+    '    "metadata": {"team_name": "...", "composition_mode": "freeform", "proposal_mode": "create"},',
+    '    "participants": [{"participant_id": "...", "kind": "agent", "name": "...", "role": "researcher"}],',
+    '    "topology": {"pattern": "router|supervisor|sequential|parallel|debate|committee|graph|hybrid", "execution_pattern": "...", "edges": [{"from": "...", "to": "...", "payload": "summary_plus_key_evidence"}]},',
+    '    "interaction_policy": {"visibility": {"reviewer_visibility": "...", "synthesizer_visibility": "..."}},',
+    '    "knowledge_surface": {"profile_id": "...", "display_name": "...", "docs": [{"doc_id": "plan", "file_name": "..."}]},',
+    '    "memory_policy": {"stable_semantic_slots": ["decisions", "artifacts"], "migration_strategy": "semantic_slot_preserving"},',
+    '    "control_policy": {"runtime_execution": {"continuous_improvement": {"enabled": false, "max_turns": 8}}}',
+    '  }',
     '}',
     '',
     `User request: ${clean(taskText)}`,
@@ -162,10 +176,12 @@ function buildPlannerPrompt({
 
 function summarizeTeamForPlanner(team = null) {
   const row = asObject(team);
+  const structure = row.structure_v2 || row.structureV2;
+  const source = structure && typeof structure === 'object' ? { ...row, ...deriveTeamConfigFromStructureV2(structure) } : row;
   return {
-    team_name: clean(row.team_name || row.teamName || ''),
-    task_brief: clean(row.task_brief || row.taskBrief || row.task || row.design_prompt || row.designPrompt || ''),
-    agents: asArray(row.agents).map((agent) => ({
+    team_name: clean(source.team_name || source.teamName || ''),
+    task_brief: clean(source.task_brief || source.taskBrief || source.task || source.design_prompt || source.designPrompt || ''),
+    agents: asArray(source.agents).map((agent) => ({
       name: clean(agent?.name),
       role: cleanId(agent?.role || agent?.role_id || agent?.roleId || 'researcher') || 'researcher',
       purpose: clean(agent?.purpose),
@@ -178,9 +194,17 @@ function summarizeTeamForPlanner(team = null) {
         goal: clean(entry?.goal || entry?.objective || entry?.description),
       })).filter((entry) => entry.label).slice(0, 3),
       recommended_tool_ids: asArray(agent?.recommended_tool_ids || agent?.recommendedToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 6),
+      context_policy: asObject(agent?.context_policy || agent?.contextPolicy),
     })).filter((agent) => agent.name),
-    interaction_spec: asObject(row.interaction_spec || row.interactionSpec),
-    shortcut_policy: asObject(row.shortcut_policy || row.shortcutPolicy),
+    interaction_spec: asObject(source.interaction_spec || source.interactionSpec),
+    shortcut_policy: asObject(source.shortcut_policy || source.shortcutPolicy),
+    knowledge_surface: asObject(source.knowledge_surface || source.knowledgeSurface || structure?.knowledge_surface || structure?.knowledgeSurface),
+    memory_policy: asObject(source.memory_policy || source.memoryPolicy || structure?.memory_policy || structure?.memoryPolicy),
+    runtime_execution: asObject(source.runtime_execution || source.runtimeExecution || structure?.control_policy?.runtime_execution || structure?.control_policy?.runtimeExecution),
+    structure_v2: structure || undefined,
+    knowledge_surface: asObject(source.knowledge_surface || source.knowledgeSurface || structure?.knowledge_surface || structure?.knowledgeSurface),
+    memory_policy: asObject(source.memory_policy || source.memoryPolicy || structure?.memory_policy || structure?.memoryPolicy),
+    planner_metadata: asObject(source.planner_metadata || source.plannerMetadata),
   };
 }
 
@@ -203,10 +227,11 @@ function buildRefinementPlannerPrompt({
     'Goal: update the current team in response to the refinement instruction while preserving useful existing agents and revising both agent roster and interaction design when necessary.',
     '',
     'Refinement rules:',
+    buildPlannerSchemaHintText(),
     '- return the full next team, not a patch',
     '- preserve existing strong agents unless the instruction clearly asks to remove or replace them',
     '- if the user asks for coding, notebook work, IPython, Jupyter, implementation, or a Coder Agent, include a builder agent with a concrete coding/notebook purpose',
-    '- consider interaction_spec as first-class: update handoffs, execution_pattern, and final_answer_owner when the refinement implies a new workflow',
+    '- consider interaction_spec as first-class: update handoffs, execution_pattern, rebuttal/adjudication shape, reviewer_visibility, synthesizer_visibility, builder_direct_response, and final_answer_owner when the refinement implies a new workflow',
     '- if multiple upstream agents remain, keep or add a synthesizer unless the user rejects it',
     '- prefer existing executable skill ids from the registry for attached_skill_ids',
     '- do not attach irrelevant domain-specific skills (for example KR equity analysis) unless the refinement actually asks for that domain',
@@ -242,7 +267,10 @@ function buildRefinementPlannerPrompt({
     '    "handoffs": [{"from":"...","to":"...","payload":"summary_plus_key_evidence"}],',
     '    "policies": {"reviewer_visibility":"...","synthesizer_visibility":"...","builder_direct_response":false}',
     '  },',
-    '  "shortcut_policy": {"enabled": true, "only_for_followups": true}',
+    '  "shortcut_policy": {"enabled": true, "only_for_followups": true, "disallow_when_pending_approval": true},',
+    '  "knowledge_surface": {"profile_id": "...", "display_name": "...", "docs": [{"doc_id": "plan", "file_name": "..."}]},',
+    '  "memory_policy": {"stable_semantic_slots": ["decisions", "artifacts"], "migration_strategy": "semantic_slot_preserving"},',
+    '  "runtime_execution": {"continuous_improvement": {"enabled": false, "max_turns": 8}}',
     '}',
     '',
     `Current team: ${JSON.stringify(current)}`,
@@ -280,10 +308,14 @@ function normalizeGeneratedSkillBriefs(rows = []) {
 
 function normalizePlannerPlan(raw = {}) {
   const row = asObject(raw);
+  const rawStructure = row.structure_v2 || row.structureV2;
+  const structure = rawStructure && typeof rawStructure === 'object' ? normalizeTeamStructureV2(rawStructure) : null;
+  const derived = structure ? deriveTeamConfigFromStructureV2(structure) : {};
+  const source = structure ? { ...row, ...derived } : row;
   return {
-    team_name: clean(row.team_name || row.teamName || 'freeform_team'),
-    reasoning_summary: asArray(row.reasoning_summary || row.rationale || row.why).map((entry) => clean(entry)).filter(Boolean).slice(0, 5),
-    agents: asArray(row.agents).map((agent) => {
+    team_name: clean(source.team_name || source.teamName || 'freeform_team'),
+    reasoning_summary: asArray(source.reasoning_summary || source.rationale || source.why).map((entry) => clean(entry)).filter(Boolean).slice(0, 5),
+    agents: asArray(source.agents).map((agent) => {
       const item = asObject(agent);
       return {
         name: clean(item.name || item.display_name || item.agent_name),
@@ -298,8 +330,12 @@ function normalizePlannerPlan(raw = {}) {
         context_policy: asObject(item.context_policy || item.contextPolicy),
       };
     }).filter((agent) => agent.name),
-    interaction_spec: asObject(row.interaction_spec || row.interactionSpec),
-    shortcut_policy: asObject(row.shortcut_policy || row.shortcutPolicy),
+    interaction_spec: asObject(source.interaction_spec || source.interactionSpec),
+    shortcut_policy: asObject(source.shortcut_policy || source.shortcutPolicy),
+    knowledge_surface: asObject(source.knowledge_surface || source.knowledgeSurface || structure?.knowledge_surface || structure?.knowledgeSurface),
+    memory_policy: asObject(source.memory_policy || source.memoryPolicy || structure?.memory_policy || structure?.memoryPolicy),
+    runtime_execution: asObject(source.runtime_execution || source.runtimeExecution || structure?.control_policy?.runtime_execution || structure?.control_policy?.runtimeExecution),
+    structure_v2: structure || undefined,
   };
 }
 

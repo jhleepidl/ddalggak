@@ -45,7 +45,7 @@ export function normalizeRunRouteAction(raw, { resolveAgentId = null } = {}) {
     return { type: "chatgpt_prompt", question: prompt };
   }
 
-  if (["spawn_parallel", "checkpoint", "pause_children", "cancel_child", "reroute_child", "supervisor_decision", "synthesize_final"].includes(type)) {
+  if (["spawn_parallel", "checkpoint", "pause_children", "cancel_child", "reroute_child", "supervisor_decision", "synthesize_final", "gate_wait", "human_checkpoint", "tool_proxy_call", "memory_sync", "committee_consensus"].includes(type)) {
     const agents = Array.isArray(raw?.agents)
       ? raw.agents
         .map((agent) => {

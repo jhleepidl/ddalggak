@@ -1,6 +1,8 @@
 import { loadAgents } from '../agents.js';
 import { recommendTeamForTask } from './telegram_route_planning.js';
 import { inferProviderForModel, listSupportedModels, resolveSupportedModel } from '../catalog/model_catalog.js';
+import { detectTeamCapabilityGaps, normalizeCapabilityGapList } from './capability_gap_detector.js';
+import { buildManifestRequirements, formatManifestRequirementLines } from '../shared/manifest_requirements.js';
 import { SkillRegistry } from './skill_registry.js';
 import { SkillResolver, scoreSkillForTask } from './skill_resolver.js';
 import { PresetRegistry } from '../catalog/preset_registry.js';
@@ -28,6 +30,9 @@ import {
   shouldAutoRenameAgent,
   suggestAgentDisplayName,
 } from './team_presentation.js';
+import { hasExplicitSkillDomainMatch, requiresExplicitDomainMatch } from '../shared/skill_relevance.js';
+import { buildTeamStructureV2, normalizeTeamStructureV2, deriveTeamConfigFromStructureV2, buildRuntimeExecutionProfileFromStructureV2 } from '../shared/team_structure_v2.js';
+import { deriveKnowledgeBaseDesign, summarizeKnowledgeBaseProfile } from '../knowledge_base/profile.js';
 
 function asArray(v){return Array.isArray(v)?v:[]}
 function asObject(v){return v&&typeof v==='object'?v:{}}
@@ -215,24 +220,6 @@ function isSkillCompatibleWithAgentRole(skill = {}, role = '') {
 }
 
 
-function requiresExplicitDomainMatch(skill = {}) {
-  const category = cleanId(skill?.category || '');
-  const tags = uniqueIds([...(skill?.capability_tags || []), ...(skill?.tags || [])], { max: 24 });
-  return category === 'finance'
-    || tags.some((entry) => /equity|valuation|ticker|earnings|kr_equity|financial/.test(String(entry || '').toLowerCase()));
-}
-
-function hasExplicitSkillDomainMatch(skillId = '', text = '') {
-  const haystack = clean(text).toLowerCase();
-  if (!haystack) return false;
-  if (skillId === 'skill.kr_equity_analysis.v1') return /주식시장|증시|코스피|투자|종목|equity|stock|valuation|kospi|financial|earnings|공시|실적/.test(haystack);
-  if (skillId === 'skill.claim_evidence_audit.v1') return /claim|evidence|citation|fact|support|contradiction|근거|출처|주장|검증|모순/.test(haystack);
-  if (skillId === 'skill.context_selection_policy.v1') return /context|scope|grant|memory|selection|문맥|스코프|그랜트|메모리/.test(haystack);
-  if (skillId === 'skill.thread_team_reconciliation.v1') return /team|agent|membership|reconciliation|apply|refine|handoff|coord|멤버십|동기화|팀/.test(haystack);
-  if (skillId === 'skill.run_trace_debugging.v1') return /debug|trace|stalled|queued|reroute|runtime|실행|디버그|트레이스|끊겨|오류/.test(haystack);
-  if (skillId === 'skill.telegram_briefing.v1') return /telegram|brief|summary|status update|브리핑|요약|채팅/.test(haystack);
-  return false;
-}
 
 function filterRelevantAttachedSkillIds(skillIds = [], { role = '', taskText = '', purpose = '', capabilities = [], contextPolicy = null, planning = null } = {}) {
   const registry = planning?.skillRegistry || getSkillRegistry();
@@ -271,7 +258,12 @@ function filterRelevantAttachedSkillIds(skillIds = [], { role = '', taskText = '
     });
     const reasons = asArray(scored?.reasons || []);
     const semanticMatch = reasons.some((entry) => /^trigger_matches:|^capability_matches:|^name_matches:/.test(String(entry || '')));
-    const explicitMatch = hasExplicitSkillDomainMatch(skillId, [taskText, purpose, ...hints].join('\n'));
+    const explicitMatch = hasExplicitSkillDomainMatch({
+      skill,
+      skillId,
+      text: [taskText, purpose, ...hints].join('\n'),
+      taskInterpretation: interpretation,
+    });
     if (requiresExplicitDomainMatch(skill) && !explicitMatch) continue;
     const score = Number(scored?.score || 0);
     if (semanticMatch || explicitMatch || score >= 58) out.push(skillId);
@@ -1214,41 +1206,48 @@ async function clearConversationStoreTeamConfiguration(runtime = null) {
 
 export function buildTeamConfigurationTemplate(team = {}) {
   const row = team && typeof team === 'object' ? team : {};
+  const normalized = normalizeTeamConfig(row, { runtime: null, autoRenameGenericNames: false });
+  const structureV2 = normalizeTeamStructureV2(normalized.structure_v2 || buildTeamStructureV2(normalized));
+  const compatibilityTeam = deriveTeamConfigFromStructureV2(structureV2);
   return JSON.stringify({
-    team_name: clean(row.team_name || row.teamName || 'team_config'),
-    mode: cleanId(row.mode || 'scoped_context') || 'scoped_context',
-    composition_mode: normalizeCompositionMode(row.composition_mode || row.compositionMode || 'structured'),
-    proposal_mode: normalizeProposalMode(row.proposal_mode || row.proposalMode || 'suggest'),
-    task_brief: clean(row.task_brief || row.taskBrief || row.task || ''),
-    lock_after_apply: row.lock_after_apply !== false,
-    agents: asArray(row.agents).map((agent) => ({
-      agent_id: cleanId(agent.agent_id || agent.agentId || agent.id),
-      name: clean(agent.name || agent.display_name),
-      role: cleanId(agent.role || agent.role_id || agent.roleId),
-      model: clean(agent.model),
-      purpose: clean(agent.purpose),
-      capabilities: uniqueIds(agent.capabilities || []),
-      skills: uniqueIds(agent.skills || []),
-      attached_skill_ids: uniqueIds(agent.attached_skill_ids || agent.attachedSkillIds || []),
-      generated_skill_briefs: normalizeGeneratedSkillBriefs(agent.generated_skill_briefs || agent.generatedSkillBriefs || []),
-      recommended_tool_ids: uniqueIds(agent.recommended_tool_ids || agent.recommendedToolIds || []),
-      context_policy: normalizeContextPolicy(agent.context_policy || agent.contextPolicy, {
-        role: agent.role,
-        taskText: row.task_brief || row.taskBrief || row.task || '',
-        purpose: agent.purpose,
-      }),
-    })),
-    interaction_spec: normalizeInteractionSpec(row.interaction_spec || row.interactions || {}),
-    shortcut_policy: normalizeShortcutPolicy(row.shortcut_policy || row.shortcutPolicy),
-    planner_metadata: normalizePlannerMetadata(row.planner_metadata || row.plannerMetadata),
+    kind: 'ddalggak_team_manifest',
+    version: 2,
+    primary_schema: 'structure_v2',
+    apply_state: 'pending',
+    structure_v2: structureV2,
+    team: compatibilityTeam,
+    requirements: normalized.requirements,
   }, null, 2);
 }
 
 function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames = true } = {}) {
-  const row = asObject(raw);
-  const compositionMode = normalizeCompositionMode(row.composition_mode || row.compositionMode || 'structured');
+  const input = asObject(raw);
+  const explicitStructure = input.kind === 'team_structure_v2'
+    ? input
+    : asObject(input.structure_v2 || input.structureV2);
+  const normalizedStructure = Object.keys(explicitStructure).length > 0
+    ? normalizeTeamStructureV2(explicitStructure)
+    : null;
+  const structureDerived = normalizedStructure ? deriveTeamConfigFromStructureV2(normalizedStructure) : {};
+  const preferStructure = normalizedStructure && (
+    cleanId(input.primary_schema || input.primarySchema || '') === 'structure_v2'
+    || cleanId(input.kind || '') === 'team_structure_v2'
+  );
+  const row = normalizedStructure
+    ? {
+        ...(preferStructure ? input : structureDerived),
+        ...(preferStructure ? structureDerived : input),
+        requirements: input.requirements || normalizedStructure.requirements || structureDerived.requirements,
+        capability_gaps: input.capability_gaps || input.capabilityGaps || structureDerived.capability_gaps || structureDerived.capabilityGaps,
+        install_proposal_state: input.install_proposal_state || input.installProposalState || structureDerived.install_proposal_state || structureDerived.installProposalState,
+        credential_binding_state: input.credential_binding_state || input.credentialBindingState || structureDerived.credential_binding_state || structureDerived.credentialBindingState,
+        structure_v2: normalizedStructure,
+        primary_schema: 'structure_v2',
+      }
+    : input;
+  const compositionMode = normalizeCompositionMode(row.composition_mode || row.compositionMode || normalizedStructure?.metadata?.composition_mode || 'structured');
   const proposalMode = normalizeProposalMode(row.proposal_mode || row.proposalMode || (compositionMode === 'freeform' ? 'create' : 'suggest'));
-  const taskBrief = clean(row.task_brief || row.taskBrief || row.task || row.design_prompt || row.designPrompt || '');
+  const taskBrief = clean(row.task_brief || row.taskBrief || row.task || row.design_prompt || row.designPrompt || normalizedStructure?.intent?.task_brief || '');
   const interactionAliasMap = new Map();
   const seenDisplayNames = new Set();
   const agents = asArray(row.agents).map((entry, index) => {
@@ -1307,7 +1306,12 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
     reconcileInteractionSpecWithRoster(rawInteractionSpec, agents, interactionAliasMap),
     { agentRoster: agents.map((agent) => ({ name: agent.name, agent_id: agent.agent_id, role: agent.role })) }
   );
-  return {
+  const capabilityGaps = normalizeCapabilityGapList(row.capability_gaps || row.capabilityGaps || detectTeamCapabilityGaps({
+    team: { agents },
+    runtime,
+    skillRegistry: getSkillRegistry(),
+  }));
+  const normalizedTeam = {
     team_name: clean(row.team_name || row.teamName || 'configured_team'),
     mode: cleanId(row.mode || 'scoped_context') || 'scoped_context',
     composition_mode: compositionMode,
@@ -1320,9 +1324,101 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
     interaction_notes: buildInteractionSummaryLines(interactionSpec),
     shortcut_policy: normalizeShortcutPolicy(row.shortcut_policy || row.shortcutPolicy),
     planner_metadata: normalizePlannerMetadata(row.planner_metadata || row.plannerMetadata),
+    capability_gaps: capabilityGaps,
+    requirements: buildManifestRequirements({
+      team: row,
+      capabilityGaps,
+    }),
     status: cleanId(row.status || 'draft') || 'draft',
     created_at: clean(row.created_at || nowIso()),
     updated_at: nowIso(),
+  };
+  const derivedStructure = buildTeamStructureV2(normalizedTeam);
+  const structureV2 = normalizedStructure
+    ? normalizeTeamStructureV2({
+        ...normalizedStructure,
+        metadata: {
+          ...asObject(derivedStructure.metadata),
+          ...asObject(normalizedStructure.metadata),
+        },
+        intent: {
+          ...asObject(derivedStructure.intent),
+          ...asObject(normalizedStructure.intent),
+        },
+        participants: asArray(normalizedStructure.participants).length > 0 ? normalizedStructure.participants : derivedStructure.participants,
+        topology: {
+          ...asObject(derivedStructure.topology),
+          ...asObject(normalizedStructure.topology),
+          execution_pattern: cleanId(asObject(normalizedStructure.topology).execution_pattern || asObject(normalizedStructure.topology).executionPattern || derivedStructure.topology.execution_pattern),
+          final_participant_id: cleanId(asObject(normalizedStructure.topology).final_participant_id || asObject(normalizedStructure.topology).finalParticipantId || derivedStructure.topology.final_participant_id || derivedStructure.control_policy?.final_answer_owner_participant_id),
+          nodes: asArray(asObject(normalizedStructure.topology).nodes).length > 0 ? asArray(asObject(normalizedStructure.topology).nodes) : derivedStructure.topology.nodes,
+          edges: asArray(asObject(normalizedStructure.topology).edges).length > 0 ? asArray(asObject(normalizedStructure.topology).edges) : derivedStructure.topology.edges,
+        },
+        interaction_policy: {
+          ...asObject(derivedStructure.interaction_policy),
+          ...asObject(normalizedStructure.interaction_policy),
+          visibility: {
+            ...asObject(asObject(derivedStructure.interaction_policy).visibility),
+            ...asObject(asObject(normalizedStructure.interaction_policy).visibility),
+          },
+          handoff_policy: {
+            ...asObject(asObject(derivedStructure.interaction_policy).handoff_policy),
+            ...asObject(asObject(normalizedStructure.interaction_policy).handoff_policy),
+          },
+          followup_policy: {
+            ...asObject(asObject(derivedStructure.interaction_policy).followup_policy),
+            ...asObject(asObject(normalizedStructure.interaction_policy).followup_policy),
+          },
+          debate_policy: {
+            ...asObject(asObject(derivedStructure.interaction_policy).debate_policy),
+            ...asObject(asObject(normalizedStructure.interaction_policy).debate_policy),
+          },
+          consensus_policy: {
+            ...asObject(asObject(derivedStructure.interaction_policy).consensus_policy),
+            ...asObject(asObject(normalizedStructure.interaction_policy).consensus_policy),
+          },
+        },
+        control_policy: {
+          ...asObject(derivedStructure.control_policy),
+          ...asObject(normalizedStructure.control_policy),
+          final_answer_owner_participant_id: cleanId(asObject(normalizedStructure.control_policy).final_answer_owner_participant_id || asObject(normalizedStructure.control_policy).finalAnswerOwnerParticipantId || derivedStructure.control_policy.final_answer_owner_participant_id),
+        },
+        artifacts: {
+          ...asObject(derivedStructure.artifacts),
+          ...asObject(normalizedStructure.artifacts),
+        },
+        knowledge_surface: Object.keys(asObject(normalizedStructure.knowledge_surface || normalizedStructure.knowledgeSurface)).length > 0
+          ? asObject(normalizedStructure.knowledge_surface || normalizedStructure.knowledgeSurface)
+          : asObject(derivedStructure.knowledge_surface),
+        memory_policy: Object.keys(asObject(normalizedStructure.memory_policy || normalizedStructure.memoryPolicy)).length > 0
+          ? asObject(normalizedStructure.memory_policy || normalizedStructure.memoryPolicy)
+          : asObject(derivedStructure.memory_policy),
+        requirements: normalizedTeam.requirements,
+        runtime_state: {
+          ...asObject(derivedStructure.runtime_state),
+          ...asObject(normalizedStructure.runtime_state),
+        },
+      })
+    : derivedStructure;
+  const knowledgeDesign = deriveKnowledgeBaseDesign({
+    goal: normalizedTeam.task_brief,
+    teamConfig: {
+      ...normalizedTeam,
+      structure_v2: structureV2,
+    },
+  });
+  const finalStructureV2 = normalizeTeamStructureV2({
+    ...structureV2,
+    knowledge_surface: knowledgeDesign.knowledge_surface,
+    memory_policy: knowledgeDesign.memory_policy,
+  });
+  return {
+    ...normalizedTeam,
+    structure_v2: finalStructureV2,
+    knowledge_surface: knowledgeDesign.knowledge_surface,
+    memory_policy: knowledgeDesign.memory_policy,
+    knowledge_base_profile: knowledgeDesign.profile,
+    primary_schema: 'structure_v2',
   };
 }
 
@@ -1334,6 +1430,9 @@ function normalizePlannerMetadata(raw = null) {
     planner_model: clean(row.planner_model || row.plannerModel || ''),
     planning_source: cleanId(row.planning_source || row.plan_source || row.planSource || '') || undefined,
     reasoning_summary: reasoning,
+    auto_refine_from_pattern_conflict: row.auto_refine_from_pattern_conflict === true || row.autoRefineFromPatternConflict === true || undefined,
+    refine_trigger: cleanId(row.refine_trigger || row.refineTrigger || '') || undefined,
+    refine_instruction: clean(row.refine_instruction || row.refineInstruction || '') || undefined,
   };
 }
 
@@ -1452,7 +1551,7 @@ function buildPlannerDrivenRefineAgents({ taskText = '', runtime = null, planner
     recommended_tool_ids: uniqueIds(agent?.recommended_tool_ids || agent?.recommendedToolIds || []),
     context_policy: agent?.context_policy || agent?.contextPolicy || null,
   })).filter((agent) => agent.name);
-  const preserveMissing = !/(remove|delete|drop|replace|빼|제거|삭제|교체)/i.test(taskText);
+  const preserveMissing = !/(remove|delete|drop|replace|빼|제거|삭제|교체)/i.test(taskText);
   const seen = new Set();
   const drafts = [];
   const matchedCurrent = new Set();
@@ -1515,6 +1614,7 @@ export async function refineTeamConfigurationAdvanced({ team = {}, instruction =
   });
   return normalizeTeamConfig({
     ...current,
+    primary_schema: undefined,
     team_name: clean(plannerResult.plan.team_name || current.team_name || 'refined_team'),
     composition_mode: current.composition_mode || 'freeform',
     proposal_mode: 'refine',
@@ -1525,6 +1625,44 @@ export async function refineTeamConfigurationAdvanced({ team = {}, instruction =
     status: 'suggested',
     updated_at: nowIso(),
   }, { runtime: fallbackRuntime });
+}
+
+export async function buildAutoRefineDraftFromStructureConflict({ team = {}, instruction = '', runtime = null, planner = null } = {}) {
+  const instructionText = clean(instruction);
+  const baseRuntime = runtime || { agentsCatalog: asArray(team?.agents).map((agent) => ({ id: agent.agent_id, name: agent.name, role: agent.role, model: agent.model, provider: agent.provider, skills: agent.skills })) };
+  const draft = await refineTeamConfigurationAdvanced({
+    team,
+    instruction: instructionText,
+    runtime: baseRuntime,
+    planner,
+  });
+  return normalizeTeamConfig({
+    ...draft,
+    proposal_mode: 'refine',
+    status: 'suggested',
+    structure_v2: draft?.structure_v2 && typeof draft.structure_v2 === 'object'
+      ? {
+          ...draft.structure_v2,
+          metadata: {
+            ...(asObject(draft.structure_v2.metadata)),
+            proposal_mode: 'refine',
+            status: 'suggested',
+            planner_metadata: normalizePlannerMetadata({
+              ...asObject(draft?.planner_metadata || draft?.structure_v2?.metadata?.planner_metadata),
+              auto_refine_from_pattern_conflict: true,
+              refine_trigger: 'structure_override_required',
+              refine_instruction: instructionText,
+            }),
+          },
+        }
+      : draft?.structure_v2,
+    planner_metadata: normalizePlannerMetadata({
+      ...asObject(draft?.planner_metadata),
+      auto_refine_from_pattern_conflict: true,
+      refine_trigger: 'structure_override_required',
+      refine_instruction: instructionText,
+    }),
+  }, { runtime: baseRuntime });
 }
 
 export async function createFreeformTeamConfigurationAdvanced({ description = '', runtime = null, planner = null } = {}) {
@@ -1803,11 +1941,17 @@ export async function syncTeamConfigurationToConversationStore({ runtime = null,
 export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null) {
   const team = teamConfig && typeof teamConfig === 'object' ? teamConfig : null;
   if (!team) return runtime;
+  const structure = normalizeTeamStructureV2(team.structure_v2 || buildTeamStructureV2(team));
+  const executionProfile = buildRuntimeExecutionProfileFromStructureV2(structure, {
+    taskBrief: team.task_brief,
+    compositionMode: team.composition_mode,
+    proposalMode: team.proposal_mode,
+  });
   const catalog = new Map(runtimeCatalog(runtime).map((row) => [cleanId(row.id), row]));
   const configuredAgents = [];
   const runtimeAgents = [];
   const enabledAgentIds = [];
-  for (const [index, configAgent] of asArray(team.agents).entries()) {
+  for (const [index, configAgent] of asArray(executionProfile.configured_agents).entries()) {
     const base = asObject(catalog.get(cleanId(configAgent.agent_id)) || {});
     const merged = {
       ...base,
@@ -1822,7 +1966,7 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       attached_skill_ids: uniqueIds(configAgent.attached_skill_ids || configAgent.attachedSkillIds || []),
       generated_skill_briefs: normalizeGeneratedSkillBriefs(configAgent.generated_skill_briefs || configAgent.generatedSkillBriefs || []),
       recommended_tool_ids: uniqueIds(configAgent.recommended_tool_ids || configAgent.recommendedToolIds || []),
-      interaction_contract: buildAgentLocalInteractionContract(team.interaction_spec, clean(configAgent.name || base.name || configAgent.agent_id)),
+      interaction_contract: configAgent.interaction_contract || buildAgentLocalInteractionContract(executionProfile.interaction_spec, clean(configAgent.name || base.name || configAgent.agent_id)),
       prompt: clean(base.prompt || configAgent.prompt || ''),
       context_policy: normalizeContextPolicy(configAgent.context_policy || configAgent.contextPolicy, {
         role: configAgent.role || base.role,
@@ -1831,12 +1975,15 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       }),
       enabled: true,
       order_index: index,
+      participant_id: clean(configAgent.agent_id),
     };
     configuredAgents.push(merged);
     enabledAgentIds.push(merged.id);
     runtimeAgents.push({
       instance_id: `team_${merged.role}_${index + 1}`,
+      slot_id: clean(configAgent.slot_id || configAgent.agent_id || merged.id),
       template_id: merged.id,
+      participant_id: merged.id,
       display_label: merged.name,
       role_id: merged.role,
       provider: cleanId(merged.provider || inferProviderForModel(merged.model) || ''),
@@ -1848,22 +1995,37 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       interaction_contract: merged.interaction_contract,
       context_policy: merged.context_policy,
       composition_mode: team.composition_mode,
+      order_index: configAgent?.interaction_contract?.order_index,
+      stage_index: configAgent?.interaction_contract?.stage_index,
+      parallel_group_id: configAgent?.interaction_contract?.parallel_group_id,
       status: 'ready',
     });
   }
-  runtime.activeTeamConfig = team;
+  runtime.activeTeamConfig = { ...team, structure_v2: structure, knowledge_surface: structure.knowledge_surface, memory_policy: structure.memory_policy, runtime_execution: asObject(structure.control_policy?.runtime_execution), knowledge_base_profile: deriveKnowledgeBaseDesign({ goal: team.task_brief || structure?.intent?.task_brief || '', teamConfig: { ...team, structure_v2: structure } }).profile, primary_schema: 'structure_v2' };
+  runtime.activeTeamStructure = structure;
   runtime.teamLocked = true;
-  runtime.teamInteractionSpec = normalizeInteractionSpec(team.interaction_spec);
+  runtime.teamInteractionSpec = normalizeInteractionSpec(executionProfile.interaction_spec || team.interaction_spec);
   runtime.teamCompositionMode = team.composition_mode;
+  runtime.teamTopologyPattern = cleanId(structure?.topology?.pattern || executionProfile?.execution_graph?.pattern || 'hybrid') || 'hybrid';
   runtime.agents = configuredAgents;
   runtime.enabledAgentIds = enabledAgentIds;
+  runtime.runtimeParticipants = executionProfile.runtime_participants;
+  runtime.nonExecutableParticipants = executionProfile.non_executable_participants;
   runtime.runtimeTeamSnapshot = {
     ...(asObject(runtime.runtimeTeamSnapshot)),
+    structure_v2: structure,
+    runtime_participants: executionProfile.runtime_participants,
+    topology_pattern: runtime.teamTopologyPattern,
+    non_executable_participants: executionProfile.non_executable_participants,
     runtime_agents: runtimeAgents,
     interaction_spec: runtime.teamInteractionSpec,
     composition_mode: team.composition_mode,
     proposal_mode: team.proposal_mode,
     shortcut_policy: normalizeShortcutPolicy(team.shortcut_policy),
+    knowledge_surface: asObject(structure.knowledge_surface),
+    memory_policy: asObject(structure.memory_policy),
+    runtime_execution: asObject(structure.control_policy?.runtime_execution),
+    execution_graph: executionProfile.execution_graph,
     team_locked: true,
   };
   return runtime;
@@ -1876,7 +2038,9 @@ export function buildTeamListMessage(teamState = {}) {
     `팀 이름: ${clean(active.team_name || 'active_team')}`,
     `구성 방식: ${normalizeCompositionMode(active.composition_mode || 'structured')}`,
     `agent 수: ${asArray(active.agents).length}`,
+    active.structure_v2?.topology?.pattern ? `structure 패턴: ${clean(active.structure_v2.topology.pattern)}` : null,
     active.planner_metadata ? `설계 엔진: ${summarizePlannerMetadata(active.planner_metadata)}` : null,
+    active.knowledge_base_profile ? summarizeKnowledgeBaseProfile(active.knowledge_base_profile).split('\n')[0] : null,
     '',
     'Agents',
     ...asArray(active.agents).flatMap((agent, index) => {
@@ -1910,6 +2074,7 @@ export function formatTeamProposalMessage(team = {}) {
     `구성 방식: ${compositionMode} · 제안 모드: ${proposalMode}`,
     row.task_brief ? `목표: ${clean(row.task_brief)}` : null,
     row.planner_metadata ? `설계 엔진: ${summarizePlannerMetadata(row.planner_metadata)}` : null,
+    row.structure_v2?.topology?.pattern ? `structure 패턴: ${clean(row.structure_v2.topology.pattern)}` : null,
     '',
     'Agents',
     ...asArray(row.agents).flatMap((agent, index) => {
@@ -1930,11 +2095,23 @@ export function formatTeamProposalMessage(team = {}) {
     '',
     'Interaction',
     ...buildReadableInteractionLines(row.interaction_spec || {}, row.shortcut_policy || {}),
+    ...(formatManifestRequirementLines(row.requirements || buildManifestRequirements({
+      team: row,
+      capabilityGaps: row.capability_gaps || row.capabilityGaps || [],
+    }), { maxLines: 4 }).length > 0 ? [
+      '',
+      '실행 requirements',
+      ...formatManifestRequirementLines(row.requirements || buildManifestRequirements({
+        team: row,
+        capabilityGaps: row.capability_gaps || row.capabilityGaps || [],
+      }), { maxLines: 4 }),
+    ] : []),
     '',
     '다음 단계',
     '- /team apply',
     '- /team refine <자연어 수정>',
     '- /team template',
+    '- /team options',
   ].filter(Boolean);
   return lines.join('\n');
 }

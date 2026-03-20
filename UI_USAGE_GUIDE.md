@@ -17,11 +17,10 @@
 
 ## 3) Team/Preference Notes
 
-- `/agents`는 team membership UI가 아니라 preset/preferences UI입니다.
-- `add|enable <preset>` 는 preset pin 선호로, `remove|disable <preset>` 는 preset ban 선호로 동작합니다.
-- `remove reviewer` 같은 legacy role 명령은 해당 canonical role suppression으로 해석됩니다.
+- `/team`이 기본 팀 UI입니다. `/agents`는 현재 legacy alias로 유지되며, 새 운영 흐름에서는 `/team`을 사용하세요.
 - compatibility membership 변경이 실제로 일어나는 경우에는 readback 확인이 끝나야 확정됩니다.
-- `/agents` 표시와 compatibility mutation 검증은 동일한 canonical target(`thread_id + conversation_id`)을 사용합니다.
+- install proposal / credential binding / pattern conflict 상태는 `/team`, `/team proposal`, `/credential pending`, `/status`에서 함께 확인합니다.
+- 최신 요청이 team pattern과 충돌하면 structure conflict 안내와 pending refine draft가 함께 보일 수 있습니다.
 
 ## 4) Runtime Metadata to Inspect
 

@@ -78,12 +78,13 @@ async function handlePasteModeMessage({
   jobAbortControllers,
 } = {}) {
   const jobId = pasteState.jobId;
-  tracking.append(jobId, "plan.md", `## ChatGPT reply (pasted)\n\n${text}\n`);
+  const planDocName = typeof tracking?.resolveDocName === "function" ? tracking.resolveDocName(jobId, "plan") : "plan";
+  tracking.append(jobId, "plan", `## ChatGPT reply (pasted)\n\n${text}\n`);
   jobs.appendConversation(jobId, "chatgpt", text, { kind: "plan_reply" });
 
   const plan = extractJsonPlan(text);
   if (!(plan && String(plan.jobId || "") === String(jobId))) {
-    await bot.sendMessage(chatId, "🟣 plan.md에 기록 완료. (JSON 플랜이 없어서 자동 실행은 하지 않았어요)");
+    await bot.sendMessage(chatId, `🟣 ${planDocName}에 기록 완료. (JSON 플랜이 없어서 자동 실행은 하지 않았어요)`);
     return true;
   }
 
@@ -245,6 +246,7 @@ export function createTelegramMessageHandler(deps = {}) {
         text: plain,
         kind: "normal",
         telegramMessageId: msg.message_id,
+        userReplyToMessageId: Number.isFinite(Number(msg?.reply_to_message?.message_id)) ? Number(msg.reply_to_message.message_id) : null,
         chatInfo: {
           chat_id: String(chatId || ""),
           title: String(msg?.chat?.title || msg?.chat?.username || "").trim(),

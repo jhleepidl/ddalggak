@@ -271,13 +271,21 @@ export function createTelegramUploadService(deps = {}) {
       local_path: finalPath,
       sha256,
     });
-    tracking.append(jobId, "progress.md", [
+    tracking.append(jobId, "progress", [
       "## upload",
       `- kind: ${cleanKind}`,
       `- filename: ${cleanName}`,
       `- size: ${actualSize}`,
       `- sha256: ${sha256}`,
       `- workspace_path: ${workspaceRelPath}`,
+      `- file_id: ${candidate.fileId}`,
+    ].join("\n"));
+    tracking.append(jobId, "artifacts", [
+      "## uploaded artifact",
+      `- kind: ${cleanKind}`,
+      `- filename: ${cleanName}`,
+      `- workspace_path: ${workspaceRelPath}`,
+      `- sha256: ${sha256}`,
       `- file_id: ${candidate.fileId}`,
     ].join("\n"));
     await appendWorkspaceUploadArtifactToGoc(jobId, {

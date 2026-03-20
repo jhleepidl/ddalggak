@@ -148,27 +148,40 @@ function normalizeNodes(teamPlan = {}, runtimeAgents = []) {
 function normalizeEdges(teamPlan = {}, runtimeAgents = []) {
   const index = createPlanIndex(teamPlan, runtimeAgents);
   const rawEdges = asArray(teamPlan?.execution_graph?.edges);
+  const graphNodeMap = new Map(
+    normalizeExecutionGraphNodes(teamPlan, runtimeAgents)
+      .map((node) => [normalizeText(node.slot_id || node.participant_id), node])
+      .filter((entry) => entry[0])
+  );
   const edges = [];
-  const addEdge = (fromSlotId = "", toSlotId = "", relation = "precedes") => {
+  const addEdge = (fromSlotId = "", toSlotId = "", relation = "precedes", condition = "") => {
     if (!fromSlotId || !toSlotId || fromSlotId === toSlotId) return;
-    if (edges.some((edge) => edge.from_slot_id === fromSlotId && edge.to_slot_id === toSlotId)) return;
+    if (edges.some((edge) => edge.from_slot_id === fromSlotId && edge.to_slot_id === toSlotId && edge.relation === (normalizeText(relation || "precedes", { lower: true }) || "precedes"))) return;
     const fromSlot = index.slotsById.get(fromSlotId);
     const toSlot = index.slotsById.get(toSlotId);
-    if (!fromSlot || !toSlot) return;
+    const fromNode = graphNodeMap.get(fromSlotId);
+    const toNode = graphNodeMap.get(toSlotId);
     edges.push({
       from_slot_id: fromSlotId,
       to_slot_id: toSlotId,
-      from: normalizeRoleId(fromSlot?.role_id || fromSlot?.role_label),
-      to: normalizeRoleId(toSlot?.role_id || toSlot?.role_label),
+      from: normalizeRoleId(fromSlot?.role_id || fromSlot?.role_label || fromNode?.role_id || fromNode?.label || fromSlotId),
+      to: normalizeRoleId(toSlot?.role_id || toSlot?.role_label || toNode?.role_id || toNode?.label || toSlotId),
       relation: normalizeText(relation || "precedes", { lower: true }) || "precedes",
+      condition: normalizeText(condition),
     });
   };
 
   for (const rawEdge of rawEdges) {
     const fromSlotIds = resolveSlotIds(index, rawEdge?.from_slot_id || rawEdge?.fromSlotId || rawEdge?.from);
     const toSlotIds = resolveSlotIds(index, rawEdge?.to_slot_id || rawEdge?.toSlotId || rawEdge?.to);
-    for (const fromSlotId of fromSlotIds) {
-      for (const toSlotId of toSlotIds) addEdge(fromSlotId, toSlotId, rawEdge?.relation);
+    const resolvedFrom = fromSlotIds.length > 0
+      ? fromSlotIds
+      : [normalizeText(rawEdge?.from_slot_id || rawEdge?.fromSlotId || rawEdge?.from)].filter(Boolean);
+    const resolvedTo = toSlotIds.length > 0
+      ? toSlotIds
+      : [normalizeText(rawEdge?.to_slot_id || rawEdge?.toSlotId || rawEdge?.to)].filter(Boolean);
+    for (const fromSlotId of resolvedFrom) {
+      for (const toSlotId of resolvedTo) addEdge(fromSlotId, toSlotId, rawEdge?.relation || rawEdge?.kind, rawEdge?.condition);
     }
   }
   if (edges.length > 0) return edges;
@@ -177,7 +190,7 @@ function normalizeEdges(teamPlan = {}, runtimeAgents = []) {
     const fromSlotIds = resolveSlotIds(index, rawEdge?.from);
     const toSlotIds = resolveSlotIds(index, rawEdge?.to);
     for (const fromSlotId of fromSlotIds) {
-      for (const toSlotId of toSlotIds) addEdge(fromSlotId, toSlotId, "precedes");
+      for (const toSlotId of toSlotIds) addEdge(fromSlotId, toSlotId, "precedes", rawEdge?.condition);
     }
   }
   return edges;
@@ -211,6 +224,278 @@ function topologicalLevels(teamPlan = {}, runtimeAgents = []) {
     }
   }
   return levels;
+}
+
+function normalizeExecutionGraphNodes(teamPlan = {}, runtimeAgents = []) {
+  const graph = teamPlan?.execution_graph && typeof teamPlan.execution_graph === 'object'
+    ? teamPlan.execution_graph
+    : {};
+  const explicitNodes = asArray(graph.nodes)
+    .map((node, index) => {
+      const slotId = normalizeText(node?.slot_id || node?.slotId || node?.participant_id || node?.participantId || node?.id);
+      if (!slotId) return null;
+      return {
+        node_id: normalizeText(node?.node_id || node?.nodeId || `node_${index + 1}`) || `node_${index + 1}`,
+        slot_id: slotId,
+        participant_id: normalizeText(node?.participant_id || node?.participantId || slotId) || slotId,
+        kind: normalizeText(node?.kind || 'task', { lower: true }) || 'task',
+        label: normalizeText(node?.label || node?.name || slotId) || slotId,
+        role_id: normalizeRoleId(node?.role_id || node?.roleId || ''),
+      };
+    })
+    .filter(Boolean);
+  if (explicitNodes.length > 0) return explicitNodes;
+  return normalizeNodes(teamPlan, runtimeAgents).map((node, index) => ({
+    node_id: `node_${index + 1}`,
+    slot_id: normalizeText(node.slot_id),
+    participant_id: normalizeText(node.slot_id),
+    kind: 'task',
+    label: normalizeText(node.slot_id),
+    role_id: normalizeRoleId(node.role_id),
+  }));
+}
+
+function topologicalLevelsForExecutionNodes(teamPlan = {}, runtimeAgents = []) {
+  const nodes = normalizeExecutionGraphNodes(teamPlan, runtimeAgents);
+  const ids = [...new Set(nodes.map((node) => normalizeText(node.slot_id || node.participant_id)).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const idSet = new Set(ids);
+  const edges = normalizeEdges(teamPlan, runtimeAgents);
+  const incoming = new Map(ids.map((id) => [id, 0]));
+  const outgoing = new Map(ids.map((id) => [id, []]));
+  for (const edge of edges) {
+    const fromId = normalizeText(edge?.from_slot_id || edge?.fromSlotId || edge?.from);
+    const toId = normalizeText(edge?.to_slot_id || edge?.toSlotId || edge?.to);
+    if (!fromId || !toId || fromId === toId || !idSet.has(fromId) || !idSet.has(toId)) continue;
+    outgoing.get(fromId)?.push(toId);
+    incoming.set(toId, (incoming.get(toId) || 0) + 1);
+  }
+  const remaining = new Set(ids);
+  const levels = [];
+  while (remaining.size > 0) {
+    const ready = ids.filter((id) => remaining.has(id) && (incoming.get(id) || 0) === 0);
+    if (ready.length === 0) {
+      levels.push([...remaining]);
+      break;
+    }
+    levels.push(ready);
+    for (const id of ready) {
+      remaining.delete(id);
+      for (const child of outgoing.get(id) || []) {
+        incoming.set(child, Math.max(0, (incoming.get(child) || 0) - 1));
+      }
+    }
+  }
+  return levels;
+}
+
+function createEdgeConditionMaps(edges = []) {
+  const incomingBySlot = new Map();
+  const outgoingBySlot = new Map();
+  for (const edge of asArray(edges)) {
+    const fromSlotId = normalizeText(edge?.from_slot_id || edge?.fromSlotId || edge?.from);
+    const toSlotId = normalizeText(edge?.to_slot_id || edge?.toSlotId || edge?.to);
+    const condition = normalizeText(edge?.condition);
+    const relation = normalizeText(edge?.relation || edge?.kind, { lower: true }) || 'precedes';
+    if (!fromSlotId || !toSlotId) continue;
+    const descriptor = { from_slot_id: fromSlotId, to_slot_id: toSlotId, condition, relation };
+    if (!incomingBySlot.has(toSlotId)) incomingBySlot.set(toSlotId, []);
+    incomingBySlot.get(toSlotId).push(descriptor);
+    if (!outgoingBySlot.has(fromSlotId)) outgoingBySlot.set(fromSlotId, []);
+    outgoingBySlot.get(fromSlotId).push(descriptor);
+  }
+  return { incomingBySlot, outgoingBySlot };
+}
+
+function createParticipantDescriptorMap(teamBuild = {}, teamPlan = {}) {
+  const runtimeSnapshot = teamBuild?.runtime_team_snapshot && typeof teamBuild.runtime_team_snapshot === 'object'
+    ? teamBuild.runtime_team_snapshot
+    : null;
+  const structures = [
+    teamBuild?.structure_v2,
+    runtimeSnapshot?.structure_v2,
+    teamPlan?.structure_v2,
+  ].filter((entry) => entry && typeof entry === 'object');
+  const lists = [
+    teamBuild?.runtime_participants,
+    teamBuild?.non_executable_participants,
+    runtimeSnapshot?.runtime_participants,
+    runtimeSnapshot?.non_executable_participants,
+  ];
+  const rows = [];
+  for (const structure of structures) rows.push(...asArray(structure?.participants));
+  for (const list of lists) rows.push(...asArray(list));
+  const out = new Map();
+  for (const row of rows) {
+    const participantId = normalizeText(row?.participant_id || row?.id || row?.slot_id || row?.slotId);
+    if (!participantId || out.has(participantId)) continue;
+    out.set(participantId, row);
+  }
+  return out;
+}
+
+
+function pickRuntimeRepairLoopTargets({
+  incomingConditions = [],
+  outgoingConditions = [],
+  slotsById = new Map(),
+  runtimeAgents = [],
+} = {}) {
+  const runtimeList = asArray(runtimeAgents);
+  const bySlotId = new Map();
+  for (const agent of runtimeList) {
+    const slotId = normalizeText(agent?.slot_id || agent?.slotId);
+    if (slotId && !bySlotId.has(slotId)) bySlotId.set(slotId, agent);
+  }
+  const materialize = (slotId = '') => {
+    const cleanSlotId = normalizeText(slotId);
+    if (!cleanSlotId) return null;
+    const slot = slotsById instanceof Map ? (slotsById.get(cleanSlotId) || {}) : {};
+    const runtimeAgent = bySlotId.get(cleanSlotId) || null;
+    return {
+      slot_id: cleanSlotId,
+      role_id: normalizeRoleId(slot?.role_id || slot?.role_label || runtimeAgent?.role_id || runtimeAgent?.role_label),
+      agent_id: normalizeRoleId(runtimeAgent?.role_id || runtimeAgent?.role_label) || '',
+      runtime_instance_id: normalizeText(runtimeAgent?.instance_id || runtimeAgent?.instanceId),
+    };
+  };
+  const incomingCandidates = asArray(incomingConditions).map((edge) => materialize(edge?.from_slot_id)).filter(Boolean);
+  const outgoingCandidates = asArray(outgoingConditions).map((edge) => materialize(edge?.to_slot_id)).filter(Boolean);
+  const pick = (candidates = [], preferredRoles = []) => {
+    const list = asArray(candidates).filter((entry) => entry?.agent_id || entry?.slot_id);
+    for (const preferred of preferredRoles) {
+      const found = list.find((entry) => entry.role_id === preferred || entry.agent_id === preferred);
+      if (found) return found;
+    }
+    return list[0] || null;
+  };
+  const repair = pick(incomingCandidates, ['builder', 'coder', 'developer', 'implementer', 'operator']);
+  const verifier = pick(outgoingCandidates, ['reviewer', 'judge', 'synthesizer', 'researcher']);
+  return {
+    repair,
+    verifier,
+  };
+}
+
+function structuralNodeActionType(kind = '') {
+  const normalizedKind = normalizeText(kind, { lower: true });
+  if (normalizedKind === 'gate') return 'gate_wait';
+  if (normalizedKind === 'human') return 'human_checkpoint';
+  if (normalizedKind === 'tool' || normalizedKind === 'tool_proxy') return 'tool_proxy_call';
+  if (normalizedKind === 'memory' || normalizedKind === 'memory_node') return 'memory_sync';
+  return '';
+}
+
+function buildStructuralNodeAction({
+  node = {},
+  participant = {},
+  graphDescriptor = {},
+  edgeConditionMaps = {},
+  checkpointIds = [],
+  supervisorRuntime = null,
+  compatibilityFallback = false,
+  slotsById = new Map(),
+  runtimeAgents = [],
+} = {}) {
+  const slotId = normalizeText(node?.slot_id || node?.participant_id || participant?.participant_id);
+  const participantId = normalizeText(node?.participant_id || participant?.participant_id || slotId);
+  const roleId = normalizeRoleId(participant?.role || node?.role_id || node?.roleId);
+  const gateRole = normalizeText(participant?.role || node?.role_id || node?.roleId, { lower: true });
+  const nodeKind = normalizeText(participant?.kind || node?.kind, { lower: true }) || 'task';
+  const actionType = structuralNodeActionType(nodeKind);
+  if (!actionType || !slotId) return null;
+  const incomingConditions = asArray(edgeConditionMaps?.incomingBySlot?.get(slotId))
+    .filter((edge) => normalizeText(edge?.condition))
+    .map((edge) => ({ from_slot_id: edge.from_slot_id, condition: edge.condition, relation: edge.relation }));
+  const outgoingConditions = asArray(edgeConditionMaps?.outgoingBySlot?.get(slotId))
+    .filter((edge) => normalizeText(edge?.condition))
+    .map((edge) => ({ to_slot_id: edge.to_slot_id, condition: edge.condition, relation: edge.relation }));
+  const label = normalizeText(participant?.name || node?.label || slotId) || slotId;
+  const repairTargets = actionType === 'tool_proxy_call'
+    ? pickRuntimeRepairLoopTargets({
+      incomingConditions,
+      outgoingConditions,
+      slotsById,
+      runtimeAgents,
+    })
+    : { repair: null, verifier: null };
+  return {
+    type: actionType,
+    label,
+    prompt: label,
+    inputs: {
+      slot_id: slotId,
+      participant_id: participantId || undefined,
+      role_id: roleId || undefined,
+      node_kind: nodeKind,
+      checkpoint_ids: asArray(checkpointIds).map((checkpointId) => normalizeText(checkpointId)).filter(Boolean),
+      supervisor_instance_id: normalizeText(supervisorRuntime?.instance_id || supervisorRuntime?.instanceId) || undefined,
+      gate_type: actionType === 'gate_wait' ? (gateRole || roleId || 'approval') : undefined,
+      approval_required: actionType === 'gate_wait' ? ['approval', 'mutating_confirm'].includes(gateRole || roleId) : (actionType === 'human_checkpoint'),
+      required_tool_ids: actionType === 'tool_proxy_call'
+        ? asArray(participant?.recommended_tool_ids || participant?.required_tool_ids || participant?.tool_ids).map((toolId) => normalizeText(toolId, { lower: true })).filter(Boolean)
+        : undefined,
+      memory_keys: actionType === 'memory_sync'
+        ? asArray(participant?.memory_keys || participant?.bound_memory_keys).map((key) => normalizeText(key)).filter(Boolean)
+        : undefined,
+      incoming_conditions: incomingConditions,
+      outgoing_conditions: outgoingConditions,
+      structure_pattern: graphDescriptor.pattern || undefined,
+      topology_validation_fallback: compatibilityFallback || undefined,
+      summary_kind: actionType === 'memory_sync' ? 'memory_sync' : 'control_checkpoint',
+      repair_target_agent_id: actionType === 'tool_proxy_call' ? (repairTargets.repair?.agent_id || undefined) : undefined,
+      repair_target_slot_id: actionType === 'tool_proxy_call' ? (repairTargets.repair?.slot_id || undefined) : undefined,
+      repair_target_runtime_instance_id: actionType === 'tool_proxy_call' ? (repairTargets.repair?.runtime_instance_id || undefined) : undefined,
+      verifier_agent_id: actionType === 'tool_proxy_call' ? (repairTargets.verifier?.agent_id || undefined) : undefined,
+      verifier_slot_id: actionType === 'tool_proxy_call' ? (repairTargets.verifier?.slot_id || undefined) : undefined,
+      verifier_runtime_instance_id: actionType === 'tool_proxy_call' ? (repairTargets.verifier?.runtime_instance_id || undefined) : undefined,
+      repair_attempt_limit: actionType === 'tool_proxy_call' && repairTargets.repair?.agent_id ? 1 : undefined,
+    },
+    metadata: {
+      structure_pattern: graphDescriptor.pattern || undefined,
+      stage_mode: 'structural_node',
+      topology_validation_fallback: compatibilityFallback || undefined,
+    },
+  };
+}
+
+function buildCommitteeConsensusAction({
+  graphDescriptor = {},
+  checkpointIds = [],
+  supervisorRuntime = null,
+  memberSlotIds = [],
+  chairSlotId = '',
+  compatibilityFallback = false,
+} = {}) {
+  if (normalizeText(graphDescriptor?.pattern, { lower: true }) !== 'committee') return null;
+  const cleanMemberSlotIds = asArray(memberSlotIds).map((slotId) => normalizeText(slotId)).filter(Boolean);
+  if (cleanMemberSlotIds.length === 0) return null;
+  const consensusMode = normalizeText(graphDescriptor?.committee?.mode, { lower: true }) || 'majority';
+  const quorumRaw = Number(graphDescriptor?.committee?.quorum);
+  const quorum = Number.isFinite(quorumRaw)
+    ? Math.max(1, Math.floor(quorumRaw))
+    : (consensusMode === 'unanimous' ? cleanMemberSlotIds.length : Math.ceil(cleanMemberSlotIds.length / 2));
+  return {
+    type: 'committee_consensus',
+    label: 'Committee consensus check',
+    prompt: `Evaluate committee readiness before the chair produces the final decision (mode=${consensusMode}${quorum ? `, quorum=${quorum}` : ''}).`,
+    inputs: {
+      member_slot_ids: cleanMemberSlotIds,
+      chair_slot_id: normalizeText(chairSlotId) || undefined,
+      consensus_mode: consensusMode,
+      committee_quorum: quorum,
+      checkpoint_ids: asArray(checkpointIds).map((checkpointId) => normalizeText(checkpointId)).filter(Boolean),
+      supervisor_instance_id: normalizeText(supervisorRuntime?.instance_id || supervisorRuntime?.instanceId) || undefined,
+      structure_pattern: graphDescriptor.pattern || undefined,
+      topology_validation_fallback: compatibilityFallback || undefined,
+      summary_kind: 'committee_consensus',
+    },
+    metadata: {
+      structure_pattern: graphDescriptor.pattern || undefined,
+      stage_mode: 'committee_consensus',
+      topology_validation_fallback: compatibilityFallback || undefined,
+    },
+  };
 }
 
 export function findExecutionOrder(teamPlan = {}, runtimeAgents = []) {
@@ -430,20 +715,33 @@ function buildSlotPrompt({
   goal = "",
   seedInstruction = "",
   taskInterpretation = {},
+  incomingConditions = [],
+  outgoingConditions = [],
 } = {}) {
   const cleanRoleId = normalizeRoleId(roleId || slot?.role_id || runtimeAgent?.role_id || runtimeAgent?.role_label);
+  let prompt = '';
   if (cleanRoleId === "builder") {
-    return normalizeText(seedInstruction || goal || slot?.purpose || runtimeAgent?.assigned_goal);
-  }
-  if (cleanRoleId === "synthesizer") {
-    return normalizeText(
+    prompt = normalizeText(seedInstruction || goal || slot?.purpose || runtimeAgent?.assigned_goal);
+  } else if (cleanRoleId === "synthesizer") {
+    prompt = normalizeText(
       slot?.purpose
       || taskInterpretation?.task_summary
       || goal
       || runtimeAgent?.assigned_goal
     );
+  } else {
+    prompt = normalizeText(slot?.purpose || runtimeAgent?.assigned_goal || goal || seedInstruction);
   }
-  return normalizeText(slot?.purpose || runtimeAgent?.assigned_goal || goal || seedInstruction);
+  const incoming = asArray(incomingConditions).filter((entry) => normalizeText(entry?.condition));
+  const outgoing = asArray(outgoingConditions).filter((entry) => normalizeText(entry?.condition));
+  if (incoming.length > 0) {
+    prompt = appendPromptSuffix(prompt, `Only execute this step when these route conditions are satisfied: ${incoming.map((entry) => `${entry.condition} (from ${entry.from_slot_id || 'upstream'})`).join('; ')}.`);
+  }
+  if (outgoing.length > 0) {
+    const routeSignalExample = JSON.stringify({ signals: [outgoing[0]?.condition || 'condition_name'] });
+    prompt = appendPromptSuffix(prompt, `Your output will be used for conditional routing with these branches: ${outgoing.map((entry) => `${entry.condition} -> ${entry.to_slot_id || 'next'}`).join('; ')}. When you know which branch conditions are satisfied, include a ROUTE_SIGNALS_JSON block with exact condition strings. Example: ROUTE_SIGNALS_JSON ${routeSignalExample}. Only include the conditions that should be activated.`);
+  }
+  return prompt;
 }
 
 function buildSlotActionInputs({
@@ -456,6 +754,8 @@ function buildSlotActionInputs({
   taskInterpretation = {},
   supervisorRuntime = null,
   scopeSpec = null,
+  incomingConditions = [],
+  outgoingConditions = [],
 } = {}) {
   const instanceId = normalizeText(runtimeAgent?.instance_id || runtimeAgent?.instanceId);
   const slotId = normalizeText(slot?.slot_id || slot?.slotId);
@@ -503,6 +803,8 @@ function buildSlotActionInputs({
       runtimeAgent?.template_id || getTransportRoleId(roleId),
       { lower: true }
     ) || undefined,
+    incoming_conditions: asArray(incomingConditions).filter((entry) => entry && typeof entry === 'object'),
+    outgoing_conditions: asArray(outgoingConditions).filter((entry) => entry && typeof entry === 'object'),
   };
 }
 
@@ -519,6 +821,8 @@ function buildSlotRunAction({
   supervisorRuntime = null,
   finalSynthesis = false,
   scopeSpec = null,
+  incomingConditions = [],
+  outgoingConditions = [],
 } = {}) {
   const roleId = normalizeRoleId(slot?.role_id || runtimeAgent?.role_id || runtimeAgent?.role_label);
   const prompt = buildSlotPrompt({
@@ -528,6 +832,8 @@ function buildSlotRunAction({
     goal,
     seedInstruction,
     taskInterpretation,
+    incomingConditions,
+    outgoingConditions,
   });
   if (!roleId || !prompt) return null;
   return {
@@ -545,6 +851,8 @@ function buildSlotRunAction({
         taskInterpretation,
         supervisorRuntime,
         scopeSpec,
+        incomingConditions,
+        outgoingConditions,
       }),
       final_synthesis: finalSynthesis === true || undefined,
     },
@@ -623,16 +931,101 @@ function checkpointIdsForSlots(slotIds = [], checkpointLookup = new Map()) {
   return checkpoints;
 }
 
-function findTerminalSynthesizerSlotId(teamPlan = {}, slotOrder = []) {
+function resolveExplicitFinalSlotId(teamPlan = {}, slotOrder = [], runtimeAgents = []) {
+  const index = createPlanIndex(teamPlan, runtimeAgents);
+  const explicitRefs = [
+    teamPlan?.execution_graph?.final_participant_id,
+    teamPlan?.execution_graph?.final_slot_id,
+    teamPlan?.execution_graph?.finalSlotId,
+    teamPlan?.final_answer_owner,
+    teamPlan?.finalAnswerOwner,
+  ];
+  for (const ref of explicitRefs) {
+    const slotIds = resolveSlotIds(index, ref);
+    if (slotIds.length > 0) return slotIds[0];
+  }
+  return '';
+}
+
+function findTerminalFinalSlotId(teamPlan = {}, slotOrder = [], runtimeAgents = []) {
   const slotsById = new Map(asArray(teamPlan?.slots).map((slot) => [normalizeText(slot?.slot_id), slot]));
-  let terminalSlotId = "";
+  const explicitFinal = resolveExplicitFinalSlotId(teamPlan, slotOrder, runtimeAgents);
+  if (explicitFinal) return explicitFinal;
+  let terminalSynthesizerSlotId = '';
   for (const slotId of slotOrder) {
     const slot = slotsById.get(normalizeText(slotId));
-    if (normalizeRoleId(slot?.role_id || slot?.role_label) === "synthesizer") {
-      terminalSlotId = normalizeText(slot?.slot_id);
+    if (normalizeRoleId(slot?.role_id || slot?.role_label) === 'synthesizer') {
+      terminalSynthesizerSlotId = normalizeText(slot?.slot_id);
     }
   }
-  return terminalSlotId;
+  if (terminalSynthesizerSlotId) return terminalSynthesizerSlotId;
+  return '';
+}
+
+function createSequentialLevelsFromOrder(slotOrder = []) {
+  return asArray(slotOrder).map((slotId) => [normalizeText(slotId)]).filter((group) => group[0]);
+}
+
+function extractExecutionGraphDescriptor(teamPlan = {}, runtimeAgents = []) {
+  const graph = teamPlan?.execution_graph && typeof teamPlan.execution_graph === 'object'
+    ? teamPlan.execution_graph
+    : {};
+  const validation = graph.validation && typeof graph.validation === 'object' ? graph.validation : {};
+  const errors = asArray(validation.errors).map((entry) => normalizeText(entry)).filter(Boolean);
+  const warnings = asArray(validation.warnings).map((entry) => normalizeText(entry)).filter(Boolean);
+  const pattern = normalizeText(graph.pattern || graph.execution_pattern, { lower: true }) || 'hybrid';
+  const debate = graph.debate && typeof graph.debate === 'object' ? graph.debate : null;
+  const committee = graph.committee && typeof graph.committee === 'object' ? graph.committee : null;
+  const finalSlotId = resolveExplicitFinalSlotId(teamPlan, findExecutionOrder(teamPlan, runtimeAgents), runtimeAgents);
+  return {
+    pattern,
+    validation: {
+      errors,
+      warnings,
+      pattern_ready: validation.pattern_ready !== false && errors.length === 0,
+      strict_pattern_ready: validation.strict_pattern_ready === true,
+    },
+    cyclic_topology: graph.cyclic_topology === true,
+    final_slot_id: finalSlotId,
+    debate: debate ? {
+      rounds: Number.isFinite(Number(debate.rounds)) ? Math.max(1, Math.min(6, Math.floor(Number(debate.rounds)))) : 1,
+      adjudicator_slot_id: normalizeText(debate.adjudicator_participant_id || debate.adjudicator_slot_id),
+      debater_slot_ids: asArray(debate.debater_participant_ids || debate.debater_slot_ids).map((entry) => normalizeText(entry)).filter(Boolean),
+      rebuttal_required: debate.rebuttal_required !== false,
+    } : null,
+    committee: committee ? {
+      mode: normalizeText(committee.mode, { lower: true }) || 'majority',
+      quorum: Number.isFinite(Number(committee.quorum)) ? Math.max(1, Math.floor(Number(committee.quorum))) : undefined,
+      chair_slot_id: normalizeText(committee.chair_participant_id || committee.chair_slot_id),
+      member_slot_ids: asArray(committee.member_participant_ids || committee.member_slot_ids).map((entry) => normalizeText(entry)).filter(Boolean),
+    } : null,
+  };
+}
+
+function appendPromptSuffix(prompt = '', suffix = '') {
+  const base = normalizeText(prompt);
+  const extra = normalizeText(suffix);
+  if (!base) return extra;
+  if (!extra) return base;
+  return `${base}
+
+${extra}`;
+}
+
+function annotateAction(action = null, metadata = {}, inputPatch = {}) {
+  const row = action && typeof action === 'object' ? action : null;
+  if (!row) return null;
+  return {
+    ...row,
+    inputs: {
+      ...(row.inputs && typeof row.inputs === 'object' ? row.inputs : {}),
+      ...(inputPatch && typeof inputPatch === 'object' ? inputPatch : {}),
+    },
+    metadata: {
+      ...(row.metadata && typeof row.metadata === 'object' ? row.metadata : {}),
+      ...(metadata && typeof metadata === 'object' ? metadata : {}),
+    },
+  };
 }
 
 export function mapTeamPlanToRouteActions(teamBuild = {}, {
@@ -647,7 +1040,17 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
 
   const index = createPlanIndex(teamPlan, runtimeAgents);
   const slotOrder = findExecutionOrder(teamPlan, runtimeAgents);
-  const levels = topologicalLevels(teamPlan, runtimeAgents);
+  const graphDescriptor = extractExecutionGraphDescriptor(teamPlan, runtimeAgents);
+  const compatibilityFallback = graphDescriptor.cyclic_topology === true || graphDescriptor.validation.errors.length > 0;
+  const participantDescriptorMap = createParticipantDescriptorMap(teamBuild, teamPlan);
+  const graphNodes = normalizeExecutionGraphNodes(teamPlan, runtimeAgents);
+  const graphNodeBySlotId = new Map(graphNodes.map((node) => [normalizeText(node.slot_id || node.participant_id), node]));
+  const executionLevels = compatibilityFallback
+    ? createSequentialLevelsFromOrder(slotOrder)
+    : (() => {
+      const derivedLevels = topologicalLevelsForExecutionNodes(teamPlan, runtimeAgents);
+      return derivedLevels.length > 0 ? derivedLevels : topologicalLevels(teamPlan, runtimeAgents);
+    })();
   const dependencyMap = createDependencyMap(teamPlan, runtimeAgents);
   const collaborationLookup = createCollaborationLookup(teamPlan);
   const checkpointLookup = createCheckpointLookup(teamPlan);
@@ -655,6 +1058,7 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
     ? teamPlan.supervisor_runtime
     : null;
   const edges = normalizeEdges(teamPlan, runtimeAgents);
+  const edgeConditionMaps = createEdgeConditionMaps(edges);
   const parallelGroups = buildParallelGroups(teamPlan, runtimeAgents);
   const parallelGroupBySlot = new Map();
   for (const group of parallelGroups) {
@@ -663,178 +1067,336 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
     }
   }
 
-  const terminalSynthesizerSlotId = findTerminalSynthesizerSlotId(teamPlan, slotOrder);
+  const terminalFinalSlotId = findTerminalFinalSlotId(teamPlan, slotOrder, runtimeAgents);
   const emittedCheckpointIds = new Set();
   const actions = [];
 
-  for (const levelSlotIds of levels) {
-    const runnableSlots = levelSlotIds
-      .map((slotId) => index.slotsById.get(normalizeText(slotId)))
-      .filter(Boolean)
-      .filter((slot) => normalizeText(slot.slot_id) !== terminalSynthesizerSlotId);
-    if (runnableSlots.length === 0) continue;
-
-    const levelCheckpointList = checkpointIdsForSlots(
-      runnableSlots.map((slot) => slot.slot_id),
-      checkpointLookup
-    );
-    const parallelDecision = decideParallelCompilation({
-      slots: runnableSlots,
-      edges,
-      taskInterpretation,
-    });
-
-    if (runnableSlots.length > 1 && parallelDecision.allowed) {
-      const children = runnableSlots
-        .map((slot) => {
-          const runtimeAgent = findRuntimeAgentForSlot(slot, runtimeAgents);
-          if (!runtimeAgent) return null;
-          const scopeSpec = findScopeSpecForSlot(slot, runtimeAgent, teamPlan);
-          return buildSlotRunAction({
-            slot,
-            runtimeAgent,
-            goal,
-            seedInstruction,
-            dependencyMap,
-            collaborationLookup,
-            checkpointIds: levelCheckpointList.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
-            parallelGroupId: parallelGroupBySlot.get(slot.slot_id),
-            taskInterpretation,
-            supervisorRuntime,
-            finalSynthesis: false,
-            scopeSpec,
-          });
-        })
-        .filter(Boolean);
-      if (children.length > 0) {
-        const slotIds = children.map((child) => normalizeText(child.inputs?.slot_id)).filter(Boolean);
-        const instanceIds = children.map((child) => normalizeText(child.inputs?.runtime_instance_id)).filter(Boolean);
-        actions.push({
-          type: "spawn_parallel",
-          label: `Parallel ${children.map((child) => child.agent).join(", ")}`,
-          prompt: children.map((child) => child.prompt).join("\n\n"),
-          inputs: {
-            parallel_group_id: parallelGroupBySlot.get(slotIds[0]) || undefined,
-            target_slot_ids: slotIds,
-            target_instance_ids: instanceIds,
-            checkpoint_ids: levelCheckpointList.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
-            supervisor_instance_id: normalizeText(supervisorRuntime?.instance_id || supervisorRuntime?.instanceId) || undefined,
-          },
-          agents: children,
-          metadata: parallelDecision.override_reason
-            ? { parallelism_override_reason: parallelDecision.override_reason }
-            : undefined,
-        });
-        for (const checkpoint of levelCheckpointList) {
-          const checkpointId = normalizeText(checkpoint?.checkpoint_id);
-          if (!checkpointId || emittedCheckpointIds.has(checkpointId)) continue;
-          emittedCheckpointIds.add(checkpointId);
-          const checkpointAction = buildCheckpointAction(checkpoint, {
-            supervisorRuntime,
-            targetInstanceIds: instanceIds,
-          });
-          if (checkpointAction) actions.push(checkpointAction);
-        }
-        const supervisorAction = buildSupervisorDecisionAction({
-          supervisorRuntime,
-          slotIds,
-          instanceIds,
-          checkpointIds: levelCheckpointList.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
-          label: "Supervisor review after parallel group",
-          summaryKind: "parallel_report",
-        });
-        if (supervisorAction) actions.push(supervisorAction);
-      }
-      continue;
-    }
-
-    for (const slot of runnableSlots) {
-      const runtimeAgent = findRuntimeAgentForSlot(slot, runtimeAgents);
-      if (!runtimeAgent) continue;
-      const scopeSpec = findScopeSpecForSlot(slot, runtimeAgent, teamPlan);
-      const slotCheckpointList = checkpointIdsForSlots([slot.slot_id], checkpointLookup);
-      const action = buildSlotRunAction({
-        slot,
-        runtimeAgent,
-        goal,
-        seedInstruction,
-        dependencyMap,
-        collaborationLookup,
-        checkpointIds: slotCheckpointList.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
-        parallelGroupId: parallelGroupBySlot.get(slot.slot_id),
-        taskInterpretation,
-        supervisorRuntime,
-        finalSynthesis: false,
-        scopeSpec,
-      });
-      if (action) actions.push(action);
-
-      for (const checkpoint of slotCheckpointList) {
-        const checkpointId = normalizeText(checkpoint?.checkpoint_id);
-        if (!checkpointId || emittedCheckpointIds.has(checkpointId)) continue;
-        emittedCheckpointIds.add(checkpointId);
-        const checkpointAction = buildCheckpointAction(checkpoint, {
-          supervisorRuntime,
-          targetInstanceIds: [runtimeAgent.instance_id].filter(Boolean),
-        });
-        if (checkpointAction) actions.push(checkpointAction);
-      }
-    }
-  }
-
-  if (terminalSynthesizerSlotId) {
-    const synthesizerSlot = index.slotsById.get(terminalSynthesizerSlotId);
-    const synthesizerAgent = synthesizerSlot
-      ? findRuntimeAgentForSlot(synthesizerSlot, runtimeAgents)
-      : null;
-    const slotCheckpointList = checkpointIdsForSlots([terminalSynthesizerSlotId], checkpointLookup);
-    const synthesisScopeSpec = synthesizerSlot && synthesizerAgent
-      ? findScopeSpecForSlot(synthesizerSlot, synthesizerAgent, teamPlan)
-      : null;
-    const synthesisAction = synthesizerSlot && synthesizerAgent
-      ? buildSlotRunAction({
-        slot: synthesizerSlot,
-        runtimeAgent: synthesizerAgent,
-        goal,
-        seedInstruction,
-        dependencyMap,
-        collaborationLookup,
-        checkpointIds: slotCheckpointList.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
-        parallelGroupId: parallelGroupBySlot.get(terminalSynthesizerSlotId),
-        taskInterpretation,
-        supervisorRuntime,
-        finalSynthesis: true,
-        scopeSpec: synthesisScopeSpec,
-      })
-      : null;
-    if (synthesisAction) actions.push(synthesisAction);
+  const pushCheckpointActions = (slotIds = [], targetInstanceIds = []) => {
+    const slotCheckpointList = checkpointIdsForSlots(slotIds, checkpointLookup);
     for (const checkpoint of slotCheckpointList) {
       const checkpointId = normalizeText(checkpoint?.checkpoint_id);
       if (!checkpointId || emittedCheckpointIds.has(checkpointId)) continue;
       emittedCheckpointIds.add(checkpointId);
       const checkpointAction = buildCheckpointAction(checkpoint, {
         supervisorRuntime,
-        targetInstanceIds: synthesisAction?.inputs?.runtime_instance_id
-          ? [synthesisAction.inputs.runtime_instance_id]
-          : [],
+        targetInstanceIds,
       });
       if (checkpointAction) actions.push(checkpointAction);
     }
-    const supervisorAction = buildSupervisorDecisionAction({
+    return slotCheckpointList;
+  };
+
+  const makeSlotAction = ({
+    slot,
+    runtimeAgent,
+    finalSynthesis = false,
+    promptSuffix = '',
+    metadata = {},
+    inputPatch = {},
+    summaryKind = undefined,
+  } = {}) => {
+    if (!slot || !runtimeAgent) return null;
+    const scopeSpec = findScopeSpecForSlot(slot, runtimeAgent, teamPlan);
+    const slotId = normalizeText(slot.slot_id);
+    let action = buildSlotRunAction({
+      slot,
+      runtimeAgent,
+      goal,
+      seedInstruction,
+      dependencyMap,
+      collaborationLookup,
+      checkpointIds: checkpointIdsForSlots([slot.slot_id], checkpointLookup).map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
+      parallelGroupId: parallelGroupBySlot.get(slot.slot_id),
+      taskInterpretation,
       supervisorRuntime,
-      slotIds: [terminalSynthesizerSlotId],
-      instanceIds: synthesisAction?.inputs?.runtime_instance_id
-        ? [synthesisAction.inputs.runtime_instance_id]
-        : [],
-      checkpointIds: slotCheckpointList.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
-      label: "Supervisor final synthesis review",
-      summaryKind: "final_output",
+      finalSynthesis,
+      scopeSpec,
+      incomingConditions: asArray(edgeConditionMaps.incomingBySlot.get(slotId)).filter((entry) => normalizeText(entry?.condition)),
+      outgoingConditions: asArray(edgeConditionMaps.outgoingBySlot.get(slotId)).filter((entry) => normalizeText(entry?.condition)),
     });
-    if (supervisorAction) actions.push(supervisorAction);
+    if (!action) return null;
+    if (promptSuffix) action = { ...action, prompt: appendPromptSuffix(action.prompt, promptSuffix) };
+    return annotateAction(action, metadata, {
+      structure_pattern: graphDescriptor.pattern || undefined,
+      topology_validation_fallback: compatibilityFallback || undefined,
+      summary_kind: summaryKind || undefined,
+      ...(inputPatch && typeof inputPatch === 'object' ? inputPatch : {}),
+    });
+  };
+
+  const buildGenericActions = () => {
+    for (const levelSlotIds of executionLevels) {
+      const structuralNodes = levelSlotIds
+        .map((slotId) => graphNodeBySlotId.get(normalizeText(slotId)))
+        .filter(Boolean)
+        .filter((node) => {
+          const nodeKind = normalizeText(node?.kind, { lower: true });
+          return structuralNodeActionType(nodeKind) !== '';
+        });
+      const runnableSlots = levelSlotIds
+        .map((slotId) => index.slotsById.get(normalizeText(slotId)))
+        .filter(Boolean)
+        .filter((slot) => normalizeText(slot.slot_id) !== terminalFinalSlotId);
+      if (runnableSlots.length === 0 && structuralNodes.length === 0) continue;
+
+      const levelCheckpointList = checkpointIdsForSlots(
+        [...runnableSlots.map((slot) => slot.slot_id), ...structuralNodes.map((node) => normalizeText(node.slot_id || node.participant_id))],
+        checkpointLookup
+      );
+      for (const node of structuralNodes) {
+        const slotId = normalizeText(node.slot_id || node.participant_id);
+        const participant = participantDescriptorMap.get(normalizeText(node.participant_id || slotId)) || participantDescriptorMap.get(slotId) || {};
+        const action = buildStructuralNodeAction({
+          node,
+          participant,
+          graphDescriptor,
+          edgeConditionMaps,
+          checkpointIds: levelCheckpointList.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
+          supervisorRuntime,
+          compatibilityFallback,
+          slotsById: index.slotsById,
+          runtimeAgents,
+        });
+        if (action) actions.push(action);
+        pushCheckpointActions([slotId], []);
+      }
+      if (runnableSlots.length === 0) continue;
+
+      const parallelDecision = compatibilityFallback
+        ? { allowed: false, override_reason: '' }
+        : decideParallelCompilation({
+          slots: runnableSlots,
+          edges,
+          taskInterpretation,
+        });
+
+      if (runnableSlots.length > 1 && parallelDecision.allowed) {
+        const children = runnableSlots
+          .map((slot) => {
+            const runtimeAgent = findRuntimeAgentForSlot(slot, runtimeAgents);
+            if (!runtimeAgent) return null;
+            const scopeSpec = findScopeSpecForSlot(slot, runtimeAgent, teamPlan);
+            return buildSlotRunAction({
+              slot,
+              runtimeAgent,
+              goal,
+              seedInstruction,
+              dependencyMap,
+              collaborationLookup,
+              checkpointIds: levelCheckpointList.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
+              parallelGroupId: parallelGroupBySlot.get(slot.slot_id),
+              taskInterpretation,
+              supervisorRuntime,
+              finalSynthesis: false,
+              scopeSpec,
+              incomingConditions: asArray(edgeConditionMaps.incomingBySlot.get(normalizeText(slot.slot_id))).filter((entry) => normalizeText(entry?.condition)),
+              outgoingConditions: asArray(edgeConditionMaps.outgoingBySlot.get(normalizeText(slot.slot_id))).filter((entry) => normalizeText(entry?.condition)),
+            });
+          })
+          .filter(Boolean)
+          .map((child) => annotateAction(child, {
+            structure_pattern: graphDescriptor.pattern || undefined,
+          }, {
+            structure_pattern: graphDescriptor.pattern || undefined,
+            topology_validation_fallback: compatibilityFallback || undefined,
+          }));
+        if (children.length > 0) {
+          const slotIds = children.map((child) => normalizeText(child.inputs?.slot_id)).filter(Boolean);
+          const instanceIds = children.map((child) => normalizeText(child.inputs?.runtime_instance_id)).filter(Boolean);
+          actions.push({
+            type: 'spawn_parallel',
+            label: `Parallel ${children.map((child) => child.agent).join(', ')}`,
+            prompt: children.map((child) => child.prompt).join('\n\n'),
+            inputs: {
+              parallel_group_id: parallelGroupBySlot.get(slotIds[0]) || undefined,
+              target_slot_ids: slotIds,
+              target_instance_ids: instanceIds,
+              checkpoint_ids: levelCheckpointList.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
+              supervisor_instance_id: normalizeText(supervisorRuntime?.instance_id || supervisorRuntime?.instanceId) || undefined,
+              structure_pattern: graphDescriptor.pattern || undefined,
+            },
+            agents: children,
+            metadata: {
+              ...(parallelDecision.override_reason ? { parallelism_override_reason: parallelDecision.override_reason } : {}),
+              ...(compatibilityFallback ? { topology_validation_fallback: true } : {}),
+            },
+          });
+          pushCheckpointActions(slotIds, instanceIds);
+          const supervisorAction = buildSupervisorDecisionAction({
+            supervisorRuntime,
+            slotIds,
+            instanceIds,
+            checkpointIds: levelCheckpointList.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
+            label: 'Supervisor review after parallel group',
+            summaryKind: 'parallel_report',
+          });
+          if (supervisorAction) actions.push(supervisorAction);
+        }
+        continue;
+      }
+
+      for (const slot of runnableSlots) {
+        const runtimeAgent = findRuntimeAgentForSlot(slot, runtimeAgents);
+        if (!runtimeAgent) continue;
+        const action = makeSlotAction({
+          slot,
+          runtimeAgent,
+          metadata: {
+            stage_mode: runnableSlots.length > 1 ? 'parallel_degraded' : 'serial',
+          },
+        });
+        if (action) actions.push(action);
+        pushCheckpointActions([slot.slot_id], [runtimeAgent.instance_id].filter(Boolean));
+      }
+    }
+  };
+
+  const buildDebateActions = () => {
+    const debate = graphDescriptor.debate;
+    const adjudicatorSlotId = normalizeText(debate?.adjudicator_slot_id || terminalFinalSlotId);
+    const debaterSlotIds = (debate?.debater_slot_ids?.length > 0
+      ? debate.debater_slot_ids
+      : slotOrder.filter((slotId) => normalizeText(slotId) !== adjudicatorSlotId)
+    ).filter(Boolean);
+    const rounds = Number.isFinite(Number(debate?.rounds)) ? Math.max(1, Math.min(6, Math.floor(Number(debate.rounds)))) : 1;
+
+    for (let round = 1; round <= rounds; round += 1) {
+      for (const slotId of debaterSlotIds) {
+        const slot = index.slotsById.get(normalizeText(slotId));
+        const runtimeAgent = slot ? findRuntimeAgentForSlot(slot, runtimeAgents) : null;
+        if (!slot || !runtimeAgent) continue;
+        const action = makeSlotAction({
+          slot,
+          runtimeAgent,
+          promptSuffix: round === 1
+            ? 'Debate round 1: present your strongest case and cite the most relevant evidence for your side.'
+            : `Debate round ${round}: rebut prior arguments, address weaknesses, and update your position with the strongest remaining evidence.`,
+          metadata: {
+            debate_round: round,
+            debate_role: 'debater',
+            rebuttal_required: debate?.rebuttal_required !== false,
+          },
+          inputPatch: {
+            debate_round: round,
+            debate_role: 'debater',
+            debate_adjudicator_slot_id: adjudicatorSlotId || undefined,
+          },
+          summaryKind: round === rounds ? 'debate_round_final' : 'debate_round',
+        });
+        if (action) actions.push(action);
+        pushCheckpointActions([slot.slot_id], [runtimeAgent.instance_id].filter(Boolean));
+      }
+      const supervisorAction = buildSupervisorDecisionAction({
+        supervisorRuntime,
+        slotIds: debaterSlotIds,
+        instanceIds: debaterSlotIds.map((slotId) => normalizeText(findRuntimeAgentForSlot(index.slotsById.get(slotId), runtimeAgents)?.instance_id)).filter(Boolean),
+        checkpointIds: [],
+        label: `Supervisor review after debate round ${round}`,
+        summaryKind: 'debate_round',
+      });
+      if (supervisorAction && rounds > 1) actions.push(supervisorAction);
+    }
+
+    const adjudicatorSlot = index.slotsById.get(adjudicatorSlotId);
+    const adjudicatorAgent = adjudicatorSlot ? findRuntimeAgentForSlot(adjudicatorSlot, runtimeAgents) : null;
+    if (adjudicatorSlot && adjudicatorAgent) {
+      const finalAction = makeSlotAction({
+        slot: adjudicatorSlot,
+        runtimeAgent: adjudicatorAgent,
+        finalSynthesis: true,
+        promptSuffix: `Adjudicate the debate after ${rounds} round(s). Weigh both sides, resolve conflicts in evidence, and produce the final answer for the user.`,
+        metadata: {
+          debate_role: 'adjudicator',
+          debate_rounds: rounds,
+        },
+        inputPatch: {
+          debate_rounds: rounds,
+          debate_role: 'adjudicator',
+        },
+        summaryKind: 'final_output',
+      });
+      if (finalAction) actions.push(finalAction);
+      const checkpoints = pushCheckpointActions([adjudicatorSlot.slot_id], [adjudicatorAgent.instance_id].filter(Boolean));
+      const supervisorAction = buildSupervisorDecisionAction({
+        supervisorRuntime,
+        slotIds: [adjudicatorSlot.slot_id],
+        instanceIds: [adjudicatorAgent.instance_id].filter(Boolean),
+        checkpointIds: checkpoints.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
+        label: 'Supervisor final debate review',
+        summaryKind: 'final_output',
+      });
+      if (supervisorAction) actions.push(supervisorAction);
+    }
+  };
+
+  if (graphDescriptor.pattern === 'debate' && graphDescriptor.debate && graphDescriptor.debate.rounds > 1) {
+    buildDebateActions();
+  } else {
+    buildGenericActions();
+    if (terminalFinalSlotId) {
+      const finalSlot = index.slotsById.get(terminalFinalSlotId);
+      const finalAgent = finalSlot ? findRuntimeAgentForSlot(finalSlot, runtimeAgents) : null;
+      if (finalSlot && finalAgent) {
+        const committeeMemberSlotIds = graphDescriptor.pattern === 'committee'
+          ? ((graphDescriptor.committee?.member_slot_ids?.length > 0 ? graphDescriptor.committee.member_slot_ids : slotOrder.filter((slotId) => normalizeText(slotId) !== terminalFinalSlotId)).filter(Boolean))
+          : [];
+        const promptSuffix = graphDescriptor.pattern === 'committee'
+          ? `Synthesize committee member outputs and make the final decision using consensus mode=${graphDescriptor.committee?.mode || 'majority'}${graphDescriptor.committee?.quorum ? ` quorum=${graphDescriptor.committee.quorum}` : ''}.`
+          : (graphDescriptor.pattern === 'graph' && compatibilityFallback
+            ? 'Topology validation failed, so this final step is running in compatibility fallback mode. Produce a cautious final answer and call out any uncertainty in upstream routing.'
+            : '');
+        if (graphDescriptor.pattern === 'committee') {
+          const consensusAction = buildCommitteeConsensusAction({
+            graphDescriptor,
+            checkpointIds: checkpointIdsForSlots(committeeMemberSlotIds, checkpointLookup).map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
+            supervisorRuntime,
+            memberSlotIds: committeeMemberSlotIds,
+            chairSlotId: terminalFinalSlotId,
+            compatibilityFallback,
+          });
+          if (consensusAction) actions.push(consensusAction);
+        }
+        const finalAction = makeSlotAction({
+          slot: finalSlot,
+          runtimeAgent: finalAgent,
+          finalSynthesis: true,
+          promptSuffix,
+          metadata: graphDescriptor.pattern === 'committee'
+            ? { committee_role: 'chair', consensus_mode: graphDescriptor.committee?.mode || 'majority', committee_member_slot_ids: committeeMemberSlotIds }
+            : {},
+          inputPatch: graphDescriptor.pattern === 'committee'
+            ? { committee_role: 'chair', consensus_mode: graphDescriptor.committee?.mode || 'majority', committee_quorum: graphDescriptor.committee?.quorum, committee_member_slot_ids: committeeMemberSlotIds }
+            : {},
+          summaryKind: 'final_output',
+        });
+        if (finalAction) actions.push(finalAction);
+        const checkpoints = pushCheckpointActions([terminalFinalSlotId], [finalAgent.instance_id].filter(Boolean));
+        const supervisorAction = buildSupervisorDecisionAction({
+          supervisorRuntime,
+          slotIds: [terminalFinalSlotId],
+          instanceIds: finalAction?.inputs?.runtime_instance_id
+            ? [finalAction.inputs.runtime_instance_id]
+            : [],
+          checkpointIds: checkpoints.map((checkpoint) => checkpoint.checkpoint_id).filter(Boolean),
+          label: graphDescriptor.pattern === 'committee' ? 'Supervisor committee decision review' : 'Supervisor final synthesis review',
+          summaryKind: 'final_output',
+        });
+        if (supervisorAction) actions.push(supervisorAction);
+      }
+    }
   }
 
-  if (normalizeText(mode, { lower: true }) !== "chat" && actions.length < 12) {
-    actions.push({ type: "git_summary" });
+  if (compatibilityFallback && actions[0]) {
+    actions[0] = annotateAction(actions[0], {
+      topology_validation_errors: graphDescriptor.validation.errors,
+      topology_validation_warnings: graphDescriptor.validation.warnings,
+    }, {
+      topology_validation_fallback: true,
+    });
+  }
+
+  if (normalizeText(mode, { lower: true }) !== 'chat' && actions.length < 12) {
+    actions.push({ type: 'git_summary' });
   }
   return actions.slice(0, 16);
 }

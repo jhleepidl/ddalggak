@@ -8,6 +8,9 @@ import { OrchestratorMemory } from "../settings.js";
 import { orchestratorNotes } from "../prompts.js";
 import { loadAgents, getAgent } from "../agents.js";
 import { GocClient } from "../goc_client.js";
+import {
+  KNOWLEDGE_BASE_CONTRACT_FILE,
+} from "../knowledge_base/runtime.js";
 import { ChatSessionStore } from "../chat/session.js";
 import {
   createJobRuntimeState,
@@ -131,7 +134,7 @@ if (MEMORY_MODE === "goc") {
   }
 }
 
-const TRACK_DOC_NAMES = ["plan.md", "research.md", "progress.md", "decisions.md"];
+const TRACK_DOC_NAMES = ["plan", "research", "progress", "decisions", "artifacts"];
 const gocFallbackByJob = new Map();
 
 const jobRuntimeState = createJobRuntimeState();
@@ -190,13 +193,54 @@ function runSharedDir(jobId) {
 
 function loadLocalContextDocs(jobId, docNames, maxCharsPerDoc = 3500) {
   let out = "";
+  const kbSummary = tracking.renderProfileMarkdown(jobId);
+  if (kbSummary) {
+    const summaryLimit = Math.max(1200, Math.floor(maxCharsPerDoc / 2));
+    const clippedSummary = kbSummary.length > summaryLimit ? kbSummary.slice(0, summaryLimit) : kbSummary;
+    out += `
+
+---
+
+### [rendered] knowledge_base_summary
+
+${clippedSummary}
+`;
+  }
+  try {
+    const contractText = fs.readFileSync(path.join(runSharedDir(jobId), KNOWLEDGE_BASE_CONTRACT_FILE), 'utf8');
+    const contractLimit = Math.max(1200, Math.floor(maxCharsPerDoc / 2));
+    const clippedContract = contractText.length > contractLimit ? contractText.slice(0, contractLimit) : contractText;
+    out += `
+
+---
+
+### ${path.join(runSharedDir(jobId), KNOWLEDGE_BASE_CONTRACT_FILE)}
+
+${clippedContract}
+`;
+  } catch {}
   for (const name of docNames) {
+    const resolvedName = tracking.resolveDocName(jobId, name);
     try {
       const text = tracking.read(jobId, name);
       const clipped = text.length > maxCharsPerDoc ? text.slice(-maxCharsPerDoc) : text;
-      out += `\n\n---\n\n### ${path.join(runSharedDir(jobId), name)}\n\n${clipped}\n`;
+      out += `
+
+---
+
+### ${path.join(runSharedDir(jobId), resolvedName)}
+
+${clipped}
+`;
     } catch (error) {
-      out += `\n\n---\n\n### ${path.join(runSharedDir(jobId), name)}\n\n[read failed: ${String(error?.message ?? error)}]\n`;
+      out += `
+
+---
+
+### ${path.join(runSharedDir(jobId), resolvedName)}
+
+[read failed: ${String(error?.message ?? error)}]
+`;
     }
   }
   return out.trim() || "(none)";

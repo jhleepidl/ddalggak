@@ -24,6 +24,11 @@ function normalizePendingEntry(raw = {}) {
       : (Number.isFinite(Number(row.telegramMessageId))
         ? Number(row.telegramMessageId)
         : null),
+    user_reply_to_message_id: Number.isFinite(Number(row.user_reply_to_message_id))
+      ? Number(row.user_reply_to_message_id)
+      : (Number.isFinite(Number(row.userReplyToMessageId))
+        ? Number(row.userReplyToMessageId)
+        : null),
   };
 }
 
@@ -107,13 +112,14 @@ export class ChatRunManager {
     }));
   }
 
-  _appendPending(chatId, { userId = "", text = "", forceMode = "normal", telegramMessageId = null } = {}) {
+  _appendPending(chatId, { userId = "", text = "", forceMode = "normal", telegramMessageId = null, userReplyToMessageId = null } = {}) {
     const normalized = normalizePendingEntry({
       ts: nowIso(),
       user_id: String(userId || "").trim(),
       text,
       force_mode: normalizeForceMode(forceMode),
       telegram_message_id: telegramMessageId,
+      user_reply_to_message_id: userReplyToMessageId,
     });
     if (!normalized) return;
     this.sessionStore.upsert(chatId, (session) => {
@@ -237,6 +243,7 @@ export class ChatRunManager {
           pendingCount: merged.count,
           pendingRows: merged.rows,
           telegramMessageId: merged.latest?.telegram_message_id || null,
+          userReplyToMessageId: merged.latest?.user_reply_to_message_id || null,
           forceMode,
           chatInfo,
         });
@@ -303,6 +310,7 @@ export class ChatRunManager {
     userId = "",
     text = "",
     telegramMessageId = null,
+    userReplyToMessageId = null,
     chatInfo = null,
     kind = "normal",
     forceMode = "normal",
@@ -324,6 +332,7 @@ export class ChatRunManager {
       text: cleanText,
       forceMode: cleanForceMode,
       telegramMessageId,
+      userReplyToMessageId,
     });
 
     const session = this.sessionStore.get(chatId);

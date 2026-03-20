@@ -18,6 +18,18 @@ import {
   evaluateActionAuthority,
 } from "../application/run_authority.js";
 import { sanitizeExecutablePlan } from "./route_execution_contract.js";
+import {
+  attachRouteSignals,
+  collectActiveRouteSignals,
+  evaluateIncomingConditions,
+  resolveActionRouteSignals,
+  summarizeConditions,
+} from "./structural_runtime.js";
+import { normalizeRuntimeExecutionPolicy } from "../application/runtime_execution_policy.js";
+import {
+  buildProviderRuntimePolicySummary,
+  resolveProviderRuntimeOptions,
+} from "../application/provider_runtime_policy.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -135,6 +147,64 @@ function getProviderByAgent(agents = [], agentId = "") {
   return String(found?.provider || "").trim().toLowerCase();
 }
 
+function findAgentById(agents = [], agentId = "") {
+  const key = String(agentId || "").trim().toLowerCase();
+  if (!key) return null;
+  return (Array.isArray(agents) ? agents : []).find((agent) => String(agent?.id || "").trim().toLowerCase() === key) || null;
+}
+
+function resolveRuntimeExecutionPolicyFromSnapshot(runtimeSnapshot = {}) {
+  const structureRuntime = runtimeSnapshot?.structure_v2?.control_policy?.runtime_execution
+    || runtimeSnapshot?.structure_v2?.control_policy?.runtimeExecution;
+  return normalizeRuntimeExecutionPolicy(structureRuntime || runtimeSnapshot?.runtime_execution || runtimeSnapshot?.runtimeExecution || {});
+}
+
+function buildPendingRuntimePolicySummary({ action = {}, runtimeSnapshot = {}, agents = [] } = {}) {
+  const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyFromSnapshot(runtimeSnapshot);
+  const checkpointing = runtimeExecutionPolicy?.checkpointing || {};
+  const continuous = runtimeExecutionPolicy?.continuous_improvement || {};
+  const approvalMatrix = runtimeExecutionPolicy?.approval_matrix || {};
+  const summary = [
+    `- runtime_execution: checkpointing=${checkpointing.enabled === true ? 'enabled' : 'disabled'}, continuous_improvement=${continuous.enabled === true ? `enabled(max_turns=${continuous.max_turns})` : 'disabled'}`,
+  ];
+  if (Object.keys(approvalMatrix).length > 0) {
+    const compact = Object.entries(approvalMatrix)
+      .map(([key, value]) => `${key}=${String(value || '').trim()}`)
+      .filter((entry) => !entry.endsWith('='))
+      .slice(0, 6);
+    if (compact.length > 0) summary.push(`- approval_matrix: ${compact.join(', ')}`);
+  }
+
+  const type = String(action?.type || '').trim().toLowerCase();
+  if (["run_agent", "synthesize_final"].includes(type)) {
+    const agentId = String(action?.agent_id || action?.agentId || action?.agent || '').trim().toLowerCase();
+    const agent = findAgentById(agents, agentId);
+    const provider = String(agent?.provider || '').trim().toLowerCase();
+    if (provider) {
+      const options = resolveProviderRuntimeOptions({
+        runtimeExecutionPolicy,
+        provider,
+        action,
+        agent,
+      });
+      const providerSummary = buildProviderRuntimePolicySummary({
+        runtimeExecutionPolicy,
+        provider,
+        options,
+      }).split("\n")
+        .map((line) => String(line || '').trim())
+        .filter(Boolean)
+        .slice(0, 6)
+        .map((line) => `- ${line}`);
+      summary.push(...providerSummary);
+    }
+  } else if (type === 'tool_proxy_call') {
+    summary.push(`- verification: ${String(approvalMatrix.verification || 'allow').trim() || 'allow'}`);
+  }
+
+  return summary.slice(0, 8);
+}
+
 function nextApprovalId() {
   return `appr_${Date.now().toString(36)}_${crypto.randomBytes(4).toString("hex")}`;
 }
@@ -169,6 +239,236 @@ function readInterruptState(sessionStore, chatId) {
   };
 }
 
+function buildStructuralPendingApproval({
+  action = {},
+  agentIndex = new Map(),
+  chatId = '',
+  jobId = '',
+  userId = '',
+  results = [],
+  outputs = [],
+  blockedIndex = 0,
+  remainingActions = [],
+  reason = '',
+  gateType = '',
+  runtimePolicySummary = [],
+} = {}) {
+  return {
+    id: nextApprovalId(),
+    chat_id: String(chatId || ''),
+    job_id: String(jobId || ''),
+    action,
+    action_display_label: actionLabel(action, { agentIndex }),
+    reason: String(reason || action?.prompt || action?.label || gateType || 'approval required').trim(),
+    preview_reason: String(gateType || action?.type || 'approval').trim(),
+    actions_summary: approvalActionSummary(remainingActions, { agentIndex }),
+    cancel_impact: '취소 시 이후 구조 단계와 후속 agent 실행이 멈춥니다.',
+    gate_type: String(gateType || action?.inputs?.gate_type || action?.type || 'approval').trim(),
+    blocked_index: blockedIndex,
+    remaining_actions: remainingActions,
+    checkpoint_id: action?.inputs?.checkpoint_id || undefined,
+    checkpoint_ids: Array.isArray(action?.inputs?.checkpoint_ids) ? action.inputs.checkpoint_ids : undefined,
+    already_done: {
+      results: [...results],
+      outputs: [...outputs],
+    },
+    requested_by: String(userId || ''),
+    ts: new Date().toISOString(),
+    runtime_policy_summary: Array.isArray(runtimePolicySummary)
+      ? runtimePolicySummary.map((entry) => String(entry || '').trim()).filter(Boolean).slice(0, 8)
+      : [],
+  };
+}
+
+
+function summarizeVerificationResult(proxyResult = {}) {
+  const commands = Array.isArray(proxyResult?.commands) ? proxyResult.commands.filter(Boolean) : [];
+  const resultRows = Array.isArray(proxyResult?.results) ? proxyResult.results : [];
+  const lines = [];
+  if (commands.length > 0) lines.push(`commands: ${commands.join(' ; ')}`);
+  for (const row of resultRows.slice(0, 6)) {
+    const command = String(row?.command || '').trim();
+    const status = row?.ok ? 'ok' : 'failed';
+    const exitCode = Number.isFinite(Number(row?.exitCode)) ? Number(row.exitCode) : -1;
+    const detail = String((row?.ok ? row?.stdout : (row?.stderr || row?.stdout)) || '').trim().replace(/\s+/g, ' ');
+    lines.push(`- ${command || 'command'} -> ${status} (exit=${exitCode})${detail ? ` :: ${detail.slice(0, 240)}` : ''}`);
+  }
+  const text = String(proxyResult?.text || '').trim();
+  if (lines.length > 0) return lines.join('\n');
+  return text.slice(0, 700);
+}
+
+function buildRepairPrompt({
+  proxyResult = {},
+  action = {},
+  repairTarget = null,
+  verifierTarget = null,
+  attempt = 1,
+} = {}) {
+  const label = String(action?.label || action?.prompt || 'verification').trim() || 'verification';
+  const summary = summarizeVerificationResult(proxyResult) || 'verification failed';
+  const verifierLine = verifierTarget?.agent_id
+    ? `After repairing, keep the change set tidy so ${verifierTarget.agent_id} can review it.`
+    : 'After repairing, keep the change set minimal and ready for review.';
+  return [
+    `Repair attempt ${attempt}: ${label} failed.`,
+    verifierLine,
+    'Fix the code or workspace issues causing the verification failure, then stop after applying the smallest safe patch.',
+    'Do not invent missing files or rename knowledge-base documents; use only the files that exist in the current KB contract.',
+    '',
+    'Verification summary:',
+    summary,
+  ].join('\n');
+}
+
+function buildVerifierPrompt({
+  proxyResult = {},
+  action = {},
+  repairTarget = null,
+  verifierTarget = null,
+  attempt = 1,
+} = {}) {
+  const label = String(action?.label || action?.prompt || 'verification').trim() || 'verification';
+  const repairLabel = String(repairTarget?.agent_id || repairTarget?.slot_id || 'coder').trim() || 'coder';
+  const summary = summarizeVerificationResult(proxyResult) || 'verification failed';
+  return [
+    `Review repair attempt ${attempt} after ${label} failed.`,
+    `Check whether ${repairLabel}'s latest patch likely addresses the failure and flag any remaining risk or missing test coverage.`,
+    'Keep the response concise and implementation-facing.',
+    '',
+    'Verification summary:',
+    summary,
+  ].join('\n');
+}
+
+function summarizeCommitteeCoverage(action = {}, outputs = []) {
+  const memberSlotIds = (Array.isArray(action?.inputs?.member_slot_ids) ? action.inputs.member_slot_ids : [])
+    .map((entry) => String(entry || '').trim())
+    .filter(Boolean);
+  const memberSet = new Set(memberSlotIds);
+  const respondedSlots = new Set();
+  const respondedAgents = new Set();
+  for (const row of Array.isArray(outputs) ? outputs : []) {
+    const slotId = String(row?.slot_id || '').trim();
+    const agentId = String(row?.agentId || '').trim().toLowerCase();
+    if (slotId && memberSet.has(slotId)) respondedSlots.add(slotId);
+    if (agentId) respondedAgents.add(agentId);
+  }
+  return {
+    member_slot_ids: memberSlotIds,
+    responded_slot_ids: [...respondedSlots],
+    responded_count: respondedSlots.size,
+    responded_agent_count: respondedAgents.size,
+  };
+}
+
+
+async function runVerificationRepairLoop({
+  action = {},
+  initialProxyResult = null,
+  callbacks = {},
+  jobId = '',
+  detailContext = '',
+  outputs = [],
+  results = [],
+  activeRouteSignals = new Set(),
+  maxAttempts = 1,
+} = {}) {
+  if (typeof callbacks.toolProxyCall !== 'function' || typeof callbacks.runAgent !== 'function') return null;
+  const inputs = asObject(action?.inputs);
+  const repairAgentId = String(inputs.repair_target_agent_id || inputs.repair_agent_id || '').trim().toLowerCase();
+  const repairSlotId = String(inputs.repair_target_slot_id || '').trim();
+  if (!repairAgentId) return null;
+  const verifierAgentId = String(inputs.verifier_agent_id || '').trim().toLowerCase();
+  const verifierSlotId = String(inputs.verifier_slot_id || '').trim();
+  const attemptLimit = Number.isFinite(Number(maxAttempts)) ? Math.max(1, Math.min(3, Math.floor(Number(maxAttempts)))) : 1;
+  let previousProxyResult = initialProxyResult;
+  let latestProxyResult = initialProxyResult;
+
+  for (let attempt = 1; attempt <= attemptLimit; attempt += 1) {
+    const repairAction = {
+      type: 'run_agent',
+      agent_id: repairAgentId,
+      goal: buildRepairPrompt({
+        proxyResult: previousProxyResult || {},
+        action,
+        repairTarget: { agent_id: repairAgentId, slot_id: repairSlotId },
+        verifierTarget: { agent_id: verifierAgentId, slot_id: verifierSlotId },
+        attempt,
+      }),
+      inputs: {
+        slot_id: repairSlotId || undefined,
+        runtime_instance_id: String(inputs.repair_target_runtime_instance_id || '').trim() || undefined,
+        verification_repair_attempt: attempt,
+        verification_repair_for_slot_id: String(inputs.slot_id || '').trim() || undefined,
+        verification_repair_for_label: String(action?.label || action?.prompt || '').trim() || undefined,
+      },
+    };
+    const repairResult = await callbacks.runAgent({ action: repairAction, jobId, detailContext });
+    outputs.push(attachRouteSignals({
+      agentId: repairAgentId,
+      provider: String(repairResult?.provider || '').trim().toLowerCase(),
+      mode: String(repairResult?.mode || 'verification_repair').trim() || 'verification_repair',
+      output: String(repairResult?.output || '').trim(),
+      jobId: String(jobId || ''),
+      slot_id: repairSlotId || undefined,
+      runtime_instance_id: String(inputs.repair_target_runtime_instance_id || '').trim() || undefined,
+      verification_repair_attempt: attempt,
+    }, resolveActionRouteSignals({ action: repairAction, result: repairResult, fallbackSignals: ['repair_attempted'] }), { activeSignals: activeRouteSignals }));
+    results.push({ label: `${String(action?.label || 'tool proxy').trim()} repair#${attempt}`, status: 'ok', note: `repair by ${repairAgentId}` });
+
+    if (verifierAgentId && verifierAgentId !== repairAgentId) {
+      const verifierAction = {
+        type: 'run_agent',
+        agent_id: verifierAgentId,
+        goal: buildVerifierPrompt({
+          proxyResult: previousProxyResult || {},
+          action,
+          repairTarget: { agent_id: repairAgentId, slot_id: repairSlotId },
+          verifierTarget: { agent_id: verifierAgentId, slot_id: verifierSlotId },
+          attempt,
+        }),
+        inputs: {
+          slot_id: verifierSlotId || undefined,
+          runtime_instance_id: String(inputs.verifier_runtime_instance_id || '').trim() || undefined,
+          verification_review_attempt: attempt,
+          verification_review_for_slot_id: String(inputs.slot_id || '').trim() || undefined,
+        },
+      };
+      const verifierResult = await callbacks.runAgent({ action: verifierAction, jobId, detailContext });
+      outputs.push(attachRouteSignals({
+        agentId: verifierAgentId,
+        provider: String(verifierResult?.provider || '').trim().toLowerCase(),
+        mode: String(verifierResult?.mode || 'verification_review').trim() || 'verification_review',
+        output: String(verifierResult?.output || '').trim(),
+        jobId: String(jobId || ''),
+        slot_id: verifierSlotId || undefined,
+        runtime_instance_id: String(inputs.verifier_runtime_instance_id || '').trim() || undefined,
+        verification_review_attempt: attempt,
+      }, resolveActionRouteSignals({ action: verifierAction, result: verifierResult, fallbackSignals: ['repair_reviewed'] }), { activeSignals: activeRouteSignals }));
+      results.push({ label: `${String(action?.label || 'tool proxy').trim()} review#${attempt}`, status: 'ok', note: `review by ${verifierAgentId}` });
+    }
+
+    latestProxyResult = await callbacks.toolProxyCall({ action, jobId, outputs, results, detailContext });
+    outputs.push(attachRouteSignals({
+      agentId: 'system',
+      provider: 'system',
+      mode: 'tool_proxy_call',
+      output: String(latestProxyResult?.text || latestProxyResult?.output || action?.label || 'tool proxy step').trim(),
+      jobId: String(jobId || ''),
+      verification_repair_attempt: attempt,
+      verification_replayed: true,
+    }, resolveActionRouteSignals({ action, result: latestProxyResult }), { activeSignals: activeRouteSignals }));
+    results.push({ label: `${String(action?.label || 'tool proxy').trim()} retry#${attempt}`, status: latestProxyResult?.ok === true ? 'ok' : 'error', note: latestProxyResult?.ok === true ? 'verification recovered' : 'verification still failing' });
+    if (latestProxyResult?.ok === true) {
+      return { proxyResult: latestProxyResult, recovered: true, attemptsUsed: attempt };
+    }
+    previousProxyResult = latestProxyResult;
+  }
+
+  return { proxyResult: latestProxyResult, recovered: false, attemptsUsed: attemptLimit };
+}
+
 export async function executeSupervisorActions({
   chatId,
   userId,
@@ -181,6 +481,8 @@ export async function executeSupervisorActions({
   tools = [],
   sessionStore = null,
   callbacks = {},
+  initialResults = [],
+  initialOutputs = [],
 } = {}) {
   const config = asObject(jobConfig);
   const budgetCfg = asObject(config.budget);
@@ -205,8 +507,9 @@ export async function executeSupervisorActions({
     ? Math.max(1, Math.floor(Number(budgetCfg.max_actions)))
     : 4;
 
-  const results = [];
-  const outputs = [];
+  const results = Array.isArray(initialResults) ? [...initialResults] : [];
+  const outputs = Array.isArray(initialOutputs) ? [...initialOutputs] : [];
+  const activeRouteSignals = collectActiveRouteSignals(outputs);
   let detailContext = "";
   let pendingApproval = null;
   let blockedIndex = -1;
@@ -283,6 +586,11 @@ export async function executeSupervisorActions({
       force_mode: cleanForceMode,
       work_like_hint: workLikeHint,
       preview_lines: mutatingPreviewLines(executableActions, { agentIndex: agentDisplayIndex }),
+      runtime_policy_summary: buildPendingRuntimePolicySummary({
+        action: mutatingAction,
+        runtimeSnapshot,
+        agents,
+      }),
     };
     results.push({
       label: actionLabel(mutatingAction, { agentIndex: agentDisplayIndex }),
@@ -357,6 +665,11 @@ export async function executeSupervisorActions({
         },
         requested_by: String(userId || ""),
         ts: new Date().toISOString(),
+        runtime_policy_summary: buildPendingRuntimePolicySummary({
+          action,
+          runtimeSnapshot,
+          agents,
+        }),
       };
       results.push({ label, status: "blocked", note: pendingApproval.reason });
       if (sessionStore) {
@@ -377,6 +690,21 @@ export async function executeSupervisorActions({
       blockedActions += 1;
       results.push({ label, status: "blocked", note: `budget exceeded (max_actions=${maxActions})` });
       break;
+    }
+
+    const routeDecision = evaluateIncomingConditions(action, {
+      activeSignals: activeRouteSignals,
+    });
+    const routeConditionBypass = ["gate_wait", "human_checkpoint", "checkpoint", "committee_consensus", "supervisor_decision"].includes(String(action?.type || "").trim().toLowerCase());
+    if (!routeDecision.allowed && !routeConditionBypass) {
+      results.push({
+        label,
+        status: "skip",
+        note: routeDecision.missing_conditions.length > 0
+          ? `route conditions not satisfied: ${routeDecision.missing_conditions.join(", ")}`
+          : "route conditions not satisfied",
+      });
+      continue;
     }
 
     const provider = action?.type === "run_agent"
@@ -408,6 +736,11 @@ export async function executeSupervisorActions({
         },
         requested_by: String(userId || ""),
         ts: new Date().toISOString(),
+        runtime_policy_summary: buildPendingRuntimePolicySummary({
+          action,
+          runtimeSnapshot,
+          agents,
+        }),
       };
       results.push({ label, status: "blocked", note: `approval required: ${approval.reason}` });
       if (sessionStore) {
@@ -444,6 +777,11 @@ export async function executeSupervisorActions({
         },
         requested_by: String(userId || ""),
         ts: new Date().toISOString(),
+        runtime_policy_summary: buildPendingRuntimePolicySummary({
+          action,
+          runtimeSnapshot,
+          agents,
+        }),
       };
       results.push({ label, status: "blocked", note: pendingApproval.reason });
       if (sessionStore) {
@@ -482,13 +820,16 @@ export async function executeSupervisorActions({
           detailContext,
         });
         const outputText = String(runResult?.output || "");
-        outputs.push({
+        const routeSignals = resolveActionRouteSignals({ action, result: runResult });
+        outputs.push(attachRouteSignals({
           agentId: String(action.agent_id || "").trim().toLowerCase(),
           provider: String(runResult?.provider || provider || "").trim().toLowerCase(),
           mode: String(runResult?.mode || ""),
           output: outputText,
           jobId: String(jobId || ""),
-        });
+          slot_id: String(action?.inputs?.slot_id || '').trim() || undefined,
+          runtime_instance_id: String(action?.inputs?.runtime_instance_id || '').trim() || undefined,
+        }, routeSignals, { activeSignals: activeRouteSignals }));
         results.push({ label, status: "ok", note: `provider=${provider || "unknown"}` });
         usedActions += 1;
         continue;
@@ -565,13 +906,16 @@ export async function executeSupervisorActions({
           jobId,
           detailContext,
         });
-        outputs.push({
+        const routeSignals = resolveActionRouteSignals({ action, result: runResult });
+        outputs.push(attachRouteSignals({
           agentId: String(action?.agent || "").trim().toLowerCase() || "synthesizer",
           provider: String(runResult?.provider || "unknown").trim().toLowerCase(),
           mode: "synthesize_final",
           output: String(runResult?.output || ""),
           jobId: String(jobId || ""),
-        });
+          slot_id: String(action?.inputs?.slot_id || '').trim() || undefined,
+          runtime_instance_id: String(action?.inputs?.runtime_instance_id || '').trim() || undefined,
+        }, routeSignals, { activeSignals: activeRouteSignals }));
         results.push({ label, status: "ok", note: "final synthesis" });
         usedActions += 1;
         continue;
@@ -1201,6 +1545,228 @@ export async function executeSupervisorActions({
           }
         }
         results.push({ label, status: "ok", note: "supervisor decision" });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "gate_wait") {
+        const conditions = summarizeConditions(action?.inputs?.incoming_conditions);
+        const needsApproval = action?.inputs?.approval_required === true;
+        const approved = isMutatingApproved(action);
+        if (needsApproval && !approved) {
+          blockedActions += 1;
+          blockedIndex = i;
+          remainingActions = executableActions.slice(i);
+          pendingApproval = buildStructuralPendingApproval({
+            action,
+            agentIndex: agentDisplayIndex,
+            chatId,
+            jobId,
+            userId,
+            results,
+            outputs,
+            blockedIndex: i,
+            remainingActions,
+            reason: conditions
+              ? `${String(action?.label || action?.prompt || 'gate').trim()} · ${conditions}`
+              : String(action?.label || action?.prompt || 'gate approval required').trim(),
+            gateType: String(action?.inputs?.gate_type || 'approval').trim() || 'approval',
+          });
+          results.push({ label, status: "blocked", note: pendingApproval.reason });
+          if (sessionStore) {
+            sessionStore.upsert(chatId, {
+              state: "awaiting_approval",
+              pending_approval: pendingApproval,
+            });
+          }
+          break;
+        }
+        outputs.push(attachRouteSignals({
+          agentId: 'system',
+          provider: 'system',
+          mode: 'gate_wait',
+          output: conditions
+            ? `${String(action?.label || action?.prompt || 'gate').trim()} · ${conditions}`
+            : String(action?.label || action?.prompt || 'gate reached').trim(),
+          jobId: String(jobId || ''),
+          approved: approved || undefined,
+        }, resolveActionRouteSignals({ action, result: { route_signals: action?.inputs?.selected_route_signals || [] } }), { activeSignals: activeRouteSignals }));
+        results.push({ label, status: "ok", note: conditions || action?.inputs?.gate_type || "gate" });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "human_checkpoint") {
+        const approved = isMutatingApproved(action);
+        if (!approved) {
+          blockedActions += 1;
+          blockedIndex = i;
+          remainingActions = executableActions.slice(i);
+          pendingApproval = buildStructuralPendingApproval({
+            action,
+            agentIndex: agentDisplayIndex,
+            chatId,
+            jobId,
+            userId,
+            results,
+            outputs,
+            blockedIndex: i,
+            remainingActions,
+            reason: String(action?.label || action?.prompt || 'human checkpoint').trim(),
+            gateType: 'human_checkpoint',
+            runtimePolicySummary: buildPendingRuntimePolicySummary({
+              action,
+              runtimeSnapshot,
+              agents,
+            }),
+          });
+          results.push({ label, status: "blocked", note: pendingApproval.reason });
+          if (sessionStore) {
+            sessionStore.upsert(chatId, {
+              state: "awaiting_approval",
+              pending_approval: pendingApproval,
+            });
+          }
+          break;
+        }
+        outputs.push(attachRouteSignals({
+          agentId: 'system',
+          provider: 'system',
+          mode: 'human_checkpoint',
+          output: String(action?.label || action?.prompt || 'human checkpoint approved').trim(),
+          jobId: String(jobId || ''),
+          approved: true,
+        }, resolveActionRouteSignals({ action, result: { route_signals: action?.inputs?.selected_route_signals || [] } }), { activeSignals: activeRouteSignals }));
+        results.push({ label, status: "ok", note: 'human checkpoint approved' });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "tool_proxy_call") {
+        let proxyResult = null;
+        let repairLoopResult = null;
+        if (typeof callbacks.toolProxyCall === "function") {
+          proxyResult = await callbacks.toolProxyCall({ action, jobId, outputs, results, detailContext });
+          outputs.push(attachRouteSignals({
+            agentId: 'system',
+            provider: 'system',
+            mode: 'tool_proxy_call',
+            output: String(proxyResult?.text || proxyResult?.output || action?.label || 'tool proxy step').trim(),
+            jobId: String(jobId || ''),
+          }, resolveActionRouteSignals({ action, result: proxyResult }), { activeSignals: activeRouteSignals }));
+          const shouldRepair = proxyResult?.ok !== true
+            && Array.isArray(proxyResult?.route_signals)
+            && proxyResult.route_signals.includes('verification_failed')
+            && (action?.inputs?.repair_target_agent_id || action?.inputs?.repair_agent_id)
+            && typeof callbacks.runAgent === 'function';
+          if (shouldRepair) {
+            repairLoopResult = await runVerificationRepairLoop({
+              action,
+              initialProxyResult: proxyResult,
+              callbacks,
+              jobId,
+              detailContext,
+              outputs,
+              results,
+              activeRouteSignals,
+              maxAttempts: Number(action?.inputs?.repair_attempt_limit || 1),
+            });
+            if (repairLoopResult?.proxyResult) proxyResult = repairLoopResult.proxyResult;
+          }
+        } else {
+          const requiredTools = (Array.isArray(action?.inputs?.required_tool_ids) ? action.inputs.required_tool_ids : []).filter(Boolean);
+          outputs.push(attachRouteSignals({
+            agentId: 'system',
+            provider: 'system',
+            mode: 'tool_proxy_call',
+            output: `${String(action?.label || action?.prompt || 'tool proxy step').trim()}${requiredTools.length > 0 ? ` · required_tools=${requiredTools.join(', ')}` : ''}`,
+            jobId: String(jobId || ''),
+          }, resolveActionRouteSignals({ action, result: proxyResult }), { activeSignals: activeRouteSignals }));
+        }
+        const repairRecovered = repairLoopResult?.recovered === true;
+        const repairAttempted = Number(repairLoopResult?.attemptsUsed || 0) > 0;
+        results.push({
+          label,
+          status: proxyResult?.ok === false ? "error" : "ok",
+          note: repairRecovered
+            ? "tool proxy repaired"
+            : (repairAttempted ? "tool proxy still failing after repair" : "tool proxy"),
+        });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "memory_sync") {
+        let syncResult = null;
+        if (typeof callbacks.memorySync === "function") {
+          syncResult = await callbacks.memorySync({ action, jobId, outputs, results, detailContext });
+          outputs.push(attachRouteSignals({
+            agentId: 'system',
+            provider: 'system',
+            mode: 'memory_sync',
+            output: String(syncResult?.text || syncResult?.output || action?.label || 'memory sync').trim(),
+            jobId: String(jobId || ''),
+          }, resolveActionRouteSignals({ action, result: syncResult }), { activeSignals: activeRouteSignals }));
+        } else {
+          const memoryKeys = (Array.isArray(action?.inputs?.memory_keys) ? action.inputs.memory_keys : []).filter(Boolean);
+          outputs.push(attachRouteSignals({
+            agentId: 'system',
+            provider: 'system',
+            mode: 'memory_sync',
+            output: `${String(action?.label || action?.prompt || 'memory sync').trim()}${memoryKeys.length > 0 ? ` · keys=${memoryKeys.join(', ')}` : ''}`,
+            jobId: String(jobId || ''),
+          }, resolveActionRouteSignals({ action, result: syncResult }), { activeSignals: activeRouteSignals }));
+        }
+        results.push({ label, status: "ok", note: "memory sync" });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "committee_consensus") {
+        const coverage = summarizeCommitteeCoverage(action, outputs);
+        const mode = String(action?.inputs?.consensus_mode || 'majority').trim().toLowerCase() || 'majority';
+        const quorumRaw = Number(action?.inputs?.committee_quorum);
+        const requiredCount = Number.isFinite(quorumRaw)
+          ? Math.max(1, Math.floor(quorumRaw))
+          : (mode === 'unanimous' ? coverage.member_slot_ids.length : Math.ceil(coverage.member_slot_ids.length / 2));
+        const approved = isMutatingApproved(action);
+        if (coverage.responded_count < requiredCount && !approved) {
+          blockedActions += 1;
+          blockedIndex = i;
+          remainingActions = executableActions.slice(i);
+          pendingApproval = buildStructuralPendingApproval({
+            action,
+            agentIndex: agentDisplayIndex,
+            chatId,
+            jobId,
+            userId,
+            results,
+            outputs,
+            blockedIndex: i,
+            remainingActions,
+            reason: `committee quorum not met: responded=${coverage.responded_count}/${coverage.member_slot_ids.length}, required=${requiredCount}`,
+            gateType: 'committee_consensus',
+          });
+          pendingApproval.committee_coverage = coverage;
+          results.push({ label, status: "blocked", note: pendingApproval.reason });
+          if (sessionStore) {
+            sessionStore.upsert(chatId, {
+              state: "awaiting_approval",
+              pending_approval: pendingApproval,
+            });
+          }
+          break;
+        }
+        outputs.push(attachRouteSignals({
+          agentId: 'system',
+          provider: 'system',
+          mode: 'committee_consensus',
+          output: `committee readiness satisfied: responded=${coverage.responded_count}/${coverage.member_slot_ids.length}, mode=${mode}, quorum=${requiredCount}${approved && coverage.responded_count < requiredCount ? ' (approved override)' : ''}`,
+          jobId: String(jobId || ''),
+          committee_coverage: coverage,
+          approved: approved || undefined,
+        }, resolveActionRouteSignals({ action, result: { route_signals: action?.inputs?.selected_route_signals || [] } }), { activeSignals: activeRouteSignals }));
+        results.push({ label, status: "ok", note: `committee_ready ${coverage.responded_count}/${coverage.member_slot_ids.length}` });
         usedActions += 1;
         continue;
       }

@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { normalizeStringList } from "../shared/normalize.js";
 import { normalizeRoleList } from "../compatibility/legacy_roles.js";
 
@@ -93,6 +95,39 @@ function normalizeKind(raw = "", category = "") {
   return "method";
 }
 
+function readFileWordCount(filePath = "") {
+  const target = normalizeRef(filePath);
+  if (!target) return 0;
+  try {
+    const text = fs.readFileSync(target, "utf8");
+    return (String(text || "").match(/[\p{L}\p{N}_-]+/gu) || []).length;
+  } catch {
+    return 0;
+  }
+}
+
+function inferDocumentationProfile({ skillDir = "", instructionsRef = "", resourceRefs = [] } = {}) {
+  const instructionPath = skillDir && instructionsRef ? path.resolve(skillDir, instructionsRef) : "";
+  const instructionWordCount = readFileWordCount(instructionPath);
+  const resourceWordCount = asArray(resourceRefs).reduce((sum, ref) => {
+    if (!skillDir || !ref) return sum;
+    return sum + readFileWordCount(path.resolve(skillDir, ref));
+  }, 0);
+  const totalWordCount = instructionWordCount + resourceWordCount;
+  const resourceCount = asArray(resourceRefs).length;
+  let complexityBand = "compact";
+  if (totalWordCount >= 2200 || resourceCount >= 4) complexityBand = "comprehensive";
+  else if (totalWordCount >= 1200 || resourceCount >= 2) complexityBand = "detailed";
+  else if (totalWordCount >= 450) complexityBand = "standard";
+  return {
+    instruction_word_count: instructionWordCount,
+    resource_word_count: resourceWordCount,
+    total_word_count: totalWordCount,
+    resource_count: resourceCount,
+    complexity_band: complexityBand,
+  };
+}
+
 function normalizeWeight(raw, fallback = 1) {
   const value = Number(raw);
   if (!Number.isFinite(value)) return fallback;
@@ -123,6 +158,13 @@ export function normalizeSkillPackage(raw = {}, {
     row.compatible_roles ?? row.compatibleRoles ?? [],
     { allowDeprecatedControlPlane: true, max: 24 }
   );
+  const instructionsRef = normalizeRef(row.instructions_ref ?? row.instructionsRef ?? "SKILL.md");
+  const resourceRefs = normalizeRefList(row.resource_refs ?? row.resourceRefs ?? []);
+  const documentationProfile = inferDocumentationProfile({
+    skillDir,
+    instructionsRef,
+    resourceRefs,
+  });
 
   return {
     id,
@@ -147,8 +189,8 @@ export function normalizeSkillPackage(raw = {}, {
     trigger_terms: normalizeTagList(row.trigger_terms ?? row.triggerTerms ?? []),
     input_contract: asObject(row.input_contract ?? row.inputContract),
     output_contract: asObject(row.output_contract ?? row.outputContract),
-    instructions_ref: normalizeRef(row.instructions_ref ?? row.instructionsRef ?? "SKILL.md"),
-    resource_refs: normalizeRefList(row.resource_refs ?? row.resourceRefs ?? []),
+    instructions_ref: instructionsRef,
+    resource_refs: resourceRefs,
     utility_refs: normalizeRefList(row.utility_refs ?? row.utilityRefs ?? []),
     default_context_policy: asObject(row.default_context_policy ?? row.defaultContextPolicy),
     validation_policy: asObject(row.validation_policy ?? row.validationPolicy),
@@ -158,6 +200,7 @@ export function normalizeSkillPackage(raw = {}, {
     status: normalizeStatus(row.status),
     manifest_path: normalizeRef(manifestPath) || undefined,
     skill_dir: normalizeRef(skillDir) || undefined,
+    documentation_profile: documentationProfile,
   };
 }
 

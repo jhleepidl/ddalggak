@@ -134,7 +134,8 @@ test("createTelegramUploadService stores Telegram uploads in the workspace and r
   assert.deepEqual(harness.state.rememberedJobs, [{ chatId: 9001, jobId: "job_upload_1" }]);
   assert.equal(harness.state.sessionUpdates.length, 1);
   assert.equal(harness.state.conversations.length, 1);
-  assert.equal(harness.state.tracking.length, 1);
+  assert.equal(harness.state.tracking.length, 2);
+  assert.deepEqual(harness.state.tracking.map((row) => row.docName), ["progress", "artifacts"]);
   assert.equal(harness.state.gocArtifacts.length, 1);
   assert.match(harness.state.sentMessages[0].text, /파일 업로드 저장 완료/);
 

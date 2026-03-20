@@ -2,6 +2,9 @@ import {
   isActionApprovalCallbackData,
   handleActionApprovalCallback,
 } from "../../application/approval_flow.js";
+import { applyPendingTeam, getSessionTeamState, storePendingTeam, buildTeamListMessage, formatTeamProposalMessage } from '../../application/team_configuration.js';
+import { getPendingInstallProposal, archivePendingInstallProposal, buildInstallProposalPrompt } from '../../application/install_proposal_state.js';
+import { handleTelegramInstallProposalCallback } from './install_proposal_callbacks.js';
 
 export function createTelegramCallbackQueryHandler(deps = {}) {
   const telegramUi = deps.telegramUi || {};
@@ -32,6 +35,9 @@ export function createTelegramCallbackQueryHandler(deps = {}) {
   const requireGocClient = runtimeOps.requireGocClient || deps.requireGocClient;
   const resolveCurrentJobIdForChat = runtimeOps.resolveCurrentJobIdForChat || deps.resolveCurrentJobIdForChat;
   const suggestNextPrompt = runtimeOps.suggestNextPrompt || deps.suggestNextPrompt;
+  const runSupervisorChat = runtimeOps.runSupervisorChat || deps.runSupervisorChat;
+  const normalizeForceMode = runtimeOps.normalizeForceMode || deps.normalizeForceMode || ((value) => value || 'normal');
+  const loadSupervisorRuntime = runtimeOps.loadSupervisorRuntime || deps.loadSupervisorRuntime;
   const handleActionApproval = runtimeOps.handleActionApproval || deps.handleActionApproval;
   const actionApprovalDeps = runtimeOps.actionApprovalDeps || deps.actionApprovalDeps || {};
 
@@ -42,6 +48,7 @@ export function createTelegramCallbackQueryHandler(deps = {}) {
 
   const setAwait = sessionOps.setAwait || deps.setAwait;
   const rememberLastChatJob = sessionOps.rememberLastChatJob || deps.rememberLastChatJob;
+  const chatSessionStore = sessionOps.chatSessionStore || deps.chatSessionStore;
 
   const runWorkspaceDir = fileOps.runWorkspaceDir || deps.runWorkspaceDir;
 
@@ -67,6 +74,58 @@ export function createTelegramCallbackQueryHandler(deps = {}) {
             userId,
             deps: actionApprovalDeps,
           });
+          return;
+        }
+
+        const handledInstallProposal = await handleTelegramInstallProposalCallback({
+          q,
+          bot,
+          chatId,
+          userId,
+          data,
+          deps: {
+            chatSessionStore,
+            resolveCurrentJobIdForChat,
+            loadSupervisorRuntime,
+            runSupervisorChat,
+            normalizeForceMode,
+            jobs,
+          },
+        });
+        if (handledInstallProposal) {
+          return;
+        }
+
+        if (data === 'team_state:apply_pending' || data === 'team_state:show_pending' || data === 'team_state:show_active') {
+          const teamState = getSessionTeamState(chatSessionStore, chatId);
+          if (data === 'team_state:show_pending') {
+            await bot.answerCallbackQuery(q.id, { text: teamState?.pending_team ? 'pending team' : 'no pending team' });
+            if (!teamState?.pending_team) {
+              await bot.sendMessage(chatId, '현재 pending team이 없습니다.');
+              return;
+            }
+            await sendLong(bot, chatId, formatTeamProposalMessage(teamState.pending_team));
+            return;
+          }
+          if (data === 'team_state:show_active') {
+            await bot.answerCallbackQuery(q.id, { text: teamState?.active_team ? 'active team' : 'no active team' });
+            await sendLong(bot, chatId, buildTeamListMessage(teamState));
+            return;
+          }
+          await bot.answerCallbackQuery(q.id, { text: teamState?.pending_team ? 'apply pending' : 'no pending team' });
+          if (!teamState?.pending_team) {
+            await bot.sendMessage(chatId, '적용할 pending team이 없습니다.');
+            return;
+          }
+          let runtime = null;
+          try {
+            const currentJobId = resolveCurrentJobIdForChat?.(chatId);
+            if (currentJobId && typeof loadSupervisorRuntime === 'function') {
+              runtime = await loadSupervisorRuntime(currentJobId, { telegramUserId: userId, includeContext: false, includeGlobal: false });
+            }
+          } catch {}
+          const applied = await applyPendingTeam({ sessionStore: chatSessionStore, chatId, runtime });
+          await sendLong(bot, chatId, ['✅ pending team을 active team으로 반영했습니다.', '', buildTeamListMessage({ active_team: applied })].join('\n'));
           return;
         }
 
@@ -227,7 +286,7 @@ export function createTelegramCallbackQueryHandler(deps = {}) {
                 });
                 participantsApplied = true;
                 conversationTeamApplied = true;
-                tracking.append(draftJobId, "decisions.md", [
+                tracking.append(draftJobId, "decisions", [
                   "## /chat approve_agent",
                   `- agent_id: ${effectiveAgentId}`,
                   `- draft_node: ${draftNode}`,
@@ -236,7 +295,7 @@ export function createTelegramCallbackQueryHandler(deps = {}) {
                 ].join("\n"));
               } catch (e) {
                 if (draftJobId) {
-                  tracking.append(draftJobId, "decisions.md", [
+                  tracking.append(draftJobId, "decisions", [
                     "## /chat approve_agent (participant update failed)",
                     `- agent_id: ${effectiveAgentId}`,
                     `- error: ${String(e?.message ?? e)}`,
@@ -269,7 +328,7 @@ export function createTelegramCallbackQueryHandler(deps = {}) {
               await client.deactivateNodes(found.slot.ctxId, [found.resource.id]);
             } catch {}
             if (draftJobId) {
-              tracking.append(draftJobId, "decisions.md", [
+              tracking.append(draftJobId, "decisions", [
                 "## /chat reject_agent",
                 `- agent_id: ${agentId}`,
                 `- draft_node: ${draftNode}`,
@@ -317,7 +376,7 @@ export function createTelegramCallbackQueryHandler(deps = {}) {
             return;
           }
           const commit = await runCommand("git", ["commit", "-m", msg2], { cwd: commitCwd });
-          tracking.append(jobId, "progress.md", `## git commit\n\n${FENCE}\n${add.stdout || add.stderr}\n${commit.stdout || commit.stderr}\n${FENCE}\n`);
+          tracking.append(jobId, "progress", `## git commit\n\n${FENCE}\n${add.stdout || add.stderr}\n${commit.stdout || commit.stderr}\n${FENCE}\n`);
           await sendLong(bot, chatId, `✅ 커밋 완료\n${clip(commit.stdout || commit.stderr, 3500)}`);
           await suggestNextPrompt(bot, chatId, jobId, "커밋 이후 다음 단계(테스트/PR/배포 등)를 결정해줘.", "commit");
         }

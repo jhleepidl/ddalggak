@@ -115,3 +115,44 @@ test('advanced refine uses planner output to add coder/builder and update intera
   assert.ok(refined.interaction_spec.handoffs.some((handoff) => /builder/i.test(handoff.from) || /builder/i.test(handoff.to)));
   assert.equal(refined.planner_metadata.planner_model, 'gpt-5.4');
 });
+
+
+test('advanced refine removes omitted agents when instruction explicitly asks for removal', async () => {
+  const baseTeam = await createFreeformTeamConfigurationAdvanced({
+    description: '과제용 조사 팀을 구성해줘.',
+    planner: async () => ({
+      ok: true,
+      planner_metadata: { planner_type: 'codex_cli', planner_model: 'gpt-5.4', planning_source: 'codex_gpt_5_4' },
+      plan: {
+        team_name: 'coursework_team',
+        agents: [
+          { name: 'Lead Researcher', role: 'researcher', purpose: '자료를 조사한다', model: 'gemini-2.5-pro', provider: 'gemini' },
+          { name: 'Pedagogy Reviewer', role: 'reviewer', purpose: '검토한다', model: 'gpt-5.4', provider: 'chatgpt' },
+          { name: 'Final Synthesizer', role: 'synthesizer', purpose: '정리한다', model: 'gpt-5.4', provider: 'chatgpt' },
+        ],
+      },
+    }),
+  });
+
+  const refined = await refineTeamConfigurationAdvanced({
+    team: baseTeam,
+    instruction: 'reviewer는 제거하고 researcher와 synthesizer만 유지해줘',
+    planner: async () => ({
+      ok: true,
+      planner_metadata: {
+        planner_type: 'codex_cli',
+        planner_model: 'gpt-5.4',
+        planning_source: 'codex_gpt_5_4_refine',
+      },
+      plan: {
+        team_name: 'lean_coursework_team',
+        agents: [
+          { name: 'Lead Researcher', role: 'researcher', purpose: '자료를 조사한다', model: 'gemini-2.5-pro', provider: 'gemini' },
+          { name: 'Final Synthesizer', role: 'synthesizer', purpose: '정리한다', model: 'gpt-5.4', provider: 'chatgpt' },
+        ],
+      },
+    }),
+  });
+
+  assert.equal(refined.agents.some((agent) => agent.name === 'Pedagogy Reviewer'), false);
+});

@@ -57,7 +57,7 @@ export async function executeRunCommand({
         runtimeAgents: route?.runtime_agents || [],
         source: "team_builder",
       });
-      tracking.append(jobId, "decisions.md", [
+      tracking.append(jobId, "decisions", [
         "## Multi-Agent routing",
         "- mode: run",
         `- reason: ${route.reason}`,
@@ -120,9 +120,11 @@ export async function executeContinueCommand({
   activeJobByChat.set(chatKey, jobKey);
   await bot.sendMessage(chatId, `▶️ Continue job ${jobId}\nworkspace: ${runWorkspaceDir(jobKey)}`);
 
-  let instruction = "run/shared의 plan.md와 research.md를 반영해 CODEX_WORKSPACE_ROOT 코드 변경을 진행해라.";
+  const planDocName = tracking.resolveDocName(jobKey, "plan");
+  const researchDocName = tracking.resolveDocName(jobKey, "research");
+  let instruction = `run/shared의 ${planDocName}와 ${researchDocName}를 반영해 CODEX_WORKSPACE_ROOT 코드 변경을 진행해라.`;
   try {
-    const planText = tracking.read(jobId, "plan.md");
+    const planText = tracking.read(jobId, "plan");
     const extracted = extractCodexInstruction(planText);
     if (extracted) instruction = extracted;
   } catch {}
@@ -156,7 +158,7 @@ export async function executeContinueCommand({
       runtimeAgents: route?.runtime_agents || [],
       source: "team_builder",
     });
-    tracking.append(jobKey, "decisions.md", [
+    tracking.append(jobKey, "decisions", [
       "## Multi-Agent routing",
       "- mode: continue",
       `- reason: ${route.reason}`,

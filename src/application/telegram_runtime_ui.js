@@ -199,6 +199,7 @@ export function formatMemorySummary() {
     "명령:",
     "/memory show",
     "/memory md",
+    "/memory kb",
     "/memory policy <자연어 프롬프트>",
     "/memory routing <자연어 프롬프트>",
     "/memory role <gemini|codex|chatgpt> <자연어 역할>",
@@ -284,6 +285,24 @@ export function buildChatStatusCard(chatId, runtime = null) {
   const pendingApproval = session.pending_approval && typeof session.pending_approval === "object"
     ? session.pending_approval
     : null;
+  const pendingInstallProposal = session.pending_install_proposal && typeof session.pending_install_proposal === 'object'
+    ? session.pending_install_proposal
+    : null;
+  const lastInstallProposal = session.last_install_proposal && typeof session.last_install_proposal === 'object'
+    ? session.last_install_proposal
+    : null;
+  const credentialBindingState = session.credential_binding_state && typeof session.credential_binding_state === 'object'
+    ? session.credential_binding_state
+    : null;
+  const patternConflict = session.pattern_conflict && typeof session.pattern_conflict === 'object'
+    ? session.pattern_conflict
+    : null;
+  const temporaryExecutionOverride = session.temporary_execution_override && typeof session.temporary_execution_override === 'object'
+    ? session.temporary_execution_override
+    : null;
+  const patternRecovery = session.pattern_recovery && typeof session.pattern_recovery === 'object'
+    ? session.pattern_recovery
+    : null;
   const pendingApprovalActionLabel = pendingApproval?.action
     ? (String(pendingApproval?.action_display_label || "").trim() || chatActionLabel(pendingApproval.action))
     : "";
@@ -314,6 +333,12 @@ export function buildChatStatusCard(chatId, runtime = null) {
     `- pending_interrupt: ${interrupt?.requested ? `${interrupt.mode}${interrupt.reason ? ` (${clip(interrupt.reason, 90)})` : ""}` : "none"}`,
     `- pending_approval: ${pendingApproval ? (pendingApproval.reason || "yes") : "none"}`,
     pendingApprovalActionLabel ? `- pending_approval_action: ${pendingApprovalActionLabel}` : "",
+    `- pending_install_proposal: ${pendingInstallProposal ? `${String(pendingInstallProposal.status || 'awaiting_install_approval')} (gaps=${Number(pendingInstallProposal?.proposal?.gap_count || 0)})` : 'none'}`,
+    (!pendingInstallProposal && lastInstallProposal) ? `- last_install_proposal: ${String(lastInstallProposal.status || 'done')}` : '',
+    credentialBindingState ? `- bound_credentials: ${Number(credentialBindingState?.summary?.bound_count || 0)}` : '',
+    patternConflict ? `- pattern_conflict: ${String(patternConflict.classification || 'detected')}${patternConflict.current_pattern ? ` (${patternConflict.current_pattern})` : ''}` : '',
+    temporaryExecutionOverride ? `- temporary_execution_override: ${String(temporaryExecutionOverride.mode || 'active')}${temporaryExecutionOverride.effective_pattern ? ` -> ${temporaryExecutionOverride.effective_pattern}` : ''}` : '',
+    patternRecovery ? `- pattern_recovery: ${String(patternRecovery.status || 'pending')}${patternRecovery.active_pattern ? ` (${patternRecovery.active_pattern})` : ''}` : '',
     lastRoute
       ? `- last_route: ${String(lastRoute.reason || "(none)")}, actions=${Array.isArray(lastRoute.actions) ? lastRoute.actions.length : 0}`
       : "",

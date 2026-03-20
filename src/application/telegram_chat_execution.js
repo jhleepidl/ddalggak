@@ -88,8 +88,10 @@ import {
   isExplicitTeamConfigurationIntentMessage,
 } from "./team_intent.js";
 import { buildExplicitTeamReconfigurationActions } from "./team_config_diff.js";
-import { applyTeamConfigurationToRuntime, getSessionTeamState, hydrateSessionTeamStateFromConversationStore, syncTeamConfigurationToConversationStore, validateTeamConfiguration } from "./team_configuration.js";
+import { applyTeamConfigurationToRuntime, buildAutoRefineDraftFromStructureConflict, formatTeamProposalMessage, getSessionTeamState, hydrateSessionTeamStateFromConversationStore, storePendingTeam, syncTeamConfigurationToConversationStore, validateTeamConfiguration } from "./team_configuration.js";
 import { appendRecentAgentTurn, planAgentFollowupShortcut } from "./agent_followup_shortcuts.js";
+import { buildAnswerCapsules } from "./answer_capsules.js";
+import { buildInstallProposalPrompt, buildInstallProposalStateFromExecution, setPendingInstallProposal } from './install_proposal_state.js';
 import { buildAgentLocalInteractionContract } from "../domain/interaction_spec.js";
 import {
   verifyConversationMembershipMutation,
@@ -121,8 +123,15 @@ import {
   appendTrackingChunkToGoc,
 } from "../goc_mapping.js";
 import { ChatSessionStore } from "../chat/session.js";
+import { ReplyAnchorStore } from "../runtime_capabilities/reply_anchor_store.js";
 import { routeWithSupervisor } from "../chat/supervisor_router.js";
 import { executeSupervisorActions, isMutatingAction } from "../chat/executor.js";
+import {
+  collectActiveRouteSignals,
+  evaluateIncomingConditions,
+  resolveActionRouteSignals,
+  summarizeConditions,
+} from "../chat/structural_runtime.js";
 import {
   buildAgentDisplayIndex as buildAgentDisplayIndexShared,
   formatChatAgentDisplayName,
@@ -135,12 +144,36 @@ import { ChatRunManager } from "../chat/run_manager.js";
 import { GocExecutionGraphRecorder } from "../chat/goc_execution_graph.js";
 import { mergePreferredRuntimeTeamSnapshot, sanitizeExecutablePlan } from "../chat/route_execution_contract.js";
 import { updateAgentStatus } from "./agent_status_store.js";
+import { detectPatternConflict, applyTemporaryExecutionOverrideToRuntimeSnapshot, buildPatternRecoveryState, inferCompatibilityFallbackState, summarizePatternConflictLines } from "./pattern_conflict_detector.js";
+import { buildAgentKnowledgeBaseGuidance } from "../knowledge_base/runtime.js";
+import { executeToolProxyAction } from "./tool_proxy_runtime.js";
+import { writeGeminiMemoryFile, writeCodexInstructionFile } from "./cli_workspace_contract.js";
+import { normalizeRuntimeExecutionPolicy } from "./runtime_execution_policy.js";
+import { resolveProviderRuntimeOptions } from "./provider_runtime_policy.js";
+import { writeRuntimeCheckpointBundle } from "./runtime_checkpointing.js";
 
 import * as runtimeState from "./telegram_runtime_state.js";
 import * as runtimeIo from "./telegram_runtime_io.js";
 import * as routePlanning from "./telegram_route_planning.js";
 import * as gocRuntime from "./telegram_goc_runtime.js";
 import * as runtimeUi from "./telegram_runtime_ui.js";
+
+async function maybeBuildStructureConflictRefineDraft({ sessionStore, chatId, teamConfig, instruction, runtime }) {
+  const currentState = typeof getSessionTeamState === 'function' ? getSessionTeamState(sessionStore, chatId) : {};
+  try {
+    const draft = await buildAutoRefineDraftFromStructureConflict({
+      team: teamConfig,
+      instruction,
+      runtime,
+    });
+    if (!draft || typeof draft !== 'object') return { draft: null, stored: false };
+    const hasExistingPending = !!(currentState?.pending_team && typeof currentState.pending_team === 'object');
+    if (!hasExistingPending && typeof storePendingTeam === 'function') storePendingTeam(sessionStore, chatId, draft);
+    return { draft, stored: !hasExistingPending };
+  } catch (error) {
+    return { draft: null, stored: false, error: String(error?.message || error) };
+  }
+}
 
 const {
   FENCE,
@@ -185,6 +218,8 @@ const {
   maybeAutoSendOutputs,
   sendLong,
 } = runtimeIo;
+
+const replyAnchorStore = new ReplyAnchorStore({ sessionStore: chatSessionStore });
 const {
   getGoalFromResearch,
   normalizeActionShape,
@@ -211,6 +246,156 @@ const {
   sendGeminiGiveUpMessage,
   sendAgentStatusTransitionMessage,
 } = routePlanning;
+
+
+function resolveRuntimeExecutionPolicyForRuntime(runtime = null) {
+  const structurePolicy = runtime?.activeTeamConfig?.structure_v2?.control_policy?.runtime_execution
+    || runtime?.activeTeamConfig?.runtime_execution
+    || runtime?.runtimeTeamSnapshot?.structure_v2?.control_policy?.runtime_execution
+    || runtime?.runtimeTeamSnapshot?.runtime_execution
+    || runtime?.runtime_team_snapshot?.structure_v2?.control_policy?.runtime_execution
+    || runtime?.runtime_team_snapshot?.runtime_execution
+    || {};
+  return normalizeRuntimeExecutionPolicy(structurePolicy);
+}
+
+function resolveProviderRuntimeOptionsForJob({ runtime = null, provider = '', action = null, agent = null, jobId = '' } = {}) {
+  const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
+  let workspaceRoot = process.cwd();
+  try {
+    if (jobId) workspaceRoot = runWorkspaceDir(jobId);
+  } catch {}
+  return resolveProviderRuntimeOptions({
+    runtimeExecutionPolicy,
+    provider,
+    workspaceRoot,
+    action,
+    agent,
+  });
+}
+
+function continuousStopSignalsMatched(activeSignals = [], policy = {}) {
+  const signals = new Set((Array.isArray(activeSignals) ? activeSignals : []).map((row) => String(row || '').trim().toLowerCase()).filter(Boolean));
+  return (Array.isArray(policy?.stop_signals) ? policy.stop_signals : [])
+    .map((row) => String(row || '').trim().toLowerCase())
+    .filter(Boolean)
+    .filter((row) => signals.has(row));
+}
+
+function shouldRequestQualityDecision({ roleId = '', runtimeExecutionPolicy = {} } = {}) {
+  const roleKey = String(roleId || '').trim().toLowerCase();
+  if ((runtimeExecutionPolicy?.continuous_improvement || {}).enabled === true) return true;
+  return ['reviewer', 'judge', 'synthesizer', 'operator', 'chair'].includes(roleKey);
+}
+
+function buildQualityAssessmentInstruction({ roleId = '', runtimeExecutionPolicy = {} } = {}) {
+  if (!shouldRequestQualityDecision({ roleId, runtimeExecutionPolicy })) return '';
+  const stopSignals = (Array.isArray(runtimeExecutionPolicy?.continuous_improvement?.stop_signals)
+    ? runtimeExecutionPolicy.continuous_improvement.stop_signals
+    : ['quality_threshold_met', 'ready_for_user', 'final_answer_ready', 'done_enough'])
+    .map((row) => String(row || '').trim())
+    .filter(Boolean);
+  const continueSignals = ['needs_more_revision', 'needs_more_research', 'quality_gap_remaining', 'evidence_gap_remaining', 'not_ready_yet'];
+  const exampleStop = JSON.stringify({ decision: 'stop', signals: [stopSignals[0] || 'quality_threshold_met'], reason: 'The output is coherent, verified, and ready for the user.' });
+  const exampleContinue = JSON.stringify({ decision: 'continue', signals: ['needs_more_revision'], reason: 'The output still has quality gaps that require another iteration.' });
+  return [
+    '[QUALITY SIGNAL CONTRACT]',
+    '- If you can judge whether the current workspace/output is good enough to stop refining, include a QUALITY_DECISION_JSON block.',
+    `- Stop signals (exact strings): ${stopSignals.join(', ') || '(none)'}`,
+    `- Continue/refine signals (exact strings): ${continueSignals.join(', ')}`,
+    '- Use only exact signal strings. Do not invent new signal names unless the route explicitly asked for them.',
+    '- If the work is ready for user delivery, emit at least one stop signal.',
+    '- If the work still needs another iteration, emit at least one continue/refine signal.',
+    '- Format:',
+    'QUALITY_DECISION_JSON',
+    '```json',
+    exampleStop,
+    '```',
+    '- Or when not ready:',
+    'QUALITY_DECISION_JSON',
+    '```json',
+    exampleContinue,
+    '```',
+  ].join('\n');
+}
+
+function buildAgentOutputContractBlock({ roleId = '', runtimeExecutionPolicy = {} } = {}) {
+  const outputContract = [
+    '[OUTPUT CONTRACT]',
+    '- 사용자에게 채팅방에 바로 공유할 중간 결과가 있으면 CHAT_UPDATE 블록을 포함하라.',
+    '- CHAT_UPDATE는 3~6줄의 자연어 요약으로 쓰고, 근거/핵심 판단/다음 포인트만 남겨라.',
+    '- 형식:',
+    'CHAT_UPDATE',
+    '```text',
+    '핵심 발견 2~3개',
+    '왜 중요한지',
+    '다음으로 넘길 포인트',
+    '```',
+    '- 필요하면 마지막에 NEXT_ACTIONS_JSON 블록으로 후속 작업을 제안하라.',
+    '- 형식:',
+    'NEXT_ACTIONS_JSON',
+    '```json',
+    '{"actions":[{"type":"run_agent","agent_id":"coder","goal":"..."}]}',
+    '```',
+    '- 후속 제안이 없으면 NEXT_ACTIONS_JSON 블록은 생략한다.',
+  ].join('\n');
+  const qualityInstruction = buildQualityAssessmentInstruction({ roleId, runtimeExecutionPolicy });
+  return [outputContract, qualityInstruction].filter(Boolean).join('\n\n');
+}
+
+function withAgentOutputContract(action = {}, { runtimeExecutionPolicy = {} } = {}) {
+  const row = action && typeof action === 'object' ? action : {};
+  const basePrompt = String(row.prompt || row.goal || '').trim();
+  if (!basePrompt) return row;
+  if (basePrompt.includes('[OUTPUT CONTRACT]')) return row;
+  const inputs = row.inputs && typeof row.inputs === 'object' ? row.inputs : {};
+  const roleId = String(inputs.role_id || inputs.roleId || row.agent || row.agent_id || '').trim().toLowerCase();
+  const contract = buildAgentOutputContractBlock({ roleId, runtimeExecutionPolicy });
+  if (!contract) return row;
+  return {
+    ...row,
+    prompt: [basePrompt, contract].filter(Boolean).join('\n\n'),
+  };
+}
+
+function buildContinuousImprovementFollowup({
+  originalUserText = '',
+  followupHint = '',
+  deliverables = [],
+  completedDeliverables = [],
+  stopSignals = [],
+  turn = 1,
+  maxTurns = 1,
+  customPrompt = '',
+} = {}) {
+  const remaining = (Array.isArray(deliverables) ? deliverables : []).filter((item) => {
+    const key = String(item || '').trim().toLowerCase();
+    return key && !(Array.isArray(completedDeliverables) ? completedDeliverables : []).some((done) => String(done || '').trim().toLowerCase() === key);
+  });
+  return [
+    customPrompt || '현재 workspace 결과를 스스로 검토하고 더 개선하라. 아직 품질이 충분하지 않다면 다음 개선 단계를 이어서 수행하라.',
+    `original_request=${String(originalUserText || '').trim()}`,
+    `continuous_turn=${turn}/${maxTurns}`,
+    remaining.length > 0 ? `remaining_deliverables=${remaining.join(', ')}` : 'remaining_deliverables=(none)',
+    followupHint ? `followup_hint=${followupHint}` : '',
+    stopSignals.length > 0 ? `observed_stop_signals=${stopSignals.join(', ')}` : '',
+    '이번 턴의 목표: 품질을 높이기 위한 self-refine / verify / rewrite / strengthen 작업을 계속하라. 단, stop signal을 충족하면 마무리해도 된다.',
+    'quality_contract=가능하면 QUALITY_DECISION_JSON 블록으로 stop/continue 판단과 정확한 signal 문자열을 남겨라.',
+  ].filter(Boolean).join('\n');
+}
+
+function buildContinuousImprovementProgressMessage({ turn = 1, maxTurns = 1, deliverables = [], completedDeliverables = [], stopSignals = [] } = {}) {
+  const remaining = (Array.isArray(deliverables) ? deliverables : []).filter((item) => {
+    const key = String(item || '').trim().toLowerCase();
+    return key && !(Array.isArray(completedDeliverables) ? completedDeliverables : []).some((done) => String(done || '').trim().toLowerCase() === key);
+  });
+  return [
+    `♻️ self-refine progress ${turn}/${maxTurns}`,
+    `- completed: ${Array.isArray(completedDeliverables) && completedDeliverables.length > 0 ? completedDeliverables.join(', ') : '(none)'}`,
+    `- remaining: ${remaining.length > 0 ? remaining.join(', ') : '(none)'}`,
+    stopSignals.length > 0 ? `- stop_signals: ${stopSignals.join(', ')}` : '',
+  ].filter(Boolean).join('\n');
+}
 const {
   createJob,
   composeCapabilitiesForRun,
@@ -309,6 +494,69 @@ function buildAgentChatUpdateText({ agentId = "", output = "" } = {}) {
   return `🧾 ${displayName} 중간 결과\n${clip(cleanOutput, 2400)}`;
 }
 
+function buildAgentKnowledgeBaseBlock(jobId, { provider = "", roleId = "", agentId = "" } = {}) {
+  try {
+    const profile = tracking.loadProfile(jobId);
+    if (!profile) return "";
+    return buildAgentKnowledgeBaseGuidance({
+      profile,
+      sharedDir: runSharedDir(jobId),
+      provider,
+      roleId,
+      agentId,
+    });
+  } catch {
+    return "";
+  }
+}
+
+function ensureCliWorkspaceSupportFiles(jobId, { provider = "", roleMemo = "", kbContract = "", goal = "", instruction = "", runtimeExecutionPolicy = {}, providerOptions = {} } = {}) {
+  let workspacePath = "";
+  try {
+    workspacePath = runWorkspaceDir(jobId);
+  } catch {
+    return {};
+  }
+  if (provider === "gemini") {
+    return {
+      geminiMemoryFile: writeGeminiMemoryFile({
+        workspaceRoot: workspacePath,
+        roleMemo,
+        kbContract,
+        goal,
+        runtimeExecutionPolicy,
+        providerOptions,
+      }),
+    };
+  }
+  if (provider === "codex") {
+    return {
+      codexInstructionFile: writeCodexInstructionFile({
+        workspaceRoot: workspacePath,
+        roleMemo,
+        kbContract,
+        instruction,
+        goal,
+        runtimeExecutionPolicy,
+        providerOptions,
+      }),
+    };
+  }
+  return {};
+}
+
+async function runToolProxyStep({ action = {}, jobId = "", signal = null, runtime = null } = {}) {
+  return await executeToolProxyAction({
+    action,
+    jobId,
+    workspaceRoot: runWorkspaceDir(jobId),
+    sharedDir: runSharedDir(jobId),
+    tracking,
+    signal,
+    runtimeExecutionPolicy: resolveRuntimeExecutionPolicyForRuntime(runtime),
+  });
+}
+
 function decoratePlanActionsWithAgentMetadata(actions = [], runtime = null) {
   const metadataIndex = buildRuntimeAgentMetadataIndex(runtime);
   const decorateOne = (action = {}) => {
@@ -344,16 +592,28 @@ function decoratePlanActionsWithAgentMetadata(actions = [], runtime = null) {
 }
 
 async function geminiResearch(jobId, goal, signal = null, opts = {}) {
+  const runtimeExecutionPolicy = normalizeRuntimeExecutionPolicy(opts.runtimeExecutionPolicy || {});
   const sectionTitle = String(opts.sectionTitle || "Gemini notes");
   const outputGuide = String(opts.outputGuide || "").trim();
   const concurrencyKey = String(opts.concurrencyKey || "").trim() || `job:${String(jobId || "").trim()}`;
   const preferredModel = String(opts.model || "").trim();
   const roleMemo = memory.getAgentRole("gemini");
-  const ctx = await loadContextDocs(jobId, ["research.md"]);
+  const ctx = await loadContextDocs(jobId, ["research"]);
   const workspacePath = runWorkspaceDir(jobId);
+  const providerOptions = opts.providerOptions && typeof opts.providerOptions === 'object'
+    ? opts.providerOptions
+    : resolveProviderRuntimeOptions({
+      runtimeExecutionPolicy,
+      provider: "gemini",
+      workspaceRoot: workspacePath,
+    });
   const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 5 });
+  const kbContract = buildAgentKnowledgeBaseBlock(jobId, { provider: "gemini", roleId: "researcher", agentId: "gemini" });
+  ensureCliWorkspaceSupportFiles(jobId, { provider: "gemini", roleMemo, kbContract, goal, runtimeExecutionPolicy, providerOptions });
   const prompt = [
     ctx,
+    "",
+    kbContract,
     "",
     "역할 메모리:",
     roleMemo,
@@ -392,22 +652,38 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     onRetry: opts.onGeminiRetry,
     onModelSwitch: opts.onGeminiModelSwitch,
     onGiveUp: opts.onGeminiGiveUp,
+    approvalMode: providerOptions.approvalMode,
+    settingsOverwrite: providerOptions.settingsOverwrite,
+    workspaceSettingsPatch: providerOptions.workspaceSettings,
+    extraEnv: providerOptions.extraEnv,
   });
   const out = (r.stdout || r.stderr || "");
-  tracking.append(jobId, "research.md", `## ${sectionTitle}\n\n${out}\n`);
+  tracking.append(jobId, "research", `## ${sectionTitle}\n\n${out}\n`);
   jobs.appendConversation(jobId, "gemini", out, { kind: "research" });
   ensureCommandOk("Gemini", r);
   return out;
 }
 
-async function codexImplement(jobId, instruction, signal = null) {
+async function codexImplement(jobId, instruction, signal = null, opts = {}) {
+  const runtimeExecutionPolicy = normalizeRuntimeExecutionPolicy(opts.runtimeExecutionPolicy || {});
+  const providerOptions = opts.providerOptions && typeof opts.providerOptions === 'object'
+    ? opts.providerOptions
+    : resolveProviderRuntimeOptions({
+      runtimeExecutionPolicy,
+      provider: "codex",
+      workspaceRoot: runWorkspaceDir(jobId),
+    });
   const roleMemo = memory.getAgentRole("codex");
-  const ctx = await loadContextDocs(jobId, ["plan.md", "research.md"], 6000);
-  const trackDocs = TRACK_DOC_NAMES.map(n => `- ${path.join(runSharedDir(jobId), n)}`).join("\n");
+  const ctx = await loadContextDocs(jobId, ["plan", "research"], 6000);
+  const trackDocs = runtimeState.tracking.listDocs(jobId).map((entry) => `- ${path.join(runSharedDir(jobId), entry.file_name)}`).join("\n");
   const workspacePath = runWorkspaceDir(jobId);
   const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 5 });
+  const kbContract = buildAgentKnowledgeBaseBlock(jobId, { provider: "codex", roleId: "builder", agentId: "codex" });
+  const cliSupport = ensureCliWorkspaceSupportFiles(jobId, { provider: "codex", roleMemo, kbContract, instruction, goal: instruction, runtimeExecutionPolicy, providerOptions });
   const prompt = [
     ctx,
+    "",
+    kbContract,
     "",
     "역할 메모리:",
     roleMemo,
@@ -422,7 +698,7 @@ async function codexImplement(jobId, instruction, signal = null) {
     trackDocs,
     "",
     workspaceFilesText,
-    "- 테스트 실행은 하지 말고, 필요한 테스트를 제안만.",
+    "- 테스트/빌드 실행은 별도의 tool_proxy 검증 단계가 담당한다. 수정 내용에 맞는 검증 명령을 염두에 두고 변경하라.",
     "- 변경 요약(파일별 이유) 포함.",
     "",
     "작업:",
@@ -435,9 +711,17 @@ async function codexImplement(jobId, instruction, signal = null) {
     prompt,
     signal,
     jobId,
+    profile: providerOptions.profile || process.env.CODEX_PROFILE || "",
+    addDirs: providerOptions.addDirs || [],
+    sandboxMode: providerOptions.sandboxMode,
+    approvalPolicy: providerOptions.approvalPolicy,
+    configOverrides: {
+      ...(providerOptions.configOverrides || {}),
+      ...(cliSupport.codexInstructionFile ? { model_instructions_file: cliSupport.codexInstructionFile } : {}),
+    },
   });
   const out = (r.stdout || r.stderr || "");
-  tracking.append(jobId, "progress.md", `## Codex output\n\n${out}\n`);
+  tracking.append(jobId, "progress", `## Codex output\n\n${out}\n`);
   jobs.appendConversation(jobId, "codex", out, { kind: "implementation" });
   ensureCommandOk("Codex", r);
   return out;
@@ -448,15 +732,15 @@ async function gitSummary(jobId, signal = null) {
   const status = await runCommand("git", ["status", "--porcelain=v1"], { cwd: commandCwd, abortSignal: signal });
   if (!status.ok && /not a git repository/i.test(String(status.stderr || ""))) {
     const note = `workspace is not a git repository: ${commandCwd}`;
-    tracking.append(jobId, "progress.md", `## git status\n\n${note}\n`);
+    tracking.append(jobId, "progress", `## git status\n\n${note}\n`);
     return { status: "", diff: "", note };
   }
   const diff = await runCommand("git", ["diff"], { cwd: commandCwd, timeoutMs: 120000, abortSignal: signal });
   ensureCommandOk("git status", status);
   ensureCommandOk("git diff", diff);
 
-  tracking.append(jobId, "progress.md", `## git status\n\n${FENCE}\n${status.stdout}\n${FENCE}\n`);
-  tracking.append(jobId, "progress.md", `## git diff\n\n${FENCE}diff\n${diff.stdout}\n${FENCE}\n`);
+  tracking.append(jobId, "progress", `## git status\n\n${FENCE}\n${status.stdout}\n${FENCE}\n`);
+  tracking.append(jobId, "progress", `## git diff\n\n${FENCE}diff\n${diff.stdout}\n${FENCE}\n`);
 
   return { status: status.stdout || "", diff: diff.stdout || "" };
 }
@@ -469,11 +753,12 @@ function summarizeSpecialChatOutputs(outputs) {
   return summarizeSpecialChatOutputsShared(outputs);
 }
 
-function buildChatSynthesisFallback(message, execution = {}) {
-  return buildChatSynthesisFallbackShared(message, execution);
+function buildChatSynthesisFallback(message, execution = {}, runtime = null) {
+  return buildChatSynthesisFallbackShared(message, { ...execution, runtime });
 }
 
 async function synthesizeChatReply(message, routePlan, execution = {}) {
+  if (execution && typeof execution === 'object' && !execution.runtime && routePlan?.runtime) execution.runtime = routePlan.runtime;
   const outputs = Array.isArray(execution.outputs) ? execution.outputs : [];
   const hardFailures = Array.isArray(execution?.results)
     ? execution.results.filter((row) => ['error', 'blocked'].includes(String(row?.status || '').trim().toLowerCase()))
@@ -481,7 +766,7 @@ async function synthesizeChatReply(message, routePlan, execution = {}) {
   const outputTextBlob = outputs.map((row) => String(row?.output || '').trim()).join('\n');
   const capabilityGapDetected = /Tool ['"]?[a-zA-Z0-9_.-]+['"]? not found|OPENAI_API_KEY|GEMINI_API_KEY|ANTHROPIC_API_KEY|api[_ -]?key/i.test(outputTextBlob);
   if (outputs.length === 0 || hardFailures.length > 0 || capabilityGapDetected) {
-    return buildChatSynthesisFallback(message, execution);
+    return buildChatSynthesisFallback(message, execution, execution?.runtime || null);
   }
   const special = summarizeSpecialChatOutputs(outputs);
   const hasAgentOutput = outputs.some((row) => String(row?.agentId || "").trim().toLowerCase() !== "system");
@@ -548,7 +833,7 @@ async function synthesizeChatReply(message, routePlan, execution = {}) {
     if (r?.ok && out) return clip(out, 3800);
   } catch {}
 
-  return buildChatSynthesisFallback(message, execution);
+  return buildChatSynthesisFallback(message, execution, execution?.runtime || null);
 }
 
 
@@ -1187,28 +1472,14 @@ function buildSupervisorExecutionCallbacks({
         slotId,
         scopeId,
       });
-    const nextActionsInstruction = [
-      "[OUTPUT CONTRACT]",
-      "- 사용자에게 채팅방에 바로 공유할 중간 결과가 있으면 CHAT_UPDATE 블록을 포함하라.",
-      "- CHAT_UPDATE는 3~6줄의 자연어 요약으로 쓰고, 근거/핵심 판단/다음 포인트만 남겨라.",
-      "- 형식:",
-      "CHAT_UPDATE",
-      "```text",
-      "핵심 발견 2~3개",
-      "왜 중요한지",
-      "다음으로 넘길 포인트",
-      "```",
-      "- 필요하면 마지막에 NEXT_ACTIONS_JSON 블록으로 후속 작업을 제안하라.",
-      "- 형식:",
-      "NEXT_ACTIONS_JSON",
-      "```json",
-      "{\"actions\":[{\"type\":\"run_agent\",\"agent_id\":\"coder\",\"goal\":\"...\"}]}",
-      "```",
-      "- 후속 제안이 없으면 NEXT_ACTIONS_JSON 블록은 생략한다.",
-    ].join("\n");
+    const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
+    const roleKey = String(actionInputs?.role_id || actionInputs?.roleId || cleanAgentId || '').trim().toLowerCase();
     const finalPrompt = [
       String(prepared?.final_prompt || "").trim() || cleanGoal,
-      nextActionsInstruction,
+      buildAgentOutputContractBlock({
+        roleId: roleKey,
+        runtimeExecutionPolicy,
+      }),
     ].filter(Boolean).join("\n\n");
     try {
       const result = await enqueue(
@@ -1636,6 +1907,15 @@ function buildSupervisorExecutionCallbacks({
         },
       });
     },
+    toolProxyCall: async ({ action }) => {
+      return await runActionWithGraph({
+        action,
+        toolName: "tool_proxy_call",
+        work: async () => {
+          return await runToolProxyStep({ action, jobId, signal: controller?.signal || null, runtime });
+        },
+      });
+    },
     proposeAgent: async ({ action }) => {
       return await runActionWithGraph({
         action,
@@ -2051,7 +2331,7 @@ function buildSupervisorExecutionCallbacks({
             agentIdOverride: override || "",
           });
           await refreshAgentRegistry({ includeCompiled: true });
-          tracking.append(jobId, "decisions.md", [
+          tracking.append(jobId, "decisions", [
             "## /chat install_agent_blueprint",
             `- blueprint_id: ${installed.blueprint_id || selected.blueprint_id || "unknown"}`,
             `- public_node_id: ${installed.public_node_id || selected.public_node_id || "unknown"}`,
@@ -2080,7 +2360,7 @@ function buildSupervisorExecutionCallbacks({
           const targetAgentId = String(action.agent_id || "").trim().toLowerCase();
           if (targetAgentId && typeof client.publishAgent === "function") {
             const published = await client.publishAgent(targetAgentId, true);
-            tracking.append(jobId, "decisions.md", [
+            tracking.append(jobId, "decisions", [
               "## /chat publish_agent",
               `- agent_id: ${targetAgentId}`,
               `- published: ${published?.published === true ? "true" : "requested"}`,
@@ -2104,7 +2384,7 @@ function buildSupervisorExecutionCallbacks({
             throw new Error("publish 대상 agent_profile node를 찾지 못했습니다.");
           }
           const request = await client.createPublishRequest(String(targetNode.id));
-          tracking.append(jobId, "decisions.md", [
+          tracking.append(jobId, "decisions", [
             "## /chat publish_agent",
             `- source_node_id: ${String(targetNode.id)}`,
             `- request_id: ${request.request_id || "unknown"}`,
@@ -2249,6 +2529,7 @@ async function runSupervisorChat(
     chatInfo = null,
     inputKind = "chat_message",
     telegramMessageId = null,
+    userReplyToMessageId = null,
     forceMode = "normal",
     teamConfig = null,
   } = {}
@@ -2266,7 +2547,11 @@ async function runSupervisorChat(
     }
   }
   if (!currentJobId) {
-    const job = await createJob(message, { ownerUserId: userId, ownerChatId: chatId });
+    const preflightTeamState = getSessionTeamState(chatSessionStore, chatId);
+    const seedTeamConfig = preflightTeamState?.active_team && typeof preflightTeamState.active_team === 'object'
+      ? preflightTeamState.active_team
+      : null;
+    const job = await createJob(message, { ownerUserId: userId, ownerChatId: chatId, teamConfig: seedTeamConfig });
     currentJobId = String(job.jobId);
     createdNewJob = true;
     if (memoryModeWithFallback() === "goc") {
@@ -2315,6 +2600,9 @@ async function runSupervisorChat(
   let runtime = null;
   let contextEngine = null;
   let finalAssistantText = "";
+  let patternConflictState = null;
+  let temporaryExecutionOverride = null;
+  let patternRecoveryState = null;
   const sessionAtStart = chatSessionStore.get(chatId);
   let currentTurnAckMessageId = Number(sessionAtStart?.current_turn_ack_message_id || 0);
   if (!(Number.isFinite(currentTurnAckMessageId) && currentTurnAckMessageId > 0)) {
@@ -2337,6 +2625,76 @@ async function runSupervisorChat(
     }
     const normalizedActiveTeamConfig = validateTeamConfiguration(activeTeamConfig, { runtime });
     applyTeamConfigurationToRuntime(runtime, normalizedActiveTeamConfig);
+    try {
+      const kbSync = tracking.reconcileProfile(currentJobId, normalizedActiveTeamConfig.knowledge_base_profile || normalizedActiveTeamConfig.structure_v2?.knowledge_surface || {}, { migrate: true });
+      if (kbSync?.migration?.changed) {
+        const moved = Array.isArray(kbSync.migration.moved_slots) ? kbSync.migration.moved_slots : [];
+        const created = Array.isArray(kbSync.migration.created_files) ? kbSync.migration.created_files : [];
+        tracking.append(currentJobId, "decisions", [
+          "## Knowledge base migration",
+          `- profile: ${kbSync.profile?.profile_id || 'unknown'}`,
+          ...(moved.length > 0 ? moved.map((row) => `- migrated ${row.doc_id}: ${row.from} -> ${row.to}`) : ["- migrated slots: none"]),
+          ...(created.length > 0 ? [`- created files: ${created.join(', ')}`] : []),
+        ].join("\n"));
+      }
+    } catch {}
+    patternConflictState = detectPatternConflict({ message, teamConfig: normalizedActiveTeamConfig });
+    temporaryExecutionOverride = patternConflictState?.override || null;
+    patternRecoveryState = temporaryExecutionOverride
+      ? buildPatternRecoveryState({
+        originalPattern: normalizedActiveTeamConfig?.structure_v2?.topology?.pattern || runtime?.teamTopologyPattern || '',
+        activePattern: temporaryExecutionOverride?.effective_pattern || runtime?.teamTopologyPattern || '',
+        reason: patternConflictState?.reason || 'latest_user_interrupt_priority',
+        status: 'temporary_override_active',
+        recoveryPolicy: temporaryExecutionOverride?.recovery_policy || 'next_turn_retry',
+      })
+      : null;
+    chatSessionStore.upsert(chatId, {
+      pattern_conflict: patternConflictState?.classification && patternConflictState.classification !== 'no_conflict' ? patternConflictState : null,
+      temporary_execution_override: temporaryExecutionOverride,
+      pattern_recovery: patternRecoveryState,
+    });
+    if (patternConflictState?.classification === 'structure_override_required') {
+      const refineDraftState = await maybeBuildStructureConflictRefineDraft({
+        sessionStore: chatSessionStore,
+        chatId,
+        teamConfig: normalizedActiveTeamConfig,
+        instruction: message,
+        runtime,
+      });
+      const draftPreview = refineDraftState?.draft
+        ? formatTeamProposalMessage(refineDraftState.draft).split('\n').slice(0, 12)
+        : [];
+      const structureConflictButtons = [];
+      if (refineDraftState?.stored) structureConflictButtons.push({ text: '✅ Apply refine draft', callback_data: 'team_state:apply_pending' });
+      if (refineDraftState?.draft) structureConflictButtons.push({ text: '👀 Show pending draft', callback_data: 'team_state:show_pending' });
+      if (normalizedActiveTeamConfig) structureConflictButtons.push({ text: '📌 Show active team', callback_data: 'team_state:show_active' });
+      const structureConflictOptions = {
+        ...(Number.isFinite(Number(currentTurnAckMessageId)) ? { reply_to_message_id: Number(currentTurnAckMessageId) } : {}),
+        ...(structureConflictButtons.length > 0 ? { reply_markup: { inline_keyboard: [structureConflictButtons] } } : {}),
+      };
+      await sendLong(bot, chatId, [
+        '🧭 현재 요청은 active team의 구조 변경에 가깝습니다.',
+        patternConflictState.reason,
+        refineDraftState?.stored ? 'pending refine draft를 자동 생성했습니다. 버튼으로 바로 확인/적용하거나 /team refine 로 다시 조정할 수 있습니다.' : '',
+        refineDraftState?.draft && !refineDraftState?.stored ? 'refine draft preview를 생성했지만 기존 pending team이 있어 자동 저장하지는 않았습니다.' : '',
+        refineDraftState?.error ? `draft generation: ${refineDraftState.error}` : '',
+        draftPreview.length > 0 ? '' : '',
+        ...draftPreview,
+        '',
+        '이번 turn은 현재 team 안에서 최대한 처리합니다.',
+      ].filter(Boolean).join('\n'), Object.keys(structureConflictOptions).length > 0 ? structureConflictOptions : undefined).catch(() => null);
+    } else if (temporaryExecutionOverride) {
+      await bot.sendMessage(
+        chatId,
+        [
+          '↪️ 최신 유저 요청을 우선해 이번 turn에 한해 임시 execution override를 적용합니다.',
+          ...summarizePatternConflictLines(patternConflictState),
+          '- 팀 구조 자체는 유지됩니다. 계속 쓰려면 /team refine 로 반영하세요.',
+        ].filter(Boolean).join('\n'),
+        Number.isFinite(Number(currentTurnAckMessageId)) ? { reply_to_message_id: Number(currentTurnAckMessageId) } : undefined,
+      ).catch(() => null);
+    }
     await syncTeamConfigurationToConversationStore({ runtime, teamConfig: normalizedActiveTeamConfig, source: 'chat_runtime_bootstrap' }).catch(() => null);
     const runtimeCapabilities = runtime?.capabilities && typeof runtime.capabilities === "object"
       ? runtime.capabilities
@@ -2381,9 +2739,16 @@ async function runSupervisorChat(
         jobId: currentJobId,
       });
     }
-    const autopilotEnabled = AUTOPILOT_ENABLED;
-    const maxTurns = autopilotEnabled ? AUTOPILOT_MAX_TURNS : 1;
-    const maxTotalActions = autopilotEnabled ? AUTOPILOT_MAX_TOTAL_ACTIONS : 4;
+    const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
+    const continuousImprovementPolicy = runtimeExecutionPolicy.continuous_improvement || {};
+    const checkpointPolicy = runtimeExecutionPolicy.checkpointing || {};
+    const autopilotEnabled = AUTOPILOT_ENABLED || continuousImprovementPolicy.enabled === true;
+    const maxTurns = continuousImprovementPolicy.enabled === true
+      ? Number(continuousImprovementPolicy.max_turns || AUTOPILOT_MAX_TURNS || 1)
+      : (autopilotEnabled ? AUTOPILOT_MAX_TURNS : 1);
+    const maxTotalActions = continuousImprovementPolicy.enabled === true
+      ? Number(continuousImprovementPolicy.max_total_actions || AUTOPILOT_MAX_TOTAL_ACTIONS || 4)
+      : (autopilotEnabled ? AUTOPILOT_MAX_TOTAL_ACTIONS : 4);
     const callbacks = buildSupervisorExecutionCallbacks({
       bot,
       chatId,
@@ -2424,15 +2789,34 @@ async function runSupervisorChat(
     const runThreadId = String(runtime?.map?.threadId || "").trim();
     const sharedCtxId = String(runtime?.map?.ctxSharedId || "").trim();
 
+    let turnRuntimeTeamSnapshot = runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === 'object'
+      ? runtime.runtimeTeamSnapshot
+      : null;
+    let turnAgentsCatalog = Array.isArray(runtime?.agents) ? runtime.agents : [];
+    let turnEnabledAgentIds = Array.isArray(runtime?.enabledAgentIds) ? runtime.enabledAgentIds : [];
+    if (temporaryExecutionOverride && turnRuntimeTeamSnapshot) {
+      const overrideState = applyTemporaryExecutionOverrideToRuntimeSnapshot(turnRuntimeTeamSnapshot, temporaryExecutionOverride);
+      if (overrideState?.applied) {
+        turnRuntimeTeamSnapshot = overrideState.runtimeTeamSnapshot;
+        runtime.runtimeTeamSnapshot = turnRuntimeTeamSnapshot;
+        const targetIds = new Set((temporaryExecutionOverride?.target_participant_ids || []).map((row) => String(row || '').trim().toLowerCase()).filter(Boolean));
+        if (targetIds.size > 0) {
+          turnAgentsCatalog = turnAgentsCatalog.filter((agent) => targetIds.has(String(agent?.participant_id || agent?.id || agent?.agent_id || '').trim().toLowerCase()));
+          turnEnabledAgentIds = turnEnabledAgentIds.filter((agentId) => targetIds.has(String(agentId || '').trim().toLowerCase()));
+        }
+      }
+    }
+
     const shortcutCandidate = planAgentFollowupShortcut({
       message,
       session: sessionAtStart,
       runtime,
       teamConfig: normalizedActiveTeamConfig,
+      replyToMessageId: getCurrentTurnReplyMessageId(chatId),
     });
-    if (shortcutCandidate?.matched && shortcutCandidate?.action) {
-      const runtimeTeamSnapshot = runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
-        ? runtime.runtimeTeamSnapshot
+    if (shortcutCandidate?.matched && shortcutCandidate?.action && (!temporaryExecutionOverride || (temporaryExecutionOverride.target_participant_ids || []).length === 0 || temporaryExecutionOverride.target_participant_ids.includes(String(shortcutCandidate.target_agent_id || '').trim().toLowerCase()))) {
+      const runtimeTeamSnapshot = turnRuntimeTeamSnapshot && typeof turnRuntimeTeamSnapshot === "object"
+        ? turnRuntimeTeamSnapshot
         : createRuntimeTeamSnapshot({
           source: "team_builder",
           runtimeAgents: Array.isArray(runtime?.runtimeTeamSnapshot?.runtime_agents) ? runtime.runtimeTeamSnapshot.runtime_agents : [],
@@ -2509,7 +2893,7 @@ async function runSupervisorChat(
         remaining_actions: [],
       };
       stopReason = "direct_shortcut";
-      tracking.append(currentJobId, "decisions.md", [
+      tracking.append(currentJobId, "decisions", [
         "## /chat shortcut followup",
         `- message: ${clip(message, 220)}`,
         `- agent: ${String(shortcutCandidate.target_agent_id || "").trim().toLowerCase()}`,
@@ -2587,7 +2971,7 @@ async function runSupervisorChat(
       });
       const teamRecommendation = runtime.activeTeamConfig
         ? {
-          selected_existing_agents: (Array.isArray(runtime.activeTeamConfig.agents) ? runtime.activeTeamConfig.agents : []).map((agent) => ({
+          selected_existing_agents: (Array.isArray(turnAgentsCatalog) && turnAgentsCatalog.length > 0 ? turnAgentsCatalog : (Array.isArray(runtime.activeTeamConfig.agents) ? runtime.activeTeamConfig.agents : [])).map((agent) => ({
             role: agent.role,
             agent_id: agent.agent_id,
             name: agent.name,
@@ -2608,8 +2992,8 @@ async function runSupervisorChat(
       const selectedExistingAgents = Array.isArray(teamRecommendation?.selected_existing_agents)
         ? teamRecommendation.selected_existing_agents
         : [];
-      const existingRuntimeSnapshot = runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === 'object'
-        ? runtime.runtimeTeamSnapshot
+      const existingRuntimeSnapshot = turnRuntimeTeamSnapshot && typeof turnRuntimeTeamSnapshot === 'object'
+        ? turnRuntimeTeamSnapshot
         : (runtime?.runtime_team_snapshot && typeof runtime.runtime_team_snapshot === 'object'
           ? runtime.runtime_team_snapshot
           : null);
@@ -2672,10 +3056,10 @@ async function runSupervisorChat(
         },
       });
       const rawRoutePlan = await routeWithSupervisor(lastUserText, {
-        agents: runtime.agents,
+        agents: turnAgentsCatalog,
         agentsCatalog: runtime.agentsCatalog,
         teamRecommendation,
-        enabledAgentIds: runtime.enabledAgentIds,
+        enabledAgentIds: turnEnabledAgentIds,
         teamLocked: runtime.teamLocked === true,
         teamCompositionMode: runtime.teamCompositionMode || runtime.activeTeamConfig?.composition_mode || 'structured',
         teamInteractionSpec: runtime.teamInteractionSpec || runtime.activeTeamConfig?.interaction_spec || null,
@@ -2758,6 +3142,7 @@ async function runSupervisorChat(
         plan_source: routePlanSource,
       });
       runtime.runtimeTeamSnapshot = runtimeTeamSnapshot;
+      if (temporaryExecutionOverride) routePlan = { ...routePlan, temporary_execution_override: temporaryExecutionOverride, pattern_conflict: patternConflictState };
       routePlan = {
         ...routePlan,
         runtime_team_snapshot: runtimeTeamSnapshot,
@@ -2901,14 +3286,50 @@ async function runSupervisorChat(
         completedDeliverables,
         turnOutputs
       );
+      const activeStopSignals = collectActiveRouteSignals(mergedOutputs);
+      const matchedContinuousStopSignals = continuousStopSignalsMatched(activeStopSignals, continuousImprovementPolicy);
+      if (checkpointPolicy.enabled === true && checkpointPolicy.write_on_turn_end === true) {
+        try {
+          writeRuntimeCheckpointBundle({
+            sharedDir: runSharedDir(currentJobId),
+            jobId: currentJobId,
+            stage: 'turn_end',
+            trigger: execution.pendingApproval ? 'pending_approval' : 'turn_complete',
+            userText: lastUserText,
+            reason: String(routePlan?.reason || '').trim(),
+            results: mergedResults,
+            outputs: mergedOutputs,
+            remainingActions: turnRemainingActions,
+            pendingApproval: execution.pendingApproval || null,
+            routePlan,
+            continuousState: { turn, max_turns: maxTurns, stop_signals: matchedContinuousStopSignals },
+          });
+        } catch {}
+      }
+      if (continuousImprovementPolicy.enabled === true && continuousImprovementPolicy.progress_report_each_turn !== false) {
+        await bot.sendMessage(
+          chatId,
+          buildContinuousImprovementProgressMessage({
+            turn,
+            maxTurns,
+            deliverables,
+            completedDeliverables,
+            stopSignals: matchedContinuousStopSignals,
+          }),
+          Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
+            ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
+            : undefined
+        ).catch(() => null);
+      }
 
-      tracking.append(currentJobId, "decisions.md", [
+      tracking.append(currentJobId, "decisions", [
         "## /chat supervisor routing",
         `- turn: ${turn}`,
         `- message: ${clip(lastUserText, 260)}`,
         `- reason: ${routePlan.reason || "(none)"}`,
         `- runtime_team_source: ${String(routePlan?.runtime_team_snapshot?.source || "team_builder")}`,
         `- action_source: ${String(routePlan?.action_source || routeActionSource || "explicit_route_plan")}`,
+        ...(patternConflictState && patternConflictState.classification !== 'no_conflict' ? summarizePatternConflictLines(patternConflictState) : []),
         ...summarizeRunAuthorityLines(runtime, routePlan, {
           modeLabel: "capability_mode",
           fallbackReasonEmpty: "(none)",
@@ -2927,16 +3348,74 @@ async function runSupervisorChat(
         await markActionsSkipped(executionGraph, pendingRows, {
           reason: "awaiting_approval",
         });
+        if (checkpointPolicy.enabled === true && checkpointPolicy.write_on_approval_pause !== false) {
+          try {
+            const approvalCheckpoint = writeRuntimeCheckpointBundle({
+              sharedDir: runSharedDir(currentJobId),
+              jobId: currentJobId,
+              stage: 'approval_pause',
+              trigger: 'pending_approval',
+              userText: lastUserText,
+              reason: execution.pendingApproval.reason || 'awaiting approval',
+              results: mergedResults,
+              outputs: mergedOutputs,
+              remainingActions: pendingRows,
+              pendingApproval: execution.pendingApproval,
+              routePlan,
+              continuousState: { turn, max_turns: maxTurns },
+            });
+            execution.pendingApproval.runtime_checkpoint = approvalCheckpoint;
+            const latestSession = chatSessionStore.get(chatId);
+            if (latestSession?.pending_approval) {
+              chatSessionStore.upsert(chatId, {
+                pending_approval: {
+                  ...latestSession.pending_approval,
+                  runtime_checkpoint: approvalCheckpoint,
+                },
+              });
+            }
+          } catch {}
+        }
         stopReason = "pending_approval";
+        break;
+      }
+      if (continuousImprovementPolicy.enabled === true
+        && matchedContinuousStopSignals.length > 0
+        && turn >= Number(continuousImprovementPolicy.min_turns || 1)) {
+        stopReason = 'continuous_goal_met';
         break;
       }
       if (routePlan.await_user === true) {
         stopReason = "await_user";
         break;
       }
-      if (routePlan.done === true) {
+      if (routePlan.done === true && continuousImprovementPolicy.enabled !== true) {
         stopReason = "done";
         break;
+      }
+      if (routePlan.done === true && continuousImprovementPolicy.enabled === true) {
+        if (turn >= maxTurns) {
+          stopReason = 'max_turns';
+          break;
+        }
+        await bot.sendMessage(
+          chatId,
+          '♻️ 결과를 더 끌어올리기 위해 self-refine를 계속합니다…',
+          Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
+            ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
+            : undefined
+        ).catch(() => null);
+        lastUserText = buildContinuousImprovementFollowup({
+          originalUserText: message,
+          followupHint,
+          deliverables,
+          completedDeliverables,
+          stopSignals: matchedContinuousStopSignals,
+          turn: turn + 1,
+          maxTurns,
+          customPrompt: String(continuousImprovementPolicy.self_refine_prompt || '').trim(),
+        });
+        continue;
       }
 
       if (!autopilotEnabled) {
@@ -3013,6 +3492,34 @@ async function runSupervisorChat(
       outputs: mergedOutputs,
     };
 
+    let installProposalState = null;
+    const compatibilityRecovery = inferCompatibilityFallbackState(routePlan);
+    if (compatibilityRecovery) {
+      patternRecoveryState = compatibilityRecovery;
+      chatSessionStore.upsert(chatId, { pattern_recovery: compatibilityRecovery });
+    }
+    if (!mergedExecution.pendingApproval) {
+      const teamStateForInstall = getSessionTeamState(chatSessionStore, chatId);
+      installProposalState = buildInstallProposalStateFromExecution({
+        team: normalizedActiveTeamConfig,
+        runtime,
+        execution: mergedExecution,
+        applyState: teamStateForInstall?.pending_team ? 'active' : 'pending',
+        resumeRequest: {
+          message,
+          input_kind: inputKind || 'chat_message',
+          force_mode: cleanForceMode,
+          telegram_message_id: telegramMessageId || null,
+          user_reply_to_message_id: userReplyToMessageId || null,
+          chat_info: chatInfo && typeof chatInfo === 'object' ? chatInfo : { chat_id: String(chatId || '') },
+        },
+        source: 'execution_gap',
+      });
+      if (installProposalState?.proposal?.gap_count > 0) {
+        setPendingInstallProposal(chatSessionStore, chatId, installProposalState);
+      }
+    }
+
     if (forcedAwaitReason && !mergedExecution.pendingApproval) {
       routePlan = {
         ...routePlan,
@@ -3054,7 +3561,7 @@ async function runSupervisorChat(
         pending_approval: pendingApproval,
       });
       mergedExecution.pendingApproval = pendingApproval;
-      tracking.append(currentJobId, "decisions.md", [
+      tracking.append(currentJobId, "decisions", [
         "## /chat approval required",
         `- reason: ${pendingApproval.reason}`,
         `- action: ${String(pendingApproval?.action_display_label || "").trim() || chatActionLabel(pendingApproval.action)}`,
@@ -3095,9 +3602,10 @@ async function runSupervisorChat(
       await sendLong(bot, chatId, formatChatSummary(routePlan, mergedExecution.results));
       await bot.sendMessage(chatId, `autopilot_stop_reason=${stopReason}`);
     }
+    const assistantReplyMessages = [];
     finalAssistantText = replyText;
     if (!isMutatingConfirm) {
-      await sendLong(bot, chatId, replyText);
+      assistantReplyMessages.push(...(await sendLong(bot, chatId, replyText)));
     }
     jobs.appendConversation(currentJobId, "assistant", replyText, {
       kind: mergedExecution.pendingApproval ? "chat_reply_pending_approval" : "chat_reply",
@@ -3134,7 +3642,7 @@ async function runSupervisorChat(
     }
     if (mergedExecution.pendingApproval?.id) {
       const prompt = pendingPrompt || buildPendingApprovalPrompt(mergedExecution.pendingApproval);
-      await bot.sendMessage(
+      const promptMessage = await bot.sendMessage(
         chatId,
         prompt.text,
         {
@@ -3146,6 +3654,37 @@ async function runSupervisorChat(
           },
         }
       );
+      if (promptMessage) assistantReplyMessages.push(promptMessage);
+    } else if (installProposalState?.proposal?.gap_count > 0) {
+      const installPrompt = buildInstallProposalPrompt(installProposalState, { hasPendingTeam: !!getSessionTeamState(chatSessionStore, chatId)?.pending_team });
+      if (installPrompt?.text) {
+        const installMessage = await bot.sendMessage(
+          chatId,
+          installPrompt.text,
+          {
+            reply_to_message_id: Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
+              ? Number(getCurrentTurnReplyMessageId(chatId))
+              : undefined,
+            reply_markup: {
+              inline_keyboard: installPrompt.keyboard,
+            },
+          }
+        );
+        if (installMessage) assistantReplyMessages.push(installMessage);
+      }
+    }
+    const capsules = buildAnswerCapsules({
+      telegramMessages: assistantReplyMessages,
+      replyToMessageId: userReplyToMessageId,
+      runId,
+      jobId: currentJobId,
+      routePlan,
+      execution: mergedExecution,
+      replyText,
+      originalGoal: message,
+    });
+    if (capsules.length > 0) {
+      replyAnchorStore.append(chatId, capsules);
     }
     await maybeAutoSendOutputs(bot, chatId, currentJobId, {
       when: "run_end",
@@ -3239,7 +3778,22 @@ async function runSupervisorChat(
     jobAbortControllers.delete(currentJobId);
     chatSessionStore.upsert(chatId, (session) => ({
       ...session,
-      state: session.pending_approval ? "awaiting_approval" : "idle",
+      state: session.pending_approval
+        ? "awaiting_approval"
+        : (session.pending_install_proposal ? 'awaiting_install_approval' : "idle"),
+      pattern_conflict: session.pending_approval || session.pending_install_proposal ? session.pattern_conflict : null,
+      temporary_execution_override: null,
+      pattern_recovery: session.pending_approval || session.pending_install_proposal
+        ? session.pattern_recovery
+        : (patternRecoveryState
+          ? buildPatternRecoveryState({
+            originalPattern: patternRecoveryState.original_pattern,
+            activePattern: patternRecoveryState.original_pattern || patternRecoveryState.active_pattern,
+            reason: patternRecoveryState.reason || 'restored_after_turn',
+            status: 'restored',
+            recoveryPolicy: patternRecoveryState.recovery_policy || 'next_turn_retry',
+          })
+          : null),
     }));
   }
 }
@@ -3421,15 +3975,35 @@ async function executeAgentRun(
     const provider = String(agent.provider || "gemini").trim().toLowerCase();
     const model = String(agent.model || provider).trim() || provider;
     const rolePrompt = String(agent.prompt || "").trim();
+    const roleId = String(act?.inputs?.role_id || act?.inputs?.roleId || agent.role || agent.role_id || agent.roleId || "").trim().toLowerCase();
+    const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
+    const providerOptions = resolveProviderRuntimeOptionsForJob({ runtime, provider, action: act, agent, jobId });
+    const kbContract = buildAgentKnowledgeBaseBlock(jobId, { provider, roleId, agentId });
+    ensureCliWorkspaceSupportFiles(jobId, { provider, roleMemo: rolePrompt, kbContract, goal: taskPrompt, instruction: taskPrompt, runtimeExecutionPolicy, providerOptions });
+    const taskBody = kbContract
+      ? `${kbContract}
+
+[ASSIGNED TASK]
+${taskPrompt}`
+      : taskPrompt;
     const combinedInstruction = rolePrompt
-      ? `[ROLE]\n${rolePrompt}\n\n[TASK]\n${taskPrompt}`
-      : taskPrompt;
+      ? `[ROLE]
+${rolePrompt}
+
+${taskBody}`
+      : taskBody;
     const combinedGoal = rolePrompt
-      ? `[ROLE]\n${rolePrompt}\n\n[TASK]\n${taskPrompt}`
-      : taskPrompt;
+      ? `[ROLE]
+${rolePrompt}
+
+${taskBody}`
+      : taskBody;
     const combinedChatQuestion = rolePrompt
-      ? `[AGENT ROLE]\n${rolePrompt}\n\n[QUESTION]\n${taskPrompt}`
-      : taskPrompt;
+      ? `[AGENT ROLE]
+${rolePrompt}
+
+${taskBody}`
+      : taskBody;
 
     const runProvider = async (providerPrompt) => {
       if (provider === "chatgpt") {
@@ -3443,15 +4017,18 @@ async function executeAgentRun(
     const appendLocalLogs = (output, mode) => {
       const section = `## Agent ${agentId} output (${mode})`;
       if (provider === "codex") {
-        tracking.append(jobId, "progress.md", `${section}\n\n${output}\n`);
+        tracking.append(jobId, "progress", `${section}\n\n${output}\n`);
       } else {
-        tracking.append(jobId, "research.md", `${section}\n\n${output}\n`);
+        tracking.append(jobId, "research", `${section}\n\n${output}\n`);
       }
       jobs.appendConversation(jobId, agentId, output, { kind: "agent_run", provider, model, mode });
     };
 
     if (provider === "codex") {
-      const output = await codexImplement(jobId, combinedInstruction, signal);
+      const output = await codexImplement(jobId, combinedInstruction, signal, {
+        runtimeExecutionPolicy,
+        providerOptions,
+      });
       await maybeAutoSendOutputs(bot, chatId, jobId, {
         when: "step",
         replyToMessageId: getCurrentTurnReplyMessageId(chatId),
@@ -3480,6 +4057,8 @@ async function executeAgentRun(
         onGeminiRetry,
         onGeminiModelSwitch,
         onGeminiGiveUp,
+        runtimeExecutionPolicy,
+        providerOptions,
       });
       await maybeAutoSendOutputs(bot, chatId, jobId, {
         when: "step",
@@ -3534,7 +4113,7 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
   const actions = Array.isArray(sanitizedRoute?.plan?.actions) ? sanitizedRoute.plan.actions : [];
   const executionContractNotes = Array.isArray(sanitizedRoute?.notes) ? sanitizedRoute.notes : [];
   if (executionContractNotes.length > 0) {
-    tracking.append(jobId, "decisions.md", [
+    tracking.append(jobId, "decisions", [
       "## route execution contract",
       ...executionContractNotes.map((note) => `- ${note.action_type} downgraded to sequential run_agent: ${note.reason}`),
     ].join("\n"));
@@ -3620,7 +4199,7 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
   };
 
   if (runtimeTeamSnapshot && Array.isArray(runtimeTeamSnapshot.runtime_agents) && runtimeTeamSnapshot.runtime_agents.length > 0) {
-    tracking.append(jobId, "decisions.md", [
+    tracking.append(jobId, "decisions", [
       "## Runtime team snapshot",
       ...summarizeRuntimeTeamSnapshotLines(runtimeTeamSnapshot, {
         actionSource: String(route?.action_source || "unknown"),
@@ -3661,7 +4240,9 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
       }
       if (act.type === 'spawn_parallel') {
         for (const child of Array.isArray(act.agents) ? act.agents : []) {
-          collectFailure(formatChatAgentDisplayName(child?.agent || '', agentIndex), prepareScopedAction(child));
+          collectFailure(formatChatAgentDisplayName(child?.agent || '', agentIndex), prepareScopedAction(withAgentOutputContract(child, {
+            runtimeExecutionPolicy: resolveRuntimeExecutionPolicyForRuntime(runtime),
+          })));
         }
       }
     }
@@ -3686,6 +4267,9 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
     };
   }
 
+  const activeRouteSignals = new Set();
+  const legacyDirectRuntimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
+
   for (const rawAct of actions) {
     const act = normalizeActionShape(rawAct);
     if (!act?.type) continue;
@@ -3702,12 +4286,21 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
       break;
     }
 
+    const routeDecision = evaluateIncomingConditions(act, { activeSignals: activeRouteSignals });
+    const routeConditionBypass = ["gate_wait", "human_checkpoint", "checkpoint", "committee_consensus", "supervisor_decision"].includes(String(act?.type || "").trim().toLowerCase());
+    if (!routeDecision.allowed && !routeConditionBypass) {
+      await bot.sendMessage(chatId, `⏭️ route skipped: ${routeDecision.missing_conditions.join(', ') || 'conditions not satisfied'}`);
+      continue;
+    }
+
     if (act.type === "agent_run") {
       const agentInfo = findAgentConfigInRuntime(act.agent, runtime) || findAgentConfig(act.agent);
       const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
       const displayName = formatChatAgentDisplayName(act.agent, agentIndex);
       await bot.sendMessage(chatId, `🤖 ${displayName} 실행 중… (${provider})`);
-      const scopedActState = prepareScopedAction(act);
+      const scopedActState = prepareScopedAction(withAgentOutputContract(act, {
+        runtimeExecutionPolicy: legacyDirectRuntimeExecutionPolicy,
+      }));
       if (scopedActState.blocked) {
         await bot.sendMessage(chatId, `⛔️ scoped execution blocked: ${scopedActState.reason}`);
         continue;
@@ -3720,7 +4313,11 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
         }),
         { jobId, signal, label: `agent_run_${act.agent}` }
       );
-      await sendLong(bot, chatId, `🤖 ${displayName} 완료 (${result.mode})\n${clip(result.output, 3500)}`);
+      const routeSignals = resolveActionRouteSignals({ action: act, result });
+      for (const signal of routeSignals) activeRouteSignals.add(signal);
+      await sendLong(bot, chatId, `🤖 ${displayName} 완료 (${result.mode})${routeSignals.length > 0 ? `
+route_signals=${routeSignals.join(', ')}` : ''}
+${clip(result.output, 3500)}`);
       if (result.provider === "chatgpt") askedChatGPT = true;
       continue;
     }
@@ -3730,7 +4327,7 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
       const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
       const displayName = formatChatAgentDisplayName(act.agent, agentIndex);
       await bot.sendMessage(chatId, `🧩 ${displayName} 최종 합성 중… (${provider})`);
-      const scopedSynthesisState = prepareScopedAction({
+      const scopedSynthesisState = prepareScopedAction(withAgentOutputContract({
         type: "agent_run",
         agent: act.agent,
         prompt: act.prompt,
@@ -3738,7 +4335,9 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
           ...(act.inputs && typeof act.inputs === "object" ? act.inputs : {}),
           final_synthesis: true,
         },
-      }, { finalSynthesis: true });
+      }, {
+        runtimeExecutionPolicy: legacyDirectRuntimeExecutionPolicy,
+      }), { finalSynthesis: true });
       if (scopedSynthesisState.blocked) {
         await bot.sendMessage(chatId, `⛔️ scoped execution blocked: ${scopedSynthesisState.reason}`);
         continue;
@@ -3751,7 +4350,11 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
         }),
         { jobId, signal, label: `synthesize_final_${act.agent}` }
       );
-      await sendLong(bot, chatId, `🧩 ${displayName} 최종 합성 완료 (${result.mode})\n${clip(result.output, 3500)}`);
+      const routeSignals = resolveActionRouteSignals({ action: act, result });
+      for (const signal of routeSignals) activeRouteSignals.add(signal);
+      await sendLong(bot, chatId, `🧩 ${displayName} 최종 합성 완료 (${result.mode})${routeSignals.length > 0 ? `
+route_signals=${routeSignals.join(', ')}` : ''}
+${clip(result.output, 3500)}`);
       if (result.provider === "chatgpt") askedChatGPT = true;
       continue;
     }
@@ -3761,7 +4364,9 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
       if (children.length === 0) continue;
       await bot.sendMessage(chatId, `📣 병렬 실행 시작 (${children.length})`);
       const settled = await Promise.allSettled(children.map((child) => {
-        const scopedChildState = prepareScopedAction(child);
+        const scopedChildState = prepareScopedAction(withAgentOutputContract(child, {
+          runtimeExecutionPolicy: legacyDirectRuntimeExecutionPolicy,
+        }));
         if (scopedChildState.blocked) {
           return Promise.reject(new Error(`scoped execution blocked: ${scopedChildState.reason}`));
         }
@@ -3824,6 +4429,54 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
       continue;
     }
 
+    if (act.type === "gate_wait") {
+      const label = String(act.label || act.prompt || act.inputs?.slot_id || "gate").trim();
+      const needsApproval = act.inputs?.approval_required === true || String(act.inputs?.gate_type || '').trim().toLowerCase() === 'approval';
+      const detail = summarizeConditions(act.inputs?.incoming_conditions);
+      const routeSignals = resolveActionRouteSignals({ action: act, result: { route_signals: act?.inputs?.selected_route_signals || [] } });
+      await bot.sendMessage(chatId, `${needsApproval ? '🟡' : '⏸️'} gate reached: ${label}${detail ? `
+조건: ${detail}` : ''}${routeSignals.length > 0 ? `
+route_signals=${routeSignals.join(', ')}` : ''}`);
+      if (needsApproval) break;
+      for (const signal of routeSignals) activeRouteSignals.add(signal);
+      continue;
+    }
+
+    if (act.type === "human_checkpoint") {
+      const label = String(act.label || act.prompt || act.inputs?.slot_id || "human checkpoint").trim();
+      const routeSignals = resolveActionRouteSignals({ action: act, result: { route_signals: act?.inputs?.selected_route_signals || [] } });
+      await bot.sendMessage(chatId, `🧑 checkpoint required: ${label}${routeSignals.length > 0 ? `
+route_signals=${routeSignals.join(', ')}` : ''}
+사람 확인이 필요해 실행을 멈춥니다.`);
+      break;
+    }
+
+    if (act.type === "tool_proxy_call") {
+      const proxyResult = await runToolProxyStep({ action: act, jobId, signal, runtime });
+      const routeSignals = resolveActionRouteSignals({ action: act, result: proxyResult });
+      for (const signal of routeSignals) activeRouteSignals.add(signal);
+      await sendLong(bot, chatId, String(proxyResult?.text || 'tool proxy step'));
+      continue;
+    }
+
+    if (act.type === "memory_sync") {
+      const label = String(act.label || act.prompt || act.inputs?.slot_id || "memory sync").trim();
+      const memoryKeys = Array.isArray(act.inputs?.memory_keys) ? act.inputs.memory_keys.filter(Boolean) : [];
+      const routeSignals = resolveActionRouteSignals({ action: act, result: {} });
+      for (const signal of routeSignals) activeRouteSignals.add(signal);
+      await bot.sendMessage(chatId, `🧠 memory sync: ${label}${memoryKeys.length > 0 ? `
+keys=${memoryKeys.join(', ')}` : ''}${routeSignals.length > 0 ? `
+route_signals=${routeSignals.join(', ')}` : ''}`);
+      continue;
+    }
+
+    if (act.type === "committee_consensus") {
+      const routeSignals = resolveActionRouteSignals({ action: act, result: {} });
+      for (const signal of routeSignals) activeRouteSignals.add(signal);
+      await bot.sendMessage(chatId, `🏛️ ${String(act.label || act.prompt || 'committee consensus').trim()}${routeSignals.length > 0 ? `\nroute_signals=${routeSignals.join(', ')}` : ''}`);
+      continue;
+    }
+
     if (act.type === "supervisor_decision") {
       const label = String(act.label || act.prompt || "Supervisor decision").trim();
       await bot.sendMessage(chatId, `🧭 ${label}`);
@@ -3849,46 +4502,282 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
 
 async function executeActions(bot, chatId, jobId, plan, signal = null, opts = {}) {
   const runtime = opts?.runtime && typeof opts.runtime === "object" ? opts.runtime : null;
-  const agentIndex = buildTelegramAgentIndex({ runtime, routePlan: plan, actions: plan?.actions || [] });
-  const telegramUserId = String(opts?.telegramUserId || "").trim();
-  if (!plan || !Array.isArray(plan.actions)) return;
-  const allowed = new Set(["track_append", "agent_run", "gemini", "codex", "git_summary", "chatgpt_prompt", "chatgpt", "commit_request"]);
+  const rawPlan = plan && typeof plan === "object" ? plan : {};
+  const rawActions = Array.isArray(rawPlan.actions) ? rawPlan.actions : [];
+  if (rawActions.length === 0) return;
 
-  for (const rawAct of plan.actions) {
+  const normalizedPlan = normalizeActionPlan(rawPlan, {
+    maxActions: Math.max(4, Math.min(24, rawActions.length || 4)),
+  });
+  const planForExecution = normalizedPlan.actions.length > 0
+    ? {
+      ...rawPlan,
+      ...normalizedPlan,
+      actions: normalizedPlan.actions,
+    }
+    : rawPlan;
+  const runtimeSnapshot = mergePreferredRuntimeTeamSnapshot({
+    baseSnapshot: runtime?.runtime_team_snapshot || runtime?.runtimeTeamSnapshot || null,
+    routePlan: planForExecution,
+    source: String(planForExecution?.action_source || rawPlan?.action_source || "team_builder").trim() || "team_builder",
+  });
+  const sanitizedPlan = sanitizeExecutablePlan({
+    plan: planForExecution,
+    runtimeSnapshot,
+  });
+  const executionContractNotes = Array.isArray(sanitizedPlan?.notes) ? sanitizedPlan.notes : [];
+  const executablePlan = sanitizedPlan?.plan && typeof sanitizedPlan.plan === "object"
+    ? {
+      ...planForExecution,
+      ...sanitizedPlan.plan,
+      runtime_team_snapshot: runtimeSnapshot,
+    }
+    : {
+      ...planForExecution,
+      runtime_team_snapshot: runtimeSnapshot,
+    };
+  const effectiveRuntime = runtimeSnapshot
+    ? {
+      ...(runtime && typeof runtime === "object" ? runtime : {}),
+      runtime_team_snapshot: runtimeSnapshot,
+    }
+    : runtime;
+  const agentIndex = buildTelegramAgentIndex({ runtime: effectiveRuntime, routePlan: executablePlan, actions: executablePlan?.actions || [] });
+  const telegramUserId = String(opts?.telegramUserId || "").trim();
+  const allowed = new Set([
+    "track_append",
+    "agent_run",
+    "run_agent",
+    "gemini",
+    "codex",
+    "git_summary",
+    "chatgpt_prompt",
+    "chatgpt",
+    "commit_request",
+    "checkpoint",
+    "gate_wait",
+    "human_checkpoint",
+    "supervisor_decision",
+    "tool_proxy_call",
+    "memory_sync",
+    "committee_consensus",
+    "synthesize_final",
+    "spawn_parallel",
+    "spawn_agents",
+    "pause_children",
+    "cancel_child",
+    "reroute_child",
+  ]);
+  const activeRouteSignals = new Set();
+  const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(effectiveRuntime);
+
+  for (const note of executionContractNotes) {
+    await bot.sendMessage(
+      chatId,
+      `ℹ️ execution contract: ${String(note?.action_type || 'action').trim()} downgraded (${Number(note?.child_count || 0)})
+reason=${String(note?.reason || 'parallel spawn unavailable').trim()}`
+    );
+  }
+
+  for (const rawAct of executablePlan.actions || []) {
     if (!rawAct || !allowed.has(String(rawAct.type || "").trim().toLowerCase())) continue;
     const act = normalizeActionShape(rawAct);
     if (!act) continue;
 
+    const routeDecision = evaluateIncomingConditions(act, { activeSignals: activeRouteSignals });
+    const routeConditionBypass = ["gate_wait", "human_checkpoint", "checkpoint", "committee_consensus", "supervisor_decision"].includes(String(act?.type || "").trim().toLowerCase());
+    if (!routeDecision.allowed && !routeConditionBypass) {
+      await bot.sendMessage(chatId, `⏭️ route skipped: ${routeDecision.missing_conditions.join(', ') || 'conditions not satisfied'}`);
+      continue;
+    }
+
     if (act.type === "track_append") {
-      tracking.append(jobId, act.doc || "plan.md", String(act.markdown || ""));
-      await bot.sendMessage(chatId, `📝 기록 업데이트: ${act.doc || "plan.md"}`);
+      tracking.append(jobId, act.doc || "plan", String(act.markdown || ""));
+      const resolvedDocName = tracking.resolveDocName(jobId, act.doc || "plan");
+      await bot.sendMessage(chatId, `📝 기록 업데이트: ${resolvedDocName}`);
+      continue;
     }
 
     if (act.type === "agent_run") {
-      const agentInfo = findAgentConfigInRuntime(act.agent, runtime) || findAgentConfig(act.agent);
+      const agentInfo = findAgentConfigInRuntime(act.agent, effectiveRuntime) || findAgentConfig(act.agent);
       const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
       const displayName = formatChatAgentDisplayName(act.agent, agentIndex);
       await bot.sendMessage(chatId, `🤖 ${displayName} 실행 중… (${provider})`);
       const r = await enqueue(
-        () => executeAgentRun(bot, chatId, jobId, act, {
+        () => executeAgentRun(bot, chatId, jobId, withAgentOutputContract(act, {
+          runtimeExecutionPolicy,
+        }), {
           signal,
-          runtime,
+          runtime: effectiveRuntime,
           telegramUserId,
         }),
         { jobId, signal, label: `agent_run_${act.agent}` }
       );
-      await sendLong(bot, chatId, `🤖 ${displayName} 결과 (${r.mode})\n${clip(r.output, 3500)}`);
+      const routeSignals = resolveActionRouteSignals({ action: act, result: r });
+      for (const nextSignal of routeSignals) activeRouteSignals.add(nextSignal);
+      await sendLong(bot, chatId, `🤖 ${displayName} 결과 (${r.mode})${routeSignals.length > 0 ? `
+route_signals=${routeSignals.join(', ')}` : ''}
+${clip(r.output, 3500)}`);
+      continue;
+    }
+
+    if (act.type === "synthesize_final") {
+      const agentInfo = findAgentConfigInRuntime(act.agent, effectiveRuntime) || findAgentConfig(act.agent);
+      const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
+      const displayName = formatChatAgentDisplayName(act.agent, agentIndex);
+      await bot.sendMessage(chatId, `🧩 ${displayName} 최종 합성 중… (${provider})`);
+      const r = await enqueue(
+        () => executeAgentRun(bot, chatId, jobId, withAgentOutputContract({
+          type: "agent_run",
+          agent: act.agent,
+          prompt: act.prompt,
+          inputs: {
+            ...(act.inputs && typeof act.inputs === "object" ? act.inputs : {}),
+            final_synthesis: true,
+          },
+        }, {
+          runtimeExecutionPolicy,
+        }), {
+          signal,
+          runtime: effectiveRuntime,
+          telegramUserId,
+        }),
+        { jobId, signal, label: `synthesize_final_${act.agent}` }
+      );
+      const routeSignals = resolveActionRouteSignals({ action: act, result: r });
+      for (const nextSignal of routeSignals) activeRouteSignals.add(nextSignal);
+      await sendLong(bot, chatId, `🧩 ${displayName} 최종 합성 완료 (${r.mode})${routeSignals.length > 0 ? `
+route_signals=${routeSignals.join(', ')}` : ''}
+${clip(r.output, 3500)}`);
+      continue;
+    }
+
+    if (act.type === "spawn_parallel") {
+      const children = Array.isArray(act.agents) ? act.agents : [];
+      if (children.length === 0) continue;
+      await bot.sendMessage(chatId, `📣 병렬 실행 시작 (${children.length})`);
+      const settled = await Promise.allSettled(children.map((child) => enqueue(
+        () => executeAgentRun(bot, chatId, jobId, withAgentOutputContract(child, {
+          runtimeExecutionPolicy,
+        }), {
+          signal,
+          runtime: effectiveRuntime,
+          telegramUserId,
+          notify: false,
+        }),
+        { jobId, signal, label: `spawn_parallel_${child.agent}` }
+      )));
+      let okCount = 0;
+      let errorCount = 0;
+      const summaries = [];
+      for (let index = 0; index < settled.length; index += 1) {
+        const row = settled[index];
+        const child = children[index];
+        const displayName = formatChatAgentDisplayName(child?.agent || "", agentIndex);
+        if (row.status === "fulfilled") {
+          okCount += 1;
+          summaries.push(`- ${displayName}: ok`);
+        } else {
+          errorCount += 1;
+          summaries.push(`- ${displayName}: ${String(row.reason?.message || row.reason || "error")}`);
+        }
+      }
+      await sendLong(bot, chatId, [
+        `📣 병렬 실행 완료: ok=${okCount}, error=${errorCount}`,
+        ...summaries,
+      ].join("\n"));
+      continue;
     }
 
     if (act.type === "git_summary") {
       const { status, diff } = await gitSummary(jobId, signal);
-      await sendLong(bot, chatId, `📌 git status\n${FENCE}\n${clip(status, 1500)}\n${FENCE}\n\n📌 git diff(일부)\n${FENCE}diff\n${clip(diff, 2500)}\n${FENCE}`);
+      await sendLong(bot, chatId, `📌 git status
+${FENCE}
+${clip(status, 1500)}
+${FENCE}
+
+📌 git diff(일부)
+${FENCE}diff
+${clip(diff, 2500)}
+${FENCE}`);
+      continue;
     }
 
     if (act.type === "chatgpt_prompt") {
       const q = String(act.question || act.prompt || "").trim();
       if (!q) continue;
       await sendChatGPTPrompt(bot, chatId, jobId, q);
+      continue;
+    }
+
+    if (act.type === "checkpoint") {
+      const approvalRequired = act?.inputs?.approval_required === true;
+      const label = String(act.label || act.prompt || act.inputs?.checkpoint_id || "checkpoint").trim();
+      await bot.sendMessage(chatId, `🧭 checkpoint: ${label}`);
+      if (approvalRequired) {
+        await bot.sendMessage(chatId, `🧑 checkpoint required: ${label}`);
+        break;
+      }
+      continue;
+    }
+
+    if (act.type === "gate_wait") {
+      const label = String(act.label || act.prompt || act.inputs?.slot_id || "gate").trim();
+      const detail = summarizeConditions(act.inputs?.incoming_conditions);
+      const routeSignals = resolveActionRouteSignals({ action: act, result: { route_signals: act?.inputs?.selected_route_signals || [] } });
+      await bot.sendMessage(chatId, `⏸️ gate reached: ${label}${detail ? `
+조건: ${detail}` : ''}${routeSignals.length > 0 ? `
+route_signals=${routeSignals.join(', ')}` : ''}`);
+      if (act.inputs?.approval_required === true) break;
+      for (const nextSignal of routeSignals) activeRouteSignals.add(nextSignal);
+      continue;
+    }
+
+    if (act.type === "human_checkpoint") {
+      const label = String(act.label || act.prompt || act.inputs?.slot_id || "human checkpoint").trim();
+      const routeSignals = resolveActionRouteSignals({ action: act, result: { route_signals: act?.inputs?.selected_route_signals || [] } });
+      await bot.sendMessage(chatId, `🧑 checkpoint required: ${label}${routeSignals.length > 0 ? `
+route_signals=${routeSignals.join(', ')}` : ''}`);
+      break;
+    }
+
+    if (act.type === "tool_proxy_call") {
+      const proxyResult = await runToolProxyStep({ action: act, jobId, signal, runtime: effectiveRuntime });
+      const routeSignals = resolveActionRouteSignals({ action: act, result: proxyResult });
+      for (const nextSignal of routeSignals) activeRouteSignals.add(nextSignal);
+      await sendLong(bot, chatId, String(proxyResult?.text || 'tool proxy step'));
+      continue;
+    }
+
+    if (act.type === "memory_sync") {
+      const label = String(act.label || act.prompt || act.inputs?.slot_id || "memory sync").trim();
+      const memoryKeys = Array.isArray(act.inputs?.memory_keys) ? act.inputs.memory_keys.filter(Boolean) : [];
+      const routeSignals = resolveActionRouteSignals({ action: act, result: {} });
+      for (const nextSignal of routeSignals) activeRouteSignals.add(nextSignal);
+      await bot.sendMessage(chatId, `🧠 memory sync: ${label}${memoryKeys.length > 0 ? `
+keys=${memoryKeys.join(', ')}` : ''}${routeSignals.length > 0 ? `
+route_signals=${routeSignals.join(', ')}` : ''}`);
+      continue;
+    }
+
+    if (act.type === "committee_consensus") {
+      const label = String(act.label || act.prompt || "committee consensus").trim();
+      const routeSignals = resolveActionRouteSignals({ action: act, result: {} });
+      for (const nextSignal of routeSignals) activeRouteSignals.add(nextSignal);
+      await bot.sendMessage(chatId, `🏛️ ${label}${routeSignals.length > 0 ? `
+route_signals=${routeSignals.join(', ')}` : ''}`);
+      continue;
+    }
+
+    if (act.type === "supervisor_decision") {
+      const label = String(act.label || act.prompt || "Supervisor decision").trim();
+      await bot.sendMessage(chatId, `🧭 ${label}`);
+      continue;
+    }
+
+    if (["pause_children", "cancel_child", "reroute_child"].includes(act.type)) {
+      await bot.sendMessage(chatId, `🧭 control action noted: ${act.type}`);
+      continue;
     }
 
     if (act.type === "commit_request") {
@@ -3896,7 +4785,10 @@ async function executeActions(bot, chatId, jobId, plan, signal = null, opts = {}
       if (!message) continue;
       const rec = approvals.request(jobId, { purpose: "git commit", summary: `Commit changes with message: ${message}`, payload: { action: "git_commit", message } });
       await bot.sendMessage(chatId,
-        `🟡 커밋 승인 필요\njobId=${jobId}\nmessage=${message}\ntoken=${rec.token}`,
+        `🟡 커밋 승인 필요
+jobId=${jobId}
+message=${message}
+token=${rec.token}`,
         { reply_markup: { inline_keyboard: [[{ text: "✅ Approve", callback_data: `approve:${jobId}:${rec.token}` }, { text: "❌ Deny", callback_data: `deny:${jobId}:${rec.token}` }]] } }
       );
     }
@@ -3907,6 +4799,8 @@ async function executeActions(bot, chatId, jobId, plan, signal = null, opts = {}
     replyToMessageId: getCurrentTurnReplyMessageId(chatId),
   }).catch(() => null);
 }
+
+
 
 export {
   buildSupervisorExecutionCallbacks,

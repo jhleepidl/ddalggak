@@ -159,6 +159,24 @@ function mergeObjectsPreferExisting(baseValue, userValue) {
   return typeof userValue === "undefined" ? baseValue : userValue;
 }
 
+
+function mergeObjectsPreferPatch(baseValue, patchValue) {
+  if (Array.isArray(baseValue)) {
+    return Array.isArray(patchValue) ? [...patchValue] : [...baseValue];
+  }
+  if (baseValue && typeof baseValue === "object") {
+    const base = asObject(baseValue);
+    const patch = asObject(patchValue);
+    const out = { ...base };
+    for (const [key, value] of Object.entries(patch)) {
+      if (key in base) out[key] = mergeObjectsPreferPatch(base[key], value);
+      else out[key] = value;
+    }
+    return out;
+  }
+  return typeof patchValue === "undefined" ? baseValue : patchValue;
+}
+
 function enforceWorkspaceContextSettings(raw = {}) {
   const row = asObject(raw);
   const context = asObject(row.context);
@@ -184,7 +202,7 @@ function appendGeminiDebugLog(line = "") {
   } catch {}
 }
 
-export function ensureGeminiWorkspaceConfig(workspacePath, { overwritePolicy = "" } = {}) {
+export function ensureGeminiWorkspaceConfig(workspacePath, { overwritePolicy = "", patchSettings = {} } = {}) {
   const workspaceDir = path.resolve(String(workspacePath || process.cwd()));
   fs.mkdirSync(workspaceDir, { recursive: true });
   const geminiDir = path.join(workspaceDir, ".gemini");
@@ -192,9 +210,11 @@ export function ensureGeminiWorkspaceConfig(workspacePath, { overwritePolicy = "
   const policy = normalizeOverwritePolicy(overwritePolicy || process.env.GEMINI_SETTINGS_OVERWRITE);
   const workspaceModelOverride = process.env.GEMINI_WORKSPACE_MODEL;
   const defaults = enforceWorkspaceContextSettings(defaultGeminiWorkspaceSettings());
+  const policyPatch = asObject(patchSettings);
   const manageWorkspaceConfig = fs.existsSync(settingsPath)
     || ['1', 'true', 'yes', 'on'].includes(String(process.env.GEMINI_MANAGE_WORKSPACE_CONFIG || '').trim().toLowerCase())
-    || Boolean(String(workspaceModelOverride || '').trim());
+    || Boolean(String(workspaceModelOverride || '').trim())
+    || Object.keys(policyPatch).length > 0;
   if (!manageWorkspaceConfig) {
     return {
       workspaceDir,
@@ -218,6 +238,9 @@ export function ensureGeminiWorkspaceConfig(workspacePath, { overwritePolicy = "
   const sanitized = sanitizeWorkspaceModelSettings(next, { workspaceModelOverride });
   next = enforceWorkspaceContextSettings(sanitized.settings);
   if (sanitized.changed && sanitized.logLine) appendGeminiDebugLog(sanitized.logLine);
+  if (Object.keys(policyPatch).length > 0) {
+    next = enforceWorkspaceContextSettings(mergeObjectsPreferPatch(next, policyPatch));
+  }
 
   const serialized = `${JSON.stringify(next, null, 2)}\n`;
   if (existingRaw !== serialized) {
@@ -665,6 +688,10 @@ export async function runGeminiPrompt({
   onRetry = null,
   onModelSwitch = null,
   onGiveUp = null,
+  approvalMode = "",
+  settingsOverwrite = "",
+  workspaceSettingsPatch = {},
+  extraEnv = {},
 }) {
   // Keep CLI prompt argument simple and stream the real prompt via stdin.
   // This avoids parser issues when prompt text starts with "-" or markdown fences.
@@ -676,7 +703,7 @@ export async function runGeminiPrompt({
   const timeoutMs = 30 * 60 * 1000;
   const commandCwd = path.resolve(String(cwd || workspaceRoot || process.cwd()).trim() || process.cwd());
   const workspacePath = commandCwd;
-  ensureGeminiWorkspaceConfig(workspacePath);
+  ensureGeminiWorkspaceConfig(workspacePath, { overwritePolicy: settingsOverwrite, patchSettings: workspaceSettingsPatch });
   const cleanJobId = String(jobId || "").trim() || (
     String(concurrencyKey || "").startsWith("job:")
       ? String(concurrencyKey || "").slice(4).trim()
@@ -684,9 +711,10 @@ export async function runGeminiPrompt({
   );
   const baseEnv = {
     GEMINI_WORKSPACE_PATH: workspacePath,
+    ...asObject(extraEnv),
   };
   void concurrencyKey;
-  const requestedMode = resolveApprovalMode();
+  const requestedMode = VALID_APPROVAL_MODES.has(String(approvalMode || "").trim()) ? String(approvalMode || "").trim() : resolveApprovalMode();
   const modelCandidates = buildModelCandidates(model);
   const maxRetries = getCapacityMaxRetries();
   const switchAfter = getCapacitySwitchAfter();

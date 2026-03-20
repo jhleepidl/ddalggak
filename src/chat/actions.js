@@ -407,7 +407,7 @@ export function normalizeAction(raw) {
   if (type === "interrupt" || type === "cancel") return normalizeInterrupt(row);
   if (type === "spawn_agents" || type === "fork_join" || type === "spawn") return normalizeSpawnAgents(row);
   if (type === "spawn_parallel") return normalizeControlAction(row, "spawn_parallel");
-  if (["checkpoint", "pause_children", "cancel_child", "reroute_child", "supervisor_decision", "synthesize_final"].includes(type)) {
+  if (["checkpoint", "pause_children", "cancel_child", "reroute_child", "supervisor_decision", "synthesize_final", "gate_wait", "human_checkpoint", "tool_proxy_call", "memory_sync", "committee_consensus"].includes(type)) {
     return normalizeControlAction(row, type);
   }
   return null;
@@ -476,6 +476,11 @@ export function defaultAllowlist() {
     "reroute_child",
     "supervisor_decision",
     "synthesize_final",
+    "gate_wait",
+    "human_checkpoint",
+    "tool_proxy_call",
+    "memory_sync",
+    "committee_consensus",
   ]);
 }
 

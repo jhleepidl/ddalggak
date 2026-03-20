@@ -1,3 +1,5 @@
+import { findAnswerCapsuleByTelegramMessageId } from "./answer_capsules.js";
+
 function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -82,6 +84,15 @@ function estimateTokenCount(text = "") {
   return (String(text || "").match(/[a-zA-Z0-9가-힣_]+/g) || []).length;
 }
 
+function isLikelyNewTask(message = "") {
+  const text = clean(message);
+  if (!text || text.startsWith("/")) return false;
+  for (const regex of NEW_TASK_KEYWORDS) {
+    if (regex.test(text) && estimateTokenCount(text) > 8) return true;
+  }
+  return false;
+}
+
 export function inferAgentFollowupIntent(message = "") {
   const text = clean(message);
   const lower = text.toLowerCase();
@@ -160,16 +171,79 @@ function isShortcutEligibleTurn(turn = {}) {
   return clean(turn.output).length > 0;
 }
 
-export function planAgentFollowupShortcut({ message = "", session = null, runtime = null, teamConfig = null } = {}) {
+function buildReplyAnchoredFollowup({ capsule = null, message = "" } = {}) {
+  const row = asObject(capsule);
+  const agentId = cleanId(row.agent_id || row.agentId);
+  if (!agentId) return null;
+  const prompt = [
+    "[FOLLOW-UP SHORTCUT: REPLY ANCHOR]",
+    "너는 이전 답변을 작성했던 동일한 agent다.",
+    "이번 요청은 오래된 답장(reply) 기반의 후속 질문이므로 team router를 다시 거치지 않는다.",
+    "가능하면 이전 답변의 논리와 근거를 그대로 이어서 설명하고, 새 팀 구성 제안은 하지 말라.",
+    row.original_goal_summary ? `[ORIGINAL GOAL SUMMARY]\n${row.original_goal_summary}` : "",
+    row.answer_summary ? `[PREVIOUS ANSWER SUMMARY]\n${row.answer_summary}` : "",
+    row.answer_excerpt ? `[PREVIOUS ANSWER EXCERPT]\n${clipText(row.answer_excerpt, 3600)}` : "",
+    Array.isArray(row.evidence_refs) && row.evidence_refs.length > 0
+      ? `[EVIDENCE REFS]\n${row.evidence_refs.map((entry) => `- ${entry}`).join("\n")}`
+      : "",
+    Array.isArray(row.artifact_refs) && row.artifact_refs.length > 0
+      ? `[ARTIFACT REFS]\n${row.artifact_refs.map((entry) => `- ${entry}`).join("\n")}`
+      : "",
+    `[USER FOLLOW-UP]\n${clean(message)}`,
+    "[RESPONSE STYLE] 한국어로 직접 답하고, 필요하면 이전 답변과 연결되는 핵심 근거만 짧게 덧붙여라.",
+  ].filter(Boolean).join("\n\n");
+
+  return {
+    matched: true,
+    reason: "reply_anchor_capsule",
+    target_agent_id: agentId,
+    target_capsule: row,
+    action: {
+      type: "run_agent",
+      agent_id: agentId,
+      goal: prompt,
+      inputs: {
+        shortcut_followup: true,
+        reply_anchor_followup: true,
+        reply_anchor_message_id: row.telegram_message_id || undefined,
+      },
+    },
+  };
+}
+
+export function planAgentFollowupShortcut({ message = "", session = null, runtime = null, teamConfig = null, replyToMessageId = null } = {}) {
   const intent = inferAgentFollowupIntent(message);
+  const cleanReplyToMessageId = Number.isFinite(Number(replyToMessageId)) ? Number(replyToMessageId) : null;
   const shortcutPolicy = asObject(teamConfig?.shortcut_policy || runtime?.activeTeamConfig?.shortcut_policy);
   if (shortcutPolicy.enabled === false) {
     return { matched: false, reason: "shortcut_disabled", intent };
   }
-  if (!intent.matched) return { matched: false, reason: "intent_not_matched", intent };
   if (session?.pending_approval && shortcutPolicy.disallow_when_pending_approval !== false) {
     return { matched: false, reason: "pending_approval", intent };
   }
+
+  if (!cleanReplyToMessageId) {
+    return { matched: false, reason: "reply_required", intent };
+  }
+
+  const replyCapsule = findAnswerCapsuleByTelegramMessageId(session, cleanReplyToMessageId);
+  const replyShortcutAllowed = replyCapsule && !isLikelyNewTask(message);
+  if (replyShortcutAllowed) {
+    const anchored = buildReplyAnchoredFollowup({ capsule: replyCapsule, message });
+    if (anchored) {
+      return {
+        ...anchored,
+        intent: {
+          ...intent,
+          matched: true,
+          score: Math.max(3, Number(intent?.score || 0)),
+          reasons: [...new Set([...(Array.isArray(intent?.reasons) ? intent.reasons : []), "reply_anchor"])],
+        },
+      };
+    }
+  }
+
+  if (!intent.matched) return { matched: false, reason: "intent_not_matched", intent };
 
   const recentTurns = normalizeRecentAgentTurns(session?.recent_agent_turns || session?.recentAgentTurns || []);
   if (recentTurns.length === 0) return { matched: false, reason: "no_recent_agent_turn", intent };

@@ -20,18 +20,29 @@ import {
   suggestTeamConfiguration,
   validateTeamConfiguration,
 } from "../../application/team_configuration.js";
+import { buildTeamManifest, installTeamManifestToSession, normalizeTeamManifest } from '../../application/team_manifest.js';
+import { buildTeamInstallProposal, formatTeamInstallProposalMessage } from '../../application/install_proposal.js';
+import { buildInstallProposalPrompt, createPendingInstallProposalState, getPendingInstallProposal, archivePendingInstallProposal } from '../../application/install_proposal_state.js';
+import { formatManifestRequirementLines, normalizeManifestRequirements } from '../../shared/manifest_requirements.js';
+import { handleTelegramTeamManifestSubcommand } from './team_manifest_commands.js';
+import { handleTelegramCredentialCommand } from './credential_commands.js';
+import { getCredentialBindingState } from '../../application/credential_binding.js';
+import { buildTeamSchemaOptionsText, buildTeamSchemaOptionsSummaryLines } from '../../shared/team_schema_catalog.js';
 
 const HELP_TEXT = [
   "Commands:",
   "- /chat [text]: 대화/작업 지시",
   "- /context [global]: 현재 job 또는 global 컨텍스트 보기",
-  "- /team [suggest <목적>|create <자연어 팀 설명>|refine <자연어 수정>|apply|template|validate <JSON>|reset|modes]: 팀 제안/생성/수정/확정",
+  "- /team [suggest <목적>|create <자연어 팀 설명>|refine <자연어 수정>|apply|requirements|proposal|export|install <JSON>|pull|push|template|validate <JSON>|options|reset|modes]: 팀 제안/생성/수정/동기화",
+  "- /agents ...: legacy alias of /team (팀 상태/수정은 /team 권장)",
+  "- /agents ...: legacy alias of /team (팀 상태/수정은 /team 권장)",
   "- /skills: 현재/예정 agent roster와 대표 skill 보기",
   "- /tools: 현재 job의 tool 상태 보기",
   "- /files [uploads|outputs|all] [limit]: workspace 파일 목록 보기",
   "- /outputs [send]: output 목록 보기 또는 파일 전송",
   "- /sendfile <relative_path>: 특정 workspace 파일 전송",
   "- /status: 현재 chat/job 상태 보기",
+  "- /credential [list|pending|set <KEY> <secret> [--resume]|clear <KEY>]: install proposal용 credential 바인딩",
   "- /stop [jobId]: 현재 실행 또는 지정 job 중단",
   "- /running: 실행 중이거나 대기 중인 job 확인",
   "- /whoami: 현재 chat_id / user_id 확인",
@@ -44,10 +55,12 @@ const ADVANCED_HELP_TEXT = [
   "- /whoami: 현재 chat_id / user_id 확인",
   "- /running: 실행/대기 job 목록 확인",
   "- /status: 현재 chat/job 상태 보기",
+  "- /credential [list|pending|set <KEY> <secret> [--resume]|clear <KEY>]: install proposal용 credential 바인딩",
   "- /stop [jobId]: 현재 실행 또는 지정 job 중단",
-  "- /memory [show|md|policy|routing|role|agents|note|lesson|reset]: 런타임 메모리 조회/수정",
+  "- /memory [show|md|kb|policy|routing|role|agents|note|lesson|reset]: 런타임 메모리/KB 조회·수정",
   "- /settings ...: /memory alias",
-  "- /team [suggest <목적>|create <자연어 팀 설명>|refine <자연어 수정>|apply|template|validate <JSON>|reset|modes]: 팀 제안/생성/수정/확정",
+  "- /team [suggest <목적>|create <자연어 팀 설명>|refine <자연어 수정>|apply|requirements|proposal|export|install <JSON>|pull|push|template|validate <JSON>|options|reset|modes]: 팀 제안/생성/수정/동기화",
+  "- /agents ...: legacy alias of /team (팀 상태/수정은 /team 권장)",
   "- /skills: 현재/예정 agent roster와 대표 skill 보기",
   "- /tools: 현재 job의 tool 상태 보기",
   "- /files [uploads|outputs|all] [limit]: workspace 파일 목록 보기",
@@ -61,6 +74,9 @@ const ADVANCED_HELP_TEXT = [
   "- /gptapply [jobId]: GPT 응답 적용",
   "- /gptdone: GPT paste 대기 모드 종료",
   "- /commit <jobId> <message>: 작업 결과 커밋",
+  ...buildTeamSchemaOptionsSummaryLines(),
+  "- 실행 중 최신 유저 요청이 team pattern과 충돌하면 이번 turn에 한해 임시 execution override가 적용될 수 있습니다.",
+  "- 팀 구조 자체를 바꾸려면 /team refine 를 사용하세요.",
 ].join("\n");
 
 export function createTelegramCommandHandler(deps = {}) {
@@ -116,13 +132,98 @@ export function createTelegramCommandHandler(deps = {}) {
   const parseChatMessageWithFlags = runtimeOps.parseChatMessageWithFlags || deps.parseChatMessageWithFlags;
   const runSupervisorChat = runtimeOps.runSupervisorChat || deps.runSupervisorChat;
   const loadSupervisorRuntime = runtimeOps.loadSupervisorRuntime || deps.loadSupervisorRuntime;
+  const normalizeForceMode = runtimeOps.normalizeForceMode || deps.normalizeForceMode || ((value) => value || 'normal');
   const decideRunRoute = runtimeOps.decideRunRoute || deps.decideRunRoute;
   const executeRoutedPlan = runtimeOps.executeRoutedPlan || deps.executeRoutedPlan;
   const suggestNextPrompt = runtimeOps.suggestNextPrompt || deps.suggestNextPrompt;
   const sendChatGPTPrompt = runtimeOps.sendChatGPTPrompt || deps.sendChatGPTPrompt;
+  const memoryModeWithFallback = runtimeOps.memoryModeWithFallback || deps.memoryModeWithFallback;
+  const requireGocClient = runtimeOps.requireGocClient || deps.requireGocClient;
 
   const sendChatStatus = teamOps.sendChatStatus || deps.sendChatStatus;
   const sendAgentOrToolListQuick = teamOps.sendAgentOrToolListQuick || deps.sendAgentOrToolListQuick;
+
+  function parseApplyStateTokens(tokens = []) {
+    for (const raw of tokens) {
+      const value = String(raw || '').trim().toLowerCase();
+      if (value === 'active' || value === '--active' || value === '--apply') return 'active';
+      if (value === 'pending' || value === '--pending') return 'pending';
+    }
+    return 'pending';
+  }
+
+  function currentTeamForManifest(teamState = {}) {
+    return teamState.pending_team || teamState.active_team || null;
+  }
+
+  function buildManifestWithSessionState(baseTeam, { runtime = null, applyState = 'pending', source = 'telegram', sessionInstallProposal = null } = {}) {
+    return buildTeamManifest(baseTeam, { runtime, applyState, source, installProposalState: sessionInstallProposal });
+  }
+
+  function buildTeamStatusOverview(teamState = {}, { chatId = '' } = {}) {
+    const lines = [buildTeamListMessage(teamState)];
+    const session = chatSessionStore?.get?.(chatId) || {};
+    const pendingTeam = teamState?.pending_team && typeof teamState.pending_team === 'object' ? teamState.pending_team : null;
+    const activeTeam = teamState?.active_team && typeof teamState.active_team === 'object' ? teamState.active_team : null;
+    const pendingInstallProposal = getPendingInstallProposal(chatSessionStore, chatId);
+    const credentialBindingState = getCredentialBindingState(chatSessionStore, chatId);
+    const patternConflict = session?.pattern_conflict && typeof session.pattern_conflict === 'object' ? session.pattern_conflict : null;
+    const temporaryOverride = session?.temporary_execution_override && typeof session.temporary_execution_override === 'object' ? session.temporary_execution_override : null;
+    const patternRecovery = session?.pattern_recovery && typeof session.pattern_recovery === 'object' ? session.pattern_recovery : null;
+
+    const stateLines = [
+      `active team: ${activeTeam ? String(activeTeam.team_name || 'configured').trim() : 'none'}`,
+      `pending team: ${pendingTeam ? `${String(pendingTeam.team_name || 'pending_team').trim()}${pendingTeam?.planner_metadata?.auto_refine_from_pattern_conflict ? ' · auto_refine_draft' : ''}` : 'none'}`,
+      `install proposal: ${pendingInstallProposal ? `${String(pendingInstallProposal.status || 'awaiting_install_approval')} · gaps=${Number(pendingInstallProposal?.proposal?.gap_count || 0)}` : 'none'}`,
+      `credential bindings: ${Number(credentialBindingState?.summary?.bound_count || 0)}`,
+    ];
+    if (patternConflict?.classification) {
+      stateLines.push(`pattern conflict: ${String(patternConflict.classification)}${patternConflict?.reason ? ` · ${String(patternConflict.reason)}` : ''}`);
+    }
+    if (temporaryOverride?.effective_pattern || temporaryOverride?.mode) {
+      stateLines.push(`temporary override: ${String(temporaryOverride.effective_pattern || temporaryOverride.mode || 'active')}`);
+    }
+    if (patternRecovery?.recovery_mode || patternRecovery?.status) {
+      stateLines.push(`pattern recovery: ${String(patternRecovery.recovery_mode || patternRecovery.status || 'pending')}`);
+    }
+    lines.push('', 'Runtime state', ...stateLines);
+
+    const nextSteps = [];
+    if (pendingTeam) nextSteps.push('- /team apply');
+    if (pendingInstallProposal) nextSteps.push('- /team proposal', '- /credential pending');
+    if (patternConflict?.classification === 'structure_override_required') nextSteps.push('- /team refine <자연어 수정>');
+    if (nextSteps.length > 0) lines.push('', '추천 명령', ...nextSteps);
+    return lines.join('\n');
+  }
+
+  async function resumeFromInstallProposal({ state = null, runtime = null, chatId = '', userId = '', currentTeam = null } = {}) {
+    const resume = state?.resume_request && typeof state.resume_request === 'object' ? state.resume_request : null;
+    if (!resume?.message || typeof runSupervisorChat !== 'function') return false;
+    await runSupervisorChat(bot, chatId, userId, resume.message, {
+      debug: false,
+      chatInfo: resume.chat_info && typeof resume.chat_info === 'object' ? resume.chat_info : { chat_id: String(chatId || '') },
+      inputKind: resume.input_kind || 'install_resume',
+      telegramMessageId: resume.telegram_message_id || null,
+      userReplyToMessageId: resume.user_reply_to_message_id || null,
+      forceMode: normalizeForceMode(resume.force_mode || 'normal'),
+      teamConfig: currentTeam && typeof currentTeam === 'object' ? currentTeam : null,
+    });
+    return true;
+  }
+
+  async function requireCurrentRuntime(chatId, userId) {
+    const currentJobId = resolveLiveJobIdForChat(chatId);
+    if (!currentJobId || typeof loadSupervisorRuntime !== 'function') return null;
+    try {
+      return await loadSupervisorRuntime(currentJobId, { telegramUserId: userId, includeContext: false, includeGlobal: false });
+    } catch {
+      return null;
+    }
+  }
+
+  function getCurrentThreadId(runtime = null) {
+    return String(runtime?.map?.threadId || runtime?.threadId || '').trim();
+  }
 
   return async function handleTelegramCommand({ msg, text, chatId, userId }) {
     if (!String(text || "").startsWith("/")) return false;
@@ -207,6 +308,16 @@ export function createTelegramCommandHandler(deps = {}) {
 
       if (sub === "md") {
         await sendLong(bot, chatId, memory.readMarkdown());
+        return true;
+      }
+
+      if (sub === "kb") {
+        const currentJobId = resolveLiveJobIdForChat(chatId);
+        if (!currentJobId) {
+          await bot.sendMessage(chatId, "현재 job이 없어 knowledge base profile을 표시할 수 없습니다. /chat 또는 /run 으로 job을 먼저 시작하세요.");
+          return true;
+        }
+        await sendLong(bot, chatId, tracking.renderProfileMarkdown(currentJobId));
         return true;
       }
 
@@ -297,7 +408,7 @@ export function createTelegramCommandHandler(deps = {}) {
         return true;
       }
 
-      await bot.sendMessage(chatId, "Usage:\n/memory show\n/memory md\n/memory policy <자연어 프롬프트>\n/memory routing <자연어 프롬프트>\n/memory role <gemini|codex|chatgpt> <자연어 역할>\n/memory agents\n/memory note <메모>\n/memory lesson <교훈>\n/memory reset");
+      await bot.sendMessage(chatId, "Usage:\n/memory show\n/memory md\n/memory kb\n/memory policy <자연어 프롬프트>\n/memory routing <자연어 프롬프트>\n/memory role <gemini|codex|chatgpt> <자연어 역할>\n/memory agents\n/memory note <메모>\n/memory lesson <교훈>\n/memory reset");
       return true;
     }
 
@@ -327,7 +438,7 @@ export function createTelegramCommandHandler(deps = {}) {
         teamState = getSessionTeamState(chatSessionStore, chatId);
       }
       if (!sub) {
-        await sendLong(bot, chatId, buildTeamListMessage(teamState));
+        await sendLong(bot, chatId, buildTeamStatusOverview(teamState, { chatId }));
         return true;
       }
       if (sub === 'suggest') {
@@ -351,7 +462,7 @@ ${formatSupportedModelLines()}`);
       if (sub === 'create') {
         const description = String(rawArgs.replace(/^create\s+/i, '') || '').trim();
         if (!description) {
-          await bot.sendMessage(chatId, 'Usage: /team create <자연어 팀 설명>');
+          await bot.sendMessage(chatId, 'Usage: /team create <자연어 팀 설명>\n\n선택지 참고: /team options 또는 /help advanced');
           return true;
         }
         await bot.sendMessage(chatId, '해당 요청에 맞는 팀을 구성하겠습니다. 잠시만 기다려주세요.');
@@ -371,13 +482,214 @@ ${formatSupportedModelLines()}`);
           return true;
         }
         if (!instruction) {
-          await bot.sendMessage(chatId, 'Usage: /team refine <자연어 수정>');
+          await bot.sendMessage(chatId, 'Usage: /team refine <자연어 수정>\n\n선택지 참고: /team options 또는 /help advanced');
           return true;
         }
         await bot.sendMessage(chatId, '기존 팀 구성을 바탕으로 수정안을 다시 설계하겠습니다. 잠시만 기다려주세요.');
         const next = await refineTeamConfigurationAdvanced({ team: baseTeam, instruction, runtime: runtimeForTeam });
         storePendingTeam(chatSessionStore, chatId, next);
         await sendLong(bot, chatId, formatTeamProposalMessage(next));
+        return true;
+      }
+
+      const handledTeamManifestSubcommand = await handleTelegramTeamManifestSubcommand({
+        sub,
+        rest,
+        rawArgs,
+        bot,
+        sendLong,
+        chatId,
+        userId,
+        teamState,
+        runtimeForTeam,
+        chatSessionStore,
+        memoryModeWithFallback,
+        requireGocClient,
+        applyPendingTeam,
+        storePendingTeam,
+        formatTeamProposalMessage,
+        loadSupervisorRuntime,
+        runSupervisorChat,
+        normalizeForceMode,
+        resolveLiveJobIdForChat,
+        jobs,
+      });
+      if (handledTeamManifestSubcommand) return true;
+      if (sub === 'proposal' || sub === 'install-plan') {
+        const proposalAction = String(rest[1] || '').trim().toLowerCase();
+        const existingProposalState = getPendingInstallProposal(chatSessionStore, chatId);
+        const baseTeam = currentTeamForManifest(teamState);
+        if (proposalAction === 'dismiss' || proposalAction === 'clear') {
+          if (!existingProposalState) {
+            await bot.sendMessage(chatId, '대기 중인 install proposal이 없습니다.');
+            return true;
+          }
+          archivePendingInstallProposal(chatSessionStore, chatId, 'dismissed');
+          await bot.sendMessage(chatId, '✅ install proposal을 닫았습니다.');
+          return true;
+        }
+        if (proposalAction === 'install' || proposalAction === 'pending') {
+          if (!baseTeam) {
+            await bot.sendMessage(chatId, '먼저 /team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 팀을 제안받아 주세요.');
+            return true;
+          }
+          if (!existingProposalState) {
+            const proposal = buildTeamInstallProposal({ team: baseTeam, runtime: runtimeForTeam, applyState: 'pending' });
+            const state = createPendingInstallProposalState({ proposal, applyState: 'pending', source: 'team_requirement' });
+            if (state) {
+              chatSessionStore.upsert(chatId, {
+                pending_install_proposal: state,
+                awaiting_install_approval: true,
+              });
+            }
+          }
+          if (!teamState.pending_team && baseTeam) storePendingTeam(chatSessionStore, chatId, baseTeam);
+          const archived = existingProposalState || getPendingInstallProposal(chatSessionStore, chatId);
+          if (archived) archivePendingInstallProposal(chatSessionStore, chatId, 'installed_pending', { apply_state: 'pending' });
+          await bot.sendMessage(chatId, '✅ install proposal을 pending 상태로 보관했습니다. 필요하면 /team apply 후 다시 시도해 주세요.');
+          return true;
+        }
+        if (proposalAction === 'apply' || proposalAction === 'active' || proposalAction === 'resume') {
+          if (!existingProposalState) {
+            await bot.sendMessage(chatId, '대기 중인 install proposal이 없습니다. 먼저 /team proposal 로 확인해 주세요.');
+            return true;
+          }
+          let activeTeam = teamState.active_team || null;
+          if (teamState.pending_team) {
+            activeTeam = await applyPendingTeam({ sessionStore: chatSessionStore, chatId, runtime: runtimeForTeam });
+            teamState = getSessionTeamState(chatSessionStore, chatId);
+          }
+          archivePendingInstallProposal(chatSessionStore, chatId, 'applied_active', { apply_state: 'active' });
+          await bot.sendMessage(chatId, '✅ install proposal을 반영했고 같은 요청을 재개합니다.');
+          await resumeFromInstallProposal({ state: existingProposalState, runtime: runtimeForTeam, chatId, userId, currentTeam: activeTeam || teamState.active_team || baseTeam });
+          return true;
+        }
+        if (!baseTeam && !existingProposalState) {
+          await bot.sendMessage(chatId, '먼저 /team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 팀을 제안받아 주세요.');
+          return true;
+        }
+        const proposal = baseTeam
+          ? buildTeamInstallProposal({ team: baseTeam, runtime: runtimeForTeam, applyState: teamState.pending_team ? 'active' : 'pending' })
+          : existingProposalState?.proposal;
+        const prompt = existingProposalState ? buildInstallProposalPrompt(existingProposalState, { hasPendingTeam: !!teamState.pending_team }) : null;
+        const lines = [
+          existingProposalState ? `pending install proposal state: ${existingProposalState.status}` : 'install proposal preview',
+          '',
+          formatTeamInstallProposalMessage(proposal),
+          ...(prompt ? ['', prompt.text] : []),
+          '',
+          '명령:',
+          '- /team proposal pending',
+          '- /team proposal apply',
+          '- /team proposal dismiss',
+        ].filter(Boolean);
+        await sendLong(bot, chatId, lines.join('\n'));
+        return true;
+      }
+      if (sub === 'requirements') {
+        const baseTeam = currentTeamForManifest(teamState);
+        if (!baseTeam) {
+          await bot.sendMessage(chatId, '먼저 /team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 팀을 제안받아 주세요.');
+          return true;
+        }
+        const manifest = buildTeamManifest(baseTeam, { runtime: runtimeForTeam, applyState: 'pending' });
+        const requirementLines = formatManifestRequirementLines(manifest.requirements || normalizeManifestRequirements({}), { maxLines: 12 });
+        await sendLong(bot, chatId, [
+          `실행 requirements · ${baseTeam.team_name || 'team_config'}`,
+          ...(requirementLines.length > 0 ? requirementLines : ['- (추가 requirement 없음)']),
+        ].join('\n'));
+        return true;
+      }
+      if (sub === 'export') {
+        const baseTeam = currentTeamForManifest(teamState);
+        if (!baseTeam) {
+          await bot.sendMessage(chatId, '내보낼 팀이 없습니다. 먼저 /team suggest <목적> 또는 /team create <자연어 팀 설명> 을 실행해 주세요.');
+          return true;
+        }
+        const applyState = parseApplyStateTokens(rest.slice(1));
+        const manifest = buildManifestWithSessionState(baseTeam, { runtime: runtimeForTeam, applyState, sessionInstallProposal: getPendingInstallProposal(chatSessionStore, chatId) || chatSessionStore.get(chatId)?.last_install_proposal || null });
+        await sendLong(bot, chatId, JSON.stringify(manifest, null, 2));
+        return true;
+      }
+      if (sub === 'install' || sub === 'import') {
+        const payload = String(rawArgs.replace(/^(install|import)\s+/i, '') || '').trim();
+        if (!payload) {
+          await bot.sendMessage(chatId, 'Usage: /team install [--apply|--pending] <manifest JSON>');
+          return true;
+        }
+        const applyState = parseApplyStateTokens(payload.split(/\s+/).slice(0, 3));
+        const jsonPayload = payload.replace(/^--(?:apply|active|pending)\s+/i, '').trim();
+        try {
+          const parsed = JSON.parse(jsonPayload);
+          const installed = await installTeamManifestToSession({
+            sessionStore: chatSessionStore,
+            chatId,
+            manifest: parsed,
+            runtime: runtimeForTeam,
+            applyState,
+          });
+          await sendLong(bot, chatId, [
+            `✅ manifest를 ${applyState === 'active' ? 'active' : 'pending'} team으로 설치했습니다.`,
+            '',
+            formatTeamProposalMessage(installed.team),
+          ].join('\n'));
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ manifest 설치 실패: ${String(e?.message ?? e)}`);
+        }
+        return true;
+      }
+      if (sub === 'pull') {
+        const threadId = getCurrentThreadId(runtimeForTeam);
+        if (!threadId || memoryModeWithFallback?.() !== 'goc' || typeof requireGocClient !== 'function') {
+          await bot.sendMessage(chatId, '현재 GoC thread에 연결된 runtime이 없어 pull 할 수 없습니다.');
+          return true;
+        }
+        const applyState = parseApplyStateTokens(rest.slice(1));
+        try {
+          const client = requireGocClient();
+          const manifest = await client.getTeamManifest({ threadId });
+          const installed = await installTeamManifestToSession({
+            sessionStore: chatSessionStore,
+            chatId,
+            manifest,
+            runtime: runtimeForTeam,
+            applyState,
+          });
+          await sendLong(bot, chatId, [
+            `✅ GoC thread team manifest를 가져와 ${applyState === 'active' ? 'active' : 'pending'} team으로 반영했습니다.`,
+            '',
+            formatTeamProposalMessage(installed.team),
+          ].join('\n'));
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ GoC manifest pull 실패: ${String(e?.message ?? e)}`);
+        }
+        return true;
+      }
+      if (sub === 'push') {
+        const baseTeam = currentTeamForManifest(teamState);
+        const threadId = getCurrentThreadId(runtimeForTeam);
+        if (!baseTeam) {
+          await bot.sendMessage(chatId, '먼저 push 할 팀을 준비해 주세요.');
+          return true;
+        }
+        if (!threadId || memoryModeWithFallback?.() !== 'goc' || typeof requireGocClient !== 'function') {
+          await bot.sendMessage(chatId, '현재 GoC thread에 연결된 runtime이 없어 push 할 수 없습니다.');
+          return true;
+        }
+        const applyState = parseApplyStateTokens(rest.slice(1));
+        try {
+          const manifest = buildManifestWithSessionState(baseTeam, { runtime: runtimeForTeam, applyState, source: 'telegram_push', sessionInstallProposal: getPendingInstallProposal(chatSessionStore, chatId) || chatSessionStore.get(chatId)?.last_install_proposal || null });
+          const client = requireGocClient();
+          const saved = await client.installTeamManifest({ threadId }, manifest, applyState);
+          const normalized = normalizeTeamManifest(saved?.manifest || saved || manifest, { runtime: runtimeForTeam, applyState });
+          await sendLong(bot, chatId, [
+            `✅ 현재 팀을 GoC thread에 ${applyState === 'active' ? 'active' : 'pending'} team으로 동기화했습니다.`,
+            '',
+            JSON.stringify(normalized.manifest, null, 2),
+          ].join('\n'));
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ GoC manifest push 실패: ${String(e?.message ?? e)}`);
+        }
         return true;
       }
       if (sub === 'template') {
@@ -419,6 +731,10 @@ ${buildTeamListMessage({ active_team: applied })}`);
         return true;
       }
 
+      if (sub === 'options' || sub === 'roles' || sub === 'patterns' || sub === 'schema') {
+        await sendLong(bot, chatId, buildTeamSchemaOptionsText());
+        return true;
+      }
       if (sub === 'modes') {
         await sendLong(bot, chatId, [
           'Team composition modes:',
@@ -435,8 +751,23 @@ ${buildTeamListMessage({ active_team: applied })}`);
         await bot.sendMessage(chatId, '✅ 팀 구성을 초기화했습니다. 다시 /team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 시작해 주세요.');
         return true;
       }
-      await bot.sendMessage(chatId, '지원되는 /team 명령: suggest, create, refine, apply, template, validate, reset, modes');
+      await bot.sendMessage(chatId, '지원되는 /team 명령: suggest, create, refine, apply, requirements, proposal, export, install, pull, push, template, validate, options, reset, modes');
       return true;
+    }
+
+    if (cmd === "/credential") {
+      return handleTelegramCredentialCommand({
+        bot,
+        chatId,
+        rawArgs,
+        chatSessionStore,
+        resolveLiveJobIdForChat,
+        jobs,
+        loadSupervisorRuntime,
+        userId,
+        runSupervisorChat,
+        normalizeForceMode,
+      });
     }
 
     if (cmd === "/skills") {
@@ -574,6 +905,7 @@ ${buildTeamListMessage({ active_team: applied })}`);
             text: message,
             kind: "normal",
             telegramMessageId: msg.message_id,
+            userReplyToMessageId: Number.isFinite(Number(msg?.reply_to_message?.message_id)) ? Number(msg.reply_to_message.message_id) : null,
             teamConfig: teamState.active_team,
             chatInfo: {
               chat_id: String(chatId || ""),
@@ -593,6 +925,7 @@ ${buildTeamListMessage({ active_team: applied })}`);
           },
           inputKind: "command_chat",
           telegramMessageId: msg.message_id,
+          userReplyToMessageId: Number.isFinite(Number(msg?.reply_to_message?.message_id)) ? Number(msg.reply_to_message.message_id) : null,
         });
       } catch (e) {
         await bot.sendMessage(chatId, `❌ /chat 실패: ${String(e?.message ?? e)}`);

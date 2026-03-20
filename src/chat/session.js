@@ -1,3 +1,7 @@
+import { normalizeAnswerCapsules } from "../application/answer_capsules.js";
+import { normalizeInstallProposalState } from "../application/install_proposal_state.js";
+import { normalizeCredentialBindingState } from "../application/credential_binding.js";
+import { normalizePatternConflictState, normalizeTemporaryExecutionOverride, normalizePatternRecoveryState } from "../application/pattern_conflict_detector.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -17,6 +21,9 @@ function normalizePendingApproval(raw) {
     : [];
   const actionsSummary = Array.isArray(row.actions_summary)
     ? row.actions_summary.map((entry) => String(entry || "").trim()).filter(Boolean).slice(0, 12)
+    : [];
+  const runtimePolicySummary = Array.isArray(row.runtime_policy_summary || row.runtimePolicySummary)
+    ? (row.runtime_policy_summary || row.runtimePolicySummary).map((entry) => String(entry || "").trim()).filter(Boolean).slice(0, 12)
     : [];
   return {
     ...row,
@@ -45,6 +52,7 @@ function normalizePendingApproval(raw) {
       : (row.runtimeTeamSnapshot && typeof row.runtimeTeamSnapshot === "object" ? row.runtimeTeamSnapshot : undefined),
     cancel_impact: String(row.cancel_impact || "").trim() || undefined,
     preview_lines: previewLines,
+    runtime_policy_summary: runtimePolicySummary,
   };
 }
 
@@ -207,9 +215,17 @@ function normalizeSession(chatId, raw = {}) {
     current_turn_plan_message_id: currentTurnPlanMessageId,
     agent_status: normalizeAgentStatusMap(row.agent_status),
     recent_agent_turns: normalizeRecentAgentTurns(row.recent_agent_turns || row.recentAgentTurns),
+    answer_capsules: normalizeAnswerCapsules(row.answer_capsules || row.answerCapsules),
     last_route: row.last_route && typeof row.last_route === "object" ? row.last_route : null,
     public_search_cache: normalizePublicSearchCache(row.public_search_cache),
     team_config: normalizeSessionTeamConfig(row.team_config),
+    awaiting_install_approval: row.awaiting_install_approval === true,
+    pending_install_proposal: normalizeInstallProposalState(row.pending_install_proposal || row.pendingInstallProposal),
+    last_install_proposal: normalizeInstallProposalState(row.last_install_proposal || row.lastInstallProposal),
+    credential_binding_state: normalizeCredentialBindingState(row.credential_binding_state || row.credentialBindingState || {}),
+    pattern_conflict: normalizePatternConflictState(row.pattern_conflict || row.patternConflict),
+    temporary_execution_override: normalizeTemporaryExecutionOverride(row.temporary_execution_override || row.temporaryExecutionOverride),
+    pattern_recovery: normalizePatternRecoveryState(row.pattern_recovery || row.patternRecovery),
     updated_at: String(row.updated_at || nowIso()),
   };
 }

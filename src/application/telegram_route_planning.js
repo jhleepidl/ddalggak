@@ -166,7 +166,7 @@ function parseRouterPlan(raw) {
 
 function getGoalFromResearch(jobId) {
   try {
-    const research = tracking.read(jobId, "research.md");
+    const research = tracking.read(jobId, "research");
     const m = research.match(/## Goal\s*\n\s*([\s\S]*?)(\n\n|\n---|$)/);
     if (m && m[1]) return m[1].trim().slice(0, 2000);
   } catch {}
@@ -178,7 +178,7 @@ function defaultRouteFor(mode, goal, seedInstruction = "") {
 }
 
 async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal = null }) {
-  const docs = await loadContextDocs(jobId, ["research.md", "plan.md", "progress.md", "decisions.md"], 2200);
+  const docs = await loadContextDocs(jobId, ["research", "plan", "progress", "decisions"], 2200);
   const convo = clip(convoToText(jobs.tailConversation(jobId, 50)), 4200);
   const routerPrompt = memory.getRouterPrompt();
   const roleText = getAgentRolesText();
@@ -346,7 +346,7 @@ async function reflectAutoSuggest(jobId, trigger, question, signal = null) {
   }
 
   const goal = getGoalFromResearch(jobId);
-  const docs = await loadContextDocs(jobId, ["research.md", "plan.md", "progress.md", "decisions.md"], 2200);
+  const docs = await loadContextDocs(jobId, ["research", "plan", "progress", "decisions"], 2200);
   const convo = clip(convoToText(jobs.tailConversation(jobId, 50)), 5000);
   const policyPrompt = memory.getPolicyPrompt();
 
@@ -419,7 +419,7 @@ async function suggestNextPrompt(bot, chatId, jobId, question, trigger = "run", 
   try {
     const signals = Array.isArray(decision.signals) && decision.signals.length > 0 ? decision.signals.join(", ") : "none";
     const confidence = Number.isFinite(Number(decision.confidence)) ? Number(decision.confidence) : "n/a";
-    tracking.append(jobId, "decisions.md", [
+    tracking.append(jobId, "decisions", [
       "## Auto-suggest reflection",
       `- trigger: ${trigger}`,
       `- shouldAskChatGPT: ${decision.shouldAsk}`,
@@ -435,7 +435,7 @@ async function suggestNextPrompt(bot, chatId, jobId, question, trigger = "run", 
 
 async function sendChatGPTPrompt(bot, chatId, jobId, question) {
   const goal = getGoalFromResearch(jobId);
-  const docs = await loadContextDocs(jobId, ["research.md", "plan.md", "progress.md"], 3000);
+  const docs = await loadContextDocs(jobId, ["research", "plan", "progress"], 3000);
   const convo = jobs.tailConversation(jobId, 60);
   const prompt = buildChatGPTNextStepPrompt({
     jobId,
@@ -445,6 +445,7 @@ async function sendChatGPTPrompt(bot, chatId, jobId, question) {
     convoText: convoToText(convo),
     routerPrompt: memory.getRouterPrompt(),
     agentRolesText: getAgentRolesText(),
+    knowledgeBaseProfile: tracking.loadProfile(jobId),
   });
   await bot.sendMessage(
     chatId,
@@ -465,9 +466,9 @@ function normalizeActionShape(raw) {
   const type = String(raw.type || "").trim().toLowerCase();
   if (!type) return null;
 
-  if (type === "agent_run") {
-    const agent = resolveAgentId(raw.agent || raw.agentId || "");
-    const prompt = String(raw.prompt || raw.task || raw.instruction || "").trim();
+  if (type === "agent_run" || type === "run_agent") {
+    const agent = resolveAgentId(raw.agent || raw.agent_id || raw.agentId || "");
+    const prompt = String(raw.prompt || raw.goal || raw.task || raw.instruction || "").trim();
     if (!agent || !prompt) return null;
     return {
       type: "agent_run",
@@ -497,10 +498,10 @@ function normalizeActionShape(raw) {
     return { type: "chatgpt_prompt", question: prompt };
   }
   if (type === "track_append") {
-    return { type: "track_append", doc: raw.doc || "plan.md", markdown: String(raw.markdown || "") };
+    return { type: "track_append", doc: raw.doc || "plan", markdown: String(raw.markdown || "") };
   }
   if (type === "git_summary") return { type: "git_summary" };
-  if (["checkpoint", "pause_children", "cancel_child", "reroute_child", "supervisor_decision"].includes(type)) {
+  if (["checkpoint", "pause_children", "cancel_child", "reroute_child", "supervisor_decision", "gate_wait", "human_checkpoint", "tool_proxy_call", "memory_sync", "committee_consensus"].includes(type)) {
     return {
       type,
       label: String(raw.label || raw.reason || raw.summary || "").trim() || undefined,
@@ -521,7 +522,7 @@ function normalizeActionShape(raw) {
       metadata: raw.metadata && typeof raw.metadata === "object" ? raw.metadata : undefined,
     };
   }
-  if (type === "spawn_parallel") {
+  if (type === "spawn_parallel" || type === "spawn_agents") {
     const agents = Array.isArray(raw.agents)
       ? raw.agents
         .map((child) => {
@@ -574,7 +575,7 @@ function actionLabel(act) {
     return `agent_run:${agentDisplay}`;
   }
   if (act.type === "chatgpt_prompt") return "chatgpt_prompt";
-  if (act.type === "track_append") return `track_append:${act.doc || "plan.md"}`;
+  if (act.type === "track_append") return `track_append:${act.doc || "plan"}`;
   return String(act.type);
 }
 

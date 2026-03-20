@@ -2035,6 +2035,88 @@ export class GocClient {
     });
   }
 
+
+  async getTeamManifest(threadTarget) {
+    const target = summarizeTeamTarget(threadTarget, { client: this });
+    const threadId = String(target.thread_id || '').trim();
+    if (!threadId) throw new Error('threadTarget requires threadId');
+    const data = await this._requestAny({
+      method: 'GET',
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(threadId)}/team/manifest` },
+        { path: `/threads/${encodeURIComponent(threadId)}/team/manifest` },
+      ],
+    });
+    return normalizeEntity(data, ['manifest', 'data']) || asObject(data);
+  }
+
+  async validateTeamManifest(threadTarget, manifest = {}, applyState = 'active') {
+    const target = summarizeTeamTarget(threadTarget, { client: this });
+    const threadId = String(target.thread_id || '').trim();
+    if (!threadId) throw new Error('threadTarget requires threadId');
+    return await this._requestAny({
+      method: 'POST',
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(threadId)}/team/manifest/validate`, body: { manifest, apply_state: applyState } },
+        { path: `/threads/${encodeURIComponent(threadId)}/team/manifest/validate`, body: { manifest, apply_state: applyState } },
+      ],
+    });
+  }
+
+  async installTeamManifest(threadTarget, manifest = {}, applyState = 'active') {
+    const target = summarizeTeamTarget(threadTarget, { client: this });
+    const threadId = String(target.thread_id || '').trim();
+    if (!threadId) throw new Error('threadTarget requires threadId');
+    return await this._requestAny({
+      method: 'POST',
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(threadId)}/team/install`, body: { manifest, apply_state: applyState } },
+        { path: `/threads/${encodeURIComponent(threadId)}/team/install`, body: { manifest, apply_state: applyState } },
+      ],
+    });
+  }
+
+
+  async getTeamManifest(threadTarget) {
+    const target = summarizeTeamTarget(threadTarget, { client: this });
+    const threadId = String(target.thread_id || '').trim();
+    if (!threadId) throw new Error('threadTarget requires threadId');
+    const data = await this._requestAny({
+      method: 'GET',
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(threadId)}/team/manifest` },
+        { path: `/threads/${encodeURIComponent(threadId)}/team/manifest` },
+      ],
+    });
+    return normalizeEntity(data, ['manifest', 'data']) || asObject(data);
+  }
+
+  async validateTeamManifest(threadTarget, manifest = {}, applyState = 'active') {
+    const target = summarizeTeamTarget(threadTarget, { client: this });
+    const threadId = String(target.thread_id || '').trim();
+    if (!threadId) throw new Error('threadTarget requires threadId');
+    return await this._requestAny({
+      method: 'POST',
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(threadId)}/team/manifest/validate`, body: { manifest, apply_state: applyState } },
+        { path: `/threads/${encodeURIComponent(threadId)}/team/manifest/validate`, body: { manifest, apply_state: applyState } },
+      ],
+    });
+  }
+
+  async installTeamManifest(threadTarget, manifest = {}, applyState = 'active') {
+    const target = summarizeTeamTarget(threadTarget, { client: this });
+    const threadId = String(target.thread_id || '').trim();
+    if (!threadId) throw new Error('threadTarget requires threadId');
+    return await this._requestAny({
+      method: 'POST',
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(threadId)}/team/install`, body: { manifest, apply_state: applyState } },
+        { path: `/threads/${encodeURIComponent(threadId)}/team/install`, body: { manifest, apply_state: applyState } },
+      ],
+    });
+  }
+
   async listAgents(scope = "") {
     const cleanScope = normalizeAgentsScope(scope);
     const data = await this._requestAny({

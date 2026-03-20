@@ -1,9 +1,12 @@
 import { chunk } from "../../textutil.js";
 
-export async function sendLong(bot, chatId, text) {
+export async function sendLong(bot, chatId, text, options = undefined) {
+  const messages = [];
   for (const part of chunk(String(text || ""), 3800)) {
-    await bot.sendMessage(chatId, part);
+    const sent = await bot.sendMessage(chatId, part, options);
+    messages.push(sent);
   }
+  return messages;
 }
 
 export async function sendTextWithOptionalGocButton(

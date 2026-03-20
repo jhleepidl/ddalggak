@@ -1,4 +1,5 @@
 import { normalizeStringList } from "../shared/normalize.js";
+import { isKrEquityRequest } from "../shared/skill_relevance.js";
 import { normalizeTaskInterpretation } from "../domain/task_interpretation.js";
 import { normalizeConversationPreferences } from "../domain/conversation_preferences.js";
 import { normalizeRoleId, normalizeRoleList } from "../compatibility/legacy_roles.js";
@@ -143,7 +144,7 @@ function inferPresetPins(text = "", {
   domainHints = [],
 } = {}) {
   const pins = [];
-  if (domainHints.includes("filings") || includesAny(text, ["dart"])) pins.push("dart_financial_researcher");
+  if (isKrEquityRequest(text, { domain_hints: domainHints })) pins.push("dart_financial_researcher");
   if (domainHints.includes("claims") || includesAny(text, ["skeptical", "claim audit", "evidence audit"])) pins.push("skeptical_claim_reviewer");
   if (domainHints.includes("market_news") || includesAny(text, ["market news", "headline", "macro news"])) pins.push("market_news_researcher");
   return normalizeStringList(pins, { max: 8, lower: true });
@@ -225,7 +226,7 @@ function buildCandidateSlots({
     }
   } else {
     const multiSource = parallelismPreference === "parallel";
-    if (multiSource && domainHints.includes("filings")) {
+    if (multiSource && domainHints.includes("filings") && isKrEquityRequest(lowerGoal, { domain_hints: domainHints })) {
       addSlot({
         role_id: "researcher",
         purpose: "Collect filing-based evidence",

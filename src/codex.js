@@ -9,20 +9,52 @@ function appendCodexDebugLog(line = "") {
   } catch {}
 }
 
-export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId = "", model = "" }) {
+function asObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function flattenConfigOverrides(raw = {}, prefix = "") {
+  const out = [];
+  const row = asObject(raw);
+  for (const [key, value] of Object.entries(row)) {
+    const cleanKey = String(key || "").trim();
+    if (!cleanKey) continue;
+    const nextPrefix = prefix ? `${prefix}.${cleanKey}` : cleanKey;
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      out.push(...flattenConfigOverrides(value, nextPrefix));
+    } else {
+      out.push([nextPrefix, value]);
+    }
+  }
+  return out;
+}
+
+export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId = "", model = "", profile = "", addDirs = [], configOverrides = {}, sandboxMode = "", approvalPolicy = "" }) {
   // Requires Codex CLI logged in on the server
-  const sandboxMode = process.env.CODEX_SANDBOX_MODE || "workspace-write";
-  const approvalPolicy = process.env.CODEX_APPROVAL_POLICY || "never";
+  const effectiveSandboxMode = String(sandboxMode || process.env.CODEX_SANDBOX_MODE || "workspace-write").trim() || "workspace-write";
+  const effectiveApprovalPolicy = String(approvalPolicy || process.env.CODEX_APPROVAL_POLICY || "never").trim() || "never";
   const timeoutMs = 45 * 60 * 1000;
   const workspacePath = path.resolve(String(workspaceRoot || cwd || process.cwd()).trim() || process.cwd());
   const commandCwd = path.resolve(String(cwd || workspacePath).trim() || workspacePath);
   const requestedModel = String(model || "").trim();
+  const requestedProfile = String(profile || process.env.CODEX_PROFILE || "").trim();
+  const extraDirs = Array.isArray(addDirs) ? addDirs.map((entry) => String(entry || "").trim()).filter(Boolean) : [];
+  const envConfigOverrides = {};
+  if (String(process.env.CODEX_MODEL_PROVIDER || "").trim()) envConfigOverrides.model_provider = String(process.env.CODEX_MODEL_PROVIDER || "").trim();
+  if (["1", "true", "yes", "on"].includes(String(process.env.CODEX_ENABLE_WEB_SEARCH || "").trim().toLowerCase())) envConfigOverrides["tools.web_search"] = true;
+  const mergedConfigOverrides = {
+    ...envConfigOverrides,
+    ...(configOverrides && typeof configOverrides === "object" ? configOverrides : {}),
+  };
   appendCodexDebugLog(`[codex] job=${String(jobId || "").trim() || "-"} cwd=${commandCwd} workspace=${workspacePath} model=${requestedModel || "(default)"}`);
 
   // Keep Codex workspace explicit (-C), while process CWD can be the run directory.
   // Feed prompt via stdin ("-") so prompt text is never parsed as CLI args.
   const modelArgs = requestedModel ? ["--model", requestedModel] : [];
-  const modernArgs = [...modelArgs, "exec", "-C", workspacePath, "--sandbox", sandboxMode, "-c", `approval_policy=${approvalPolicy}`, "-"];
+  const profileArgs = requestedProfile ? ["--profile", requestedProfile] : [];
+  const addDirArgs = extraDirs.flatMap((entry) => ["--add-dir", entry]);
+  const configArgs = flattenConfigOverrides(mergedConfigOverrides).flatMap(([key, value]) => ["-c", `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`]);
+  const modernArgs = [...modelArgs, ...profileArgs, "exec", "-C", workspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "-c", `approval_policy=${effectiveApprovalPolicy}`, ...configArgs, "-"];
   const modern = await runCommand("codex", modernArgs, { cwd: commandCwd, timeoutMs, input: prompt, abortSignal: signal });
   if (modern.ok) return modern;
 
@@ -35,7 +67,7 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
   ].some((needle) => (modern.stderr || "").toLowerCase().includes(needle.toLowerCase()));
   if (!optionCompatibilityError) return modern;
 
-  const legacyArgs = [...modelArgs, "exec", "-C", workspacePath, "--sandbox", sandboxMode, "--ask-for-approval", approvalPolicy, "-"];
+  const legacyArgs = [...modelArgs, ...profileArgs, "exec", "-C", workspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "--ask-for-approval", effectiveApprovalPolicy, "-"];
   const legacy = await runCommand("codex", legacyArgs, { cwd: commandCwd, timeoutMs, input: prompt, abortSignal: signal });
   if (legacy.ok) return legacy;
 
