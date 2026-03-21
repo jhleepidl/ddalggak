@@ -13,6 +13,18 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function normalizeRuntimeCheckpointRef(raw) {
+  if (!raw || typeof raw !== "object") return undefined;
+  const row = { ...raw };
+  return {
+    checkpoint_id: String(row.checkpoint_id || row.id || "").trim() || undefined,
+    json_file: String(row.json_file || "").trim() || undefined,
+    markdown_file: String(row.markdown_file || "").trim() || undefined,
+    directory: String(row.directory || "").trim() || undefined,
+    summary: String(row.summary || "").trim() || undefined,
+  };
+}
+
 function normalizePendingApproval(raw) {
   if (!raw || typeof raw !== "object") return null;
   const row = { ...raw };
@@ -53,6 +65,7 @@ function normalizePendingApproval(raw) {
     cancel_impact: String(row.cancel_impact || "").trim() || undefined,
     preview_lines: previewLines,
     runtime_policy_summary: runtimePolicySummary,
+    runtime_checkpoint: normalizeRuntimeCheckpointRef(row.runtime_checkpoint || row.runtimeCheckpoint),
   };
 }
 

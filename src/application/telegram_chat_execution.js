@@ -150,7 +150,7 @@ import { executeToolProxyAction } from "./tool_proxy_runtime.js";
 import { writeGeminiMemoryFile, writeCodexInstructionFile } from "./cli_workspace_contract.js";
 import { normalizeRuntimeExecutionPolicy } from "./runtime_execution_policy.js";
 import { resolveProviderRuntimeOptions } from "./provider_runtime_policy.js";
-import { writeRuntimeCheckpointBundle } from "./runtime_checkpointing.js";
+import { summarizeRuntimeCheckpointRef, writeRuntimeCheckpointBundle } from "./runtime_checkpointing.js";
 
 import * as runtimeState from "./telegram_runtime_state.js";
 import * as runtimeIo from "./telegram_runtime_io.js";
@@ -3364,13 +3364,14 @@ async function runSupervisorChat(
               routePlan,
               continuousState: { turn, max_turns: maxTurns },
             });
-            execution.pendingApproval.runtime_checkpoint = approvalCheckpoint;
+            const approvalCheckpointRef = summarizeRuntimeCheckpointRef(approvalCheckpoint);
+            execution.pendingApproval.runtime_checkpoint = approvalCheckpointRef;
             const latestSession = chatSessionStore.get(chatId);
             if (latestSession?.pending_approval) {
               chatSessionStore.upsert(chatId, {
                 pending_approval: {
                   ...latestSession.pending_approval,
-                  runtime_checkpoint: approvalCheckpoint,
+                  runtime_checkpoint: approvalCheckpointRef,
                 },
               });
             }

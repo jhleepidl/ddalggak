@@ -5,6 +5,15 @@ function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
+function cloneJsonSafe(value) {
+  if (value === undefined) return null;
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return null;
+  }
+}
+
 function clean(value = '') {
   return String(value || '').trim();
 }
@@ -65,6 +74,17 @@ export function formatRuntimeCheckpointSummary(record = {}) {
   ].filter(Boolean).join('\n');
 }
 
+export function summarizeRuntimeCheckpointRef(checkpoint = {}) {
+  const row = asObject(checkpoint);
+  return {
+    checkpoint_id: clean(row.checkpoint_id || row.id),
+    json_file: clean(row.json_file),
+    markdown_file: clean(row.markdown_file),
+    directory: clean(row.directory),
+    summary: clean(row.summary),
+  };
+}
+
 export function writeRuntimeCheckpointBundle({
   sharedDir = '',
   workspaceRoot = '',
@@ -94,13 +114,13 @@ export function writeRuntimeCheckpointBundle({
     trigger: clean(trigger),
     user_text: clean(userText),
     reason: clean(reason),
-    results: Array.isArray(results) ? results : [],
-    outputs: Array.isArray(outputs) ? outputs : [],
-    remaining_actions: Array.isArray(remainingActions) ? remainingActions : [],
-    pending_approval: pendingApproval && typeof pendingApproval === 'object' ? pendingApproval : null,
-    route_plan: routePlan && typeof routePlan === 'object' ? routePlan : null,
-    continuous_state: continuousState && typeof continuousState === 'object' ? continuousState : null,
-    metadata: asObject(metadata),
+    results: cloneJsonSafe(Array.isArray(results) ? results : []) || [],
+    outputs: cloneJsonSafe(Array.isArray(outputs) ? outputs : []) || [],
+    remaining_actions: cloneJsonSafe(Array.isArray(remainingActions) ? remainingActions : []) || [],
+    pending_approval: cloneJsonSafe(pendingApproval && typeof pendingApproval === 'object' ? pendingApproval : null),
+    route_plan: cloneJsonSafe(routePlan && typeof routePlan === 'object' ? routePlan : null),
+    continuous_state: cloneJsonSafe(continuousState && typeof continuousState === 'object' ? continuousState : null),
+    metadata: cloneJsonSafe(asObject(metadata)) || {},
   };
   const jsonFile = path.join(dir, `${checkpointId}.json`);
   const markdownFile = path.join(dir, `${checkpointId}.md`);
