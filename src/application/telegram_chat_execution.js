@@ -92,7 +92,7 @@ import { applyTeamConfigurationToRuntime, buildAutoRefineDraftFromStructureConfl
 import { appendRecentAgentTurn, planAgentFollowupShortcut } from "./agent_followup_shortcuts.js";
 import { buildAnswerCapsules } from "./answer_capsules.js";
 import { detectCapabilityGapsFromExecution } from "./capability_gap_detector.js";
-import { buildInstallProposalPrompt, buildInstallProposalStateFromExecution, setPendingInstallProposal } from './install_proposal_state.js';
+import { buildInstallProposalPrompt, buildInstallProposalStateFromExecution, setPendingInstallProposal, getPendingInstallProposal, clearPendingInstallProposal } from './install_proposal_state.js';
 import { resolveCredentialEnvForChat } from './credential_binding.js';
 import { buildAgentLocalInteractionContract } from "../domain/interaction_spec.js";
 import { buildAgencyRoleOverlayPromptBlock, resolveAgencyRoleOverlay } from "../domain/agency_role_overlays.js";
@@ -396,6 +396,28 @@ function buildContinuousImprovementFollowup({
     '이번 턴의 목표: 품질을 높이기 위한 self-refine / verify / rewrite / strengthen 작업을 계속하라. 단, stop signal을 충족하면 마무리해도 된다.',
     'quality_contract=가능하면 QUALITY_DECISION_JSON 블록으로 stop/continue 판단과 정확한 signal 문자열을 남겨라.',
   ].filter(Boolean).join('\n');
+}
+
+
+function normalizeComparableDeltaText(text = '') {
+  return String(text || '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .slice(0, 320);
+}
+
+function buildTurnDeltaFingerprint(outputs = []) {
+  return (Array.isArray(outputs) ? outputs : [])
+    .map((row) => {
+      const actor = String(row?.agentId || row?.agent || row?.label || '').trim().toLowerCase();
+      const body = normalizeComparableDeltaText(row?.output || row?.text || row?.summary || '');
+      return actor && body ? `${actor}:${body}` : body;
+    })
+    .filter(Boolean)
+    .slice(-3)
+    .join(' || ');
 }
 
 function buildContinuousImprovementProgressMessage({ turn = 1, maxTurns = 1, deliverables = [], completedDeliverables = [], stopSignals = [] } = {}) {
@@ -2943,6 +2965,7 @@ async function runSupervisorChat(
     let suggestedActions = [];
     let mergedResults = [];
     let mergedOutputs = [];
+    let previousTurnFingerprint = '';
     const runThreadId = String(runtime?.map?.threadId || "").trim();
     const sharedCtxId = String(runtime?.map?.ctxSharedId || "").trim();
 
@@ -3467,7 +3490,13 @@ async function runSupervisorChat(
         turnOutputs
       );
       const activeStopSignals = collectActiveRouteSignals(mergedOutputs);
-      const matchedContinuousStopSignals = continuousStopSignalsMatched(activeStopSignals, continuousImprovementPolicy);
+      const turnFingerprint = buildTurnDeltaFingerprint(turnOutputs);
+      const syntheticStopSignals = [];
+      if (continuousImprovementPolicy.enabled === true && routePlan.done === true && previousTurnFingerprint && turnFingerprint && previousTurnFingerprint === turnFingerprint) {
+        syntheticStopSignals.push('no_further_delta');
+      }
+      if (turnFingerprint) previousTurnFingerprint = turnFingerprint;
+      const matchedContinuousStopSignals = continuousStopSignalsMatched([...activeStopSignals, ...syntheticStopSignals], continuousImprovementPolicy);
       if (checkpointPolicy.enabled === true && checkpointPolicy.write_on_turn_end === true) {
         try {
           writeRuntimeCheckpointBundle({
@@ -3675,6 +3704,7 @@ async function runSupervisorChat(
     };
 
     let installProposalState = null;
+    const existingPendingInstallProposal = getPendingInstallProposal(chatSessionStore, chatId);
     const compatibilityRecovery = inferCompatibilityFallbackState(routePlan);
     if (compatibilityRecovery) {
       patternRecoveryState = compatibilityRecovery;
@@ -3699,6 +3729,8 @@ async function runSupervisorChat(
       });
       if (installProposalState?.proposal?.gap_count > 0) {
         setPendingInstallProposal(chatSessionStore, chatId, installProposalState);
+      } else if (existingPendingInstallProposal?.source === 'execution_gap') {
+        clearPendingInstallProposal(chatSessionStore, chatId, { preserveLast: true });
       }
     }
 

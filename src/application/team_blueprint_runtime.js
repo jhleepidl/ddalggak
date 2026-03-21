@@ -42,8 +42,9 @@ export function normalizeTeamBlueprint(blueprint = {}, { runtime = null, applySt
   };
 }
 
-export async function installTeamBlueprintToSession({ sessionStore, chatId, blueprint = {}, runtime = null, applyState = 'pending' } = {}) {
-  const normalized = normalizeTeamBlueprint(blueprint, { runtime, applyState });
+export async function installTeamBlueprintToSession({ sessionStore, chatId, blueprint = {}, manifest = null, runtime = null, applyState = 'pending' } = {}) {
+  const sourceBlueprint = manifest && typeof manifest === 'object' ? manifest : blueprint;
+  const normalized = normalizeTeamBlueprint(sourceBlueprint, { runtime, applyState });
   storePendingTeam(sessionStore, chatId, normalized.team);
   let installedTeam = normalized.team;
   if (normalized.apply_state === 'active') installedTeam = await applyPendingTeam({ sessionStore, chatId, runtime });

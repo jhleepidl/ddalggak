@@ -1,4 +1,4 @@
-import { getPendingInstallProposal, archivePendingInstallProposal, buildInstallProposalPrompt } from '../../application/install_proposal_state.js';
+import { getPendingInstallProposal, archivePendingInstallProposal, buildInstallProposalPrompt, shouldResumeInstallProposal } from '../../application/install_proposal_state.js';
 import { getCredentialCoverageForProposal } from '../../application/credential_binding.js';
 import { applyInstallProposalActionsToTeam, autoInstallRuntimeSupport } from '../../application/tool_install_adapter.js';
 import { getSessionTeamState, storePendingTeam, applyPendingTeam } from '../../application/team_configuration.js';
@@ -84,10 +84,11 @@ export async function handleTelegramInstallProposalCallback({ q, bot, chatId, us
       teamState = getSessionTeamState(chatSessionStore, chatId);
     }
     archivePendingInstallProposal(chatSessionStore, chatId, 'applied_active', { apply_state: 'active' });
-    await bot.answerCallbackQuery(q.id, { text: 'resuming with active team' });
-    await bot.sendMessage(chatId, '✅ install proposal을 반영했고 같은 요청을 재개합니다.');
+    const shouldResume = shouldResumeInstallProposal(proposalState);
+    await bot.answerCallbackQuery(q.id, { text: shouldResume ? 'resuming with active team' : 'applied' });
+    await bot.sendMessage(chatId, shouldResume ? '✅ install proposal을 반영했고 같은 요청을 재개합니다.' : '✅ install proposal을 반영했습니다.');
     const resume = proposalState.resume_request && typeof proposalState.resume_request === 'object' ? proposalState.resume_request : null;
-    if (resume?.message && typeof runSupervisorChat === 'function') {
+    if (shouldResume && resume?.message && typeof runSupervisorChat === 'function') {
       await runSupervisorChat(bot, chatId, userId, resume.message, {
         debug: false,
         chatInfo: resume.chat_info && typeof resume.chat_info === 'object' ? resume.chat_info : { chat_id: String(chatId || '') },

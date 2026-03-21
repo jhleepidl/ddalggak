@@ -33,6 +33,27 @@ function normalizeResumeRequest(raw = {}) {
   };
 }
 
+
+function proposalHasActionableBlockingGap(proposal = null) {
+  const row = proposal && typeof proposal === 'object' ? proposal : {};
+  if (row.blocking === true) return true;
+  const requirements = row.requirements && typeof row.requirements === 'object' ? row.requirements : {};
+  const sections = [requirements.tools, requirements.credentials, requirements.skills];
+  return sections.some((entries) => Array.isArray(entries) && entries.some((entry) => String(entry?.severity || 'blocking').trim().toLowerCase() === 'blocking'));
+}
+
+export function shouldResumeInstallProposal(state = {}) {
+  const normalized = normalizeInstallProposalState(state);
+  if (!normalized?.resume_request?.message) return false;
+  return proposalHasActionableBlockingGap(normalized.proposal);
+}
+
+export function isActionableInstallProposalState(state = {}) {
+  const normalized = normalizeInstallProposalState(state);
+  if (!normalized) return false;
+  return proposalHasActionableBlockingGap(normalized.proposal);
+}
+
 export function normalizeInstallProposalState(raw = {}) {
   const row = asObject(raw);
   const proposal = row.proposal && typeof row.proposal === 'object' ? row.proposal : null;
@@ -72,6 +93,7 @@ export function createPendingInstallProposalState({ proposal = null, resumeReque
 export function buildInstallProposalStateFromExecution({ team = {}, runtime = null, execution = null, applyState = 'pending', resumeRequest = null, source = 'execution_gap' } = {}) {
   const proposal = buildTeamInstallProposal({ team, runtime, execution, applyState });
   if (!proposal || Number(proposal.gap_count || 0) <= 0) return null;
+  if (!proposalHasActionableBlockingGap(proposal)) return null;
   return createPendingInstallProposalState({
     proposal,
     resumeRequest,
@@ -147,7 +169,10 @@ export function buildInstallProposalPrompt(state = {}, { hasPendingTeam = false,
   if (!normalized) return null;
   const proposal = normalized.proposal || {};
   const line = proposal.gap_preview_lines?.[0] || '추가 설치/승인이 필요한 capability gap이 있습니다.';
-  const applyLabel = hasPendingTeam ? 'Apply active + resume' : 'Retry active + resume';
+  const resumeOnApply = shouldResumeInstallProposal(normalized);
+  const applyLabel = resumeOnApply
+    ? (hasPendingTeam ? 'Apply active + resume' : 'Retry active + resume')
+    : (hasPendingTeam ? 'Apply active' : 'Retry active');
   const coverage = chatId ? getCredentialCoverageForProposal(sessionStore, chatId, proposal) : { missing_keys: [] };
   return {
     text: [
@@ -157,7 +182,9 @@ export function buildInstallProposalPrompt(state = {}, { hasPendingTeam = false,
       ...(coverage.missing_keys.length > 0 ? [`missing_credentials=${coverage.missing_keys.join(', ')}`] : []),
       '',
       '선택:',
-      `- ${applyLabel}: pending team이 있으면 active로 적용하고 같은 요청을 재개`,
+      (resumeOnApply
+        ? `- ${applyLabel}: pending team이 있으면 active로 적용하고 같은 요청을 재개`
+        : `- ${applyLabel}: pending team이 있으면 active로 적용 (현재 런타임에서 자동 설치/재개는 없음)`),
       '- Install pending: 현재 제안을 pending 상태로 유지',
       ...(coverage.missing_keys.length > 0 ? ['- Credential help: 필요한 secret 바인딩 방법 보기'] : []),
       '- Dismiss: 제안을 닫기',

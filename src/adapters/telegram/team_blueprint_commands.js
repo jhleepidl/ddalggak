@@ -1,6 +1,6 @@
 import { buildTeamBlueprint, installTeamBlueprintToSession, normalizeTeamBlueprint } from '../../application/team_blueprint_runtime.js';
 import { buildTeamInstallProposal, formatTeamInstallProposalMessage } from '../../application/install_proposal.js';
-import { buildInstallProposalPrompt, createPendingInstallProposalState, getPendingInstallProposal, archivePendingInstallProposal } from '../../application/install_proposal_state.js';
+import { buildInstallProposalPrompt, createPendingInstallProposalState, getPendingInstallProposal, archivePendingInstallProposal, shouldResumeInstallProposal } from '../../application/install_proposal_state.js';
 import { formatManifestRequirementLines, normalizeManifestRequirements } from '../../shared/manifest_requirements.js';
 import { applyInstallProposalActionsToTeam, autoInstallRuntimeSupport } from '../../application/tool_install_adapter.js';
 import { getCredentialBindingState, getCredentialCoverageForProposal } from '../../application/credential_binding.js';
@@ -96,9 +96,10 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
         activeTeam = await applyPendingTeam({ sessionStore: chatSessionStore, chatId, runtime: runtimeForTeam });
       }
       archivePendingInstallProposal(chatSessionStore, chatId, 'applied_active', { apply_state: 'active' });
-      await bot.sendMessage(chatId, '✅ install proposal을 반영했고 같은 요청을 재개합니다.');
+      const shouldResume = shouldResumeInstallProposal(existingProposalState);
+      await bot.sendMessage(chatId, shouldResume ? '✅ install proposal을 반영했고 같은 요청을 재개합니다.' : '✅ install proposal을 반영했습니다.');
       const resume = existingProposalState.resume_request && typeof existingProposalState.resume_request === 'object' ? existingProposalState.resume_request : null;
-      if (resume?.message && typeof runSupervisorChat === 'function') {
+      if (shouldResume && resume?.message && typeof runSupervisorChat === 'function') {
         await runSupervisorChat(bot, chatId, userId, resume.message, {
           debug: false,
           chatInfo: resume.chat_info && typeof resume.chat_info === 'object' ? resume.chat_info : { chat_id: String(chatId || '') },

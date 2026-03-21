@@ -535,6 +535,28 @@ function deriveNextHumanAction({ session = null, pendingApproval = null, pending
   return '대기 중';
 }
 
+
+function formatSignedPct(value = 0) {
+  const num = Number(value || 0);
+  if (!Number.isFinite(num)) return '0%';
+  return `${num > 0 ? '+' : ''}${num}%`;
+}
+
+function summarizePromptComponents(rows = []) {
+  const totals = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    for (const component of Array.isArray(row?.components) ? row.components : []) {
+      const key = String(component?.key || '').trim();
+      if (!key) continue;
+      totals.set(key, (totals.get(key) || 0) + Number(component?.tokens || 0));
+    }
+  }
+  return Array.from(totals.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(([key, tokens]) => ({ key, avg_tokens: Math.round(tokens / Math.max(1, Array.isArray(rows) ? rows.length : 1)) }));
+}
+
 function deriveOverlayPromptMemo(overlayStats = null, averages = null) {
   if (!overlayStats || !overlayStats.overlay_prompt_count) return 'overlay 없음 · 기본 role memo만 사용 중';
   const avgOverlayTokens = Number(overlayStats.avg_overlay_tokens || 0);
@@ -575,9 +597,10 @@ function collectPromptTelemetry(jobId = '') {
     actual_prompt_tokens: avgActual,
     conversation_only_tokens: avgConversation,
     conversation_plus_shared_tokens: avgShared,
-    savings_vs_conversation_pct: avgConversation > 0 ? Math.max(0, Math.round((1 - (avgActual / avgConversation)) * 1000) / 10) : 0,
-    savings_vs_shared_pct: avgShared > 0 ? Math.max(0, Math.round((1 - (avgActual / avgShared)) * 1000) / 10) : 0,
+    savings_vs_conversation_pct: avgConversation > 0 ? Math.round((1 - (avgActual / avgConversation)) * 1000) / 10 : 0,
+    savings_vs_shared_pct: avgShared > 0 ? Math.round((1 - (avgActual / avgShared)) * 1000) / 10 : 0,
   };
+  const topComponents = summarizePromptComponents(recent);
   const overlay = overlayRows.length > 0 ? {
     overlay_prompt_count: overlayRows.length,
     avg_overlay_tokens: avgOverlayTokens,
@@ -593,7 +616,7 @@ function collectPromptTelemetry(jobId = '') {
       delta_vs_plain_prompt_tokens: deltaVsPlain,
     }, averages),
   } : null;
-  return { rows: recent, averages, overlay };
+  return { rows: recent, averages, overlay, top_components: topComponents };
 }
 
 function formatPromptTelemetryRow(row = {}) {
@@ -601,13 +624,13 @@ function formatPromptTelemetryRow(row = {}) {
   const model = String(row?.model || '').trim();
   const actor = String(row?.agent_id || row?.role_id || provider || 'agent').trim();
   const actual = Number(row?.actual_prompt_tokens || 0);
-  const baseline = Number(row?.baseline?.conversation_only_tokens || 0);
-  const savedPct = baseline > 0 ? Math.max(0, Math.round((1 - (actual / baseline)) * 1000) / 10) : 0;
+  const baseline = Number(row?.baseline?.conversation_plus_shared_tokens || row?.baseline?.conversation_only_tokens || 0);
+  const savedPct = baseline > 0 ? Math.round((1 - (actual / baseline)) * 1000) / 10 : 0;
   const suffix = model ? `/${model}` : '';
   const overlayTokens = Number(row?.overlay?.tokens || 0);
   const overlayTitle = String(row?.overlay?.overlay_title || row?.metadata?.agency_overlay_title || '').trim();
   const overlaySuffix = overlayTokens > 0 ? ` · +overlay ${overlayTokens} tok${overlayTitle ? ` (${overlayTitle})` : ''}` : '';
-  return `${actor} · ${provider}${suffix} · ${actual} tok${overlaySuffix}${baseline > 0 ? ` · -${savedPct}% vs full` : ''}`;
+  return `${actor} · ${provider}${suffix} · ${actual} tok${overlaySuffix}${baseline > 0 ? ` · ${formatSignedPct(savedPct)} vs conv+shared` : ''}`;
 }
 
 function buildChatStatusKeyboard({ detail = 'compact', artifactCount = 0, showRecent = false, showPrompt = false } = {}) {
@@ -713,10 +736,13 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
     ];
     if (promptTelemetry.averages) {
       lines.push(`- avg_prompt_tokens: ${promptTelemetry.averages.actual_prompt_tokens}`);
-      lines.push(`- baseline(full_history): ${promptTelemetry.averages.conversation_only_tokens}`);
-      lines.push(`- baseline(full+shared): ${promptTelemetry.averages.conversation_plus_shared_tokens}`);
-      lines.push(`- savings_vs_full: ${promptTelemetry.averages.savings_vs_conversation_pct}%`);
-      lines.push(`- savings_vs_full+shared: ${promptTelemetry.averages.savings_vs_shared_pct}%`);
+      lines.push(`- baseline(conversation_only): ${promptTelemetry.averages.conversation_only_tokens}`);
+      lines.push(`- baseline(conversation+shared_docs): ${promptTelemetry.averages.conversation_plus_shared_tokens}`);
+      lines.push(`- delta_vs_conversation_only: ${formatSignedPct(promptTelemetry.averages.savings_vs_conversation_pct)}`);
+      lines.push(`- delta_vs_conversation+shared: ${formatSignedPct(promptTelemetry.averages.savings_vs_shared_pct)}`);
+      if (Array.isArray(promptTelemetry.top_components) && promptTelemetry.top_components.length > 0) {
+        lines.push(`- biggest_components: ${promptTelemetry.top_components.map((row) => `${row.key}~${row.avg_tokens} tok`).join(', ')}`);
+      }
       if (promptTelemetry.overlay) {
         lines.push(`- overlay_prompts: ${promptTelemetry.overlay.overlay_prompt_count}/${promptTelemetry.rows.length}`);
         lines.push(`- overlay_overhead_avg: +${promptTelemetry.overlay.avg_overlay_tokens} tok (${promptTelemetry.overlay.avg_overlay_share_pct}%)`);

@@ -38,6 +38,25 @@ test('buildInstallProposalStateFromExecution captures resume request and gap sum
   assert.ok(Number(state.proposal.gap_count || 0) > 0);
 });
 
+test('buildInstallProposalStateFromExecution ignores advisory-only team capability gaps after a successful run', () => {
+  const state = buildInstallProposalStateFromExecution({
+    team: {
+      team_name: 'Notebook Team',
+      agents: [
+        { agent_id: 'builder', name: 'Builder', role: 'builder', recommended_tool_ids: ['shell'] },
+      ],
+    },
+    runtime: { threadId: 'thread-1', availableToolIds: ['workspace_fs'] },
+    execution: {
+      outputs: [{ agentId: 'builder', output: '노트북 산출물을 만들었습니다.' }],
+      results: [{ status: 'ok' }],
+    },
+    resumeRequest: { message: 'notebook 만들어줘' },
+  });
+
+  assert.equal(state, null);
+});
+
 test('session store can archive pending install proposal state', () => {
   const store = new ChatSessionStore({ persistPath: '' });
   const state = buildInstallProposalStateFromExecution({

@@ -204,7 +204,7 @@ test("chat status prompt view shows recent prompt telemetry and savings", () => 
     const card = buildChatStatusCard(chatId, null, { detail: 'prompt' });
     assert.match(card.text, /Prompt 상태/);
     assert.match(card.text, /avg_prompt_tokens:/);
-    assert.match(card.text, /savings_vs_full:/);
+    assert.match(card.text, /delta_vs_conversation_only:/);
     assert.match(card.text, /overlay_overhead_avg:/);
     assert.match(card.text, /overlay_memo:/);
     assert.match(card.text, /builder · codex\/gpt-5-codex/);
