@@ -39,6 +39,7 @@ const HELP_TEXT = [
   "- /send <번호|path>: 산출물 파일 전송",
   "- /send bundle <번호,번호|path,...>: 여러 산출물을 zip으로 전송",
   "- /stop [jobId]: 현재 실행 또는 지정 job 중단",
+  "- /upload (+파일 첨부) [메모]: 실행 없이 업로드만 저장",
   "- /help advanced: credential/files/running 등 고급 명령 보기",
 ].join("\n");
 
@@ -59,6 +60,7 @@ const ADVANCED_HELP_TEXT = [
   "- /artifacts [limit]: 주요 산출물 후보 보기",
   "- /send <번호|path>: 산출물 파일 전송",
   "- /send bundle <번호,번호|path,...>: 여러 산출물을 zip으로 전송",
+  "- /upload (+파일 첨부) [메모]: 실행 없이 업로드만 저장 (/attach는 legacy alias)",
   "- /files [uploads|workspace|all] [limit]: workspace 파일 목록 보기",
   "- /outputs [limit]: legacy alias of /artifacts",
   "- /sendfile <relative_path>: legacy alias of /send",

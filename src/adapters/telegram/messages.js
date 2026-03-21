@@ -181,19 +181,31 @@ export function createTelegramMessageHandler(deps = {}) {
     if (!isAllowedChat(chatId) || !isAllowedUser(userId)) return;
     setGocActingTelegramUser(userId);
 
-    if (uploadService?.hasAttachment?.(msg)) {
+    const text = String(msg?.text || msg?.caption || "").trim();
+    const hasAttachment = !!uploadService?.hasAttachment?.(msg);
+    const loweredText = text.toLowerCase();
+    const isUploadOnlyCommand = loweredText === '/upload'
+      || loweredText.startsWith('/upload ')
+      || loweredText === '/attach'
+      || loweredText.startsWith('/attach ');
+    const uploadNote = isUploadOnlyCommand
+      ? text.replace(/^\/(?:upload|attach)\s*/i, '').trim()
+      : '';
+
+    if (hasAttachment) {
       try {
-        await uploadService.saveMessageAttachment(msg, { chatId, userId });
+        await uploadService.saveMessageAttachment(msg, { chatId, userId, uploadNote });
       } catch (error) {
         await bot.sendMessage(
           chatId,
           `❌ 파일 업로드 저장 실패: ${clip(String(error?.message ?? error), 220)}`,
           replyToMessageOptions(msg)
         );
+        return;
       }
+      if (isUploadOnlyCommand) return;
     }
 
-    const text = String(msg?.text || msg?.caption || "").trim();
     if (!text) return;
 
     const pasteState = getAwait(chatId);

@@ -125,6 +125,7 @@ test("createTelegramUploadService stores Telegram uploads in the workspace and r
   }, {
     chatId: 9001,
     userId: 42,
+    uploadNote: "spec v2 입력 샘플",
   });
 
   assert.equal(result.skipped, false);
@@ -145,7 +146,9 @@ test("createTelegramUploadService stores Telegram uploads in the workspace and r
   const manifest = JSON.parse(manifestLines[0]);
   assert.equal(manifest.job_id, "job_upload_1");
   assert.equal(manifest.file_id, "doc-file-id");
+  assert.equal(manifest.upload_note, "spec v2 입력 샘플");
   assert.match(manifest.workspace_path, /^uploads\//);
+  assert.match(harness.state.sentMessages[0].text, /upload note: spec v2 입력 샘플/);
 });
 
 test("createTelegramUploadService rejects files outside the allowed extension list", async () => {

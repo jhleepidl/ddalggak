@@ -167,8 +167,28 @@ test("message handler hands off Telegram uploads before text routing", async () 
   });
 
   assert.equal(harness.calls.upload.length, 1);
-  assert.deepEqual(harness.calls.upload[0].meta, { chatId: 11, userId: 22 });
+  assert.deepEqual(harness.calls.upload[0].meta, { chatId: 11, userId: 22, uploadNote: "" });
   assert.equal(harness.calls.handleIncoming.length, 0);
+});
+
+
+test("message handler treats /upload caption as upload-only and skips text routing", async () => {
+  const harness = createMessageHarness({
+    uploadHasAttachment: true,
+  });
+
+  await harness.handler({
+    message_id: 111,
+    chat: { id: 11, type: "private" },
+    from: { id: 22 },
+    document: { file_id: "file" },
+    caption: "/upload spec 자료",
+  });
+
+  assert.equal(harness.calls.upload.length, 1);
+  assert.equal(harness.calls.upload[0].meta.uploadNote, "spec 자료");
+  assert.equal(harness.calls.handleIncoming.length, 0);
+  assert.equal(harness.calls.handleCommand.length, 0);
 });
 
 test("message handler routes hard-stop text through chatRunManager", async () => {

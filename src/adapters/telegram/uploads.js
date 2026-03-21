@@ -173,7 +173,7 @@ export function createTelegramUploadService(deps = {}) {
     return hash.digest("hex");
   }
 
-  async function saveMessageAttachment(msg, { chatId = "", userId = "" } = {}) {
+  async function saveMessageAttachment(msg, { chatId = "", userId = "", uploadNote = "" } = {}) {
     const candidate = resolveTelegramUploadCandidate(msg);
     if (!candidate) return null;
 
@@ -247,6 +247,7 @@ export function createTelegramUploadService(deps = {}) {
     const sha256 = computeFileSha256(finalPath);
     const manifestPath = resolveWorkspacePath(jobId, "uploads/manifest.jsonl");
     const workspaceRelPath = path.relative(runWorkspaceDir(jobId), finalPath).replace(/\\/g, "/");
+    const cleanUploadNote = String(uploadNote || "").trim().slice(0, 500);
     const record = {
       ts: new Date().toISOString(),
       kind: `telegram_${cleanKind}_upload`,
@@ -262,14 +263,19 @@ export function createTelegramUploadService(deps = {}) {
       sha256,
       local_path: finalPath,
       workspace_path: workspaceRelPath,
+      upload_note: cleanUploadNote || undefined,
     };
     fs.appendFileSync(manifestPath, `${JSON.stringify(record)}\n`, "utf8");
 
-    jobs.appendConversation(jobId, "user", `uploaded file: ${cleanName}`, {
+    const uploadSummary = cleanUploadNote
+      ? `uploaded file: ${cleanName} (${cleanUploadNote})`
+      : `uploaded file: ${cleanName}`;
+    jobs.appendConversation(jobId, "user", uploadSummary, {
       kind: `upload_${cleanKind}`,
       telegram_message_id: messageId || undefined,
       local_path: finalPath,
       sha256,
+      upload_note: cleanUploadNote || undefined,
     });
     tracking.append(jobId, "progress", [
       "## upload",
@@ -279,7 +285,8 @@ export function createTelegramUploadService(deps = {}) {
       `- sha256: ${sha256}`,
       `- workspace_path: ${workspaceRelPath}`,
       `- file_id: ${candidate.fileId}`,
-    ].join("\n"));
+      cleanUploadNote ? `- note: ${cleanUploadNote}` : "",
+    ].filter(Boolean).join("\n"));
     tracking.append(jobId, "artifacts", [
       "## uploaded artifact",
       `- kind: ${cleanKind}`,
@@ -287,13 +294,15 @@ export function createTelegramUploadService(deps = {}) {
       `- workspace_path: ${workspaceRelPath}`,
       `- sha256: ${sha256}`,
       `- file_id: ${candidate.fileId}`,
-    ].join("\n"));
+      cleanUploadNote ? `- note: ${cleanUploadNote}` : "",
+    ].filter(Boolean).join("\n"));
     await appendWorkspaceUploadArtifactToGoc(jobId, {
       fileName: cleanName,
       fileSize: actualSize,
       localPath: finalPath,
       uploadKind: cleanKind,
       sha256,
+      uploadNote: cleanUploadNote || undefined,
       telegramFileId: candidate.fileId,
       telegramMessageId: messageId,
       chatId,
@@ -309,6 +318,7 @@ export function createTelegramUploadService(deps = {}) {
         `- workspace: ${runWorkspaceDir(jobId)}`,
         `- path: ${workspaceRelPath}`,
         `- size: ${formatByteSize(actualSize)}`,
+        cleanUploadNote ? `- upload note: ${cleanUploadNote}` : "",
         createdJob ? "- note: 새 job 생성됨" : "",
       ].filter(Boolean).join("\n"),
       replyToMessageOptions(msg)
