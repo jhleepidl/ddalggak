@@ -55,6 +55,26 @@ export class Tracking {
     return name;
   }
 
+  _docTemplate(jobId, name) {
+    const profile = this.loadProfile(jobId);
+    const entry = profile?.docs?.find((row) => String(row?.file_name || '').trim().toLowerCase() === String(name || '').trim().toLowerCase()) || null;
+    const title = String(entry?.title || entry?.doc_id || name || 'Memory').trim();
+    return `# ${title}
+
+> createdAt: ${new Date().toISOString()}
+
+`;
+  }
+
+  _ensureDocFile(jobId, name) {
+    const safeName = this._validateName(name);
+    const filePath = path.join(this._sharedDir(jobId), safeName);
+    if (!fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, this._docTemplate(jobId, safeName), 'utf8');
+    }
+    return filePath;
+  }
+
   loadProfile(jobId) {
     const filePath = this._profilePath(jobId);
     if (!fs.existsSync(filePath)) return null;
@@ -131,15 +151,23 @@ export class Tracking {
 
   listDocs(jobId) {
     const profile = this.loadProfile(jobId);
-    if (profile?.docs?.length) return profile.docs.map((entry) => ({ ...entry }));
-    return Object.entries(LEGACY_SEMANTIC_DOC_NAMES).map(([slotId, name]) => ({
-      doc_id: slotId,
-      file_name: name,
-      title: name.replace(/\.md$/i, ""),
-      purpose: "",
-      legacy_names: [name],
-      read_priority: 0,
-    }));
+    const rows = profile?.docs?.length
+      ? profile.docs.map((entry) => ({ ...entry }))
+      : Object.entries(LEGACY_SEMANTIC_DOC_NAMES).map(([slotId, name]) => ({
+        doc_id: slotId,
+        file_name: name,
+        title: name.replace(/\.md$/i, ""),
+        purpose: "",
+        legacy_names: [name],
+        read_priority: 0,
+      }));
+    const seen = new Set();
+    return rows.filter((entry) => {
+      const key = String(entry?.file_name || '').trim().toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
 
   renderProfileMarkdown(jobId) {
@@ -156,20 +184,17 @@ export class Tracking {
   }
 
   init(jobId, names = Object.values(LEGACY_SEMANTIC_DOC_NAMES)) {
-    const dir = this._sharedDir(jobId);
+    this._sharedDir(jobId);
     let targetNames = [];
     if (Array.isArray(names)) {
       targetNames = names.map((entry) => this.resolveDocName(jobId, entry)).filter(Boolean);
+      const first = targetNames[0];
+      if (first) this._ensureDocFile(jobId, first);
     } else if (names && typeof names === "object") {
       const profile = this.saveProfile(jobId, names);
-      targetNames = profile.docs.map((entry) => this._validateName(entry.file_name));
-    }
-    for (const n of targetNames) {
-      const p = path.join(dir, n);
-      if (!fs.existsSync(p)) {
-        const title = n.replace(/\.md$/, "");
-        fs.writeFileSync(p, `# ${title}\n\n> createdAt: ${new Date().toISOString()}\n\n`, "utf8");
-      }
+      targetNames = [...new Set(profile.docs.map((entry) => this._validateName(entry.file_name)).filter(Boolean))];
+      const primaryPlan = profile.docs.find((entry) => String(entry?.doc_id || '').trim().toLowerCase() === 'plan')?.file_name;
+      if (primaryPlan) this._ensureDocFile(jobId, primaryPlan);
     }
     return targetNames;
   }
@@ -183,8 +208,7 @@ export class Tracking {
 
   append(jobId, name, markdown, { timestamp = true } = {}) {
     name = this.resolveDocName(jobId, name);
-    const p = path.join(this._sharedDir(jobId), name);
-    if (!fs.existsSync(p)) throw new Error(`Doc not found: ${name}`);
+    const p = this._ensureDocFile(jobId, name);
     const prefix = timestamp ? `\n\n---\n\n**${new Date().toISOString()}**\n\n` : "\n\n";
     const chunk = prefix + markdown;
     fs.appendFileSync(p, chunk, "utf8");

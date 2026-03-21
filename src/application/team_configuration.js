@@ -2,7 +2,7 @@ import { loadAgents } from '../agents.js';
 import { recommendTeamForTask } from './telegram_route_planning.js';
 import { inferProviderForModel, listSupportedModels, resolveSupportedModel } from '../catalog/model_catalog.js';
 import { detectTeamCapabilityGaps, normalizeCapabilityGapList } from './capability_gap_detector.js';
-import { buildManifestRequirements, formatManifestRequirementLines } from '../shared/manifest_requirements.js';
+import { buildManifestRequirements, formatManifestRequirementLines, normalizeManifestRequirements } from '../shared/manifest_requirements.js';
 import { SkillRegistry } from './skill_registry.js';
 import { SkillResolver, scoreSkillForTask } from './skill_resolver.js';
 import { PresetRegistry } from '../catalog/preset_registry.js';
@@ -32,7 +32,9 @@ import {
 } from './team_presentation.js';
 import { hasExplicitSkillDomainMatch, requiresExplicitDomainMatch } from '../shared/skill_relevance.js';
 import { buildTeamStructureV2, normalizeTeamStructureV2, deriveTeamConfigFromStructureV2, buildRuntimeExecutionProfileFromStructureV2 } from '../shared/team_structure_v2.js';
-import { deriveKnowledgeBaseDesign, summarizeKnowledgeBaseProfile } from '../knowledge_base/profile.js';
+import { deriveKnowledgeBaseDesign, summarizeKnowledgeBaseProfile, formatKnowledgeBaseMemoryMap, formatMemoryPlanMap } from '../knowledge_base/profile.js';
+import { attachTeamBlueprint, buildTaskArchetypeBlueprintDocument, inferTaskArchetype } from './team_blueprint.js';
+import { buildTeamSeedFromTaskArchetype } from './team_blueprint_templates.js';
 
 function asArray(v){return Array.isArray(v)?v:[]}
 function asObject(v){return v&&typeof v==='object'?v:{}}
@@ -43,6 +45,7 @@ function nowIso(){return new Date().toISOString();}
 const COMPOSITION_MODES = new Set(['structured', 'freeform']);
 const PROPOSAL_MODES = new Set(['suggest', 'create', 'refine', 'validate', 'apply']);
 const SUPPORTED_ROLES = new Set(['researcher', 'builder', 'reviewer', 'synthesizer', 'operator']);
+const SUPPORTED_TASK_ARCHETYPES = new Set(['research', 'implementation', 'review_repair']);
 
 let _skillRegistry = null;
 let _presetRegistry = null;
@@ -133,6 +136,66 @@ function buildPlanningContext(taskText = '', runtime = null) {
     presetResolver: getPresetResolver(),
     taskText,
   };
+}
+
+
+function normalizeTaskArchetype(raw = '', fallback = 'research') {
+  const value = cleanId(raw);
+  if (SUPPORTED_TASK_ARCHETYPES.has(value)) return value;
+  const fallbackValue = cleanId(fallback);
+  return SUPPORTED_TASK_ARCHETYPES.has(fallbackValue) ? fallbackValue : 'research';
+}
+
+function selectTaskArchetypeTemplate({ taskText = '', currentTeam = null, plannerPlan = null, preferredTaskArchetype = '' } = {}) {
+  const preferred = cleanId(
+    plannerPlan?.task_archetype
+    || plannerPlan?.taskArchetype
+    || plannerPlan?.blueprint_archetype
+    || plannerPlan?.blueprintArchetype
+    || preferredTaskArchetype
+    || currentTeam?.task_archetype
+    || currentTeam?.taskArchetype
+    || currentTeam?.team_blueprint?.task_archetype
+    || currentTeam?.teamBlueprint?.task_archetype
+    || ''
+  );
+  if (SUPPORTED_TASK_ARCHETYPES.has(preferred)) {
+    return { archetype: preferred, reason: 'explicit_or_preserved' };
+  }
+  const text = clean(`${taskText} ${plannerPlan?.goal || ''}`);
+  const hints = inferTaskStructureHints(text);
+  const planning = buildPlanningContext(text);
+  const taskType = cleanId(planning?.taskInterpretation?.task_type || planning?.taskInterpretation?.taskType || '');
+  const currentArchetype = cleanId(currentTeam?.task_archetype || currentTeam?.taskArchetype || currentTeam?.team_blueprint?.task_archetype || currentTeam?.teamBlueprint?.task_archetype || '');
+  const repairSignals = hints.review && /(repair|regression|incident|postmortem|bug|failure|stalled|audit|triage|root cause|fixup|회귀|장애|오류|감사|원인|수습|복구|수정)/i.test(text);
+  const implementationSignals = hints.build || ['code_change', 'implementation', 'workspace_change'].includes(taskType) || /(implement|patch|refactor|code|repo|repository|workspace|script|prototype|구현|패치|리팩터|코드|레포|저장소)/i.test(text);
+  const researchSignals = hints.compare || hints.debate || hints.discussion || hints.news || hints.filings || /(research|analysis|analy|brief|memo|investigate|market|survey|source-grounded|조사|분석|브리프|리서치|시장)/i.test(text);
+  if (repairSignals) return { archetype: 'review_repair', reason: 'repair_or_audit_signals' };
+  if (implementationSignals && hints.review && /(repair|regression|bug|fixup|회귀|장애|오류|복구|수습)/i.test(text)) return { archetype: 'review_repair', reason: 'review_then_repair' };
+  if (implementationSignals) return { archetype: 'implementation', reason: 'implementation_signals' };
+  if (currentArchetype === 'review_repair' && hints.review) return { archetype: 'review_repair', reason: 'preserve_review_repair' };
+  if (researchSignals) return { archetype: 'research', reason: 'research_signals' };
+  return { archetype: currentArchetype || 'research', reason: currentArchetype ? 'preserve_current_archetype' : 'default_research' };
+}
+
+function buildTaskArchetypeSeed({ taskText = '', title = '', preferredTaskArchetype = '', currentTeam = null, plannerPlan = null } = {}) {
+  const selection = selectTaskArchetypeTemplate({ taskText, currentTeam, plannerPlan, preferredTaskArchetype });
+  const seed = buildTeamSeedFromTaskArchetype(selection.archetype || 'research', {
+    taskBrief: taskText,
+    title: title || '',
+    description: taskText,
+  });
+  seed.task_archetype = selection.archetype;
+  return { selection, seed };
+}
+
+function extendPlannerReasoningSummary(metadata = null, selection = null) {
+  const row = asObject(metadata);
+  const base = asArray(row.reasoning_summary || row.reasoningSummary || []).map((entry) => clean(entry)).filter(Boolean);
+  const archetype = clean(selection?.archetype);
+  const reason = clean(selection?.reason);
+  const addition = archetype ? `task archetype template: ${archetype}${reason ? ` (${reason})` : ''}` : '';
+  return [...new Set([...base, addition].filter(Boolean))].slice(0, 5);
 }
 
 function buildFallbackSelectionSlot(agent = {}, planning = {}) {
@@ -383,20 +446,38 @@ function enrichAgentDraft(agent = {}, planning = {}) {
   };
 }
 
-function buildStructuredAgentDrafts({ taskText = '', runtime = null } = {}) {
+function buildStructuredAgentDrafts({ taskText = '', runtime = null, preferredTaskArchetype = '', currentTeam = null } = {}) {
   const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
-  const recommendation = recommendTeamForTask(taskText, effectiveRuntime);
   const planning = buildPlanningContext(taskText, effectiveRuntime);
+  const recommendation = recommendTeamForTask(taskText, effectiveRuntime);
+  const { seed } = buildTaskArchetypeSeed({ taskText, preferredTaskArchetype, currentTeam });
+  const templateAgents = asArray(seed.agents);
+  if (templateAgents.length === 0) {
+    const drafts = [];
+    const seen = new Set();
+    const slots = asArray(planning.taskInterpretation?.candidate_capability_slots);
+    for (const [index, slot] of slots.entries()) {
+      const roleId = normalizeTeamRole(slot?.role_id || slot?.roleId);
+      const draft = agentDraft({
+        name: roleId,
+        role: roleId,
+        model: defaultModelForRole(roleId),
+        purpose: clean(slot?.purpose || taskText),
+        provider: '',
+      }, { seen, taskText, index: index + 1 });
+      drafts.push(enrichAgentDraft(draft, planning));
+    }
+    return pruneAgentLineup(drafts, taskText, planning);
+  }
   const selectedExisting = asArray(recommendation?.selected_existing_agents).map((entry) => {
     const runtimeAgent = findCatalogAgent(effectiveRuntime, entry.agent_id) || {};
     return {
       agent_id: cleanId(entry.agent_id),
-      name: clean(entry.name || runtimeAgent.name || entry.agent_id),
       role: normalizeTeamRole(runtimeAgent.role || runtimeAgent.system_key || entry.role || 'researcher'),
       model: resolveSupportedModel(runtimeAgent.model || '') || defaultModelForRole(runtimeAgent.role || entry.role, runtimeAgent.provider),
-      purpose: clean(entry.why || runtimeAgent.description || ''),
-      skills: asArray(runtimeAgent.skills).map((skill) => cleanId(skill?.id || skill)),
       provider: cleanId(runtimeAgent.provider || inferProviderForModel(runtimeAgent.model || '') || ''),
+      skills: asArray(runtimeAgent.skills).map((skill) => cleanId(skill?.id || skill)).filter(Boolean),
+      purpose: clean(entry.why || runtimeAgent.description || ''),
     };
   });
   const reuseBuckets = new Map();
@@ -408,28 +489,19 @@ function buildStructuredAgentDrafts({ taskText = '', runtime = null } = {}) {
   }
   const drafts = [];
   const seen = new Set();
-  const slots = asArray(planning.taskInterpretation?.candidate_capability_slots);
-  for (const [index, slot] of slots.entries()) {
-    const roleId = normalizeTeamRole(slot?.role_id || slot?.roleId);
+  for (const [index, templateAgent] of templateAgents.entries()) {
+    const roleId = normalizeTeamRole(templateAgent.role);
     const bucket = reuseBuckets.get(roleId) || [];
-    const reused = bucket.shift();
+    const reused = bucket.shift() || null;
     if (bucket.length === 0) reuseBuckets.delete(roleId); else reuseBuckets.set(roleId, bucket);
-    const draft = reused
-      ? agentDraft({
-          name: reused.name,
-          role: reused.role,
-          model: reused.model,
-          purpose: clean(slot?.purpose || reused.purpose || taskText),
-          skills: reused.skills,
-          provider: reused.provider,
-        }, { seen, taskText, index: index + 1 })
-      : agentDraft({
-          name: roleId,
-          role: roleId,
-          model: defaultModelForRole(roleId),
-          purpose: clean(slot?.purpose || taskText),
-          provider: '',
-        }, { seen, taskText, index: index + 1 });
+    const draft = agentDraft({
+      name: clean(templateAgent.name || roleId),
+      role: roleId,
+      model: clean(reused?.model || templateAgent.model || ''),
+      purpose: clean(templateAgent.purpose || reused?.purpose || taskText),
+      skills: asArray(reused?.skills).length > 0 ? asArray(reused.skills) : asArray(templateAgent.skills || templateAgent.capabilities || []),
+      provider: cleanId(reused?.provider || templateAgent.provider || ''),
+    }, { seen, taskText, index: index + 1 });
     drafts.push(enrichAgentDraft(draft, planning));
   }
   return pruneAgentLineup(drafts, taskText, planning);
@@ -568,6 +640,18 @@ function findCatalogAgent(runtime = {}, agentId = '') {
   const key = cleanId(agentId);
   const rows = runtimeCatalog(runtime);
   return rows.find((row) => row.id === key) || null;
+}
+
+function buildKnowledgeBaseMemoryMapLines(profileOrPlan = null, { maxLines = 7 } = {}) {
+  if (!profileOrPlan) return [];
+  const formatter = profileOrPlan && typeof profileOrPlan === 'object' && Array.isArray(profileOrPlan.surfaces)
+    ? formatMemoryPlanMap(profileOrPlan, { maxSurfaces: Math.max(3, maxLines - 3), includePolicy: true })
+    : formatKnowledgeBaseMemoryMap(profileOrPlan, { maxDocs: Math.max(3, maxLines - 3), includePolicy: true });
+  return formatter
+    .split('\n')
+    .map((line) => clean(line))
+    .filter(Boolean)
+    .slice(0, maxLines);
 }
 
 function defaultModelForRole(role = '', provider = '') {
@@ -1066,6 +1150,28 @@ function buildInteractionSpecForTeam({ taskText = '', agents = [], current = nul
         require_reviewer_before_final: reviewer ? true : spec?.policies?.require_reviewer_before_final,
       },
     });
+  } else if ((hints.compare || hints.parallel) && researchers.length >= 2) {
+    const finalOwner = clean(synthesizer?.name || reviewer?.name || researchers[0]?.name);
+    const handoffs = reviewer
+      ? [
+          ...researchers.map((agent) => ({ from: agent.name, to: reviewer.name, payload: 'summary_plus_key_evidence' })),
+          reviewer && synthesizer ? { from: reviewer.name, to: synthesizer.name, payload: 'review_summary_only' } : null,
+        ]
+      : [
+          ...researchers.filter((agent) => agent?.name && agent.name !== finalOwner).map((agent) => ({ from: agent.name, to: finalOwner, payload: 'summary_plus_key_evidence' })),
+        ];
+    spec = normalizeInteractionSpec({
+      ...spec,
+      execution_pattern: reviewer && synthesizer ? 'parallel_research_then_review_then_synthesize' : spec.execution_pattern,
+      final_answer_owner: finalOwner,
+      handoffs: mergeHandoffs(handoffs, spec.handoffs),
+      policies: {
+        ...asObject(spec.policies),
+        reviewer_visibility: reviewer ? 'summaries_plus_selected_evidence' : spec?.policies?.reviewer_visibility,
+        synthesizer_visibility: reviewer ? 'upstream_outputs_only' : spec?.policies?.synthesizer_visibility,
+        require_reviewer_before_final: reviewer ? true : spec?.policies?.require_reviewer_before_final,
+      },
+    });
   }
   return spec;
 }
@@ -1206,17 +1312,27 @@ async function clearConversationStoreTeamConfiguration(runtime = null) {
 
 export function buildTeamConfigurationTemplate(team = {}) {
   const row = team && typeof team === 'object' ? team : {};
+  const archetypeHint = cleanId(row.task_archetype || row.taskArchetype || row.blueprint_archetype || '');
+  const shouldUseArchetypeTemplate = !Array.isArray(row.agents) || row.agents.length === 0;
+  if (shouldUseArchetypeTemplate) {
+    const archetype = archetypeHint || inferTaskArchetype({ team: row, structure: asObject(row.structure || row.structure_v2), memoryPlan: asObject(row.memory_plan) });
+    const template = buildTaskArchetypeBlueprintDocument(archetype === 'general' ? 'implementation' : archetype, {
+      title: clean(row.team_name || row.title || ''),
+      taskBrief: clean(row.task_brief || row.taskBrief || row.description || ''),
+      applyState: 'pending',
+    });
+    return JSON.stringify(template, null, 2);
+  }
   const normalized = normalizeTeamConfig(row, { runtime: null, autoRenameGenericNames: false });
-  const structureV2 = normalizeTeamStructureV2(normalized.structure_v2 || buildTeamStructureV2(normalized));
-  const compatibilityTeam = deriveTeamConfigFromStructureV2(structureV2);
+  const blueprintDocument = attachTeamBlueprint(normalized, { runtime: null, applyState: 'pending', source: 'template' });
   return JSON.stringify({
-    kind: 'ddalggak_team_manifest',
-    version: 2,
-    primary_schema: 'structure_v2',
+    kind: 'ddalggak_team_blueprint',
+    version: 1,
+    primary_schema: 'team_blueprint_v1',
     apply_state: 'pending',
-    structure_v2: structureV2,
-    team: compatibilityTeam,
-    requirements: normalized.requirements,
+    blueprint: blueprintDocument.team_blueprint,
+    team: blueprintDocument,
+    requirements: blueprintDocument.requirements,
   }, null, 2);
 }
 
@@ -1230,7 +1346,7 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
     : null;
   const structureDerived = normalizedStructure ? deriveTeamConfigFromStructureV2(normalizedStructure) : {};
   const preferStructure = normalizedStructure && (
-    cleanId(input.primary_schema || input.primarySchema || '') === 'structure_v2'
+    ['structure_v2', 'team_blueprint_v1'].includes(cleanId(input.primary_schema || input.primarySchema || ''))
     || cleanId(input.kind || '') === 'team_structure_v2'
   );
   const row = normalizedStructure
@@ -1242,7 +1358,7 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
         install_proposal_state: input.install_proposal_state || input.installProposalState || structureDerived.install_proposal_state || structureDerived.installProposalState,
         credential_binding_state: input.credential_binding_state || input.credentialBindingState || structureDerived.credential_binding_state || structureDerived.credentialBindingState,
         structure_v2: normalizedStructure,
-        primary_schema: 'structure_v2',
+        primary_schema: 'team_blueprint_v1',
       }
     : input;
   const compositionMode = normalizeCompositionMode(row.composition_mode || row.compositionMode || normalizedStructure?.metadata?.composition_mode || 'structured');
@@ -1317,6 +1433,7 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
     composition_mode: compositionMode,
     proposal_mode: proposalMode,
     task_brief: taskBrief,
+    task_archetype: normalizeTaskArchetype(row.task_archetype || row.taskArchetype || row.team_blueprint?.task_archetype || row.teamBlueprint?.task_archetype || '', 'research'),
     design_prompt: clean(row.design_prompt || row.designPrompt || taskBrief),
     lock_after_apply: row.lock_after_apply !== false,
     agents,
@@ -1324,11 +1441,16 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
     interaction_notes: buildInteractionSummaryLines(interactionSpec),
     shortcut_policy: normalizeShortcutPolicy(row.shortcut_policy || row.shortcutPolicy),
     planner_metadata: normalizePlannerMetadata(row.planner_metadata || row.plannerMetadata),
+    good_for: asArray(row.good_for || row.goodFor || row.recommended_for || []).map((entry) => clean(entry)).filter(Boolean).slice(0, 8),
+    bad_for: asArray(row.bad_for || row.badFor || row.anti_patterns || []).map((entry) => clean(entry)).filter(Boolean).slice(0, 8),
+    catalog_tags: uniqueIds(row.catalog_tags || row.catalogTags || [], { max: 8 }),
+    memory_plan: asObject(row.memory_plan || row.memoryPlan),
+    runtime_execution: asObject(row.runtime_execution || row.runtimeExecution || normalizedStructure?.control_policy?.runtime_execution || normalizedStructure?.control_policy?.runtimeExecution),
     capability_gaps: capabilityGaps,
-    requirements: buildManifestRequirements({
+    requirements: normalizeManifestRequirements(row.requirements || buildManifestRequirements({
       team: row,
       capabilityGaps,
-    }),
+    })),
     status: cleanId(row.status || 'draft') || 'draft',
     created_at: clean(row.created_at || nowIso()),
     updated_at: nowIso(),
@@ -1394,6 +1516,9 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
           ? asObject(normalizedStructure.memory_policy || normalizedStructure.memoryPolicy)
           : asObject(derivedStructure.memory_policy),
         requirements: normalizedTeam.requirements,
+        memory_plan: Object.keys(asObject(normalizedStructure.memory_plan || normalizedStructure.memoryPlan)).length > 0
+          ? asObject(normalizedStructure.memory_plan || normalizedStructure.memoryPlan)
+          : asObject(derivedStructure.memory_plan),
         runtime_state: {
           ...asObject(derivedStructure.runtime_state),
           ...asObject(normalizedStructure.runtime_state),
@@ -1411,15 +1536,17 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
     ...structureV2,
     knowledge_surface: knowledgeDesign.knowledge_surface,
     memory_policy: knowledgeDesign.memory_policy,
+    memory_plan: knowledgeDesign.memory_plan,
   });
-  return {
+  return attachTeamBlueprint({
     ...normalizedTeam,
     structure_v2: finalStructureV2,
     knowledge_surface: knowledgeDesign.knowledge_surface,
     memory_policy: knowledgeDesign.memory_policy,
+    memory_plan: knowledgeDesign.memory_plan,
     knowledge_base_profile: knowledgeDesign.profile,
-    primary_schema: 'structure_v2',
-  };
+    primary_schema: 'team_blueprint_v1',
+  }, { runtime, applyState: 'pending', source: 'normalize_team_config' });
 }
 
 function normalizePlannerMetadata(raw = null) {
@@ -1668,8 +1795,9 @@ export async function buildAutoRefineDraftFromStructureConflict({ team = {}, ins
 export async function createFreeformTeamConfigurationAdvanced({ description = '', runtime = null, planner = null } = {}) {
   const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
   const taskText = clean(description);
-  const structuredFallback = suggestTeamConfiguration({ taskText, runtime: effectiveRuntime });
-  const heuristicTeam = createFreeformTeamConfiguration({ description: taskText, runtime: effectiveRuntime });
+  const initialSelection = selectTaskArchetypeTemplate({ taskText });
+  const structuredFallback = suggestTeamConfiguration({ taskText, runtime: effectiveRuntime, preferredTaskArchetype: initialSelection.archetype });
+  const heuristicTeam = createFreeformTeamConfiguration({ description: taskText, runtime: effectiveRuntime, preferredTaskArchetype: initialSelection.archetype });
   const activePlanner = typeof planner === 'function' ? planner : planFreeformTeamWithCodex;
   let plannerResult = null;
   try {
@@ -1690,10 +1818,22 @@ export async function createFreeformTeamConfigurationAdvanced({ description = ''
         planner_type: 'heuristic_rule_based',
         planner_model: '',
         planning_source: 'heuristic_fallback',
-        reasoning_summary: [clean(plannerResult?.reason || 'freeform heuristics applied') || 'freeform heuristics applied'],
+        reasoning_summary: extendPlannerReasoningSummary({
+          reasoning_summary: [clean(plannerResult?.reason || 'freeform heuristics applied') || 'freeform heuristics applied'],
+        }, initialSelection),
       }),
     };
   }
+  const plannerSelection = selectTaskArchetypeTemplate({
+    taskText,
+    plannerPlan: plannerResult.plan,
+    preferredTaskArchetype: initialSelection.archetype,
+  });
+  const teamName = clean(plannerResult.plan.team_name || heuristicTeam.team_name || taskText).slice(0, 48).replace(/\s+/g, '_') || 'freeform_team';
+  const plannerSeed = buildTeamSeedFromTaskArchetype(plannerSelection.archetype, {
+    taskBrief: taskText,
+    title: teamName,
+  });
   const agents = buildPlannerDrivenFreeformAgents({
     taskText,
     runtime: effectiveRuntime,
@@ -1703,67 +1843,90 @@ export async function createFreeformTeamConfigurationAdvanced({ description = ''
   const interactionSpec = buildInteractionSpecForTeam({
     taskText,
     agents,
-    current: plannerResult.plan.interaction_spec || heuristicTeam.interaction_spec,
+    current: plannerResult.plan.interaction_spec || plannerSeed.interaction_spec || heuristicTeam.interaction_spec,
   });
   const normalized = normalizeTeamConfig({
-    team_name: clean(plannerResult.plan.team_name || heuristicTeam.team_name || taskText).slice(0, 48).replace(/\s+/g, '_') || 'freeform_team',
+    ...plannerSeed,
+    team_name: teamName,
     mode: 'scoped_context',
     composition_mode: 'freeform',
     proposal_mode: 'create',
     lock_after_apply: true,
     agents,
     interaction_spec: interactionSpec,
-    shortcut_policy: normalizeShortcutPolicy(plannerResult.plan.shortcut_policy || heuristicTeam.shortcut_policy),
+    shortcut_policy: normalizeShortcutPolicy(plannerResult.plan.shortcut_policy || heuristicTeam.shortcut_policy || plannerSeed.shortcut_policy),
     status: 'suggested',
     task_brief: taskText,
     design_prompt: taskText,
-    planner_metadata: normalizePlannerMetadata(plannerResult.planner_metadata),
+    task_archetype: plannerSelection.archetype,
+    planner_metadata: normalizePlannerMetadata({
+      ...plannerResult.planner_metadata,
+      reasoning_summary: extendPlannerReasoningSummary(plannerResult.planner_metadata, plannerSelection),
+    }),
   }, { runtime: effectiveRuntime });
   return normalized;
 }
 
-export function suggestTeamConfiguration({ taskText = '', runtime = null } = {}) {
+export function suggestTeamConfiguration({ taskText = '', runtime = null, preferredTaskArchetype = '', currentTeam = null } = {}) {
   const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
-  const agents = buildStructuredAgentDrafts({ taskText, runtime: effectiveRuntime });
-  const interactionSpec = buildDefaultInteractionSpec(agents, { task: taskText });
+  const suggestedName = clean(taskText).slice(0, 36).replace(/\s+/g, '_') || 'team_config';
+  const { selection, seed } = buildTaskArchetypeSeed({ taskText, preferredTaskArchetype, currentTeam, title: suggestedName });
+  const agents = buildStructuredAgentDrafts({ taskText, runtime: effectiveRuntime, preferredTaskArchetype: selection.archetype, currentTeam });
+  const interactionSpec = buildInteractionSpecForTeam({ taskText, agents, current: seed.interaction_spec });
   return normalizeTeamConfig({
-    team_name: clean(taskText).slice(0, 36).replace(/\s+/g, '_') || 'team_config',
+    ...seed,
+    team_name: suggestedName || seed.team_name || 'team_config',
     mode: 'scoped_context',
     composition_mode: 'structured',
     proposal_mode: 'suggest',
     lock_after_apply: true,
     agents,
     interaction_spec: interactionSpec,
-    shortcut_policy: buildDefaultShortcutPolicy(),
+    shortcut_policy: normalizeShortcutPolicy(seed.shortcut_policy || buildDefaultShortcutPolicy()),
     status: 'suggested',
     task_brief: taskText,
     design_prompt: taskText,
+    task_archetype: selection.archetype,
+    planner_metadata: normalizePlannerMetadata({
+      planner_type: 'task_archetype_template',
+      planning_source: 'task_archetype_template',
+      reasoning_summary: extendPlannerReasoningSummary({ reasoning_summary: [] }, selection),
+    }),
   }, { runtime: effectiveRuntime });
 }
 
-export function createFreeformTeamConfiguration({ description = '', runtime = null } = {}) {
+export function createFreeformTeamConfiguration({ description = '', runtime = null, preferredTaskArchetype = '', currentTeam = null } = {}) {
   const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
   const taskText = clean(description);
-  const structuredFallback = suggestTeamConfiguration({ taskText, runtime: effectiveRuntime });
+  const suggestedName = clean(taskText).slice(0, 36).replace(/\s+/g, '_') || 'freeform_team';
+  const { selection, seed } = buildTaskArchetypeSeed({ taskText, preferredTaskArchetype, currentTeam, title: suggestedName });
+  const structuredFallback = suggestTeamConfiguration({ taskText, runtime: effectiveRuntime, preferredTaskArchetype: selection.archetype, currentTeam });
   const agents = buildFreeformAgentDrafts({
     taskText,
     runtime: effectiveRuntime,
     blueprints: inferFreeformAgentBlueprints(taskText),
     structuredAgents: asArray(structuredFallback?.agents),
   });
-  const interactionSpec = buildInteractionSpecForTeam({ taskText, agents });
+  const interactionSpec = buildInteractionSpecForTeam({ taskText, agents, current: seed.interaction_spec });
   return normalizeTeamConfig({
-    team_name: clean(taskText).slice(0, 36).replace(/\s+/g, '_') || 'freeform_team',
+    ...seed,
+    team_name: suggestedName || seed.team_name || 'freeform_team',
     mode: 'scoped_context',
     composition_mode: 'freeform',
     proposal_mode: 'create',
     lock_after_apply: true,
     agents,
     interaction_spec: interactionSpec,
-    shortcut_policy: buildDefaultShortcutPolicy(),
+    shortcut_policy: normalizeShortcutPolicy(seed.shortcut_policy || buildDefaultShortcutPolicy()),
     status: 'suggested',
     task_brief: taskText,
     design_prompt: taskText,
+    task_archetype: selection.archetype,
+    planner_metadata: normalizePlannerMetadata({
+      planner_type: 'task_archetype_template',
+      planning_source: 'task_archetype_template',
+      reasoning_summary: extendPlannerReasoningSummary({ reasoning_summary: [] }, selection),
+    }),
   }, { runtime: effectiveRuntime });
 }
 
@@ -2001,7 +2164,7 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       status: 'ready',
     });
   }
-  runtime.activeTeamConfig = { ...team, structure_v2: structure, knowledge_surface: structure.knowledge_surface, memory_policy: structure.memory_policy, runtime_execution: asObject(structure.control_policy?.runtime_execution), knowledge_base_profile: deriveKnowledgeBaseDesign({ goal: team.task_brief || structure?.intent?.task_brief || '', teamConfig: { ...team, structure_v2: structure } }).profile, primary_schema: 'structure_v2' };
+  runtime.activeTeamConfig = attachTeamBlueprint({ ...team, structure_v2: structure, knowledge_surface: structure.knowledge_surface, memory_policy: structure.memory_policy, memory_plan: structure.memory_plan, runtime_execution: asObject(structure.control_policy?.runtime_execution), knowledge_base_profile: deriveKnowledgeBaseDesign({ goal: team.task_brief || structure?.intent?.task_brief || '', teamConfig: { ...team, structure_v2: structure } }).profile, primary_schema: 'team_blueprint_v1' }, { runtime, applyState: 'active', source: 'apply_team_configuration' });
   runtime.activeTeamStructure = structure;
   runtime.teamLocked = true;
   runtime.teamInteractionSpec = normalizeInteractionSpec(executionProfile.interaction_spec || team.interaction_spec);
@@ -2038,9 +2201,15 @@ export function buildTeamListMessage(teamState = {}) {
     `팀 이름: ${clean(active.team_name || 'active_team')}`,
     `구성 방식: ${normalizeCompositionMode(active.composition_mode || 'structured')}`,
     `agent 수: ${asArray(active.agents).length}`,
+    active.task_archetype ? `task archetype: ${clean(active.task_archetype)}` : null,
     active.structure_v2?.topology?.pattern ? `structure 패턴: ${clean(active.structure_v2.topology.pattern)}` : null,
     active.planner_metadata ? `설계 엔진: ${summarizePlannerMetadata(active.planner_metadata)}` : null,
     active.knowledge_base_profile ? summarizeKnowledgeBaseProfile(active.knowledge_base_profile).split('\n')[0] : null,
+    ...(buildKnowledgeBaseMemoryMapLines(active.memory_plan || active.knowledge_base_profile, { maxLines: 6 }).length > 0 ? [
+      '',
+      'Memory layout',
+      ...buildKnowledgeBaseMemoryMapLines(active.memory_plan || active.knowledge_base_profile, { maxLines: 6 }),
+    ] : []),
     '',
     'Agents',
     ...asArray(active.agents).flatMap((agent, index) => {
@@ -2073,8 +2242,15 @@ export function formatTeamProposalMessage(team = {}) {
     `Team proposal · ${clean(row.team_name || 'team_config')}`,
     `구성 방식: ${compositionMode} · 제안 모드: ${proposalMode}`,
     row.task_brief ? `목표: ${clean(row.task_brief)}` : null,
+    row.task_archetype ? `task archetype: ${clean(row.task_archetype)}` : null,
     row.planner_metadata ? `설계 엔진: ${summarizePlannerMetadata(row.planner_metadata)}` : null,
     row.structure_v2?.topology?.pattern ? `structure 패턴: ${clean(row.structure_v2.topology.pattern)}` : null,
+    asArray(row.good_for).length > 0 ? `good for: ${asArray(row.good_for).slice(0, 3).join(', ')}` : null,
+    ...(buildKnowledgeBaseMemoryMapLines(row.memory_plan || row.knowledge_base_profile, { maxLines: 6 }).length > 0 ? [
+      '',
+      'Memory layout',
+      ...buildKnowledgeBaseMemoryMapLines(row.memory_plan || row.knowledge_base_profile, { maxLines: 6 }),
+    ] : []),
     '',
     'Agents',
     ...asArray(row.agents).flatMap((agent, index) => {

@@ -198,12 +198,12 @@ function summarizeTeamForPlanner(team = null) {
     })).filter((agent) => agent.name),
     interaction_spec: asObject(source.interaction_spec || source.interactionSpec),
     shortcut_policy: asObject(source.shortcut_policy || source.shortcutPolicy),
+    memory_plan: asObject(source.memory_plan || source.memoryPlan || structure?.memory_plan || structure?.memoryPlan),
+    memory_plan: asObject(source.memory_plan || source.memoryPlan || structure?.memory_plan || structure?.memoryPlan),
     knowledge_surface: asObject(source.knowledge_surface || source.knowledgeSurface || structure?.knowledge_surface || structure?.knowledgeSurface),
     memory_policy: asObject(source.memory_policy || source.memoryPolicy || structure?.memory_policy || structure?.memoryPolicy),
     runtime_execution: asObject(source.runtime_execution || source.runtimeExecution || structure?.control_policy?.runtime_execution || structure?.control_policy?.runtimeExecution),
     structure_v2: structure || undefined,
-    knowledge_surface: asObject(source.knowledge_surface || source.knowledgeSurface || structure?.knowledge_surface || structure?.knowledgeSurface),
-    memory_policy: asObject(source.memory_policy || source.memoryPolicy || structure?.memory_policy || structure?.memoryPolicy),
     planner_metadata: asObject(source.planner_metadata || source.plannerMetadata),
   };
 }
@@ -332,6 +332,7 @@ function normalizePlannerPlan(raw = {}) {
     }).filter((agent) => agent.name),
     interaction_spec: asObject(source.interaction_spec || source.interactionSpec),
     shortcut_policy: asObject(source.shortcut_policy || source.shortcutPolicy),
+    memory_plan: asObject(source.memory_plan || source.memoryPlan || structure?.memory_plan || structure?.memoryPlan),
     knowledge_surface: asObject(source.knowledge_surface || source.knowledgeSurface || structure?.knowledge_surface || structure?.knowledgeSurface),
     memory_policy: asObject(source.memory_policy || source.memoryPolicy || structure?.memory_policy || structure?.memoryPolicy),
     runtime_execution: asObject(source.runtime_execution || source.runtimeExecution || structure?.control_policy?.runtime_execution || structure?.control_policy?.runtimeExecution),

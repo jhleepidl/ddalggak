@@ -182,7 +182,7 @@ export async function handleActionApprovalCallback({
     clip,
     sendLong,
     buildPendingApprovalPrompt,
-    maybeAutoSendOutputs,
+    maybeSendArtifactSummary,
     markMutatingActionsConfirmed,
     jobAbortControllers,
   } = deps;
@@ -842,8 +842,7 @@ export async function handleActionApprovalCallback({
         );
       }
     }
-    await maybeAutoSendOutputs(bot, chatId, pendingJobId, {
-      when: "run_end",
+    await maybeSendArtifactSummary(bot, chatId, pendingJobId, {
       replyToMessageId: getCurrentTurnReplyMessageId(chatId),
     }).catch(() => null);
   } catch (e) {

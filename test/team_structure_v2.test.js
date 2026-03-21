@@ -102,14 +102,14 @@ test('validateTeamStructureV2 flags debate/team shape issues and synthesizes par
   assert.ok(debate.warnings.some((entry) => entry.includes('debate pattern works best')));
 });
 
-test('buildTeamConfigurationTemplate emits structure_v2-primary manifest and validation prefers structure over stale legacy team', () => {
+test('buildTeamConfigurationTemplate emits team_blueprint_v1 manifest and validation prefers structure over stale legacy team', () => {
   const template = JSON.parse(buildTeamConfigurationTemplate(baseTeam));
-  assert.equal(template.primary_schema, 'structure_v2');
-  assert.equal(template.structure_v2.kind, 'team_structure_v2');
+  assert.equal(template.primary_schema, 'team_blueprint_v1');
+  assert.equal(template.blueprint.structure.kind, 'team_structure_v2');
   assert.equal(template.team.interaction_spec.final_answer_owner, 'Judge');
 
   const normalized = validateTeamConfiguration({
-    primary_schema: 'structure_v2',
+    primary_schema: 'team_blueprint_v1',
     team_name: 'Legacy Stale',
     agents: [
       { agent_id: 'legacy', name: 'Legacy', role: 'researcher', purpose: 'stale legacy payload' },
@@ -133,7 +133,7 @@ test('buildTeamConfigurationTemplate emits structure_v2-primary manifest and val
   assert.equal(normalized.team_name, 'Canonical Structure');
   assert.equal(normalized.agents[0].agent_id, 'router');
   assert.equal(normalized.structure_v2.topology.pattern, 'sequential');
-  assert.equal(normalized.primary_schema, 'structure_v2');
+  assert.equal(normalized.primary_schema, 'team_blueprint_v1');
 });
 
 
@@ -211,7 +211,7 @@ test('validateTeamStructureV2 adds graph cycle errors and execution profile deri
 
 test('applyTeamConfigurationToRuntime builds runtime snapshot from structure_v2 participants', () => {
   const normalized = validateTeamConfiguration({
-    primary_schema: 'structure_v2',
+    primary_schema: 'team_blueprint_v1',
     structure_v2: {
       metadata: { team_name: 'Structure Runtime', composition_mode: 'freeform', proposal_mode: 'create' },
       intent: { task_brief: 'structure 우선 실행' },
@@ -256,7 +256,7 @@ test('buildAutoRefineDraftFromStructureConflict creates a pending-ready refine p
   assert.ok(draft.structure_v2);
 });
 
-test('structure_v2 carries knowledge surface and memory policy into derived team config', () => {
+test('structure_v2 carries knowledge surface, memory policy, and memory plan into derived team config', () => {
   const structure = normalizeTeamStructureV2({
     metadata: { team_name: 'KB Structure Team', composition_mode: 'freeform', proposal_mode: 'create' },
     intent: { task_brief: 'Implement and review code changes' },
@@ -286,8 +286,10 @@ test('structure_v2 carries knowledge surface and memory policy into derived team
 
   assert.equal(structure.knowledge_surface.profile_id, 'custom_impl');
   assert.deepEqual(structure.memory_policy.stable_semantic_slots, ['decisions', 'artifacts']);
+  assert.ok(Array.isArray(structure.memory_plan?.surfaces));
 
   const team = deriveTeamConfigFromStructureV2(structure);
   assert.equal(team.knowledge_base_profile.profile_id, 'custom_impl');
+  assert.ok(Array.isArray(team.memory_plan?.surfaces));
   assert.equal(team.knowledge_base_profile.docs.find((doc) => doc.doc_id === 'decisions')?.file_name, 'review_ruling.md');
 });

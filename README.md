@@ -474,9 +474,10 @@ sudo systemctl status telegram-orchestrator
   - 다운로드: 기본 20MB (`TELEGRAM_UPLOAD_MAX_MB`, `TELEGRAM_DOWNLOAD_MAX_BYTES`)
   - 전송(sendDocument): 50MB
 - 업로드 확장자 제한: `TELEGRAM_UPLOAD_ALLOWED_EXTS` (비우면 전체 허용)
-- `/files [uploads|outputs|all] [limit]` : workspace 파일 목록 조회
-- `/outputs [send]` : outputs 목록 조회 또는 즉시 전송
-- `/sendfile <relative_path>` : `uploads/` 또는 `outputs/` 파일 1개 전송
+- `/files [uploads|workspace|all] [limit]` : workspace 파일 목록 조회
+- `/artifacts [limit]` : 최근 산출물 후보 목록 조회
+- `/send <번호|path>` : 요청한 파일 1개를 Telegram 첨부로 전송
+- `/outputs [limit]`, `/sendfile <relative_path>` : legacy alias
 
 ### 6) GoC 명령
 - `/agents` : 현재 preset catalog / team view / preference 상태 출력
@@ -505,7 +506,7 @@ sudo systemctl status telegram-orchestrator
 각 jobId 폴더:
 - `workspace/`
 - `workspace/uploads/`
-- `workspace/outputs/`
+- `artifact_index.json` (workspace 원본 파일을 참조하는 산출물 인덱스)
 - `workspace/tmp/`
 - `workspace/.gemini/settings.json`
 - `shared/research.md`

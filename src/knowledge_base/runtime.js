@@ -151,6 +151,19 @@ export function buildAgentKnowledgeBaseGuidance({
   const stableFiles = listStableKnowledgeMemoryFiles({ sharedDir });
   const sharedPrefix = cleanText(sharedDir);
   const concretePath = (fileName) => (sharedPrefix ? path.join(sharedPrefix, fileName) : fileName);
+  const providerKey = cleanText(provider, { lower: true });
+  const canWriteTrackingFilesDirectly = providerKey === 'codex';
+  const dedupeDocs = (docs = []) => {
+    const seen = new Set();
+    const out = [];
+    for (const doc of asArray(docs)) {
+      const key = cleanText(doc?.file_name, { lower: true });
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(doc);
+    }
+    return out;
+  };
   const lines = [
     '[KNOWLEDGE BASE CONTRACT]',
     `profile=${normalized.profile_id} (${normalized.display_name})`,
@@ -163,18 +176,22 @@ export function buildAgentKnowledgeBaseGuidance({
     '- shared tracking 파일은 run/shared 안에만 존재한다. CODEX_WORKSPACE_ROOT 또는 repo 루트에 같은 이름 파일을 새로 만들지 마라.',
     '- 목록에 없는 tracking 파일명을 추측하거나 invent 하지 마라.',
     '- stable memory file은 읽기 전용이다. knowledge_base_profile.json / knowledge_base_contract.md를 수정 대상으로 삼지 마라.',
+    canWriteTrackingFilesDirectly
+      ? '- Codex만 tracking 문서를 직접 수정할 수 있다. 수정이 필요하면 아래 주요 작성 대상에만 append/update 하라.'
+      : '- 이 provider는 tracking 문서를 직접 수정하지 않는다. write_file/create_file/save_file 같은 도구를 호출하지 말고, 필요한 내용은 응답 본문으로만 반환하라. 오케스트레이터가 적절한 memory 파일에 반영한다.',
     `- 안정적으로 보존되는 semantic slot: ${memoryPolicy.stable_semantic_slots.join(', ') || '(none)'}.`,
     `- 변경 가능 slot: ${memoryPolicy.mutable_semantic_slots.join(', ') || '(none)'}.`,
     '',
     '추천 읽기 순서:',
-    ...access.read_docs.map((doc) => formatDocBullet({ ...doc, file_name: concretePath(doc.file_name) }, { includeAliases: false })),
+    ...dedupeDocs(access.read_docs).map((doc) => formatDocBullet({ ...doc, file_name: concretePath(doc.file_name) }, { includeAliases: false })),
     '',
     '주요 작성 대상:',
-    ...access.write_docs.map((doc) => formatDocBullet({ ...doc, file_name: concretePath(doc.file_name) }, { includeAliases: false })),
-    ...(access.write_docs.length === 0 ? ['- (명시적으로 작성 허용된 tracking 문서 없음. 필요하면 plan/research/progress/decisions/artifacts semantic slot 중 해당 concrete file만 사용하라.)'] : []),
+    ...(canWriteTrackingFilesDirectly
+      ? dedupeDocs(access.write_docs).map((doc) => formatDocBullet({ ...doc, file_name: concretePath(doc.file_name) }, { includeAliases: false }))
+      : ['- (direct file writes disabled for this provider)']),
     '',
     '전체 semantic slot 매핑:',
-    ...normalized.docs.map((doc) => formatDocBullet({ ...doc, file_name: concretePath(doc.file_name) })),
+    ...dedupeDocs(normalized.docs).map((doc) => formatDocBullet({ ...doc, file_name: concretePath(doc.file_name) })),
     '',
     '고정 메모리 파일:',
     ...stableFiles.map((file) => `- ${file.path} (${file.mode}): ${file.purpose}`),

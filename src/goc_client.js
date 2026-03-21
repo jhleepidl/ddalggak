@@ -2036,85 +2036,57 @@ export class GocClient {
   }
 
 
-  async getTeamManifest(threadTarget) {
+
+  async getTeamBlueprint(threadTarget) {
     const target = summarizeTeamTarget(threadTarget, { client: this });
     const threadId = String(target.thread_id || '').trim();
     if (!threadId) throw new Error('threadTarget requires threadId');
     const data = await this._requestAny({
       method: 'GET',
       attempts: [
-        { path: `/api/threads/${encodeURIComponent(threadId)}/team/manifest` },
-        { path: `/threads/${encodeURIComponent(threadId)}/team/manifest` },
+        { path: `/api/threads/${encodeURIComponent(threadId)}/team/blueprint` },
+        { path: `/threads/${encodeURIComponent(threadId)}/team/blueprint` },
       ],
     });
     return normalizeEntity(data, ['manifest', 'data']) || asObject(data);
   }
 
-  async validateTeamManifest(threadTarget, manifest = {}, applyState = 'active') {
+  async validateTeamBlueprint(threadTarget, blueprint = {}, applyState = 'active') {
     const target = summarizeTeamTarget(threadTarget, { client: this });
     const threadId = String(target.thread_id || '').trim();
     if (!threadId) throw new Error('threadTarget requires threadId');
     return await this._requestAny({
       method: 'POST',
       attempts: [
-        { path: `/api/threads/${encodeURIComponent(threadId)}/team/manifest/validate`, body: { manifest, apply_state: applyState } },
-        { path: `/threads/${encodeURIComponent(threadId)}/team/manifest/validate`, body: { manifest, apply_state: applyState } },
+        { path: `/api/threads/${encodeURIComponent(threadId)}/team/blueprint/validate`, body: { manifest: blueprint, apply_state: applyState } },
+        { path: `/threads/${encodeURIComponent(threadId)}/team/blueprint/validate`, body: { manifest: blueprint, apply_state: applyState } },
       ],
     });
   }
 
-  async installTeamManifest(threadTarget, manifest = {}, applyState = 'active') {
+  async installTeamBlueprint(threadTarget, blueprint = {}, applyState = 'active') {
     const target = summarizeTeamTarget(threadTarget, { client: this });
     const threadId = String(target.thread_id || '').trim();
     if (!threadId) throw new Error('threadTarget requires threadId');
     return await this._requestAny({
       method: 'POST',
       attempts: [
-        { path: `/api/threads/${encodeURIComponent(threadId)}/team/install`, body: { manifest, apply_state: applyState } },
-        { path: `/threads/${encodeURIComponent(threadId)}/team/install`, body: { manifest, apply_state: applyState } },
+        { path: `/api/threads/${encodeURIComponent(threadId)}/team/blueprint/install`, body: { manifest: blueprint, apply_state: applyState } },
+        { path: `/threads/${encodeURIComponent(threadId)}/team/blueprint/install`, body: { manifest: blueprint, apply_state: applyState } },
       ],
     });
   }
-
 
   async getTeamManifest(threadTarget) {
-    const target = summarizeTeamTarget(threadTarget, { client: this });
-    const threadId = String(target.thread_id || '').trim();
-    if (!threadId) throw new Error('threadTarget requires threadId');
-    const data = await this._requestAny({
-      method: 'GET',
-      attempts: [
-        { path: `/api/threads/${encodeURIComponent(threadId)}/team/manifest` },
-        { path: `/threads/${encodeURIComponent(threadId)}/team/manifest` },
-      ],
-    });
-    return normalizeEntity(data, ['manifest', 'data']) || asObject(data);
+    return await this.getTeamBlueprint(threadTarget);
   }
 
   async validateTeamManifest(threadTarget, manifest = {}, applyState = 'active') {
-    const target = summarizeTeamTarget(threadTarget, { client: this });
-    const threadId = String(target.thread_id || '').trim();
-    if (!threadId) throw new Error('threadTarget requires threadId');
-    return await this._requestAny({
-      method: 'POST',
-      attempts: [
-        { path: `/api/threads/${encodeURIComponent(threadId)}/team/manifest/validate`, body: { manifest, apply_state: applyState } },
-        { path: `/threads/${encodeURIComponent(threadId)}/team/manifest/validate`, body: { manifest, apply_state: applyState } },
-      ],
-    });
+    return await this.validateTeamBlueprint(threadTarget, manifest, applyState);
   }
 
   async installTeamManifest(threadTarget, manifest = {}, applyState = 'active') {
-    const target = summarizeTeamTarget(threadTarget, { client: this });
-    const threadId = String(target.thread_id || '').trim();
-    if (!threadId) throw new Error('threadTarget requires threadId');
-    return await this._requestAny({
-      method: 'POST',
-      attempts: [
-        { path: `/api/threads/${encodeURIComponent(threadId)}/team/install`, body: { manifest, apply_state: applyState } },
-        { path: `/threads/${encodeURIComponent(threadId)}/team/install`, body: { manifest, apply_state: applyState } },
-      ],
-    });
+    return await this.installTeamBlueprint(threadTarget, manifest, applyState);
   }
 
   async listAgents(scope = "") {

@@ -26,6 +26,7 @@ export function summarizeRuntimeTeamSnapshotLines(snapshot = null, {
   const supervisorRuntime = row.supervisor_runtime && typeof row.supervisor_runtime === "object"
     ? row.supervisor_runtime
     : null;
+  const blueprintSummary = row.blueprint_summary && typeof row.blueprint_summary === 'object' ? row.blueprint_summary : (row.team_plan?.blueprint_summary && typeof row.team_plan.blueprint_summary === 'object' ? row.team_plan.blueprint_summary : null);
   const lines = [
     `- action_source: ${String(actionSource || "unknown")}`,
     `- source: ${String(row.source || "team_builder")}`,
@@ -42,6 +43,13 @@ export function summarizeRuntimeTeamSnapshotLines(snapshot = null, {
       + `${dominantSkills ? ` skills=${dominantSkills}` : ""}`
       + `${agent.selection_reason ? ` reason=${agent.selection_reason}` : ""}`
     );
+  }
+  if (blueprintSummary?.task_archetype || blueprintSummary?.title) {
+    lines.push(`- task_archetype: ${String(blueprintSummary.task_archetype || '(unknown)')}`);
+    if (blueprintSummary?.title) lines.push(`- template: ${String(blueprintSummary.title)}`);
+    if (blueprintSummary?.execution_pattern || blueprintSummary?.topology_pattern) lines.push(`- template_pattern: ${String(blueprintSummary.execution_pattern || blueprintSummary.topology_pattern)}`);
+    const memoryMap = Array.isArray(blueprintSummary?.memory_map) ? blueprintSummary.memory_map.slice(0, 4) : [];
+    if (memoryMap.length > 0) lines.push(`- memory_map: ${memoryMap.map((surface) => String(surface?.surface_id || surface?.file_name || '?')).join(', ')}`);
   }
   lines.push(`- selected_skill_ids: ${selectedSkills.length > 0 ? selectedSkills.join(", ") : "(none)"}`);
   lines.push(`- context_packs: ${contextPacks.length}`);

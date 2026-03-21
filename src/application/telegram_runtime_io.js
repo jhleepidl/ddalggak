@@ -135,9 +135,6 @@ const {
   GOC_UI_BROWSER_TOKEN_TTL_SEC,
   GOC_UI_LINK_MODE,
   TELEGRAM_SEND_MAX_BYTES,
-  OUTPUT_AUTO_SEND,
-  OUTPUT_AUTO_SEND_MAX_FILES,
-  OUTPUT_AUTO_SEND_ON,
   jobs,
   chatSessionStore,
   gocFallbackByJob,
@@ -441,7 +438,10 @@ async function appendWorkspaceUploadArtifactToGoc(jobId, {
   }
 }
 
-function listWorkspaceFilesRecursive(rootDir) {
+const ARTIFACT_INDEX_FILE = "artifact_index.json";
+const WORKSPACE_FILE_SKIP_DIRS = new Set(["uploads", "outputs", ".git", "node_modules", ".codex", ".gemini"]);
+
+function listWorkspaceFilesRecursive(rootDir, { skipDirNames = null, includeHiddenFiles = false } = {}) {
   const out = [];
   const stack = [String(rootDir || "")];
   while (stack.length > 0) {
@@ -457,8 +457,10 @@ function listWorkspaceFilesRecursive(rootDir) {
       const name = String(entry?.name || "").trim();
       if (!name || name === "." || name === "..") continue;
       if (name.startsWith(".telegram_")) continue;
+      if (!includeHiddenFiles && name.startsWith('.')) continue;
       const abs = path.join(dir, name);
       if (entry.isDirectory()) {
+        if (skipDirNames && skipDirNames.has(name)) continue;
         stack.push(abs);
         continue;
       }
@@ -470,7 +472,8 @@ function listWorkspaceFilesRecursive(rootDir) {
 
 function normalizeWorkspaceScope(raw = "") {
   const scope = String(raw || "").trim().toLowerCase();
-  if (scope === "uploads" || scope === "outputs" || scope === "all") return scope;
+  if (scope === "uploads" || scope === "workspace" || scope === "all") return scope;
+  if (scope === "artifacts" || scope === "outputs") return "workspace";
   return "all";
 }
 
@@ -481,15 +484,28 @@ function collectWorkspaceFileEntries(jobId, { scope = "all" } = {}) {
   const normalizedScope = normalizeWorkspaceScope(scope);
   const targets = [];
   if (normalizedScope === "all" || normalizedScope === "uploads") {
-    targets.push({ bucket: "uploads", dir: resolveWorkspacePath(cleanJobId, "uploads", { asDirectory: true }) });
+    targets.push({
+      bucket: "uploads",
+      dir: resolveWorkspacePath(cleanJobId, "uploads", { asDirectory: true }),
+      skipDirNames: null,
+      includeHiddenFiles: false,
+    });
   }
-  if (normalizedScope === "all" || normalizedScope === "outputs") {
-    targets.push({ bucket: "outputs", dir: resolveWorkspacePath(cleanJobId, "outputs", { asDirectory: true }) });
+  if (normalizedScope === "all" || normalizedScope === "workspace") {
+    targets.push({
+      bucket: "workspace",
+      dir: workspaceRoot,
+      skipDirNames: WORKSPACE_FILE_SKIP_DIRS,
+      includeHiddenFiles: false,
+    });
   }
 
   const out = [];
   for (const target of targets) {
-    const files = listWorkspaceFilesRecursive(target.dir);
+    const files = listWorkspaceFilesRecursive(target.dir, {
+      skipDirNames: target.skipDirNames,
+      includeHiddenFiles: target.includeHiddenFiles,
+    });
     for (const abs of files) {
       let stat = null;
       try {
@@ -499,6 +515,7 @@ function collectWorkspaceFileEntries(jobId, { scope = "all" } = {}) {
       }
       if (!stat || !stat.isFile()) continue;
       const rel = path.relative(workspaceRoot, abs).replace(/\\/g, "/");
+      if (!rel || rel.startsWith("..")) continue;
       out.push({
         bucket: target.bucket,
         abs,
@@ -535,7 +552,7 @@ function buildWorkspaceFilesPromptSection(jobId, { limitPerBucket = 5 } = {}) {
     ? Math.max(1, Math.min(20, Math.floor(Number(limitPerBucket))))
     : 5;
   const uploads = collectWorkspaceFileEntries(jobId, { scope: "uploads" }).slice(0, limit);
-  const outputs = collectWorkspaceFileEntries(jobId, { scope: "outputs" }).slice(0, limit);
+  const workspaceFiles = collectWorkspaceFileEntries(jobId, { scope: "workspace" }).slice(0, limit);
   const render = (rows) => (
     rows.length > 0
       ? rows.map((row) => `- ${row.rel} (${formatByteSize(row.size)})`).join("\n")
@@ -545,29 +562,194 @@ function buildWorkspaceFilesPromptSection(jobId, { limitPerBucket = 5 } = {}) {
     "workspace 파일 목록(최근):",
     "uploads:",
     render(uploads),
-    "outputs:",
-    render(outputs),
+    "workspace artifacts:",
+    render(workspaceFiles),
     "지시:",
     "- 필요하면 uploads/ 경로의 파일 내용을 참고해라.",
+    "- 최종 산출물은 원래 workspace 경로에 유지된다. outputs/ 복사본을 만들지 마라.",
     "- 매우 큰 파일은 목록만 참고하고 필요한 부분만 선택해 사용해라.",
   ].join("\n");
 }
 
-async function maybeAutoSendOutputs(bot, chatId, jobId, {
-  when = "step",
-  replyToMessageId = null,
-} = {}) {
-  if (!OUTPUT_AUTO_SEND) return;
-  if (String(when || "").trim().toLowerCase() !== OUTPUT_AUTO_SEND_ON) return;
-  await deliverWorkspaceOutputs(bot, chatId, jobId, {
-    replyToMessageId,
-    maxFiles: OUTPUT_AUTO_SEND_MAX_FILES,
-  }).catch(() => null);
+function artifactIndexPath(jobId) {
+  return path.join(runDir(jobId), ARTIFACT_INDEX_FILE);
+}
+
+function loadArtifactIndex(jobId) {
+  const cleanJobId = String(jobId || "").trim();
+  if (!cleanJobId) return { job_id: "", updated_at: new Date().toISOString(), artifacts: [] };
+  try {
+    const parsed = JSON.parse(fs.readFileSync(artifactIndexPath(cleanJobId), 'utf8'));
+    const artifacts = Array.isArray(parsed?.artifacts)
+      ? parsed.artifacts.map((row) => ({
+        id: String(row?.id || '').trim(),
+        path: String(row?.path || '').trim(),
+        label: String(row?.label || '').trim(),
+        kind: String(row?.kind || '').trim(),
+        source: String(row?.source || '').trim(),
+        size: Number(row?.size || 0),
+        mtime_ms: Number(row?.mtime_ms || row?.mtimeMs || 0),
+        sendable: row?.sendable !== false,
+        final: row?.final !== false,
+      })).filter((row) => row.path)
+      : [];
+    return {
+      job_id: String(parsed?.job_id || cleanJobId).trim() || cleanJobId,
+      updated_at: String(parsed?.updated_at || new Date().toISOString()),
+      artifacts,
+    };
+  } catch {
+    return { job_id: cleanJobId, updated_at: new Date().toISOString(), artifacts: [] };
+  }
+}
+
+function inferArtifactKind(relPath = "") {
+  const ext = path.extname(String(relPath || '').trim()).toLowerCase();
+  if ([".md", ".txt", ".pdf", ".doc", ".docx"].includes(ext)) return 'document';
+  if ([".js", ".ts", ".tsx", ".jsx", ".py", ".java", ".go", ".rs", ".rb", ".php", ".c", ".cpp", ".h", ".hpp", ".json", ".yaml", ".yml", ".toml", ".ini", ".sh", ".sql"].includes(ext)) return 'code';
+  if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"].includes(ext)) return 'image';
+  if ([".csv", ".tsv", ".xlsx", ".parquet", ".ipynb"].includes(ext)) return 'data';
+  if ([".zip", ".tar", ".gz", ".tgz"].includes(ext)) return 'archive';
+  return 'file';
+}
+
+function collectExecutionArtifactPathCandidates(execution = null) {
+  const out = [];
+  const seen = new Set();
+  for (const row of Array.isArray(execution?.outputs) ? execution.outputs : []) {
+    const item = row && typeof row === 'object' ? row : {};
+    const rel = String(item.relativePath || item.relative_path || item.path || item.artifact_path || item.artifactPath || '').trim();
+    if (!rel || seen.has(rel)) continue;
+    seen.add(rel);
+    out.push(rel);
+    if (out.length >= 16) break;
+  }
+  return out;
+}
+
+function buildArtifactIndexEntries(jobId, { execution = null, maxFiles = 12 } = {}) {
+  const cleanJobId = String(jobId || '').trim();
+  const workspaceRoot = runWorkspaceDir(cleanJobId);
+  const executionRefs = collectExecutionArtifactPathCandidates(execution);
+  const workspaceFiles = collectWorkspaceFileEntries(cleanJobId, { scope: 'workspace' });
+  const fileMetaByRel = new Map(workspaceFiles.map((row) => [row.rel, row]));
+  const out = [];
+  const seen = new Set();
+
+  const pushEntry = (rel, source = 'workspace_recent', final = false) => {
+    const cleanRel = String(rel || '').trim().replace(/\\/g, '/').replace(/^workspace\//i, '').replace(/^\.\//, '');
+    if (!cleanRel || cleanRel.startsWith('uploads/') || cleanRel.startsWith('outputs/')) return;
+    if (seen.has(cleanRel)) return;
+    let meta = fileMetaByRel.get(cleanRel) || null;
+    if (!meta) {
+      let abs = null;
+      try {
+        abs = jobs.resolveWorkspacePath(cleanJobId, cleanRel);
+      } catch {
+        abs = null;
+      }
+      if (!abs) return;
+      let stat = null;
+      try { stat = fs.statSync(abs); } catch { stat = null; }
+      if (!stat || !stat.isFile()) return;
+      meta = {
+        abs,
+        rel: path.relative(workspaceRoot, abs).replace(/\\/g, '/'),
+        size: Number(stat.size || 0),
+        mtimeMs: Number(stat.mtimeMs || 0),
+      };
+    }
+    if (!meta.rel || meta.rel.startsWith('.') || meta.rel.includes('/.')) return;
+    seen.add(meta.rel);
+    out.push({
+      id: `artifact_${out.length + 1}`,
+      path: meta.rel,
+      label: path.basename(meta.rel),
+      kind: inferArtifactKind(meta.rel),
+      source,
+      size: Number(meta.size || 0),
+      mtime_ms: Number(meta.mtimeMs || 0),
+      sendable: Number(meta.size || 0) <= TELEGRAM_SEND_MAX_BYTES,
+      final,
+    });
+  };
+
+  for (const rel of executionRefs) pushEntry(rel, 'execution_ref', true);
+  for (const row of workspaceFiles) pushEntry(row.rel, 'workspace_recent', out.length < 3);
+
+  return out.slice(0, Math.max(1, Math.min(24, Math.floor(Number(maxFiles) || 12))));
+}
+
+function refreshArtifactIndex(jobId, { execution = null, maxFiles = 12 } = {}) {
+  const cleanJobId = String(jobId || '').trim();
+  if (!cleanJobId) return { job_id: '', updated_at: new Date().toISOString(), artifacts: [] };
+  const artifactIndex = {
+    job_id: cleanJobId,
+    updated_at: new Date().toISOString(),
+    artifacts: buildArtifactIndexEntries(cleanJobId, { execution, maxFiles }),
+  };
+  try {
+    fs.writeFileSync(artifactIndexPath(cleanJobId), `${JSON.stringify(artifactIndex, null, 2)}\n`, 'utf8');
+  } catch {}
+  return artifactIndex;
+}
+
+function formatArtifactIndexText(jobId, artifactIndex = null, { limit = 8 } = {}) {
+  const cleanJobId = String(jobId || '').trim();
+  const normalized = artifactIndex && typeof artifactIndex === 'object'
+    ? artifactIndex
+    : loadArtifactIndex(cleanJobId);
+  const rows = Array.isArray(normalized?.artifacts) ? normalized.artifacts.slice(0, Math.max(1, Math.min(24, Math.floor(Number(limit) || 8)))) : [];
+  const lines = [
+    `job_id=${cleanJobId}`,
+    `count=${rows.length}`,
+    `updated_at=${String(normalized?.updated_at || '')}`,
+  ];
+  if (rows.length === 0) {
+    lines.push('- (artifacts not detected yet)');
+    return lines.join('\n');
+  }
+  rows.forEach((row, index) => {
+    const flags = [];
+    if (row.final) flags.push('final');
+    if (!row.sendable) flags.push('too_large');
+    if (row.kind) flags.push(row.kind);
+    lines.push(`${index + 1}. ${row.path} (${formatByteSize(row.size || 0)}${flags.length > 0 ? `, ${flags.join(', ')}` : ''})`);
+  });
+  return lines.join('\n');
+}
+
+async function maybeSendArtifactSummary(bot, chatId, jobId, { execution = null, replyToMessageId = null, maxFiles = 5 } = {}) {
+  const cleanJobId = String(jobId || '').trim();
+  if (!cleanJobId) return null;
+  const artifactIndex = refreshArtifactIndex(cleanJobId, { execution, maxFiles: Math.max(3, maxFiles) });
+  const rows = Array.isArray(artifactIndex.artifacts) ? artifactIndex.artifacts.slice(0, Math.max(1, Math.min(8, Math.floor(Number(maxFiles) || 5)))) : [];
+  if (rows.length === 0) return artifactIndex;
+  const lines = [
+    '📎 주요 산출물 후보',
+    `job_id=${cleanJobId}`,
+    ...rows.map((row, index) => `${index + 1}. ${row.path} (${formatByteSize(row.size || 0)}${row.sendable ? '' : ', too_large'})`),
+    '',
+    `예: /send 1 또는 /send ${rows[0]?.path || 'path/to/file'}`,
+    '파일을 받으려면 /send <번호> 또는 /send <path> 를 사용하세요.',
+  ];
+  await bot.sendMessage(
+    chatId,
+    lines.join('\n'),
+    Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
+      ? { reply_to_message_id: Number(replyToMessageId) }
+      : undefined
+  );
+  return artifactIndex;
+}
+
+async function maybeAutoSendOutputs() {
+  return null;
 }
 
 async function sendWorkspaceFileByRelativePath(bot, chatId, jobId, relativePath, { replyToMessageId = null } = {}) {
   const cleanJobId = String(jobId || "").trim();
-  const requested = String(relativePath || "").trim();
+  const requested = String(relativePath || "").trim().replace(/^workspace\//i, '').replace(/^\.\//, '');
   if (!cleanJobId || !requested) {
     throw new Error("jobId and relative path are required");
   }
@@ -586,8 +768,8 @@ async function sendWorkspaceFileByRelativePath(bot, chatId, jobId, relativePath,
   if (!rel || rel.startsWith("..")) {
     throw new Error("Path outside workspace");
   }
-  if (!(rel.startsWith("uploads/") || rel.startsWith("outputs/"))) {
-    throw new Error("only uploads/ or outputs/ paths are allowed");
+  if (rel.startsWith('.') || rel.includes('/.telegram_')) {
+    throw new Error('internal workspace metadata cannot be sent');
   }
   if (Number(stat.size || 0) > TELEGRAM_SEND_MAX_BYTES) {
     throw new Error(
@@ -611,59 +793,34 @@ async function sendWorkspaceFileByRelativePath(bot, chatId, jobId, relativePath,
   };
 }
 
+function resolveArtifactSelection(jobId, selection, { artifactIndex = null } = {}) {
+  const cleanJobId = String(jobId || '').trim();
+  const requested = String(selection || '').trim().replace(/^workspace\//i, '').replace(/^\.\//, '');
+  if (!cleanJobId || !requested) throw new Error('jobId and selection are required');
+  if (/^\d+$/.test(requested)) {
+    const index = artifactIndex && typeof artifactIndex === 'object' ? artifactIndex : loadArtifactIndex(cleanJobId);
+    const rows = Array.isArray(index?.artifacts) ? index.artifacts : [];
+    const artifact = rows[Number(requested) - 1];
+    if (!artifact?.path) throw new Error(`artifact index ${requested} not found`);
+    return artifact.path;
+  }
+  return requested;
+}
+
+async function sendArtifactBySelection(bot, chatId, jobId, selection, { replyToMessageId = null, artifactIndex = null } = {}) {
+  const rel = resolveArtifactSelection(jobId, selection, { artifactIndex });
+  const sent = await sendWorkspaceFileByRelativePath(bot, chatId, jobId, rel, { replyToMessageId });
+  return { ...sent, requested: String(selection || '').trim() };
+}
+
 async function deliverWorkspaceOutputs(bot, chatId, jobId, { replyToMessageId = null, maxFiles = 4 } = {}) {
-  const cleanJobId = String(jobId || "").trim();
-  if (!cleanJobId) return;
-  const sentIndexPath = resolveWorkspacePath(cleanJobId, "outputs/.telegram_sent.json");
-  let sent = {};
-  try {
-    sent = JSON.parse(fs.readFileSync(sentIndexPath, "utf8"));
-  } catch {
-    sent = {};
+  const artifactIndex = refreshArtifactIndex(jobId, { maxFiles });
+  const rows = Array.isArray(artifactIndex.artifacts) ? artifactIndex.artifacts.slice(0, Math.max(1, Math.min(10, Math.floor(Number(maxFiles) || 4)))) : [];
+  for (let index = 0; index < rows.length; index += 1) {
+    if (!rows[index]?.sendable) continue;
+    await sendArtifactBySelection(bot, chatId, jobId, String(index + 1), { replyToMessageId, artifactIndex });
   }
-
-  const candidates = collectWorkspaceFileEntries(cleanJobId, { scope: "outputs" })
-    .map((row) => ({
-      ...row,
-      key: `${row.rel}:${row.size}:${row.mtimeMs}`,
-    }));
-
-  const limit = Number.isFinite(Number(maxFiles))
-    ? Math.max(1, Math.min(10, Math.floor(Number(maxFiles))))
-    : 4;
-  let sentCount = 0;
-  for (const file of candidates) {
-    if (sentCount >= limit) break;
-    if (sent[file.key]) continue;
-    if (Number(file.size || 0) <= 0) continue;
-    if (Number(file.size || 0) > TELEGRAM_SEND_MAX_BYTES) {
-      await bot.sendMessage(
-        chatId,
-        `📦 output 생성됨(sendDocument 한도 초과로 전송 생략)\njob_id=${cleanJobId}\npath=${file.rel}\nsize=${file.size}`,
-        Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
-          ? { reply_to_message_id: Number(replyToMessageId) }
-          : undefined
-      );
-      sent[file.key] = { ts: new Date().toISOString(), path: file.rel, skipped: "too_large" };
-      sentCount += 1;
-      continue;
-    }
-    await bot.sendDocument(
-      chatId,
-      file.abs,
-      {
-        caption: `📦 output file\njob_id=${cleanJobId}\npath=${file.rel}`,
-        reply_to_message_id: Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
-          ? Number(replyToMessageId)
-          : undefined,
-      }
-    );
-    sent[file.key] = { ts: new Date().toISOString(), path: file.rel, sent: true };
-    sentCount += 1;
-  }
-  try {
-    fs.writeFileSync(sentIndexPath, `${JSON.stringify(sent, null, 2)}\n`, "utf8");
-  } catch {}
+  return artifactIndex;
 }
 
 function convoToText(convo) {
@@ -692,6 +849,11 @@ export {
   formatWorkspaceFileListText,
   buildWorkspaceFilesPromptSection,
   maybeAutoSendOutputs,
+  maybeSendArtifactSummary,
+  loadArtifactIndex,
+  refreshArtifactIndex,
+  formatArtifactIndexText,
+  sendArtifactBySelection,
   sendWorkspaceFileByRelativePath,
   deliverWorkspaceOutputs,
   convoToText,

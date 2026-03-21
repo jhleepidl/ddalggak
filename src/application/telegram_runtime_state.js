@@ -11,6 +11,7 @@ import { GocClient } from "../goc_client.js";
 import {
   KNOWLEDGE_BASE_CONTRACT_FILE,
 } from "../knowledge_base/runtime.js";
+import { formatKnowledgeBaseMemoryMap } from "../knowledge_base/profile.js";
 import { ChatSessionStore } from "../chat/session.js";
 import {
   createJobRuntimeState,
@@ -53,13 +54,6 @@ const TELEGRAM_UPLOAD_ALLOWED_EXTS = String(
   .map((entry) => (entry.startsWith(".") ? entry : `.${entry}`));
 const TELEGRAM_SINGLE_INSTANCE_LOCK = String(process.env.TELEGRAM_SINGLE_INSTANCE_LOCK ?? "true").toLowerCase() !== "false";
 const LOCK_FILE = process.env.TELEGRAM_LOCK_FILE || path.join(jobs.baseDir, ".locks", "telegram_runner.lock");
-const OUTPUT_AUTO_SEND = String(process.env.OUTPUT_AUTO_SEND ?? "true").trim().toLowerCase() !== "false";
-const OUTPUT_AUTO_SEND_MAX_FILES = Number.isFinite(Number(process.env.OUTPUT_AUTO_SEND_MAX_FILES))
-  ? Math.max(1, Math.min(20, Math.floor(Number(process.env.OUTPUT_AUTO_SEND_MAX_FILES))))
-  : 4;
-const OUTPUT_AUTO_SEND_ON = String(process.env.OUTPUT_AUTO_SEND_ON || "step").trim().toLowerCase() === "run_end"
-  ? "run_end"
-  : "step";
 const MEMORY_MODE = String(process.env.MEMORY_MODE || "local").trim().toLowerCase() === "goc" ? "goc" : "local";
 const GOC_UI_TOKEN_TTL_SEC = Number(process.env.GOC_UI_TOKEN_TTL_SEC ?? 21600);
 const GOC_UI_BROWSER_TOKEN_TTL_SEC = Number.isFinite(Number(process.env.GOC_UI_BROWSER_TOKEN_TTL_SEC))
@@ -192,58 +186,29 @@ function runSharedDir(jobId) {
 }
 
 function loadLocalContextDocs(jobId, docNames, maxCharsPerDoc = 3500) {
-  let out = "";
-  const kbSummary = tracking.renderProfileMarkdown(jobId);
-  if (kbSummary) {
-    const summaryLimit = Math.max(1200, Math.floor(maxCharsPerDoc / 2));
-    const clippedSummary = kbSummary.length > summaryLimit ? kbSummary.slice(0, summaryLimit) : kbSummary;
-    out += `
-
----
-
-### [rendered] knowledge_base_summary
-
-${clippedSummary}
-`;
+  const sections = [];
+  const profile = tracking.loadProfile(jobId);
+  if (profile) {
+    const summaryLimit = Math.max(900, Math.floor(maxCharsPerDoc / 2));
+    const memoryMap = formatKnowledgeBaseMemoryMap(profile, { maxDocs: 6, includePolicy: true });
+    const clippedMap = memoryMap.length > summaryLimit ? memoryMap.slice(0, summaryLimit) : memoryMap;
+    sections.push(`### [memory_map]\n\n${clippedMap}`);
   }
-  try {
-    const contractText = fs.readFileSync(path.join(runSharedDir(jobId), KNOWLEDGE_BASE_CONTRACT_FILE), 'utf8');
-    const contractLimit = Math.max(1200, Math.floor(maxCharsPerDoc / 2));
-    const clippedContract = contractText.length > contractLimit ? contractText.slice(0, contractLimit) : contractText;
-    out += `
-
----
-
-### ${path.join(runSharedDir(jobId), KNOWLEDGE_BASE_CONTRACT_FILE)}
-
-${clippedContract}
-`;
-  } catch {}
+  const seenDocNames = new Set();
   for (const name of docNames) {
     const resolvedName = tracking.resolveDocName(jobId, name);
+    const resolvedKey = String(resolvedName || '').trim().toLowerCase();
+    if (!resolvedKey || seenDocNames.has(resolvedKey) || resolvedKey === String(KNOWLEDGE_BASE_CONTRACT_FILE).toLowerCase()) continue;
+    seenDocNames.add(resolvedKey);
     try {
       const text = tracking.read(jobId, name);
       const clipped = text.length > maxCharsPerDoc ? text.slice(-maxCharsPerDoc) : text;
-      out += `
-
----
-
-### ${path.join(runSharedDir(jobId), resolvedName)}
-
-${clipped}
-`;
+      sections.push(`### ${path.join(runSharedDir(jobId), resolvedName)}\n\n${clipped}`);
     } catch (error) {
-      out += `
-
----
-
-### ${path.join(runSharedDir(jobId), resolvedName)}
-
-[read failed: ${String(error?.message ?? error)}]
-`;
+      sections.push(`### ${path.join(runSharedDir(jobId), resolvedName)}\n\n[read failed: ${String(error?.message ?? error)}]`);
     }
   }
-  return out.trim() || "(none)";
+  return sections.length > 0 ? sections.join('\n\n---\n\n') : '(none)';
 }
 
 function resolveCurrentJobIdForChat(chatId) {
@@ -494,9 +459,6 @@ export {
   TELEGRAM_UPLOAD_ALLOWED_EXTS,
   TELEGRAM_SINGLE_INSTANCE_LOCK,
   LOCK_FILE,
-  OUTPUT_AUTO_SEND,
-  OUTPUT_AUTO_SEND_MAX_FILES,
-  OUTPUT_AUTO_SEND_ON,
   MEMORY_MODE,
   GOC_UI_TOKEN_TTL_SEC,
   GOC_UI_BROWSER_TOKEN_TTL_SEC,

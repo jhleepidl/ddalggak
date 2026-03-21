@@ -215,7 +215,7 @@ const {
   ensureCommandOk,
   loadContextDocs,
   sendContextInfo,
-  maybeAutoSendOutputs,
+  maybeSendArtifactSummary,
   sendLong,
 } = runtimeIo;
 
@@ -3686,8 +3686,8 @@ async function runSupervisorChat(
     if (capsules.length > 0) {
       replyAnchorStore.append(chatId, capsules);
     }
-    await maybeAutoSendOutputs(bot, chatId, currentJobId, {
-      when: "run_end",
+    await maybeSendArtifactSummary(bot, chatId, currentJobId, {
+      execution: mergedExecution,
       replyToMessageId: getCurrentTurnReplyMessageId(chatId),
     }).catch(() => null);
     return { routePlan, execution: mergedExecution, jobId: currentJobId };
@@ -4029,10 +4029,6 @@ ${taskBody}`
         runtimeExecutionPolicy,
         providerOptions,
       });
-      await maybeAutoSendOutputs(bot, chatId, jobId, {
-        when: "step",
-        replyToMessageId: getCurrentTurnReplyMessageId(chatId),
-      }).catch(() => null);
       const fallback = gocFallbackByJob.get(String(jobId));
       if (fallback) {
         if (notify) {
@@ -4060,10 +4056,6 @@ ${taskBody}`
         runtimeExecutionPolicy,
         providerOptions,
       });
-      await maybeAutoSendOutputs(bot, chatId, jobId, {
-        when: "step",
-        replyToMessageId: getCurrentTurnReplyMessageId(chatId),
-      }).catch(() => null);
       const fallback = gocFallbackByJob.get(String(jobId));
       if (fallback) {
         if (notify) {
@@ -4489,10 +4481,6 @@ route_signals=${routeSignals.join(', ')}` : ''}`);
     }
   }
 
-  await maybeAutoSendOutputs(bot, chatId, jobId, {
-    when: "run_end",
-    replyToMessageId: getCurrentTurnReplyMessageId(chatId),
-  }).catch(() => null);
   return {
     askedChatGPT,
     runtime_team_snapshot: runtimeTeamSnapshot,
@@ -4794,8 +4782,7 @@ token=${rec.token}`,
     }
   }
 
-  await maybeAutoSendOutputs(bot, chatId, jobId, {
-    when: "run_end",
+  await maybeSendArtifactSummary(bot, chatId, jobId, {
     replyToMessageId: getCurrentTurnReplyMessageId(chatId),
   }).catch(() => null);
 }

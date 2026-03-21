@@ -129,7 +129,7 @@ function buildGroupedDeps({ bot, botUsername, chatRunManager, uploadService }) {
       clip: runtimeCore.clip,
       sendLong: runtimeCore.sendLong,
       buildPendingApprovalPrompt: runtimeCore.buildPendingApprovalPrompt,
-      maybeAutoSendOutputs: runtimeCore.maybeAutoSendOutputs,
+      maybeSendArtifactSummary: runtimeCore.maybeSendArtifactSummary,
       markMutatingActionsConfirmed: runtimeCore.markMutatingActionsConfirmed,
       jobAbortControllers: runtimeCore.jobAbortControllers,
     },
@@ -166,9 +166,9 @@ function buildGroupedDeps({ bot, botUsername, chatRunManager, uploadService }) {
     parseClampedInt: runtimeCore.parseClampedInt,
     collectWorkspaceFileEntries: runtimeCore.collectWorkspaceFileEntries,
     formatWorkspaceFileListText: runtimeCore.formatWorkspaceFileListText,
-    deliverWorkspaceOutputs: runtimeCore.deliverWorkspaceOutputs,
-    OUTPUT_AUTO_SEND_MAX_FILES: runtimeCore.OUTPUT_AUTO_SEND_MAX_FILES,
-    sendWorkspaceFileByRelativePath: runtimeCore.sendWorkspaceFileByRelativePath,
+    refreshArtifactIndex: runtimeCore.refreshArtifactIndex,
+    formatArtifactIndexText: runtimeCore.formatArtifactIndexText,
+    sendArtifactBySelection: runtimeCore.sendArtifactBySelection,
     formatByteSize: runtimeCore.formatByteSize,
     runWorkspaceDir: runtimeCore.runWorkspaceDir,
     uploadService,
@@ -272,7 +272,7 @@ export async function startTelegramApp({ token = runtimeCore.TOKEN } = {}) {
   console.log(`Runs dir: ${runtimeCore.jobs.runsDir}`);
   console.log(`Telegram upload/download limit: ${runtimeCore.formatByteSize(runtimeCore.TELEGRAM_EFFECTIVE_DOWNLOAD_MAX_BYTES)} (bot-api download)`);
   console.log(`Telegram sendDocument limit: ${runtimeCore.formatByteSize(runtimeCore.TELEGRAM_SEND_MAX_BYTES)}`);
-  console.log(`Output auto-send: ${runtimeCore.OUTPUT_AUTO_SEND} (on=${runtimeCore.OUTPUT_AUTO_SEND_ON}, max=${runtimeCore.OUTPUT_AUTO_SEND_MAX_FILES})`);
+  console.log("Artifact delivery: explicit /send only (no automatic document sending)");
   console.log(`Memory mode: ${runtimeCore.MEMORY_MODE} (effective=${runtimeCore.memoryModeWithFallback()})`);
   if (botUsername) {
     console.log(`Telegram bot username: @${botUsername}`);

@@ -179,7 +179,7 @@ export function buildManifestInstallHints(requirements = {}, { hasGocThreadTarge
   }
   if (row.summary.tool_count > 0 || row.summary.credential_count > 0 || row.summary.skill_count > 0) {
     hints.push('/team requirements 로 실행 전제조건을 다시 확인할 수 있습니다.');
-    hints.push('/team export 로 manifest JSON을 내보내 GoC에서 Validate/Install 할 수 있습니다.');
+    hints.push('/team export 로 blueprint JSON을 내보내 GoC에서 Validate/Install 할 수 있습니다.');
   }
   if (hasGocThreadTarget) {
     hints.push('현재 GoC thread가 연결되어 있으면 /team push 로 thread team config에 바로 동기화할 수 있습니다.');

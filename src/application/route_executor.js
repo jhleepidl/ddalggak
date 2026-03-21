@@ -1,6 +1,7 @@
 import { createRuntimeTeamSnapshot } from "./runtime_metadata.js";
 import { summarizeRuntimeTeamSnapshotLines } from "./runtime_snapshot_display.js";
 import { summarizeRunAuthorityLines } from "./run_authority.js";
+import { resolveExecutionBlueprintSummary, formatExecutionBlueprintSummaryLines } from "./team_blueprint.js";
 
 export async function executeRunCommand({
   bot,
@@ -51,16 +52,25 @@ export async function executeRunCommand({
         seedInstruction: goal,
         signal: controller.signal,
       });
+      const executionBlueprint = resolveExecutionBlueprintSummary({
+        team: runtimeForRoute?.activeTeamConfig || null,
+        goal,
+        taskInterpretation: route?.task_interpretation || null,
+        runtimeTeamSnapshot: route?.runtime_team_snapshot || route?.runtimeTeamSnapshot || null,
+      });
       const runtimeTeamSnapshot = createRuntimeTeamSnapshot({
         runtime_team_snapshot: route?.runtime_team_snapshot || route?.runtimeTeamSnapshot || null,
         teamPlan: route?.team_plan || null,
         runtimeAgents: route?.runtime_agents || [],
+        blueprintSummary: executionBlueprint,
         source: "team_builder",
       });
+      const executionBlueprintLines = formatExecutionBlueprintSummaryLines(executionBlueprint);
       tracking.append(jobId, "decisions", [
         "## Multi-Agent routing",
         "- mode: run",
         `- reason: ${route.reason}`,
+        ...executionBlueprintLines,
         ...summarizeRunAuthorityLines(runtimeForRoute, route, {
           includeMode: false,
         }),
@@ -69,6 +79,9 @@ export async function executeRunCommand({
         }),
         `- actions: ${route.actions.map((a) => actionLabel(a)).join(" -> ")}`,
       ].join("\n"));
+      if (executionBlueprintLines.length > 0) {
+        await bot.sendMessage(chatId, `🧩 선택된 팀 템플릿\n${executionBlueprintLines.join("\n")}`);
+      }
       await bot.sendMessage(chatId, `🧭 Multi-Agent 라우팅\n${route.actions.map((a) => `- ${actionLabel(a)}`).join("\n")}`);
 
       const routed = await executeRoutedPlan(bot, chatId, jobId, {
@@ -152,16 +165,25 @@ export async function executeContinueCommand({
       seedInstruction: instruction,
       signal: controller.signal,
     });
+    const executionBlueprint = resolveExecutionBlueprintSummary({
+      team: runtimeForRoute?.activeTeamConfig || null,
+      goal,
+      taskInterpretation: route?.task_interpretation || null,
+      runtimeTeamSnapshot: route?.runtime_team_snapshot || route?.runtimeTeamSnapshot || null,
+    });
     const runtimeTeamSnapshot = createRuntimeTeamSnapshot({
       runtime_team_snapshot: route?.runtime_team_snapshot || route?.runtimeTeamSnapshot || null,
       teamPlan: route?.team_plan || null,
       runtimeAgents: route?.runtime_agents || [],
+      blueprintSummary: executionBlueprint,
       source: "team_builder",
     });
+    const executionBlueprintLines = formatExecutionBlueprintSummaryLines(executionBlueprint);
     tracking.append(jobKey, "decisions", [
       "## Multi-Agent routing",
       "- mode: continue",
       `- reason: ${route.reason}`,
+      ...executionBlueprintLines,
       ...summarizeRunAuthorityLines(runtimeForRoute, route, {
         includeMode: false,
       }),
@@ -170,6 +192,9 @@ export async function executeContinueCommand({
       }),
       `- actions: ${route.actions.map((a) => actionLabel(a)).join(" -> ")}`,
     ].join("\n"));
+    if (executionBlueprintLines.length > 0) {
+      await bot.sendMessage(chatId, `🧩 선택된 팀 템플릿\n${executionBlueprintLines.join("\n")}`);
+    }
     await bot.sendMessage(chatId, `🧭 Multi-Agent 라우팅\n${route.actions.map((a) => `- ${actionLabel(a)}`).join("\n")}`);
 
     const routed = await executeRoutedPlan(bot, chatId, jobKey, {

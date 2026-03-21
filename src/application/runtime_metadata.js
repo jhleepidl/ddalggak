@@ -64,6 +64,47 @@ function omitUndefinedFields(value = {}) {
   );
 }
 
+function normalizeMemoryMapSummary(value = []) {
+  const rows = Array.isArray(value) ? value : [];
+  const out = [];
+  for (const raw of rows) {
+    const row = asObject(raw);
+    const surfaceId = String(row.surface_id || row.surfaceId || row.file_name || row.fileName || '').trim();
+    if (!surfaceId) continue;
+    out.push(omitUndefinedFields({
+      surface_id: surfaceId,
+      file_name: String(row.file_name || row.fileName || '').trim() || undefined,
+      load_policy: String(row.load_policy || row.loadPolicy || '').trim().toLowerCase() || undefined,
+      write_policy: String(row.write_policy || row.writePolicy || '').trim().toLowerCase() || undefined,
+      target_roles: normalizeStringList(row.target_roles || row.targetRoles || [], { lower: true }),
+      semantic_slots: normalizeStringList(row.semantic_slots || row.semanticSlots || [], { lower: true }),
+    }));
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+function normalizeBlueprintSummary(value = null, { teamPlan = null } = {}) {
+  const row = asObject(value);
+  const planRow = asObject(teamPlan?.blueprint_summary || teamPlan?.blueprintSummary);
+  const merged = Object.keys(row).length > 0 ? row : planRow;
+  if (Object.keys(merged).length === 0) return null;
+  const memoryMap = normalizeMemoryMapSummary(merged.memory_map || merged.memoryMap || []);
+  return omitUndefinedFields({
+    source: String(merged.source || '').trim() || undefined,
+    blueprint_id: String(merged.blueprint_id || merged.blueprintId || '').trim() || undefined,
+    title: String(merged.title || '').trim() || undefined,
+    task_archetype: String(merged.task_archetype || merged.taskArchetype || '').trim().toLowerCase() || undefined,
+    description: String(merged.description || '').trim() || undefined,
+    topology_pattern: String(merged.topology_pattern || merged.topologyPattern || '').trim().toLowerCase() || undefined,
+    execution_pattern: String(merged.execution_pattern || merged.executionPattern || '').trim().toLowerCase() || undefined,
+    memory_surface_count: Number.isFinite(Number(merged.memory_surface_count || merged.memorySurfaceCount))
+      ? Math.max(0, Math.floor(Number(merged.memory_surface_count || merged.memorySurfaceCount)))
+      : (memoryMap.length || undefined),
+    memory_map: memoryMap,
+  });
+}
+
 function normalizeSelectionExplanations(value = []) {
   const rows = Array.isArray(value) ? value : [];
   const out = [];
@@ -581,6 +622,10 @@ export function normalizeRuntimeTeamSnapshot(input = null, {
     : (row.skillUsageSummary && typeof row.skillUsageSummary === "object"
       ? row.skillUsageSummary
       : summarizeSkillUsageEvents(skillUsageEvents));
+  const blueprintSummary = normalizeBlueprintSummary(
+    row.blueprint_summary ?? row.blueprintSummary ?? null,
+    { teamPlan }
+  );
 
   return {
     task_interpretation: taskInterpretation,
@@ -624,6 +669,7 @@ export function normalizeRuntimeTeamSnapshot(input = null, {
     non_executable_participants: nonExecutableParticipants,
     generated_at: String(row.generated_at || row.generatedAt || defaultGeneratedAt || new Date().toISOString()),
     source: String(row.source || defaultSource || "team_builder").trim() || "team_builder",
+    blueprint_summary: blueprintSummary || undefined,
   };
 }
 
@@ -677,6 +723,8 @@ export function createRuntimeTeamSnapshot({
   supervisor_runtime = undefined,
   runtimeAuthority = undefined,
   runtime_authority = undefined,
+  blueprintSummary = undefined,
+  blueprint_summary = undefined,
   generated_at = undefined,
   runtime_team_snapshot = undefined,
   runtimeTeamSnapshot = undefined,
@@ -713,6 +761,7 @@ export function createRuntimeTeamSnapshot({
     skill_usage_summary: skill_usage_summary ?? skillUsageSummary,
     supervisor_runtime: supervisor_runtime ?? supervisorRuntime,
     runtime_authority: runtime_authority ?? runtimeAuthority,
+    blueprint_summary: blueprint_summary ?? blueprintSummary,
     generated_at: generated_at ?? generatedAt,
     source,
   }, {

@@ -79,14 +79,14 @@ const DEFAULT_MEMORY_POLICY = {
 const PROFILE_TEMPLATES = {
   general: {
     profile_id: 'general_execution',
-    display_name: 'General execution KB',
+    display_name: 'Compact execution KB',
     strategy: 'goal_adaptive',
     docs: [
       { doc_id: 'plan', file_name: 'mission_brief.md', title: 'Mission Brief', purpose: 'Goal framing, scope, checklist, and handoff plan.', legacy_names: ['plan.md'], section_hints: ['goal', 'scope', 'checklist'] },
-      { doc_id: 'research', file_name: 'evidence_log.md', title: 'Evidence Log', purpose: 'Facts, findings, constraints, and supporting evidence.', legacy_names: ['research.md'], section_hints: ['facts', 'sources', 'constraints'] },
-      { doc_id: 'progress', file_name: 'execution_journal.md', title: 'Execution Journal', purpose: 'Run history, step results, and intermediate outputs.', legacy_names: ['progress.md'], section_hints: ['run log', 'outputs'] },
-      { doc_id: 'decisions', file_name: 'decision_record.md', title: 'Decision Record', purpose: 'Key decisions, rationale, and final answers.', legacy_names: ['decisions.md'], section_hints: ['decision', 'rationale'] },
-      { doc_id: 'artifacts', file_name: 'artifact_index.md', title: 'Artifact Index', purpose: 'Uploads, generated files, artifact refs, and delivery pointers.', legacy_names: ['artifacts.md'], section_hints: ['uploads', 'exports', 'refs'] },
+      { doc_id: 'research', file_name: 'working_memory.md', title: 'Working Memory', purpose: 'Facts, findings, open questions, and intermediate progress.', legacy_names: ['research.md'], section_hints: ['facts', 'constraints', 'open questions'] },
+      { doc_id: 'progress', file_name: 'working_memory.md', title: 'Working Memory', purpose: 'Run journal, intermediate outputs, and next actions.', legacy_names: ['progress.md'], section_hints: ['run log', 'outputs', 'next actions'] },
+      { doc_id: 'decisions', file_name: 'final_answer.md', title: 'Final Answer', purpose: 'Decisions, rationale, and user-facing final deliverable.', legacy_names: ['decisions.md'], section_hints: ['decision', 'rationale', 'deliverable'] },
+      { doc_id: 'artifacts', file_name: 'artifact_index.md', title: 'Artifact Index', purpose: 'Uploads, generated files, output links, and delivery pointers.', legacy_names: ['artifacts.md'], section_hints: ['uploads', 'exports', 'refs'] },
     ],
   },
   implementation: {
@@ -125,6 +125,18 @@ const PROFILE_TEMPLATES = {
       { doc_id: 'artifacts', file_name: 'submission_packet.md', title: 'Submission Packet', purpose: 'Submitted artifacts, supporting packets, and final handoff bundle.', legacy_names: ['artifacts.md'], section_hints: ['submission', 'packet', 'bundle'] },
     ],
   },
+  review_repair: {
+    profile_id: 'review_repair_room',
+    display_name: 'Review & repair KB',
+    strategy: 'goal_adaptive',
+    docs: [
+      { doc_id: 'plan', file_name: 'repair_brief.md', title: 'Repair Brief', purpose: 'Failure context, repair scope, and signoff conditions.', legacy_names: ['plan.md'], section_hints: ['scope', 'signoff'] },
+      { doc_id: 'research', file_name: 'defect_log.md', title: 'Defect Log', purpose: 'Concrete defects, evidence, and severity notes.', legacy_names: ['research.md'], target_roles: ['reviewer', 'researcher'], section_hints: ['defects', 'evidence'] },
+      { doc_id: 'progress', file_name: 'repair_journal.md', title: 'Repair Journal', purpose: 'Repair progress, commands, and bounded patch notes.', legacy_names: ['progress.md'], target_roles: ['builder'], section_hints: ['commands', 'patches'] },
+      { doc_id: 'decisions', file_name: 'signoff_summary.md', title: 'Signoff Summary', purpose: 'Residual risk, verification result, and user-facing repair summary.', legacy_names: ['decisions.md'], target_roles: ['reviewer', 'synthesizer'], section_hints: ['risks', 'verification'] },
+      { doc_id: 'artifacts', file_name: 'repair_artifacts.md', title: 'Repair Artifacts', purpose: 'Patched files, exports, and supporting evidence.', legacy_names: ['artifacts.md'], section_hints: ['patched files', 'evidence'] },
+    ],
+  },
   experiment: {
     profile_id: 'experiment_lab',
     display_name: 'Experiment lab KB',
@@ -145,6 +157,7 @@ function normalizeDocEntry(raw = {}, fallbackIndex = 0) {
   const fileName = safeFileName(row.file_name || row.fileName || `${docId}.md`);
   return {
     doc_id: docId,
+    surface_id: cleanText(row.surface_id || row.surfaceId || docId, { lower: true }) || docId,
     file_name: fileName,
     title: cleanText(row.title || docId) || docId,
     purpose: cleanText(row.purpose || row.description || '') || 'Knowledge base document.',
@@ -153,6 +166,9 @@ function normalizeDocEntry(raw = {}, fallbackIndex = 0) {
     write_hint: cleanText(row.write_hint || row.writeHint || ''),
     section_hints: uniqueStrings(row.section_hints || row.sectionHints || []),
     target_roles: uniqueStrings(row.target_roles || row.targetRoles || [], { lower: true }),
+    load_policy: cleanText(row.load_policy || row.loadPolicy || '', { lower: true }) || undefined,
+    write_policy: cleanText(row.write_policy || row.writePolicy || '', { lower: true }) || undefined,
+    create_mode: cleanText(row.create_mode || row.createMode || '', { lower: true }) || undefined,
   };
 }
 
@@ -176,6 +192,149 @@ export function normalizeMemoryPolicy(raw = {}, { docs = DEFAULT_CANONICAL_DOCS 
     migration_strategy: cleanText(row.migration_strategy || row.migrationStrategy || DEFAULT_MEMORY_POLICY.migration_strategy, { lower: true }) || DEFAULT_MEMORY_POLICY.migration_strategy,
     enforce_concrete_file_names_in_prompts: row.enforce_concrete_file_names_in_prompts !== false && row.enforceConcreteFileNamesInPrompts !== false,
   };
+}
+
+
+
+function coerceProfileSeedFromMemoryPlan(plan = {}) {
+  const row = asObject(plan);
+  const surfaces = asArray(row.surfaces || row.memory_surfaces || row.memorySurfaces);
+  const docs = [];
+  for (const surface of surfaces) {
+    const entry = asObject(surface);
+    const fileName = safeFileName(entry.file_name || entry.fileName || `${cleanText(entry.surface_id || entry.surfaceId || 'memory_surface', { lower: true }) || 'memory_surface'}.md`);
+    const semanticSlots = uniqueStrings(entry.semantic_slots || entry.semanticSlots || [entry.surface_id || entry.surfaceId], { lower: true, limit: 8 });
+    const targetRoles = uniqueStrings(entry.target_roles || entry.targetRoles || [], { lower: true, limit: 8 });
+    const sectionHints = uniqueStrings(entry.section_hints || entry.sectionHints || [], { limit: 8 });
+    for (const slotId of (semanticSlots.length > 0 ? semanticSlots : [cleanText(entry.surface_id || entry.surfaceId || fileName.replace(/\.md$/i, ''), { lower: true }) || fileName.replace(/\.md$/i, '')])) {
+      docs.push({
+        doc_id: slotId,
+        surface_id: cleanText(entry.surface_id || entry.surfaceId || slotId, { lower: true }) || slotId,
+        file_name: fileName,
+        title: cleanText(entry.title || entry.display_name || entry.displayName || slotId) || slotId,
+        purpose: cleanText(entry.purpose || entry.description || 'Knowledge base surface.'),
+        target_roles: targetRoles,
+        section_hints: sectionHints,
+        load_policy: cleanText(entry.load_policy || entry.loadPolicy || '', { lower: true }) || undefined,
+        write_policy: cleanText(entry.write_policy || entry.writePolicy || '', { lower: true }) || undefined,
+        create_mode: cleanText(entry.create_mode || entry.createMode || '', { lower: true }) || undefined,
+      });
+    }
+  }
+  return {
+    profile_id: row.profile_id || row.profileId || row.plan_id || row.planId,
+    display_name: row.display_name || row.displayName || row.title,
+    strategy: row.strategy || 'team_blueprint',
+    selection_reason: row.selection_reason || row.selectionReason,
+    team_name: row.team_name || row.teamName,
+    topology_pattern: row.topology_pattern || row.topologyPattern,
+    task_brief: row.task_brief || row.taskBrief,
+    docs,
+    memory_policy: {
+      stable_semantic_slots: row.stable_surface_ids || row.stableSurfaceIds || row.stable_semantic_slots || row.stableSemanticSlots || [],
+      mutable_semantic_slots: row.mutable_surface_ids || row.mutableSurfaceIds || row.mutable_semantic_slots || row.mutableSemanticSlots || [],
+      immutable_file_names: row.system_files || row.systemFiles || row.immutable_file_names || row.immutableFileNames || [],
+      preserve_history: row.preserve_history,
+      migration_strategy: row.migration_strategy || row.migrationStrategy,
+      enforce_concrete_file_names_in_prompts: row.enforce_concrete_file_names_in_prompts,
+    },
+  };
+}
+
+export function buildMemoryPlanFromProfile(profile = null) {
+  const normalized = normalizeKnowledgeBaseProfile(profile || {});
+  const surfaceMap = new Map();
+  for (const doc of normalized.docs) {
+    const fileName = cleanText(doc.file_name);
+    if (!fileName) continue;
+    const existing = surfaceMap.get(fileName) || {
+      surface_id: cleanText(doc.surface_id || doc.surfaceId || doc.doc_id, { lower: true }) || fileName.replace(/\.md$/i, ''),
+      file_name: fileName,
+      title: cleanText(doc.title || doc.doc_id || fileName) || fileName,
+      purpose: cleanText(doc.purpose || 'Knowledge base surface.'),
+      semantic_slots: [],
+      target_roles: [],
+      section_hints: [],
+      load_policy: cleanText(doc.load_policy || doc.loadPolicy || 'on_demand', { lower: true }) || 'on_demand',
+      write_policy: cleanText(doc.write_policy || doc.writePolicy || 'shared', { lower: true }) || 'shared',
+      create_mode: cleanText(doc.create_mode || doc.createMode || 'lazy', { lower: true }) || 'lazy',
+    };
+    existing.surface_id = cleanText(existing.surface_id || doc.surface_id || doc.surfaceId || doc.doc_id, { lower: true }) || existing.surface_id;
+    existing.semantic_slots = uniqueStrings([...(existing.semantic_slots || []), doc.doc_id], { lower: true, limit: 8 });
+    existing.target_roles = uniqueStrings([...(existing.target_roles || []), ...asArray(doc.target_roles)], { lower: true, limit: 8 });
+    existing.section_hints = uniqueStrings([...(existing.section_hints || []), ...asArray(doc.section_hints)], { limit: 8 });
+    const slotSet = new Set(existing.semantic_slots);
+    if (!doc.load_policy && (slotSet.has('plan') || slotSet.has('research') || slotSet.has('progress'))) existing.load_policy = 'always';
+    if (!doc.create_mode && slotSet.has('plan')) existing.create_mode = 'eager';
+    if (!doc.write_policy && slotSet.has('decisions')) existing.write_policy = 'final';
+    else if (!doc.write_policy && slotSet.has('artifacts')) existing.write_policy = 'index';
+    surfaceMap.set(fileName, existing);
+  }
+  const surfaces = Array.from(surfaceMap.values());
+  return {
+    version: 1,
+    plan_id: normalized.profile_id,
+    display_name: `${normalized.display_name} memory plan`,
+    selection_reason: normalized.selection_reason,
+    team_name: normalized.team_name || undefined,
+    topology_pattern: normalized.topology_pattern || undefined,
+    task_brief: normalized.task_brief || undefined,
+    strategy: normalized.strategy,
+    surfaces,
+    default_load_surface_ids: surfaces.filter((surface) => surface.load_policy === 'always').map((surface) => surface.surface_id),
+    writable_surface_ids: surfaces.filter((surface) => surface.write_policy !== 'readonly').map((surface) => surface.surface_id),
+    stable_surface_ids: surfaces.filter((surface) => (surface.semantic_slots || []).some((slot) => normalized.memory_policy.stable_semantic_slots.includes(slot))).map((surface) => surface.surface_id),
+    mutable_surface_ids: uniqueStrings(normalized.memory_policy.mutable_semantic_slots, { lower: true, limit: 16 }),
+    system_files: [...normalized.memory_policy.immutable_file_names],
+    migration_strategy: normalized.memory_policy.migration_strategy,
+    preserve_history: normalized.memory_policy.preserve_history !== false,
+    enforce_concrete_file_names_in_prompts: normalized.memory_policy.enforce_concrete_file_names_in_prompts !== false,
+  };
+}
+
+export function normalizeMemoryPlan(raw = {}) {
+  const seed = buildMemoryPlanFromProfile(coerceProfileSeedFromMemoryPlan(raw));
+  const row = asObject(raw);
+  const merged = { ...seed, ...row };
+  const surfaces = asArray(merged.surfaces || merged.memory_surfaces || merged.memorySurfaces).map((surface, index) => {
+    const entry = asObject(surface);
+    const surfaceId = cleanText(entry.surface_id || entry.surfaceId || `surface_${index + 1}`, { lower: true }) || `surface_${index + 1}`;
+    return {
+      surface_id: surfaceId,
+      file_name: safeFileName(entry.file_name || entry.fileName || `${surfaceId}.md`),
+      title: cleanText(entry.title || entry.display_name || entry.displayName || surfaceId) || surfaceId,
+      purpose: cleanText(entry.purpose || entry.description || 'Knowledge base surface.') || 'Knowledge base surface.',
+      semantic_slots: uniqueStrings(entry.semantic_slots || entry.semanticSlots || [surfaceId], { lower: true, limit: 8 }),
+      target_roles: uniqueStrings(entry.target_roles || entry.targetRoles || [], { lower: true, limit: 8 }),
+      section_hints: uniqueStrings(entry.section_hints || entry.sectionHints || [], { limit: 8 }),
+      load_policy: cleanText(entry.load_policy || entry.loadPolicy || 'on_demand', { lower: true }) || 'on_demand',
+      write_policy: cleanText(entry.write_policy || entry.writePolicy || 'shared', { lower: true }) || 'shared',
+      create_mode: cleanText(entry.create_mode || entry.createMode || 'lazy', { lower: true }) || 'lazy',
+    };
+  });
+  return {
+    version: 1,
+    plan_id: cleanText(merged.plan_id || merged.planId || merged.profile_id || merged.profileId || 'general_execution', { lower: true }) || 'general_execution',
+    display_name: cleanText(merged.display_name || merged.displayName || merged.title || 'Memory plan') || 'Memory plan',
+    selection_reason: cleanText(merged.selection_reason || merged.selectionReason || ''),
+    team_name: cleanText(merged.team_name || merged.teamName || ''),
+    topology_pattern: cleanText(merged.topology_pattern || merged.topologyPattern || '', { lower: true }),
+    task_brief: cleanText(merged.task_brief || merged.taskBrief || ''),
+    strategy: cleanText(merged.strategy || 'manual', { lower: true }) || 'manual',
+    surfaces,
+    default_load_surface_ids: uniqueStrings(merged.default_load_surface_ids || merged.defaultLoadSurfaceIds || surfaces.filter((entry) => entry.load_policy === 'always').map((entry) => entry.surface_id), { lower: true, limit: 16 }),
+    writable_surface_ids: uniqueStrings(merged.writable_surface_ids || merged.writableSurfaceIds || surfaces.filter((entry) => entry.write_policy !== 'readonly').map((entry) => entry.surface_id), { lower: true, limit: 16 }),
+    stable_surface_ids: uniqueStrings(merged.stable_surface_ids || merged.stableSurfaceIds || [], { lower: true, limit: 16 }),
+    mutable_surface_ids: uniqueStrings(merged.mutable_surface_ids || merged.mutableSurfaceIds || [], { lower: true, limit: 16 }),
+    system_files: uniqueStrings(merged.system_files || merged.systemFiles || STABLE_KB_FILE_NAMES, { limit: 16 }),
+    migration_strategy: cleanText(merged.migration_strategy || merged.migrationStrategy || DEFAULT_MEMORY_POLICY.migration_strategy, { lower: true }) || DEFAULT_MEMORY_POLICY.migration_strategy,
+    preserve_history: merged.preserve_history !== false && merged.preserveHistory !== false,
+    enforce_concrete_file_names_in_prompts: merged.enforce_concrete_file_names_in_prompts !== false && merged.enforceConcreteFileNamesInPrompts !== false,
+  };
+}
+
+export function deriveKnowledgeBaseProfileFromMemoryPlan(plan = {}) {
+  return normalizeKnowledgeBaseProfile(coerceProfileSeedFromMemoryPlan(plan));
 }
 
 function coerceProfileSeedFromKnowledgeSurface(surface = {}) {
@@ -235,8 +394,9 @@ function inferGoalMode(goal = '') {
   if (!text) return 'general';
   if (/(debate|committee|consensus|judge|chair|토론|위원회|합의|판정)/.test(text)) return 'deliberation';
   if (/(experiment|evaluation|eval|benchmark|notebook|dataset|ab test|workflow|pipeline|실험|평가|벤치마크|노트북|데이터셋)/.test(text)) return 'experiment';
+  if (/(review|audit|repair|regression|qa|triage|quality|회귀|감사|복구|수습|검토)/.test(text)) return 'review_repair';
   if (/(implement|implementation|fix|bug|patch|refactor|repo|repository|workspace|code|script|pull request|구현|수정|버그|패치|리팩터|레포|코드|스크립트)/.test(text)) return 'implementation';
-  if (/(research|analy|brief|memo|report|market|strategy|review|investigate|조사|분석|리포트|전략|검토|리뷰|브리프)/.test(text)) return 'analysis';
+  if (/(research|analy|brief|memo|report|market|strategy|investigate|조사|분석|리포트|전략|브리프)/.test(text)) return 'analysis';
   return 'general';
 }
 
@@ -287,6 +447,12 @@ export function buildKnowledgeSurfaceFromProfile(profile = null) {
 function resolveKnowledgeProfileSeed({ goal = '', teamConfig = null } = {}) {
   const team = asObject(teamConfig);
   const structure = asObject(team.structure_v2 || team.structureV2);
+  if (Object.keys(team.memory_plan || team.memoryPlan || {}).length > 0) return coerceProfileSeedFromMemoryPlan(team.memory_plan || team.memoryPlan);
+  if (Object.keys(structure.memory_plan || structure.memoryPlan || {}).length > 0) return coerceProfileSeedFromMemoryPlan(structure.memory_plan || structure.memoryPlan);
+  if (Object.keys(team.team_blueprint || team.teamBlueprint || {}).length > 0) {
+    const blueprint = asObject(team.team_blueprint || team.teamBlueprint);
+    if (Object.keys(blueprint.memory_plan || blueprint.memoryPlan || {}).length > 0) return coerceProfileSeedFromMemoryPlan(blueprint.memory_plan || blueprint.memoryPlan);
+  }
   if (Object.keys(team.knowledge_base_profile || {}).length > 0) return asObject(team.knowledge_base_profile);
   if (Object.keys(team.knowledgeBaseProfile || {}).length > 0) return asObject(team.knowledgeBaseProfile);
   if (Object.keys(structure.knowledge_surface || structure.knowledgeSurface || {}).length > 0) {
@@ -345,10 +511,12 @@ export function deriveKnowledgeBaseDesign({ goal = '', teamConfig = null } = {})
   }
   const memoryPolicy = normalizeMemoryPolicy(explicitMemoryPolicy || profile.memory_policy, { docs: profile.docs });
   const normalizedProfile = normalizeKnowledgeBaseProfile({ ...profile, memory_policy: memoryPolicy });
+  const memoryPlan = normalizeMemoryPlan(buildMemoryPlanFromProfile(normalizedProfile));
   return {
     profile: normalizedProfile,
     knowledge_surface: buildKnowledgeSurfaceFromProfile(normalizedProfile),
     memory_policy: memoryPolicy,
+    memory_plan: memoryPlan,
   };
 }
 
@@ -407,6 +575,30 @@ export function renderKnowledgeBaseProfileMarkdown(profile = null) {
     ].filter(Boolean).join('\n')),
   ].filter(Boolean);
   return lines.join('\n');
+}
+
+
+export function formatMemoryPlanMap(plan = null, { maxSurfaces = 8, includePolicy = true } = {}) {
+  const normalized = normalizeMemoryPlan(plan || {});
+  const surfaceLines = normalized.surfaces.slice(0, maxSurfaces).map((surface) => {
+    const slots = asArray(surface.semantic_slots).map((entry) => cleanText(entry, { lower: true })).filter(Boolean);
+    return `- ${surface.file_name}: ${slots.join(', ')} · ${cleanText(surface.purpose) || 'tracking memory'}`;
+  });
+  return [
+    `Memory layout · ${normalized.display_name}`,
+    `- plan_id: ${normalized.plan_id}`,
+    ...(normalized.selection_reason ? [`- reason: ${normalized.selection_reason}`] : []),
+    ...(includePolicy ? [
+      `- default load: ${normalized.default_load_surface_ids.join(', ') || '(none)'}`,
+      `- stable surfaces: ${normalized.stable_surface_ids.join(', ') || '(none)'}`,
+    ] : []),
+    ...surfaceLines,
+    `- system files: ${normalized.system_files.join(', ')}`,
+  ].join('\n');
+}
+
+export function formatKnowledgeBaseMemoryMap(profile = null, { maxDocs = 8, includePolicy = true } = {}) {
+  return formatMemoryPlanMap(buildMemoryPlanFromProfile(profile || {}), { maxSurfaces: maxDocs, includePolicy });
 }
 
 export function summarizeKnowledgeBaseProfile(profile = null) {

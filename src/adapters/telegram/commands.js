@@ -20,11 +20,11 @@ import {
   suggestTeamConfiguration,
   validateTeamConfiguration,
 } from "../../application/team_configuration.js";
-import { buildTeamManifest, installTeamManifestToSession, normalizeTeamManifest } from '../../application/team_manifest.js';
+import { buildTeamBlueprint, installTeamBlueprintToSession, normalizeTeamBlueprint } from '../../application/team_blueprint_runtime.js';
 import { buildTeamInstallProposal, formatTeamInstallProposalMessage } from '../../application/install_proposal.js';
 import { buildInstallProposalPrompt, createPendingInstallProposalState, getPendingInstallProposal, archivePendingInstallProposal } from '../../application/install_proposal_state.js';
 import { formatManifestRequirementLines, normalizeManifestRequirements } from '../../shared/manifest_requirements.js';
-import { handleTelegramTeamManifestSubcommand } from './team_manifest_commands.js';
+import { handleTelegramTeamBlueprintSubcommand } from './team_blueprint_commands.js';
 import { handleTelegramCredentialCommand } from './credential_commands.js';
 import { getCredentialBindingState } from '../../application/credential_binding.js';
 import { buildTeamSchemaOptionsText, buildTeamSchemaOptionsSummaryLines } from '../../shared/team_schema_catalog.js';
@@ -32,15 +32,11 @@ import { buildTeamSchemaOptionsText, buildTeamSchemaOptionsSummaryLines } from '
 const HELP_TEXT = [
   "Commands:",
   "- /chat [text]: 대화/작업 지시",
-  "- /context [global]: 현재 job 또는 global 컨텍스트 보기",
+  "- /context [global]: 현재 job 컨텍스트/GoC 링크 보기",
   "- /team [suggest <목적>|create <자연어 팀 설명>|refine <자연어 수정>|apply|requirements|proposal|export|install <JSON>|pull|push|template|validate <JSON>|options|reset|modes]: 팀 제안/생성/수정/동기화",
-  "- /agents ...: legacy alias of /team (팀 상태/수정은 /team 권장)",
-  "- /agents ...: legacy alias of /team (팀 상태/수정은 /team 권장)",
-  "- /skills: 현재/예정 agent roster와 대표 skill 보기",
-  "- /tools: 현재 job의 tool 상태 보기",
-  "- /files [uploads|outputs|all] [limit]: workspace 파일 목록 보기",
-  "- /outputs [send]: output 목록 보기 또는 파일 전송",
-  "- /sendfile <relative_path>: 특정 workspace 파일 전송",
+  "- /artifacts [limit]: 주요 산출물 후보 보기",
+  "- /send <번호|path>: 산출물 파일 전송",
+  "- /files [uploads|workspace|all] [limit]: workspace 파일 목록 보기",
   "- /status: 현재 chat/job 상태 보기",
   "- /credential [list|pending|set <KEY> <secret> [--resume]|clear <KEY>]: install proposal용 credential 바인딩",
   "- /stop [jobId]: 현재 실행 또는 지정 job 중단",
@@ -63,9 +59,11 @@ const ADVANCED_HELP_TEXT = [
   "- /agents ...: legacy alias of /team (팀 상태/수정은 /team 권장)",
   "- /skills: 현재/예정 agent roster와 대표 skill 보기",
   "- /tools: 현재 job의 tool 상태 보기",
-  "- /files [uploads|outputs|all] [limit]: workspace 파일 목록 보기",
-  "- /outputs [send]: output 목록 보기 또는 파일 전송",
-  "- /sendfile <relative_path>: 특정 workspace 파일 전송",
+  "- /artifacts [limit]: 주요 산출물 후보 보기",
+  "- /send <번호|path>: 산출물 파일 전송",
+  "- /files [uploads|workspace|all] [limit]: workspace 파일 목록 보기",
+  "- /outputs [limit]: legacy alias of /artifacts",
+  "- /sendfile <relative_path>: legacy alias of /send",
   "- /chat [--debug] <message>|reset: supervisor chat 실행 또는 세션 초기화",
   "- /context <jobId|global>: 컨텍스트 보기 (jobId 생략 시 현재 job)",
   "- /run <goal>: goal 기반 실행 시작",
@@ -120,9 +118,9 @@ export function createTelegramCommandHandler(deps = {}) {
   const parseClampedInt = fileOps.parseClampedInt || deps.parseClampedInt;
   const collectWorkspaceFileEntries = fileOps.collectWorkspaceFileEntries || deps.collectWorkspaceFileEntries;
   const formatWorkspaceFileListText = fileOps.formatWorkspaceFileListText || deps.formatWorkspaceFileListText;
-  const deliverWorkspaceOutputs = fileOps.deliverWorkspaceOutputs || deps.deliverWorkspaceOutputs;
-  const OUTPUT_AUTO_SEND_MAX_FILES = fileOps.OUTPUT_AUTO_SEND_MAX_FILES || deps.OUTPUT_AUTO_SEND_MAX_FILES;
-  const sendWorkspaceFileByRelativePath = fileOps.sendWorkspaceFileByRelativePath || deps.sendWorkspaceFileByRelativePath;
+  const refreshArtifactIndex = fileOps.refreshArtifactIndex || deps.refreshArtifactIndex;
+  const formatArtifactIndexText = fileOps.formatArtifactIndexText || deps.formatArtifactIndexText;
+  const sendArtifactBySelection = fileOps.sendArtifactBySelection || deps.sendArtifactBySelection;
   const formatByteSize = fileOps.formatByteSize || deps.formatByteSize;
   const runWorkspaceDir = fileOps.runWorkspaceDir || deps.runWorkspaceDir;
 
@@ -157,7 +155,7 @@ export function createTelegramCommandHandler(deps = {}) {
   }
 
   function buildManifestWithSessionState(baseTeam, { runtime = null, applyState = 'pending', source = 'telegram', sessionInstallProposal = null } = {}) {
-    return buildTeamManifest(baseTeam, { runtime, applyState, source, installProposalState: sessionInstallProposal });
+    return buildTeamBlueprint(baseTeam, { runtime, applyState, source, installProposalState: sessionInstallProposal });
   }
 
   function buildTeamStatusOverview(teamState = {}, { chatId = '' } = {}) {
@@ -492,7 +490,7 @@ ${formatSupportedModelLines()}`);
         return true;
       }
 
-      const handledTeamManifestSubcommand = await handleTelegramTeamManifestSubcommand({
+      const handledTeamManifestSubcommand = await handleTelegramTeamBlueprintSubcommand({
         sub,
         rest,
         rawArgs,
@@ -592,7 +590,7 @@ ${formatSupportedModelLines()}`);
           await bot.sendMessage(chatId, '먼저 /team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 팀을 제안받아 주세요.');
           return true;
         }
-        const manifest = buildTeamManifest(baseTeam, { runtime: runtimeForTeam, applyState: 'pending' });
+        const manifest = buildTeamBlueprint(baseTeam, { runtime: runtimeForTeam, applyState: 'pending' });
         const requirementLines = formatManifestRequirementLines(manifest.requirements || normalizeManifestRequirements({}), { maxLines: 12 });
         await sendLong(bot, chatId, [
           `실행 requirements · ${baseTeam.team_name || 'team_config'}`,
@@ -614,14 +612,14 @@ ${formatSupportedModelLines()}`);
       if (sub === 'install' || sub === 'import') {
         const payload = String(rawArgs.replace(/^(install|import)\s+/i, '') || '').trim();
         if (!payload) {
-          await bot.sendMessage(chatId, 'Usage: /team install [--apply|--pending] <manifest JSON>');
+          await bot.sendMessage(chatId, 'Usage: /team install [--apply|--pending] <blueprint JSON>');
           return true;
         }
         const applyState = parseApplyStateTokens(payload.split(/\s+/).slice(0, 3));
         const jsonPayload = payload.replace(/^--(?:apply|active|pending)\s+/i, '').trim();
         try {
           const parsed = JSON.parse(jsonPayload);
-          const installed = await installTeamManifestToSession({
+          const installed = await installTeamBlueprintToSession({
             sessionStore: chatSessionStore,
             chatId,
             manifest: parsed,
@@ -629,12 +627,12 @@ ${formatSupportedModelLines()}`);
             applyState,
           });
           await sendLong(bot, chatId, [
-            `✅ manifest를 ${applyState === 'active' ? 'active' : 'pending'} team으로 설치했습니다.`,
+            `✅ blueprint를 ${applyState === 'active' ? 'active' : 'pending'} team으로 설치했습니다.`,
             '',
             formatTeamProposalMessage(installed.team),
           ].join('\n'));
         } catch (e) {
-          await bot.sendMessage(chatId, `❌ manifest 설치 실패: ${String(e?.message ?? e)}`);
+          await bot.sendMessage(chatId, `❌ blueprint 설치 실패: ${String(e?.message ?? e)}`);
         }
         return true;
       }
@@ -647,8 +645,8 @@ ${formatSupportedModelLines()}`);
         const applyState = parseApplyStateTokens(rest.slice(1));
         try {
           const client = requireGocClient();
-          const manifest = await client.getTeamManifest({ threadId });
-          const installed = await installTeamManifestToSession({
+          const manifest = await client.getTeamBlueprint({ threadId });
+          const installed = await installTeamBlueprintToSession({
             sessionStore: chatSessionStore,
             chatId,
             manifest,
@@ -656,12 +654,12 @@ ${formatSupportedModelLines()}`);
             applyState,
           });
           await sendLong(bot, chatId, [
-            `✅ GoC thread team manifest를 가져와 ${applyState === 'active' ? 'active' : 'pending'} team으로 반영했습니다.`,
+            `✅ GoC thread team blueprint를 가져와 ${applyState === 'active' ? 'active' : 'pending'} team으로 반영했습니다.`,
             '',
             formatTeamProposalMessage(installed.team),
           ].join('\n'));
         } catch (e) {
-          await bot.sendMessage(chatId, `❌ GoC manifest pull 실패: ${String(e?.message ?? e)}`);
+          await bot.sendMessage(chatId, `❌ GoC blueprint pull 실패: ${String(e?.message ?? e)}`);
         }
         return true;
       }
@@ -680,15 +678,15 @@ ${formatSupportedModelLines()}`);
         try {
           const manifest = buildManifestWithSessionState(baseTeam, { runtime: runtimeForTeam, applyState, source: 'telegram_push', sessionInstallProposal: getPendingInstallProposal(chatSessionStore, chatId) || chatSessionStore.get(chatId)?.last_install_proposal || null });
           const client = requireGocClient();
-          const saved = await client.installTeamManifest({ threadId }, manifest, applyState);
-          const normalized = normalizeTeamManifest(saved?.manifest || saved || manifest, { runtime: runtimeForTeam, applyState });
+          const saved = await client.installTeamBlueprint({ threadId }, manifest, applyState);
+          const normalized = normalizeTeamBlueprint(saved?.manifest || saved?.blueprint || saved || manifest, { runtime: runtimeForTeam, applyState });
           await sendLong(bot, chatId, [
             `✅ 현재 팀을 GoC thread에 ${applyState === 'active' ? 'active' : 'pending'} team으로 동기화했습니다.`,
             '',
-            JSON.stringify(normalized.manifest, null, 2),
+            JSON.stringify(normalized.blueprint, null, 2),
           ].join('\n'));
         } catch (e) {
-          await bot.sendMessage(chatId, `❌ GoC manifest push 실패: ${String(e?.message ?? e)}`);
+          await bot.sendMessage(chatId, `❌ GoC blueprint push 실패: ${String(e?.message ?? e)}`);
         }
         return true;
       }
@@ -787,65 +785,66 @@ ${buildTeamListMessage({ active_team: applied })}`);
         return true;
       }
       const first = String(rest[0] || "").trim().toLowerCase();
-      const hasScope = first === "uploads" || first === "outputs" || first === "all";
+      const hasScope = ["uploads", "workspace", "artifacts", "outputs", "all"].includes(first);
       const scope = hasScope ? first : "all";
       const limit = parseClampedInt(hasScope ? rest[1] : rest[0], 20, { min: 1, max: 100 });
       const entries = collectWorkspaceFileEntries(currentJobId, { scope }).slice(0, limit);
       await sendLong(
         bot,
         chatId,
-        `📂 workspace files\n${formatWorkspaceFileListText(currentJobId, entries, { scope, limit })}`
+        `📂 workspace files
+${formatWorkspaceFileListText(currentJobId, entries, { scope, limit })}`
       );
       return true;
     }
 
-    if (cmd === "/outputs") {
+    if (cmd === "/artifacts" || cmd === "/outputs") {
       const currentJobId = resolveLiveJobIdForChat(chatId);
       if (!currentJobId) {
         await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어요. 먼저 /chat 또는 /run으로 job을 시작해 주세요.");
         return true;
       }
-      const mode = String(rest[0] || "").trim().toLowerCase();
-      if (mode === "send") {
-        const sendLimit = parseClampedInt(rest[1], OUTPUT_AUTO_SEND_MAX_FILES, { min: 1, max: 10 });
-        await deliverWorkspaceOutputs(bot, chatId, currentJobId, {
-          replyToMessageId: msg.message_id,
-          maxFiles: sendLimit,
-        });
-        await bot.sendMessage(chatId, `✅ outputs 전송 시도 완료 (limit=${sendLimit})`);
+      const legacyMode = cmd === "/outputs";
+      const first = String(rest[0] || '').trim().toLowerCase();
+      if (legacyMode && first === 'send') {
+        await bot.sendMessage(chatId, '이제 자동 첨부 전송은 사용하지 않아요. /artifacts 로 후보를 본 뒤 /send <번호|path> 를 사용해 주세요.');
         return true;
       }
-      const limit = parseClampedInt(rest[0], 20, { min: 1, max: 100 });
-      const entries = collectWorkspaceFileEntries(currentJobId, { scope: "outputs" }).slice(0, limit);
-      await sendLong(
-        bot,
-        chatId,
-        `📦 outputs\n${formatWorkspaceFileListText(currentJobId, entries, { scope: "outputs", limit })}`
-      );
+      const limit = parseClampedInt(rest[0], 12, { min: 1, max: 24 });
+      const artifactIndex = refreshArtifactIndex(currentJobId, { maxFiles: limit });
+      const prefix = legacyMode ? '📎 artifacts (legacy /outputs alias)' : '📎 artifacts';
+      await sendLong(bot, chatId, `${prefix}
+${formatArtifactIndexText(currentJobId, artifactIndex, { limit })}`);
       return true;
     }
 
-    if (cmd === "/sendfile") {
+    if (cmd === "/send" || cmd === "/sendfile") {
       const currentJobId = resolveLiveJobIdForChat(chatId);
       if (!currentJobId) {
         await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어요. 먼저 /chat 또는 /run으로 job을 시작해 주세요.");
         return true;
       }
-      const relativePath = String(args || "").trim();
-      if (!relativePath) {
-        await bot.sendMessage(chatId, "Usage: /sendfile <relative_path>");
+      const selection = String(args || '').trim();
+      if (!selection) {
+        await bot.sendMessage(chatId, cmd === '/sendfile' ? 'Usage: /sendfile <relative_path>' : 'Usage: /send <번호|path>');
         return true;
       }
       try {
-        const sent = await sendWorkspaceFileByRelativePath(bot, chatId, currentJobId, relativePath, {
+        const artifactIndex = refreshArtifactIndex(currentJobId, { maxFiles: 12 });
+        const sent = await sendArtifactBySelection(bot, chatId, currentJobId, selection, {
           replyToMessageId: msg.message_id,
+          artifactIndex,
         });
         await bot.sendMessage(
           chatId,
-          `✅ 파일 전송 완료\njob_id=${currentJobId}\npath=${sent.rel}\nsize=${formatByteSize(sent.size)}`
+          `✅ 파일 전송 완료
+job_id=${currentJobId}
+path=${sent.rel}
+size=${formatByteSize(sent.size)}`
         );
       } catch (e) {
-        await bot.sendMessage(chatId, `❌ /sendfile 실패: ${clip(String(e?.message ?? e), 260)}`);
+        const prefix = cmd === '/sendfile' ? '/sendfile' : '/send';
+        await bot.sendMessage(chatId, `❌ ${prefix} 실패: ${clip(String(e?.message ?? e), 260)}`);
       }
       return true;
     }

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildTeamInstallProposal } from '../src/application/install_proposal.js';
-import { buildTeamManifest } from '../src/application/team_manifest.js';
+import { buildTeamBlueprint } from '../src/application/team_blueprint_runtime.js';
 
 test('buildTeamInstallProposal summarizes blocking requirements and commands', () => {
   const proposal = buildTeamInstallProposal({
@@ -27,8 +27,8 @@ test('buildTeamInstallProposal summarizes blocking requirements and commands', (
   assert.ok(proposal.suggested_commands.some((entry) => entry.includes('/team push')));
 });
 
-test('buildTeamManifest includes install_proposal', () => {
-  const manifest = buildTeamManifest({
+test('buildTeamBlueprint includes install_proposal', () => {
+  const manifest = buildTeamBlueprint({
     team_name: 'Research Team',
     agents: [
       { agent_id: 'researcher', name: 'Researcher', role: 'researcher', recommended_tool_ids: ['web_search'] },

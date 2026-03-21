@@ -556,6 +556,7 @@ export function buildTeamStructureV2(team = {}, { applyState = 'pending', instal
     ...baseStructure,
     knowledge_surface: knowledgeDesign.knowledge_surface,
     memory_policy: knowledgeDesign.memory_policy,
+    memory_plan: knowledgeDesign.memory_plan,
   };
   const validation = validatePatternConstraints(structure);
   return {
@@ -638,10 +639,12 @@ export function normalizeTeamStructureV2(raw = {}) {
     goal: baseStructure.intent.task_brief || '',
     teamConfig: {
       task_brief: baseStructure.intent.task_brief,
+      memory_plan: asObject(row?.memory_plan || row?.memoryPlan),
       structure_v2: {
         ...baseStructure,
         knowledge_surface: asObject(row?.knowledge_surface || row?.knowledgeSurface),
         memory_policy: asObject(row?.memory_policy || row?.memoryPolicy),
+        memory_plan: asObject(row?.memory_plan || row?.memoryPlan),
       },
     },
   });
@@ -649,6 +652,7 @@ export function normalizeTeamStructureV2(raw = {}) {
     ...baseStructure,
     knowledge_surface: knowledgeDesign.knowledge_surface,
     memory_policy: knowledgeDesign.memory_policy,
+    memory_plan: knowledgeDesign.memory_plan,
   };
   return {
     ...structure,
@@ -814,7 +818,7 @@ export function deriveTeamConfigFromStructureV2(raw = {}) {
     design_prompt: structure.intent.design_prompt || structure.intent.task_brief,
     planner_metadata: {
       ...asObject(structure.metadata.planner_metadata),
-      primary_schema: 'structure_v2',
+      primary_schema: 'team_blueprint_v1',
     },
     agents,
     interaction_spec: {
@@ -838,6 +842,7 @@ export function deriveTeamConfigFromStructureV2(raw = {}) {
     requirements: asObject(structure.requirements),
     knowledge_surface: asObject(structure.knowledge_surface),
     memory_policy: asObject(structure.memory_policy),
+    memory_plan: asObject(structure.memory_plan),
     runtime_execution: asObject(structure.control_policy?.runtime_execution),
     knowledge_base_profile: deriveKnowledgeBaseDesign({ goal: structure.intent.task_brief || '', teamConfig: { structure_v2: structure } }).profile,
     status: structure.metadata.status || 'draft',

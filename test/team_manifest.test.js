@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildTeamManifest, normalizeTeamManifest } from '../src/application/team_manifest.js';
+import { buildTeamBlueprint, normalizeTeamBlueprint } from '../src/application/team_blueprint_runtime.js';
 import { createPendingInstallProposalState } from '../src/application/install_proposal_state.js';
 import { buildManifestInstallHints } from '../src/shared/manifest_requirements.js';
 
@@ -23,20 +23,21 @@ const baseTeam = {
   },
 };
 
-test('buildTeamManifest attaches requirements and install hints', () => {
-  const manifest = buildTeamManifest(baseTeam, { runtime: null, applyState: 'pending' });
-  assert.equal(manifest.kind, 'ddalggak_team_manifest');
-  assert.equal(manifest.version, 2);
-  assert.equal(manifest.primary_schema, 'structure_v2');
-  assert.equal(manifest.structure_v2.topology.pattern, 'single');
+test('buildTeamBlueprint attaches requirements and install hints', () => {
+  const manifest = buildTeamBlueprint(baseTeam, { runtime: null, applyState: 'pending' });
+  assert.equal(manifest.kind, 'ddalggak_team_blueprint');
+  assert.equal(manifest.version, 1);
+  assert.equal(manifest.primary_schema, 'team_blueprint_v1');
+  assert.equal(manifest.blueprint.structure.topology.pattern, 'single');
   assert.equal(manifest.team.agents[0].agent_id, 'builder');
+  assert.ok(Array.isArray(manifest.blueprint.memory_plan.surfaces));
   assert.equal(manifest.requirements.tools[0].tool_id, 'workspace_fs');
   assert.ok(Array.isArray(manifest.requirements.install_hints));
   assert.ok(manifest.requirements.install_hints.some((entry) => entry.includes('/team export')));
 });
 
-test('normalizeTeamManifest accepts team-only payloads', () => {
-  const normalized = normalizeTeamManifest({
+test('normalizeTeamBlueprint accepts team-only payloads', () => {
+  const normalized = normalizeTeamBlueprint({
     team: baseTeam,
     requirements: {
       credentials: [{ credential_key: 'OPENAI_API_KEY', required_by: 'Notebook Builder' }],
@@ -44,7 +45,7 @@ test('normalizeTeamManifest accepts team-only payloads', () => {
   }, { applyState: 'active' });
   assert.equal(normalized.apply_state, 'active');
   assert.equal(normalized.team.agents[0].agent_id, 'builder');
-  assert.equal(normalized.manifest.requirements.credentials[0].credential_key, 'OPENAI_API_KEY');
+  assert.equal(normalized.blueprint.requirements.credentials[0].credential_key, 'OPENAI_API_KEY');
 });
 
 test('buildManifestInstallHints includes GoC sync hint when thread target exists', () => {
@@ -55,7 +56,7 @@ test('buildManifestInstallHints includes GoC sync hint when thread target exists
 });
 
 
-test('buildTeamManifest preserves install proposal state when provided', () => {
+test('buildTeamBlueprint preserves install proposal state when provided', () => {
   const state = createPendingInstallProposalState({
     proposal: {
       kind: 'capability_install_proposal',
@@ -67,15 +68,15 @@ test('buildTeamManifest preserves install proposal state when provided', () => {
     applyState: 'active',
     resumeRequest: { message: '다시 실행해줘' },
   });
-  const manifest = buildTeamManifest(baseTeam, { runtime: { threadId: 'thread-3' }, applyState: 'active', installProposalState: state });
+  const manifest = buildTeamBlueprint(baseTeam, { runtime: { threadId: 'thread-3' }, applyState: 'active', installProposalState: state });
   assert.equal(manifest.install_proposal_state.status, 'awaiting_install_approval');
   assert.equal(manifest.install_proposal_state.proposal.gap_count, 1);
 });
 
 
 
-test('normalizeTeamManifest accepts structure_v2-only payloads', () => {
-  const normalized = normalizeTeamManifest({
+test('normalizeTeamBlueprint accepts structure_v2-only payloads', () => {
+  const normalized = normalizeTeamBlueprint({
     structure_v2: {
       metadata: { team_name: 'Structured Debate', composition_mode: 'freeform', proposal_mode: 'refine' },
       intent: { task_brief: '찬반 토론 구조' },
@@ -98,13 +99,13 @@ test('normalizeTeamManifest accepts structure_v2-only payloads', () => {
   }, { applyState: 'pending' });
   assert.equal(normalized.team.team_name, 'Structured Debate');
   assert.equal(normalized.team.agents[0].agent_id, 'pro');
-  assert.equal(normalized.manifest.structure_v2.topology.pattern, 'sequential');
+  assert.equal(normalized.blueprint.blueprint.structure.topology.pattern, 'sequential');
 });
 
 
-test('normalizeTeamManifest prefers structure_v2 over stale legacy team payloads', () => {
-  const normalized = normalizeTeamManifest({
-    primary_schema: 'structure_v2',
+test('normalizeTeamBlueprint prefers structure_v2 over stale legacy team payloads', () => {
+  const normalized = normalizeTeamBlueprint({
+    primary_schema: 'team_blueprint_v1',
     team: {
       team_name: 'Stale Team',
       agents: [{ agent_id: 'stale', name: 'Stale', role: 'researcher' }],
@@ -125,8 +126,8 @@ test('normalizeTeamManifest prefers structure_v2 over stale legacy team payloads
       },
     }
   }, { applyState: 'active' });
-  assert.equal(normalized.manifest.primary_schema, 'structure_v2');
+  assert.equal(normalized.blueprint.primary_schema, 'team_blueprint_v1');
   assert.equal(normalized.team.team_name, 'Fresh Structure');
   assert.equal(normalized.team.agents[0].agent_id, 'router');
-  assert.equal(normalized.manifest.structure_v2.validation.errors.length, 0);
+  assert.equal(normalized.blueprint.blueprint.structure.validation.errors.length, 0);
 });

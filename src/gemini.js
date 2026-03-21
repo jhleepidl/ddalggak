@@ -385,6 +385,8 @@ function classifyGeminiError(result = {}) {
   ].join("\n");
   if (!text.trim()) return "unknown_error";
 
+  if (/\[aborted\]/i.test(text)) return "aborted";
+
   const isCapacityExhausted = NO_CAPACITY_RE.test(text)
     || MODEL_CAPACITY_EXHAUSTED_RE.test(text)
     || (RESOURCE_EXHAUSTED_RE.test(text) && STATUS_429_RE.test(text));
@@ -507,6 +509,7 @@ async function runGeminiOnce({
     env: modelEnv,
   });
   if (stdinRun.ok) return stdinRun;
+  if (signal?.aborted) return makeAbortedResult();
 
   const inlineArgs = buildGeminiArgs({
     promptText,
@@ -546,6 +549,7 @@ async function invokeGemini({ promptText, approvalMode, commandCwd, timeoutMs, s
     if (canUseModelArg && model) modelFlagAvailability = true;
     return firstRun;
   }
+  if (signal?.aborted) return makeAbortedResult();
 
   if (canUseModelArg && model && MODEL_FLAG_UNSUPPORTED_RE.test(String(firstRun.stderr || ""))) {
     modelFlagAvailability = false;
@@ -595,6 +599,7 @@ async function invokeGeminiWithPlanFallback({
     if (firstMode === "plan") planModeAvailability = true;
     return first;
   }
+  if (signal?.aborted) return makeAbortedResult();
 
   if (firstMode === "plan" && PLAN_DISABLED_RE.test(String(first.stderr || ""))) {
     planModeAvailability = false;
@@ -700,7 +705,9 @@ export async function runGeminiPrompt({
     return { ok: false, exitCode: -1, stdout: "", stderr: "[gemini] empty prompt", durationMs: 0 };
   }
 
-  const timeoutMs = 30 * 60 * 1000;
+  const timeoutMs = Number(process.env.GEMINI_TIMEOUT_MS || 0) > 0
+    ? Number(process.env.GEMINI_TIMEOUT_MS)
+    : 4 * 60 * 1000;
   const commandCwd = path.resolve(String(cwd || workspaceRoot || process.cwd()).trim() || process.cwd());
   const workspacePath = commandCwd;
   ensureGeminiWorkspaceConfig(workspacePath, { overwritePolicy: settingsOverwrite, patchSettings: workspaceSettingsPatch });
@@ -793,6 +800,14 @@ export async function runGeminiPrompt({
         extraEnv: baseEnv,
       });
     });
+    if (signal?.aborted) {
+      return withGeminiMeta(makeAbortedResult(), {
+        modelName: currentModelName,
+        errorType: 'aborted',
+        retryCount,
+        notes,
+      });
+    }
     if (result.ok) {
       geminiCapacityCircuit.consecutiveCapacityFailures = 0;
       geminiCapacityCircuit.openUntilMs = 0;
