@@ -153,6 +153,7 @@ import { writeGeminiMemoryFile, writeCodexInstructionFile } from "./cli_workspac
 import { normalizeRuntimeExecutionPolicy } from "./runtime_execution_policy.js";
 import { resolveProviderRuntimeOptions } from "./provider_runtime_policy.js";
 import { summarizeRuntimeCheckpointRef, writeRuntimeCheckpointBundle } from "./runtime_checkpointing.js";
+import { appendPromptTelemetry, estimateTextTokens as estimatePromptTelemetryTokens } from "./prompt_telemetry.js";
 
 import * as runtimeState from "./telegram_runtime_state.js";
 import * as runtimeIo from "./telegram_runtime_io.js";
@@ -660,6 +661,37 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
       "- 검증(테스트/체크)",
     ].join("\n"),
   ].join("\n");
+  appendPromptTelemetry({
+    jobDir: runDir(jobId),
+    sharedDir: runSharedDir(jobId),
+    row: {
+      kind: 'provider_prompt',
+      provider: 'gemini',
+      model: preferredModel || '',
+      agent_id: String(opts.agentId || 'gemini').trim().toLowerCase(),
+      role_id: String(opts.roleId || 'researcher').trim().toLowerCase(),
+      prompt_text: prompt,
+      prepared_context_tokens: opts.preparedContextInfo?.compiled_tokens_estimate,
+      prepared_context_chars: opts.preparedContextInfo?.compiled_chars,
+      components: {
+        local_context: ctx,
+        kb_contract: kbContract,
+        role_memo: roleMemo,
+        workspace_files: workspaceFilesText,
+        task_goal: goal,
+        output_guide: outputGuide || [
+          "출력:",
+          "- 요약",
+          "- 구현 단계(번호)",
+          "- 리스크/주의",
+          "- 검증(테스트/체크)",
+        ].join("\n"),
+      },
+      metadata: {
+        concurrency_key: concurrencyKey,
+      },
+    },
+  });
   const r = await runGeminiPrompt({
     workspaceRoot: workspacePath,
     cwd: workspacePath,
@@ -728,6 +760,32 @@ async function codexImplement(jobId, instruction, signal = null, opts = {}) {
     instruction,
     "",
   ].join("\n");
+  appendPromptTelemetry({
+    jobDir: runDir(jobId),
+    sharedDir: runSharedDir(jobId),
+    row: {
+      kind: 'provider_prompt',
+      provider: 'codex',
+      model: String(providerOptions.profile || process.env.CODEX_PROFILE || '').trim() || 'codex',
+      agent_id: String(opts.agentId || 'codex').trim().toLowerCase(),
+      role_id: String(opts.roleId || 'builder').trim().toLowerCase(),
+      prompt_text: prompt,
+      prepared_context_tokens: opts.preparedContextInfo?.compiled_tokens_estimate,
+      prepared_context_chars: opts.preparedContextInfo?.compiled_chars,
+      components: {
+        local_context: ctx,
+        kb_contract: kbContract,
+        role_memo: roleMemo,
+        tracking_docs: trackDocs,
+        workspace_files: workspaceFilesText,
+        task_instruction: instruction,
+      },
+      metadata: {
+        sandbox_mode: providerOptions.sandboxMode || undefined,
+        approval_policy: providerOptions.approvalPolicy || undefined,
+      },
+    },
+  });
   const r = await runCodexExec({
     workspaceRoot: workspacePath,
     cwd: workspacePath,
@@ -923,9 +981,7 @@ function buildSupervisorExecutionCallbacks({
   };
 
   function estimateTokens(text) {
-    const src = String(text || "");
-    if (!src) return 0;
-    return Math.max(1, Math.ceil(src.length / 4));
+    return estimatePromptTelemetryTokens(text);
   }
 
   function normalizeLensSpec(rawLens, { fallbackBudget = 1200 } = {}) {
@@ -1513,7 +1569,17 @@ function buildSupervisorExecutionCallbacks({
           bot,
           chatId,
           jobId,
-          { type: "agent_run", agent: cleanAgentId, prompt: finalPrompt },
+          {
+            type: "agent_run",
+            agent: cleanAgentId,
+            prompt: finalPrompt,
+            inputs: {
+              ...(actionInputs && typeof actionInputs === "object" ? actionInputs : {}),
+              _prompt_context_info: prepared?.context_info && typeof prepared.context_info === "object"
+                ? prepared.context_info
+                : undefined,
+            },
+          },
           {
             runtime,
             telegramUserId: currentTelegramUserId,
@@ -4081,6 +4147,11 @@ ${taskBody}`
         runtimeExecutionPolicy,
         providerOptions,
         chatId,
+        agentId,
+        roleId,
+        preparedContextInfo: act?.inputs?._prompt_context_info && typeof act.inputs._prompt_context_info === 'object'
+          ? act.inputs._prompt_context_info
+          : {},
       });
       const fallback = gocFallbackByJob.get(String(jobId));
       if (fallback) {
@@ -4094,6 +4165,11 @@ ${taskBody}`
     if (provider === "gemini") {
       const output = await geminiResearch(jobId, combinedGoal, signal, {
         sectionTitle: `${agentId} notes`,
+        agentId,
+        roleId,
+        preparedContextInfo: act?.inputs?._prompt_context_info && typeof act.inputs._prompt_context_info === 'object'
+          ? act.inputs._prompt_context_info
+          : {},
         outputGuide: [
           "출력:",
           "- 핵심 요약",
