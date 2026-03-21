@@ -122,7 +122,7 @@ export function createTelegramCallbackQueryHandler(deps = {}) {
           return;
         }
 
-        if (data === 'chat_status:summary' || data === 'chat_status:full' || data === 'chat_status:recent' || data === 'chat_status:artifacts') {
+        if (data === 'chat_status:summary' || data === 'chat_status:full' || data === 'chat_status:recent' || data === 'chat_status:prompt' || data === 'chat_status:artifacts') {
           const currentJobId = resolveCurrentJobIdForChat?.(chatId);
           let runtime = null;
           if (currentJobId && typeof loadSupervisorRuntime === 'function') {
@@ -141,9 +141,9 @@ export function createTelegramCallbackQueryHandler(deps = {}) {
 ${formatArtifactIndexText(currentJobId, artifactIndex, { limit: 8 })}`);
             return;
           }
-          const detail = data === 'chat_status:full' ? 'full' : (data === 'chat_status:recent' ? 'recent' : 'compact');
+          const detail = data === 'chat_status:full' ? 'full' : (data === 'chat_status:recent' ? 'recent' : (data === 'chat_status:prompt' ? 'prompt' : 'compact'));
           const card = buildChatStatusCard(chatId, runtime, { detail });
-          await bot.answerCallbackQuery(q.id, { text: detail === 'full' ? 'full status' : (detail === 'recent' ? 'recent activity' : 'status') });
+          await bot.answerCallbackQuery(q.id, { text: detail === 'full' ? 'full status' : (detail === 'recent' ? 'recent activity' : (detail === 'prompt' ? 'prompt status' : 'status')) });
           if (card.reply_markup) {
             await bot.sendMessage(chatId, card.text, { reply_markup: card.reply_markup });
           } else {

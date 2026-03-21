@@ -95,6 +95,7 @@ import { detectCapabilityGapsFromExecution } from "./capability_gap_detector.js"
 import { buildInstallProposalPrompt, buildInstallProposalStateFromExecution, setPendingInstallProposal } from './install_proposal_state.js';
 import { resolveCredentialEnvForChat } from './credential_binding.js';
 import { buildAgentLocalInteractionContract } from "../domain/interaction_spec.js";
+import { buildAgencyRoleOverlayPromptBlock, resolveAgencyRoleOverlay } from "../domain/agency_role_overlays.js";
 import {
   verifyConversationMembershipMutation,
   createMembershipConfirmationError,
@@ -154,6 +155,7 @@ import { normalizeRuntimeExecutionPolicy } from "./runtime_execution_policy.js";
 import { resolveProviderRuntimeOptions } from "./provider_runtime_policy.js";
 import { summarizeRuntimeCheckpointRef, writeRuntimeCheckpointBundle } from "./runtime_checkpointing.js";
 import { appendPromptTelemetry, estimateTextTokens as estimatePromptTelemetryTokens } from "./prompt_telemetry.js";
+import { readIterationDelta, readRoleSummary, updateRoleSummary } from "./summary_memory.js";
 
 import * as runtimeState from "./telegram_runtime_state.js";
 import * as runtimeIo from "./telegram_runtime_io.js";
@@ -251,6 +253,14 @@ const {
   sendAgentStatusTransitionMessage,
 } = routePlanning;
 
+
+function safeRunDir(jobId = "") {
+  try {
+    return runDir(jobId);
+  } catch {
+    return "";
+  }
+}
 
 function resolveRuntimeExecutionPolicyForRuntime(runtime = null) {
   const structurePolicy = runtime?.activeTeamConfig?.structure_v2?.control_policy?.runtime_execution
@@ -444,6 +454,7 @@ function buildRuntimeAgentMetadataIndex(runtime = null) {
     if (!row || typeof row !== 'object') return;
     const id = String(row.id || row.agent_id || row.agentId || row.template_id || row.templateId || row.instance_id || row.instanceId || '').trim().toLowerCase();
     if (!id) return;
+    const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
     const next = {
       id,
       name: String(row.name || row.display_label || row.displayLabel || row.agent_name || '').trim(),
@@ -454,6 +465,8 @@ function buildRuntimeAgentMetadataIndex(runtime = null) {
         ? row.skills
         : (Array.isArray(row.attached_skill_ids) ? row.attached_skill_ids : (Array.isArray(row.attachedSkillIds) ? row.attachedSkillIds : [])),
       purpose: String(row.purpose || row.assigned_goal || row.assignedGoal || '').trim(),
+      agency_overlay_id: String(row.agency_overlay_id || row.agencyOverlayId || metadata.agency_overlay_id || '').trim(),
+      agency_overlay: row.agency_overlay || row.agencyOverlay || metadata.agency_overlay || null,
     };
     const prev = index.get(id) || {};
     index.set(id, {
@@ -465,6 +478,8 @@ function buildRuntimeAgentMetadataIndex(runtime = null) {
       model: next.model || prev.model || '',
       skills: Array.isArray(next.skills) && next.skills.length > 0 ? next.skills : (Array.isArray(prev.skills) ? prev.skills : []),
       purpose: next.purpose || prev.purpose || '',
+      agency_overlay_id: next.agency_overlay_id || prev.agency_overlay_id || '',
+      agency_overlay: next.agency_overlay || prev.agency_overlay || null,
     });
   };
   for (const row of (Array.isArray(runtime?.activeTeamConfig?.agents) ? runtime.activeTeamConfig.agents : [])) pushRow(row);
@@ -601,6 +616,8 @@ function decoratePlanActionsWithAgentMetadata(actions = [], runtime = null) {
       model: String(inputs.model || meta?.model || '').trim() || undefined,
       attached_skill_ids: (Array.isArray(inputs.attached_skill_ids) ? inputs.attached_skill_ids : (Array.isArray(inputs.attachedSkillIds) ? inputs.attachedSkillIds : (Array.isArray(meta?.skills) ? meta.skills : []))),
       slot_purpose: String(inputs.slot_purpose || inputs.slotPurpose || meta?.purpose || '').trim() || undefined,
+      agency_role_overlay: inputs.agency_role_overlay || inputs.agencyRoleOverlay || meta?.agency_overlay || undefined,
+      agency_role_overlay_id: String(inputs.agency_role_overlay_id || inputs.agencyRoleOverlayId || meta?.agency_overlay_id || '').trim() || undefined,
     };
     return {
       ...action,
@@ -960,13 +977,14 @@ function buildSupervisorExecutionCallbacks({
     const cleanAgentId = String(agentId || "").trim().toLowerCase();
     if (!cleanAgentId || !String(output || "").trim()) return;
     const configAgent = findAgentConfigInRuntime(cleanAgentId, runtime) || findAgentConfig(cleanAgentId) || {};
+    const normalizedRoleId = String(configAgent?.role || configAgent?.system_key || cleanAgentId).trim().toLowerCase();
     const maxRecentTurns = Number(runtime?.activeTeamConfig?.shortcut_policy?.max_recent_turns || 6);
     chatSessionStore.upsert(chatId, (session) => ({
       ...session,
       recent_agent_turns: appendRecentAgentTurn(session?.recent_agent_turns || [], {
         agent_id: cleanAgentId,
         agent_name: String(configAgent?.name || cleanAgentId).trim(),
-        role: String(configAgent?.role || configAgent?.system_key || "").trim().toLowerCase(),
+        role: normalizedRoleId,
         provider: String(provider || configAgent?.provider || "").trim().toLowerCase(),
         model: String(model || configAgent?.model || "").trim(),
         goal: String(goal || "").trim(),
@@ -978,6 +996,15 @@ function buildSupervisorExecutionCallbacks({
         ts: new Date().toISOString(),
       }).slice(0, Math.max(1, Math.min(12, maxRecentTurns))),
     }));
+    updateRoleSummary({
+      jobDir: safeRunDir(jobId),
+      roleId: normalizedRoleId,
+      agentId: cleanAgentId,
+      goal: String(goal || "").trim(),
+      output: String(output || "").trim(),
+      provider: String(provider || configAgent?.provider || "").trim().toLowerCase(),
+      model: String(model || configAgent?.model || "").trim(),
+    });
   };
 
   function estimateTokens(text) {
@@ -1556,12 +1583,21 @@ function buildSupervisorExecutionCallbacks({
       });
     const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
     const roleKey = String(actionInputs?.role_id || actionInputs?.roleId || cleanAgentId || '').trim().toLowerCase();
+    const agencyRoleOverlay = resolveAgencyRoleOverlay(
+      actionInputs?.agency_role_overlay,
+      actionInputs?.agencyRoleOverlay,
+    );
+    const promptRoleSummary = readRoleSummary({ jobDir: safeRunDir(jobId), roleId: roleKey, agentId: cleanAgentId });
+    const promptIterationDelta = readIterationDelta({ jobDir: safeRunDir(jobId) });
+    const outputContractBlock = buildAgentOutputContractBlock({
+      roleId: roleKey,
+      runtimeExecutionPolicy,
+    });
     const finalPrompt = [
       String(prepared?.final_prompt || "").trim() || cleanGoal,
-      buildAgentOutputContractBlock({
-        roleId: roleKey,
-        runtimeExecutionPolicy,
-      }),
+      promptRoleSummary ? `[ROLE SUMMARY]\n${clip(promptRoleSummary, 900)}` : "",
+      promptIterationDelta ? `[ITERATION DELTA]\n${clip(promptIterationDelta, 700)}` : "",
+      outputContractBlock,
     ].filter(Boolean).join("\n\n");
     try {
       const result = await enqueue(
@@ -1612,6 +1648,34 @@ function buildSupervisorExecutionCallbacks({
         ),
         { jobId, signal: controller.signal, label: `chat_v2_run_${String(cleanAgentId || "agent")}` }
       );
+      appendPromptTelemetry({
+        jobDir: safeRunDir(jobId),
+        sharedDir: runSharedDir(jobId),
+        row: {
+          kind: 'provider_prompt',
+          provider: String(result?.provider || '').trim().toLowerCase() || undefined,
+          model: String(result?.model || '').trim() || undefined,
+          agent_id: cleanAgentId,
+          role_id: roleKey || cleanAgentId,
+          prompt_text: finalPrompt,
+          prepared_context_tokens: prepared?.context_info?.compiled_tokens_estimate,
+          prepared_context_chars: prepared?.context_info?.compiled_chars,
+          components: {
+            assembled_context: String(prepared?.final_prompt || '').trim() || cleanGoal,
+            role_summary: promptRoleSummary,
+            agency_overlay: buildAgencyRoleOverlayPromptBlock(agencyRoleOverlay, { maxBullets: 4 }),
+            iteration_delta: promptIterationDelta,
+            output_contract: outputContractBlock,
+          },
+          metadata: {
+            runtime_instance_id: runtimeInstanceId || undefined,
+            slot_id: slotId || undefined,
+            scope_id: scopeId || undefined,
+            agency_overlay_id: agencyRoleOverlay?.overlay_id || undefined,
+            agency_overlay_title: agencyRoleOverlay?.display?.title || undefined,
+          },
+        },
+      });
       rememberRecentAgentTurn({
         agentId: cleanAgentId,
         goal: cleanGoal,
@@ -4094,31 +4158,40 @@ async function executeAgentRun(
     const model = String(agent.model || provider).trim() || provider;
     const rolePrompt = String(agent.prompt || "").trim();
     const roleId = String(act?.inputs?.role_id || act?.inputs?.roleId || agent.role || agent.role_id || agent.roleId || "").trim().toLowerCase();
+    const agencyRoleOverlay = resolveAgencyRoleOverlay(
+      act?.inputs?.agency_role_overlay,
+      act?.inputs?.agencyRoleOverlay,
+      agent?.agency_overlay,
+      agent?.agencyOverlay,
+      agent?.metadata?.agency_overlay,
+    );
+    const agencyRoleOverlayBlock = buildAgencyRoleOverlayPromptBlock(agencyRoleOverlay, { maxBullets: 4 });
+    const combinedRoleMemo = [rolePrompt, agencyRoleOverlayBlock].filter(Boolean).join("\n\n");
     const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
     const providerOptions = resolveProviderRuntimeOptionsForJob({ runtime, provider, action: act, agent, jobId });
     const kbContract = buildAgentKnowledgeBaseBlock(jobId, { provider, roleId, agentId });
-    ensureCliWorkspaceSupportFiles(jobId, { provider, roleMemo: rolePrompt, kbContract, goal: taskPrompt, instruction: taskPrompt, runtimeExecutionPolicy, providerOptions });
+    ensureCliWorkspaceSupportFiles(jobId, { provider, roleMemo: combinedRoleMemo, kbContract, goal: taskPrompt, instruction: taskPrompt, runtimeExecutionPolicy, providerOptions });
     const taskBody = kbContract
       ? `${kbContract}
 
 [ASSIGNED TASK]
 ${taskPrompt}`
       : taskPrompt;
-    const combinedInstruction = rolePrompt
+    const combinedInstruction = combinedRoleMemo
       ? `[ROLE]
-${rolePrompt}
+${combinedRoleMemo}
 
 ${taskBody}`
       : taskBody;
-    const combinedGoal = rolePrompt
+    const combinedGoal = combinedRoleMemo
       ? `[ROLE]
-${rolePrompt}
+${combinedRoleMemo}
 
 ${taskBody}`
       : taskBody;
-    const combinedChatQuestion = rolePrompt
+    const combinedChatQuestion = combinedRoleMemo
       ? `[AGENT ROLE]
-${rolePrompt}
+${combinedRoleMemo}
 
 ${taskBody}`
       : taskBody;

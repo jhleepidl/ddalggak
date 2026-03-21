@@ -21,6 +21,7 @@ import {
   autoPurposeForAgent,
   buildReadableInteractionLines,
   defaultSkillsForAgent,
+  formatRoleOverlayProfile,
   formatSkillLabels,
   formatToolLabels,
   humanizeModel,
@@ -2253,6 +2254,7 @@ export function buildTeamListMessage(teamState = {}, { runtime = null } = {}) {
       const generatedSkillLabels = normalizeGeneratedSkillBriefs(agent.generated_skill_briefs || agent.generatedSkillBriefs || []).map((entry) => entry.label).slice(0, 2);
       return [
         `${index + 1}. ${agent.name} · ${roleLabel(agent.role)}`,
+        `   - 역할 프로필: ${formatRoleOverlayProfile(agent.role, agent, { includeBaseLabel: true })}`,
         `   - 맡은 일: ${clean(agent.purpose) || '설명 없음'}`,
         `   - 주력 역량: ${capabilityLabels.join(', ') || '(none)'}`,
         `   - 실행 skill: ${packageLabels.join(', ') || '(none)'}`,
@@ -2296,6 +2298,7 @@ export function formatTeamProposalMessage(team = {}, { runtime = null } = {}) {
       const generatedSkillLabels = normalizeGeneratedSkillBriefs(agent.generated_skill_briefs || agent.generatedSkillBriefs || []).map((entry) => entry.label).slice(0, 2);
       return [
         `${index + 1}. ${agent.name} · ${roleLabel(agent.role)}`,
+        `   - 역할 프로필: ${formatRoleOverlayProfile(agent.role, agent, { includeBaseLabel: true })}`,
         `   - 맡은 일: ${clean(agent.purpose) || '설명 없음'}`,
         `   - 주력 역량: ${capabilityLabels.join(', ') || '(none)'}`,
         `   - 실행 skill: ${packageLabels.join(', ') || '(none)'}`,

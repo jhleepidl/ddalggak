@@ -1,3 +1,5 @@
+import { formatRoleOverlayProfile, resolveAgencyOverlayMeta } from './team_presentation.js';
+
 export function summarizeRuntimeTeamSnapshotLines(snapshot = null, {
   actionSource = "",
 } = {}) {
@@ -37,9 +39,12 @@ export function summarizeRuntimeTeamSnapshotLines(snapshot = null, {
   ];
   for (const agent of runtimeAgents.slice(0, 4)) {
     const dominantSkills = Array.isArray(agent.attached_skill_ids) ? agent.attached_skill_ids.slice(0, 2).join(", ") : "";
+    const overlayMeta = resolveAgencyOverlayMeta(agent);
+    const profile = formatRoleOverlayProfile(agent.role_id || agent.role_label || '', agent, { includeBaseLabel: true });
     lines.push(
       `- agent: ${agent.role_label || "role"} slot=${agent.slot_id || "-"} label=${agent.display_label || agent.role_label || "-"} `
       + `kind=${agent.synthesized === true ? "synthesized" : `preset:${agent.preset_id || agent.template_id || "-"}`}`
+      + `${overlayMeta.title ? ` profile=${profile}` : ""}`
       + `${dominantSkills ? ` skills=${dominantSkills}` : ""}`
       + `${agent.selection_reason ? ` reason=${agent.selection_reason}` : ""}`
     );

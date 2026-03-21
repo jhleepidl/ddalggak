@@ -490,6 +490,7 @@ export function normalizeRuntimeTeamSnapshot(input = null, {
       const item = asObject(entry);
       const participantId = String(item.participant_id || item.participantId || item.id || '').trim().toLowerCase();
       if (!participantId) return null;
+      const metadata = item.metadata && typeof item.metadata === 'object' ? item.metadata : {};
       return omitUndefinedFields({
         participant_id: participantId,
         kind: String(item.kind || 'agent').trim().toLowerCase() || 'agent',
@@ -497,6 +498,13 @@ export function normalizeRuntimeTeamSnapshot(input = null, {
         name: String(item.name || item.label || '').trim() || undefined,
         role: String(item.role || '').trim().toLowerCase() || undefined,
         model: String(item.model || '').trim() || undefined,
+        metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+        agency_overlay_id: String(item.agency_overlay_id || item.agencyOverlayId || metadata.agency_overlay_id || '').trim() || undefined,
+        agency_overlay: item.agency_overlay && typeof item.agency_overlay === 'object'
+          ? item.agency_overlay
+          : (item.agencyOverlay && typeof item.agencyOverlay === 'object'
+            ? item.agencyOverlay
+            : (metadata.agency_overlay && typeof metadata.agency_overlay === 'object' ? metadata.agency_overlay : undefined)),
       });
     })
     .filter(Boolean);

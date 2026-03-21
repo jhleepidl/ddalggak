@@ -70,6 +70,31 @@ function buildSharedDocsSnapshot(sharedDir = '') {
 
 const baselineCache = new Map();
 
+function toFiniteNumber(value, fallback = 0) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+function buildOverlayTelemetry({ components = [], metadata = {}, actualPromptTokens = 0 } = {}) {
+  const overlayComponent = Array.isArray(components)
+    ? components.find((entry) => String(entry?.key || '').trim().toLowerCase() === 'agency_overlay')
+    : null;
+  const overlayTokens = toFiniteNumber(overlayComponent?.tokens, 0);
+  const overlayChars = toFiniteNumber(overlayComponent?.chars, 0);
+  const overlayId = safeString(metadata?.agency_overlay_id || metadata?.agencyOverlayId || '').trim().toLowerCase();
+  const overlayTitle = safeString(metadata?.agency_overlay_title || metadata?.agencyOverlayTitle || '').trim();
+  if (!overlayId && overlayTokens <= 0 && !overlayTitle) return undefined;
+  const withoutOverlayTokens = Math.max(0, actualPromptTokens - overlayTokens);
+  return {
+    overlay_id: overlayId || undefined,
+    overlay_title: overlayTitle || undefined,
+    chars: overlayChars,
+    tokens: overlayTokens,
+    estimated_prompt_without_overlay_tokens: withoutOverlayTokens,
+    share_pct: actualPromptTokens > 0 ? Math.round((overlayTokens / actualPromptTokens) * 1000) / 10 : 0,
+  };
+}
+
 export function buildPromptBaselines({ jobDir = '', sharedDir = '' } = {}) {
   const cacheKey = `${safeString(jobDir)}::${safeString(sharedDir)}`;
   if (baselineCache.has(cacheKey)) return baselineCache.get(cacheKey);
@@ -111,6 +136,8 @@ export function appendPromptTelemetry({
     const baselines = buildPromptBaselines({ jobDir: cleanJobDir, sharedDir });
     const actualPromptTokens = estimateTextTokens(promptText);
     const actualPromptChars = promptText.length;
+    const metadata = row?.metadata && typeof row.metadata === 'object' ? row.metadata : undefined;
+    const overlay = buildOverlayTelemetry({ components, metadata, actualPromptTokens });
     const rec = {
       ts: new Date().toISOString(),
       kind: safeString(row?.kind || 'provider_prompt').trim() || 'provider_prompt',
@@ -126,7 +153,8 @@ export function appendPromptTelemetry({
       baseline: baselines,
       savings_vs_conversation_tokens: baselines.conversation_only_tokens - actualPromptTokens,
       savings_vs_conversation_plus_shared_tokens: baselines.conversation_plus_shared_tokens - actualPromptTokens,
-      metadata: row?.metadata && typeof row.metadata === 'object' ? row.metadata : undefined,
+      overlay,
+      metadata,
     };
     fs.appendFileSync(filePath, `${JSON.stringify(rec)}\n`, 'utf8');
     return rec;

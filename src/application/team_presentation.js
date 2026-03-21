@@ -129,6 +129,24 @@ export function formatToolLabels(toolIds = [], { max = 4 } = {}) {
   return asArray(toolIds).map((toolId) => describeTool(toolId)).slice(0, Math.max(1, Number(max) || 4)).map((meta) => meta.label);
 }
 export function roleLabel(roleId = '') { return ROLE_LABELS[cleanId(roleId)] || clean(roleId) || '역할 미지정'; }
+export function resolveAgencyOverlayMeta(row = {}) {
+  const source = row && typeof row === 'object' ? row : {};
+  const overlay = source.agency_overlay && typeof source.agency_overlay === 'object'
+    ? source.agency_overlay
+    : (source.agencyOverlay && typeof source.agencyOverlay === 'object'
+      ? source.agencyOverlay
+      : (source.metadata?.agency_overlay && typeof source.metadata.agency_overlay === 'object' ? source.metadata.agency_overlay : {}));
+  const display = overlay.display && typeof overlay.display === 'object' ? overlay.display : {};
+  const title = clean(display.title || overlay.title || source.agency_overlay_title || source.agencyOverlayTitle || '');
+  const overlayId = clean(source.agency_overlay_id || source.agencyOverlayId || overlay.overlay_id || overlay.overlayId || source.metadata?.agency_overlay_id || '');
+  return { overlay_id: overlayId, title };
+}
+export function formatRoleOverlayProfile(roleId = '', row = {}, { includeBaseLabel = false } = {}) {
+  const baseRole = roleLabel(roleId || row?.role || row?.role_id || row?.roleId || row?.role_label || row?.roleLabel || '');
+  const overlayMeta = resolveAgencyOverlayMeta(row);
+  if (!overlayMeta.title) return includeBaseLabel ? `base=${baseRole}` : baseRole;
+  return includeBaseLabel ? `base=${baseRole} · overlay=${overlayMeta.title}` : `${baseRole} + ${overlayMeta.title} overlay`;
+}
 export function humanizeExecutionPattern(pattern = '') { return EXECUTION_PATTERN_LABELS[cleanId(pattern)] || clean(pattern) || '미정'; }
 export function humanizeVisibility(visibility = '') { return VISIBILITY_LABELS[cleanId(visibility)] || clean(visibility) || '미정'; }
 export function humanizeHandoffPayload(payload = '') { return PAYLOAD_LABELS[cleanId(payload)] || clean(payload) || '요약'; }

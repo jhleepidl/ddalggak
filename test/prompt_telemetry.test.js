@@ -56,3 +56,30 @@ test('buildPromptBaselines includes conversation plus shared docs snapshot', () 
   assert.ok(out.shared_docs_tokens > 0);
   assert.ok(out.conversation_plus_shared_tokens >= out.conversation_only_tokens);
 });
+
+
+test('appendPromptTelemetry records overlay overhead when agency overlay is present', () => {
+  const dir = makeTmpDir();
+  const rec = appendPromptTelemetry({
+    jobDir: dir,
+    sharedDir: '',
+    row: {
+      provider: 'codex',
+      agent_id: 'builder',
+      role_id: 'builder',
+      prompt_text: 'prompt with overlay context',
+      components: {
+        role_summary: 'base role summary',
+        agency_overlay: '[ROLE OVERLAY]\n- mission: keep ui clean',
+      },
+      metadata: {
+        agency_overlay_id: 'agency:engineering/frontend-developer',
+        agency_overlay_title: 'Frontend Developer',
+      },
+    },
+  });
+  assert.equal(rec.overlay.overlay_id, 'agency:engineering/frontend-developer');
+  assert.equal(rec.overlay.overlay_title, 'Frontend Developer');
+  assert.ok(rec.overlay.tokens > 0);
+  assert.ok(rec.overlay.estimated_prompt_without_overlay_tokens <= rec.actual_prompt_tokens);
+});

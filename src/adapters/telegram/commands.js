@@ -33,7 +33,7 @@ const HELP_TEXT = [
   "Commands:",
   "- /chat [text]: 대화/작업 지시",
   "- /team [suggest <목적>|create <자연어 팀 설명>|refine <자연어 수정>|apply|requirements|proposal|template|options]: 팀 제안/적용/점검",
-  "- /status [full|recent]: 현재 단계·팀·최근 진행 보기",
+  "- /status [full|recent|prompt]: 현재 단계·팀·최근 진행·prompt 효율 보기",
   "- /context [global]: 현재 job 컨텍스트/GoC 링크 보기",
   "- /artifacts [limit]: 주요 산출물 후보 보기",
   "- /send <번호|path>: 산출물 파일 전송",
@@ -48,7 +48,7 @@ const ADVANCED_HELP_TEXT = [
   "- /chat [text]: 대화/작업 지시",
   "- /whoami: 현재 chat_id / user_id 확인",
   "- /running: 실행/대기 job 목록 확인",
-  "- /status [full|recent]: 현재 chat/job 상태와 최근 작업 보기",
+  "- /status [full|recent|prompt]: 현재 chat/job 상태와 최근 작업·prompt 효율 보기",
   "- /credential [list|pending|set <KEY> <secret> [--resume]|bind <KEY> env <ENV_KEY> [--resume]|clear <KEY>]: credential 바인딩 (env/local secret store 권장, set은 Telegram 노출 주의 fallback)",
   "- /stop [jobId]: 현재 실행 또는 지정 job 중단",
   "- /memory [show|md|kb|policy|routing|role|agents|note|lesson|reset]: 런타임 메모리/KB 조회·수정",
@@ -422,7 +422,9 @@ export function createTelegramCommandHandler(deps = {}) {
       const detailArg = String(rest[0] || '').trim().toLowerCase();
       const detail = ['full', 'detail', 'details', 'verbose'].includes(detailArg)
         ? 'full'
-        : (['recent', 'activity', 'progress'].includes(detailArg) ? 'recent' : 'compact');
+        : (['recent', 'activity', 'progress'].includes(detailArg)
+          ? 'recent'
+          : (['prompt', 'tokens', 'telemetry'].includes(detailArg) ? 'prompt' : 'compact'));
       await sendChatStatus(bot, chatId, { telegramUserId: userId, detail });
       return true;
     }

@@ -52,6 +52,11 @@ function normalizeParticipant(raw = {}, index = 0) {
   const role = cleanId(row.role || row.role_id || row.roleId || row.role_label || row.roleLabel || 'specialist') || 'specialist';
   const requestedKind = cleanId(row.kind || (role === 'approval' ? 'gate' : 'agent')) || 'agent';
   const kind = ALLOWED_PARTICIPANT_KINDS.has(requestedKind) ? requestedKind : 'agent';
+  const metadata = {
+    ...asObject(row.metadata),
+  };
+  if (row.agency_overlay || row.agencyOverlay) metadata.agency_overlay = asObject(row.agency_overlay || row.agencyOverlay);
+  if (clean(row.agency_overlay_id || row.agencyOverlayId)) metadata.agency_overlay_id = clean(row.agency_overlay_id || row.agencyOverlayId);
   return {
     participant_id: participantId,
     kind,
@@ -64,7 +69,7 @@ function normalizeParticipant(raw = {}, index = 0) {
     recommended_tool_ids: uniqStrings(row.recommended_tool_ids || row.recommendedToolIds || [], { limit: 8 }),
     generated_skill_briefs: asArray(row.generated_skill_briefs || row.generatedSkillBriefs || []).slice(0, 8),
     context_policy: asObject(row.context_policy || row.contextPolicy),
-    metadata: asObject(row.metadata),
+    metadata,
   };
 }
 
@@ -82,6 +87,9 @@ function buildParticipantsFromAgents(agents = []) {
       recommended_tool_ids: agent?.recommended_tool_ids || agent?.recommendedToolIds,
       generated_skill_briefs: agent?.generated_skill_briefs || agent?.generatedSkillBriefs,
       context_policy: agent?.context_policy || agent?.contextPolicy,
+      metadata: agent?.metadata,
+      agency_overlay: agent?.agency_overlay || agent?.agencyOverlay,
+      agency_overlay_id: agent?.agency_overlay_id || agent?.agencyOverlayId,
     }, index))
     .filter(Boolean);
 }
@@ -725,6 +733,9 @@ export function buildRuntimeExecutionProfileFromStructureV2(raw = {}, {
     order_index: orderIndexByParticipantId.get(cleanId(entry.participant_id)),
     stage_index: stageIndexByParticipantId.get(cleanId(entry.participant_id)),
     parallel_group_id: parallelGroupByParticipantId.get(cleanId(entry.participant_id)) || undefined,
+    metadata: asObject(entry.metadata),
+    agency_overlay_id: clean(entry?.metadata?.agency_overlay_id || ''),
+    agency_overlay: asObject(entry?.metadata?.agency_overlay),
   }));
   const configured_agents = orderedExecutableParticipants.map((entry) => ({
     agent_id: entry.participant_id,
@@ -740,6 +751,9 @@ export function buildRuntimeExecutionProfileFromStructureV2(raw = {}, {
     generated_skill_briefs: asArray(entry.generated_skill_briefs || []).slice(0, 8),
     recommended_tool_ids: uniqStrings(entry.recommended_tool_ids || [], { limit: 8, lower: true }),
     context_policy: asObject(entry.context_policy),
+    metadata: asObject(entry.metadata),
+    agency_overlay_id: clean(entry?.metadata?.agency_overlay_id || ''),
+    agency_overlay: asObject(entry?.metadata?.agency_overlay),
     interaction_contract: {
       ...buildParticipantLocalInteractionContract(structure, entry),
       order_index: orderIndexByParticipantId.get(cleanId(entry.participant_id)),

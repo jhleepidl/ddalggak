@@ -54,6 +54,10 @@ test("chat status card defaults to a compact operator-facing summary", () => {
         active_team: {
           team_name: "Iterative Improvement Studio",
           archetype: "iterative_improvement",
+          agents: [
+            { name: 'Builder', role: 'builder', agency_overlay_id: 'agency:engineering/frontend-developer', agency_overlay: { display: { title: 'Frontend Developer' } } },
+            { name: 'Critic', role: 'reviewer', agency_overlay_id: 'agency:engineering/code-reviewer', agency_overlay: { display: { title: 'Code Reviewer' } } },
+          ],
         },
       },
       last_route: { turn: 2 },
@@ -66,6 +70,8 @@ test("chat status card defaults to a compact operator-facing summary", () => {
     const card = buildChatStatusCard(chatId, null);
     assert.match(card.text, /phase: executing/);
     assert.match(card.text, /team: Iterative Improvement Studio · iterative_improvement/);
+    assert.match(card.text, /role_profiles:/);
+    assert.match(card.text, /Builder\(base=구현 · overlay=Frontend Developer\)/);
     assert.match(card.text, /iteration: 2/);
     assert.match(card.text, /recent:/);
     assert.match(card.text, /critic:/);
@@ -89,6 +95,9 @@ test("chat status card can still render the full debug view on demand", () => {
       team_config: {
         active_team: {
           team_name: "Iterative Improvement Studio",
+          agents: [
+            { name: 'Builder', role: 'builder', agency_overlay_id: 'agency:engineering/frontend-developer', agency_overlay: { display: { title: 'Frontend Developer' } } },
+          ],
         },
       },
     });
@@ -96,6 +105,8 @@ test("chat status card can still render the full debug view on demand", () => {
     const card = buildChatStatusCard(chatId, null, { detail: "full" });
     assert.match(card.text, /job_id: job-demo-1/);
     assert.match(card.text, /active_team: Iterative Improvement Studio/);
+    assert.match(card.text, /role_profiles:/);
+    assert.match(card.text, /Builder\(base=구현 · overlay=Frontend Developer\)/);
     assert.ok(card.reply_markup);
     assert.equal(card.reply_markup.inline_keyboard[0][0].text, "요약 보기");
   } finally {
@@ -168,6 +179,37 @@ test("chat status recent view shows concrete runtime activity from files and eve
     assert.match(card.text, /steps queued/);
     assert.match(card.text, /Executed notebook smoke test/);
     assert.match(card.text, /Builder: Created a cleaner notebook draft/);
+  } finally {
+    chatSessionStore.clear(chatId);
+    activeJobByChat.delete(chatId);
+    fs.rmSync(jobDir, { recursive: true, force: true });
+  }
+});
+
+
+test("chat status prompt view shows recent prompt telemetry and savings", () => {
+  const chatId = "status-test-prompt";
+  const created = jobs.createJob({ title: "job-status-prompt" });
+  const jobId = created.jobId;
+  const jobDir = created.dir;
+  fs.writeFileSync(path.join(jobDir, 'prompt_metrics.jsonl'), [
+    JSON.stringify({ ts: new Date().toISOString(), provider: 'codex', model: 'gpt-5-codex', agent_id: 'builder', actual_prompt_tokens: 900, baseline: { conversation_only_tokens: 10000, conversation_plus_shared_tokens: 20000 }, overlay: { overlay_id: 'agency:engineering/frontend-developer', overlay_title: 'Frontend Developer', tokens: 96, share_pct: 10.7 } }),
+    JSON.stringify({ ts: new Date().toISOString(), provider: 'gemini', model: 'gemini-2.5-pro', agent_id: 'critic', actual_prompt_tokens: 1100, baseline: { conversation_only_tokens: 10000, conversation_plus_shared_tokens: 20000 } }),
+  ].join('\n') + '\n', 'utf8');
+  chatSessionStore.clear(chatId);
+  activeJobByChat.delete(chatId);
+  try {
+    activeJobByChat.set(chatId, jobId);
+    chatSessionStore.upsert(chatId, { state: 'executing', jobId });
+    const card = buildChatStatusCard(chatId, null, { detail: 'prompt' });
+    assert.match(card.text, /Prompt 상태/);
+    assert.match(card.text, /avg_prompt_tokens:/);
+    assert.match(card.text, /savings_vs_full:/);
+    assert.match(card.text, /overlay_overhead_avg:/);
+    assert.match(card.text, /overlay_memo:/);
+    assert.match(card.text, /builder · codex\/gpt-5-codex/);
+    assert.ok(card.reply_markup);
+    assert.ok(card.reply_markup.inline_keyboard[0].some((button) => button.text === 'Prompt'));
   } finally {
     chatSessionStore.clear(chatId);
     activeJobByChat.delete(chatId);

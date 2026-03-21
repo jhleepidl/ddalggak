@@ -101,3 +101,39 @@ test('team messages expose memory layout to the user', () => {
   assert.match(activeMsg, /Memory layout/);
   assert.match(activeMsg, /Memory layout ·/);
 });
+
+
+test('team messages show base role and overlay profile together', () => {
+  const team = {
+    team_name: 'UI Improvement Team',
+    composition_mode: 'structured',
+    proposal_mode: 'suggest',
+    task_brief: '프론트엔드 화면을 개선해줘',
+    agents: [
+      {
+        name: 'Builder',
+        role: 'builder',
+        purpose: 'UI 구현 초안을 만든다',
+        provider: 'codex',
+        model: 'gpt-5-codex',
+        agency_overlay_id: 'agency:engineering/frontend-developer',
+        agency_overlay: { display: { title: 'Frontend Developer' } },
+      },
+      {
+        name: 'Critic',
+        role: 'reviewer',
+        purpose: 'UI 품질을 검토한다',
+        provider: 'chatgpt',
+        model: 'gpt-5.4',
+        agency_overlay_id: 'agency:engineering/code-reviewer',
+        agency_overlay: { display: { title: 'Code Reviewer' } },
+      },
+    ],
+    interaction_spec: { execution_pattern: 'builder_reviewer_loop', final_answer_owner: 'Critic', handoffs: [] },
+    shortcut_policy: { enabled: true, max_turn_window: 6 },
+  };
+  const proposalMsg = formatTeamProposalMessage(team);
+  const activeMsg = buildTeamListMessage({ active_team: team });
+  if (!/역할 프로필: base=구현 · overlay=Frontend Developer/.test(proposalMsg)) throw new Error('proposal overlay profile missing');
+  if (!/역할 프로필: base=검토 · overlay=Code Reviewer/.test(activeMsg)) throw new Error('active overlay profile missing');
+});

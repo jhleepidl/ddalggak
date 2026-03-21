@@ -168,6 +168,15 @@ export function normalizeRuntimeAgentInstance(raw = {}, {
     selection_features: row.selection_features && typeof row.selection_features === "object"
       ? row.selection_features
       : (row.selectionFeatures && typeof row.selectionFeatures === "object" ? row.selectionFeatures : undefined),
+    metadata: row.metadata && typeof row.metadata === "object" ? row.metadata : undefined,
+    agency_overlay_id: normalizeText(
+      row.agency_overlay_id || row.agencyOverlayId || row.metadata?.agency_overlay_id || ""
+    ) || undefined,
+    agency_overlay: row.agency_overlay && typeof row.agency_overlay === "object"
+      ? row.agency_overlay
+      : (row.agencyOverlay && typeof row.agencyOverlay === "object"
+        ? row.agencyOverlay
+        : (row.metadata?.agency_overlay && typeof row.metadata.agency_overlay === "object" ? row.metadata.agency_overlay : undefined)),
   };
 }
 

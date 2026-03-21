@@ -51,7 +51,7 @@ import {
   buildRunAuthorityPatch,
 } from "./run_authority.js";
 import { summarizeRuntimeTeamSnapshotLines } from "./runtime_snapshot_display.js";
-import { formatSkillLabels, humanizeModel, roleLabel } from "./team_presentation.js";
+import { formatSkillLabels, formatRoleOverlayProfile, humanizeModel, resolveAgencyOverlayMeta, roleLabel } from "./team_presentation.js";
 
 async function sendTextWithOptionalGocButton(
   bot,
@@ -245,6 +245,24 @@ function summarizeActiveAgents(agentStatus = {}, agentIndex = new Map()) {
   }).join(', ');
 }
 
+function summarizeRoleOverlayProfiles(agentRows = [], { max = 3 } = {}) {
+  const rows = Array.isArray(agentRows) ? agentRows : [];
+  const out = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const overlayMeta = resolveAgencyOverlayMeta(row);
+    if (!overlayMeta.title) continue;
+    const label = String(row?.display_label || row?.displayLabel || row?.name || row?.agent_name || row?.agentName || row?.agent_id || row?.agentId || row?.participant_id || row?.participantId || row?.slot_id || row?.slotId || '').trim() || 'Agent';
+    const profile = formatRoleOverlayProfile(row?.role_id || row?.roleId || row?.role_label || row?.roleLabel || row?.role || '', row, { includeBaseLabel: true });
+    const entry = `${label}(${profile})`;
+    if (seen.has(entry)) continue;
+    seen.add(entry);
+    out.push(entry);
+    if (out.length >= Math.max(1, Number(max) || 3)) break;
+  }
+  return out;
+}
+
 function deriveQualityDeltaSummary({ recentProgress = '', criticSummary = '' } = {}) {
   const recent = normalizeTextSummary(recentProgress, 110);
   const critic = normalizeTextSummary(criticSummary, 110);
@@ -303,7 +321,10 @@ function summarizeAgentRuntimeRowsFromActions(actions = [], runtime = null, { li
       ]).slice(0, 4);
       const goal = clip(String(child?.goal || child?.prompt || child?.task || '').trim(), 120);
       const parts = [`${label}${roleText}`];
+      const overlayProfile = formatRoleOverlayProfile(roleId, inputs, { includeBaseLabel: true });
+      const overlayMeta = resolveAgencyOverlayMeta(inputs);
       const skillLabels = formatSkillLabels(skillIds, { max: 3 });
+      if (overlayMeta.title) parts.push(`profile=${overlayProfile}`);
       const modelLabel = humanizeModel(String(inputs.provider || '').trim(), String(inputs.model || '').trim());
       if (skillLabels.length > 0) parts.push(`skills=${skillLabels.join(', ')}`);
       if (modelLabel && modelLabel !== '(미지정)') parts.push(`model=${modelLabel}`);
@@ -344,7 +365,10 @@ function formatRosterRow(row = {}) {
   const personality = String(row?.personality_profile?.stance || row?.personalityProfile?.stance || '').trim();
   const parts = [label];
   if (roleId) parts.push(roleLabel(roleId));
+  const overlayProfile = formatRoleOverlayProfile(roleId, row, { includeBaseLabel: true });
+  const overlayMeta = resolveAgencyOverlayMeta(row);
   const skillLabels = formatSkillLabels(skillIds, { max: 3 });
+  if (overlayMeta.title) parts.push(`profile=${overlayProfile}`);
   const modelLabel = humanizeModel(String(row?.provider || '').trim(), String(row?.model || '').trim());
   if (modelLabel && modelLabel !== '(미지정)') parts.push(`model=${modelLabel}`);
   if (skillLabels.length > 0) parts.push(`skills=${skillLabels.join(', ')}`);
@@ -511,13 +535,89 @@ function deriveNextHumanAction({ session = null, pendingApproval = null, pending
   return '대기 중';
 }
 
-function buildChatStatusKeyboard({ detail = 'compact', artifactCount = 0, showRecent = false } = {}) {
+function deriveOverlayPromptMemo(overlayStats = null, averages = null) {
+  if (!overlayStats || !overlayStats.overlay_prompt_count) return 'overlay 없음 · 기본 role memo만 사용 중';
+  const avgOverlayTokens = Number(overlayStats.avg_overlay_tokens || 0);
+  const avgSharePct = Number(overlayStats.avg_overlay_share_pct || 0);
+  const deltaVsPlain = Number(overlayStats.delta_vs_plain_prompt_tokens || 0);
+  const savingsVsFull = Number(averages?.savings_vs_conversation_pct || 0);
+  if (avgSharePct <= 8 && savingsVsFull >= 85) return `overlay 비용이 작음 · 평균 +${avgOverlayTokens} tok`;
+  if (avgSharePct <= 15 && deltaVsPlain <= 120) return `overlay 유지 가능 · 평균 +${avgOverlayTokens} tok`;
+  if (avgSharePct > 20 || deltaVsPlain > 180) return 'overlay가 무거움 · mission/rule bullet 압축 권장';
+  return `overlay 비용 보통 · 평균 +${avgOverlayTokens} tok`;
+}
+
+function collectPromptTelemetry(jobId = '') {
+  const cleanJobId = String(jobId || '').trim();
+  if (!cleanJobId) return { rows: [], averages: null, overlay: null };
+  let jobDir = '';
+  try {
+    jobDir = jobs.jobDir(cleanJobId);
+  } catch {
+    jobDir = '';
+  }
+  const rows = readJsonlTail(jobDir ? path.join(jobDir, 'prompt_metrics.jsonl') : '', 24)
+    .filter((row) => row && typeof row === 'object')
+    .sort((a, b) => Date.parse(String(b.ts || '')) - Date.parse(String(a.ts || '')));
+  if (rows.length === 0) return { rows: [], averages: null, overlay: null };
+  const recent = rows.slice(0, 5);
+  const avgActual = Math.round(recent.reduce((sum, row) => sum + Number(row?.actual_prompt_tokens || 0), 0) / recent.length);
+  const avgConversation = Math.round(recent.reduce((sum, row) => sum + Number(row?.baseline?.conversation_only_tokens || 0), 0) / recent.length);
+  const avgShared = Math.round(recent.reduce((sum, row) => sum + Number(row?.baseline?.conversation_plus_shared_tokens || 0), 0) / recent.length);
+  const overlayRows = recent.filter((row) => Number(row?.overlay?.tokens || 0) > 0 || String(row?.overlay?.overlay_id || row?.metadata?.agency_overlay_id || '').trim());
+  const plainRows = recent.filter((row) => !overlayRows.includes(row));
+  const avgOverlayTokens = overlayRows.length > 0 ? Math.round(overlayRows.reduce((sum, row) => sum + Number(row?.overlay?.tokens || 0), 0) / overlayRows.length) : 0;
+  const avgOverlaySharePct = overlayRows.length > 0 ? Math.round((overlayRows.reduce((sum, row) => sum + Number(row?.overlay?.share_pct || 0), 0) / overlayRows.length) * 10) / 10 : 0;
+  const avgPromptWithOverlay = overlayRows.length > 0 ? Math.round(overlayRows.reduce((sum, row) => sum + Number(row?.actual_prompt_tokens || 0), 0) / overlayRows.length) : 0;
+  const avgPromptWithoutOverlay = plainRows.length > 0 ? Math.round(plainRows.reduce((sum, row) => sum + Number(row?.actual_prompt_tokens || 0), 0) / plainRows.length) : 0;
+  const deltaVsPlain = overlayRows.length > 0 && plainRows.length > 0 ? Math.max(0, avgPromptWithOverlay - avgPromptWithoutOverlay) : avgOverlayTokens;
+  const averages = {
+    actual_prompt_tokens: avgActual,
+    conversation_only_tokens: avgConversation,
+    conversation_plus_shared_tokens: avgShared,
+    savings_vs_conversation_pct: avgConversation > 0 ? Math.max(0, Math.round((1 - (avgActual / avgConversation)) * 1000) / 10) : 0,
+    savings_vs_shared_pct: avgShared > 0 ? Math.max(0, Math.round((1 - (avgActual / avgShared)) * 1000) / 10) : 0,
+  };
+  const overlay = overlayRows.length > 0 ? {
+    overlay_prompt_count: overlayRows.length,
+    avg_overlay_tokens: avgOverlayTokens,
+    avg_overlay_share_pct: avgOverlaySharePct,
+    avg_prompt_tokens_with_overlay: avgPromptWithOverlay || undefined,
+    avg_prompt_tokens_without_overlay: avgPromptWithoutOverlay || undefined,
+    delta_vs_plain_prompt_tokens: deltaVsPlain,
+    titles: Array.from(new Set(overlayRows.map((row) => String(row?.overlay?.overlay_title || row?.metadata?.agency_overlay_title || row?.overlay?.overlay_id || '').trim()).filter(Boolean))).slice(0, 3),
+    memo: deriveOverlayPromptMemo({
+      overlay_prompt_count: overlayRows.length,
+      avg_overlay_tokens: avgOverlayTokens,
+      avg_overlay_share_pct: avgOverlaySharePct,
+      delta_vs_plain_prompt_tokens: deltaVsPlain,
+    }, averages),
+  } : null;
+  return { rows: recent, averages, overlay };
+}
+
+function formatPromptTelemetryRow(row = {}) {
+  const provider = String(row?.provider || 'agent').trim();
+  const model = String(row?.model || '').trim();
+  const actor = String(row?.agent_id || row?.role_id || provider || 'agent').trim();
+  const actual = Number(row?.actual_prompt_tokens || 0);
+  const baseline = Number(row?.baseline?.conversation_only_tokens || 0);
+  const savedPct = baseline > 0 ? Math.max(0, Math.round((1 - (actual / baseline)) * 1000) / 10) : 0;
+  const suffix = model ? `/${model}` : '';
+  const overlayTokens = Number(row?.overlay?.tokens || 0);
+  const overlayTitle = String(row?.overlay?.overlay_title || row?.metadata?.agency_overlay_title || '').trim();
+  const overlaySuffix = overlayTokens > 0 ? ` · +overlay ${overlayTokens} tok${overlayTitle ? ` (${overlayTitle})` : ''}` : '';
+  return `${actor} · ${provider}${suffix} · ${actual} tok${overlaySuffix}${baseline > 0 ? ` · -${savedPct}% vs full` : ''}`;
+}
+
+function buildChatStatusKeyboard({ detail = 'compact', artifactCount = 0, showRecent = false, showPrompt = false } = {}) {
   const normalizedDetail = String(detail || '').trim().toLowerCase();
   const isFull = normalizedDetail === 'full';
   const isRecent = normalizedDetail === 'recent';
   const primary = [];
   primary.push({ text: isFull ? '요약 보기' : '더 보기', callback_data: isFull ? 'chat_status:summary' : 'chat_status:full' });
   if (showRecent) primary.push({ text: '최근 작업', callback_data: 'chat_status:recent' });
+  if (showPrompt) primary.push({ text: 'Prompt', callback_data: 'chat_status:prompt' });
   if (artifactCount > 0) primary.push({ text: '산출물', callback_data: 'chat_status:artifacts' });
   if (isRecent && primary.length > 0) primary[0] = { text: '요약 보기', callback_data: 'chat_status:summary' };
   return primary.length > 0 ? { inline_keyboard: [primary] } : null;
@@ -582,6 +682,12 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
   const artifactIndex = currentJobId ? loadArtifactIndex(currentJobId) : null;
   const artifactCount = Array.isArray(artifactIndex?.artifacts) ? artifactIndex.artifacts.length : 0;
   const teamArchetype = inferTeamArchetype(activeTeam, runtimeTeamSnapshot);
+  const overlayProfileRows = summarizeRoleOverlayProfiles(
+    Array.isArray(runtimeTeamSnapshot?.runtime_agents) && runtimeTeamSnapshot.runtime_agents.length > 0
+      ? runtimeTeamSnapshot.runtime_agents
+      : (Array.isArray(activeTeam?.agents) ? activeTeam.agents : []),
+    { max: 3 }
+  );
   const runtimeActivity = collectRuntimeActivity({ jobId: currentJobId, session });
   const recentProgress = findRecentProgressSummary(session) || runtimeActivity.last_activity_summary || '';
   const criticSummary = findCriticSummary(session);
@@ -598,6 +704,50 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
   const heartbeatLabel = summarizeHeartbeat(runtimeActivity, { isRunning: !!activeJobId });
   const activeAgentsLabel = summarizeActiveAgents(session?.agent_status, agentIndex);
   const normalizedDetail = String(detail || '').trim().toLowerCase();
+  const promptTelemetry = collectPromptTelemetry(currentJobId);
+  if (normalizedDetail === 'prompt') {
+    const lines = [
+      '🧮 Prompt 상태',
+      `- phase: ${session.state || 'idle'}${activeJobId ? ' · running' : ''}`,
+      `- heartbeat: ${heartbeatLabel}`,
+    ];
+    if (promptTelemetry.averages) {
+      lines.push(`- avg_prompt_tokens: ${promptTelemetry.averages.actual_prompt_tokens}`);
+      lines.push(`- baseline(full_history): ${promptTelemetry.averages.conversation_only_tokens}`);
+      lines.push(`- baseline(full+shared): ${promptTelemetry.averages.conversation_plus_shared_tokens}`);
+      lines.push(`- savings_vs_full: ${promptTelemetry.averages.savings_vs_conversation_pct}%`);
+      lines.push(`- savings_vs_full+shared: ${promptTelemetry.averages.savings_vs_shared_pct}%`);
+      if (promptTelemetry.overlay) {
+        lines.push(`- overlay_prompts: ${promptTelemetry.overlay.overlay_prompt_count}/${promptTelemetry.rows.length}`);
+        lines.push(`- overlay_overhead_avg: +${promptTelemetry.overlay.avg_overlay_tokens} tok (${promptTelemetry.overlay.avg_overlay_share_pct}%)`);
+        if (Number.isFinite(Number(promptTelemetry.overlay.avg_prompt_tokens_without_overlay))) {
+          lines.push(`- overlay_vs_plain: +${promptTelemetry.overlay.delta_vs_plain_prompt_tokens} tok vs prompts without overlay`);
+        }
+        if (Array.isArray(promptTelemetry.overlay.titles) && promptTelemetry.overlay.titles.length > 0) {
+          lines.push(`- overlay_titles: ${promptTelemetry.overlay.titles.join(', ')}`);
+        }
+        lines.push(`- overlay_memo: ${promptTelemetry.overlay.memo}`);
+      }
+    } else {
+      lines.push('- prompt_metrics: (none yet)');
+    }
+    if (promptTelemetry.rows.length > 0) {
+      lines.push('- recent_prompts:');
+      for (const row of promptTelemetry.rows.slice(0, 5)) {
+        lines.push(`  • ${formatRelativeAge(row.ts)} · ${formatPromptTelemetryRow(row)}`);
+      }
+    }
+    return {
+      text: lines.join("\n"),
+      reply_markup: buildChatStatusKeyboard({ detail: 'prompt', artifactCount, showRecent: runtimeActivity.items.length > 0, showPrompt: promptTelemetry.rows.length > 0 }),
+      status: {
+        chat_id: chatKey,
+        state: session.state || 'idle',
+        job_id: currentJobId || null,
+        prompt_rows: promptTelemetry.rows.length,
+      },
+    };
+  }
   if (normalizedDetail === 'recent') {
     const recentLines = [
       '🕒 최근 작업',
@@ -610,7 +760,7 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
     ].filter(Boolean);
     return {
       text: recentLines.join("\n"),
-      reply_markup: buildChatStatusKeyboard({ detail: 'recent', artifactCount, showRecent: runtimeActivity.items.length > 0 }),
+      reply_markup: buildChatStatusKeyboard({ detail: 'recent', artifactCount, showRecent: runtimeActivity.items.length > 0, showPrompt: promptTelemetry.rows.length > 0 }),
       status: {
         chat_id: chatKey,
         state: session.state || 'idle',
@@ -627,6 +777,7 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
       '📋 현재 상태',
       `- phase: ${session.state || 'idle'}${activeJobId ? ' · running' : ''}`,
       `- team: ${String(activeTeam?.team_name || 'configured_team').trim() || '(none)'}${teamArchetype ? ` · ${teamArchetype}` : ''}`,
+      overlayProfileRows.length > 0 ? `- role_profiles: ${overlayProfileRows.join(', ')}` : '',
       iterationLabel ? `- iteration: ${iterationLabel}` : '',
       `- heartbeat: ${heartbeatLabel}`,
       activeAgentsLabel ? `- active: ${activeAgentsLabel}` : '',
@@ -638,7 +789,7 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
     ].filter(Boolean);
     return {
       text: compactLines.join("\n"),
-      reply_markup: buildChatStatusKeyboard({ detail: 'compact', artifactCount, showRecent: runtimeActivity.items.length > 0 }),
+      reply_markup: buildChatStatusKeyboard({ detail: 'compact', artifactCount, showRecent: runtimeActivity.items.length > 0, showPrompt: promptTelemetry.rows.length > 0 }),
       status: {
         chat_id: chatKey,
         state: session.state || 'idle',
@@ -695,6 +846,10 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
     lines.push(`- active_team: ${String(activeTeam.team_name || 'configured_team')}`);
     lines.push(`- team_mode: ${String(activeTeam.mode || 'scoped_context')}`);
     lines.push(`- team_agents: ${Array.isArray(activeTeam.agents) ? activeTeam.agents.length : 0}`);
+    if (overlayProfileRows.length > 0) {
+      lines.push('- role_profiles:');
+      for (const row of overlayProfileRows) lines.push(`  • ${row}`);
+    }
     const interactionSpec = activeTeam.interaction_spec && typeof activeTeam.interaction_spec === 'object' ? activeTeam.interaction_spec : null;
     if (interactionSpec) {
       lines.push(`- team_execution_pattern: ${String(interactionSpec.execution_pattern || '(none)')}`);
@@ -747,7 +902,7 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
   }
   return {
     text: lines.join("\n"),
-    reply_markup: buildChatStatusKeyboard({ detail: 'full', artifactCount, showRecent: runtimeActivity.items.length > 0 }),
+    reply_markup: buildChatStatusKeyboard({ detail: 'full', artifactCount, showRecent: runtimeActivity.items.length > 0, showPrompt: promptTelemetry.rows.length > 0 }),
     status: {
       chat_id: chatKey,
       state: session.state || "idle",

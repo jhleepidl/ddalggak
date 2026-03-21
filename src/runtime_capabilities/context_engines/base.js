@@ -11,6 +11,16 @@ function clampInt(value, min, max, fallback) {
   return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
+function normalizeRoleId(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function matchesAny(value, candidates = []) {
+  const clean = normalizeRoleId(value);
+  if (!clean) return false;
+  return (Array.isArray(candidates) ? candidates : []).some((candidate) => clean === normalizeRoleId(candidate));
+}
+
 export class ContextEngineBase {
   constructor({
     memoryMode = "local",
@@ -46,12 +56,14 @@ export class ContextEngineBase {
     return clampInt(budgetTokens, 200, 24000, clampInt(fallback, 200, 24000, 1200));
   }
 
-  defaultBudgetFor({ stepKind = "agent", agentId = "" } = {}) {
+  defaultBudgetFor({ stepKind = "agent", agentId = "", roleId = "" } = {}) {
     const cleanStepKind = String(stepKind || "").trim().toLowerCase();
-    const cleanAgentId = String(agentId || "").trim().toLowerCase();
-    if (cleanStepKind === "router" || cleanAgentId === "router" || cleanAgentId === "planner") return 900;
-    if (cleanAgentId === "coder") return 1400;
-    if (cleanAgentId === "researcher") return 1200;
+    const cleanAgentId = normalizeRoleId(agentId);
+    const cleanRoleId = normalizeRoleId(roleId);
+    if (cleanStepKind === "router" || matchesAny(cleanAgentId, ["router", "planner"]) || matchesAny(cleanRoleId, ["router", "operator", "planner"])) return 900;
+    if (matchesAny(cleanAgentId, ["coder", "builder"]) || matchesAny(cleanRoleId, ["coder", "builder"])) return 1400;
+    if (matchesAny(cleanAgentId, ["researcher", "reviewer", "critic"]) || matchesAny(cleanRoleId, ["researcher", "reviewer", "critic"])) return 1200;
+    if (matchesAny(cleanRoleId, ["synthesizer", "writer"])) return 1000;
     return 1200;
   }
 
@@ -65,6 +77,7 @@ export class ContextEngineBase {
       threadId: String(row.threadId || fallback.threadId || "").trim(),
       userId: String(row.userId || fallback.userId || "").trim(),
       agentId: String(row.agentId || fallback.agentId || "").trim().toLowerCase(),
+      roleId: normalizeRoleId(row.roleId || row.role_id || fallback.roleId || fallback.role_id || ""),
       goal: String(row.goal || fallback.goal || "").trim(),
       userMessageText: String(row.userMessageText || fallback.userMessageText || "").trim(),
       stepKind: stepKindRaw === "router" ? "router" : "agent",
@@ -73,6 +86,7 @@ export class ContextEngineBase {
         this.defaultBudgetFor({
           stepKind: stepKindRaw,
           agentId: row.agentId || fallback.agentId || "",
+          roleId: row.roleId || row.role_id || fallback.roleId || fallback.role_id || "",
         })
       ),
       lensSpec: row.lensSpec && typeof row.lensSpec === "object" ? row.lensSpec : null,
@@ -123,6 +137,7 @@ export class ContextEngineBase {
     jobId = "",
     chatId = "",
     agentId = "",
+    roleId = "",
     stepKind = "agent",
     goal = "",
     runMeta = {},
@@ -132,6 +147,7 @@ export class ContextEngineBase {
       mode: this.memoryMode,
       chat_id: String(chatId || "").trim() || undefined,
       agent_id: String(agentId || "").trim() || undefined,
+      role_id: normalizeRoleId(roleId) || undefined,
       step_kind: String(stepKind || "").trim() || undefined,
       goal: String(goal || "").trim() || undefined,
       run_meta: asObject(runMeta),

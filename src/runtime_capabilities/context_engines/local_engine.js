@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { clip } from "../../textutil.js";
+import { readIterationDelta, readRoleSummary } from "../../application/summary_memory.js";
 import { ContextEngineBase } from "./base.js";
 
 function asObject(value) {
@@ -51,18 +52,22 @@ function clipTail(text = "", maxChars = 5000) {
   return raw.slice(raw.length - maxChars);
 }
 
-function focusHeaderFor({ stepKind = "agent", agentId = "", goal = "", lensSpec = null } = {}) {
+function focusHeaderFor({ stepKind = "agent", agentId = "", roleId = "", goal = "", lensSpec = null } = {}) {
   const cleanStepKind = String(stepKind || "").trim().toLowerCase();
   const cleanAgentId = String(agentId || "").trim().toLowerCase();
+  const cleanRoleId = String(roleId || "").trim().toLowerCase();
   const lens = lensSpec && typeof lensSpec === "object" ? lensSpec : {};
-  if (cleanStepKind === "router" || cleanAgentId === "router" || cleanAgentId === "planner") {
+  if (cleanStepKind === "router" || ["router", "planner"].includes(cleanAgentId) || ["router", "operator", "planner"].includes(cleanRoleId)) {
     return "Focus: 사용자 요구를 분해하고 남은 deliverable 중심으로 다음 작업을 결정한다.";
   }
-  if (cleanAgentId === "researcher") {
+  if (["researcher"].includes(cleanAgentId) || ["researcher"].includes(cleanRoleId)) {
     return "Focus: 근거 중심 조사 결과, 리스크, 검증 포인트를 우선한다.";
   }
-  if (cleanAgentId === "coder") {
+  if (["coder", "builder"].includes(cleanAgentId) || ["coder", "builder"].includes(cleanRoleId)) {
     return "Focus: 실행 가능한 코드/노트북 산출물과 검증 단계를 우선한다.";
+  }
+  if (["reviewer", "critic"].includes(cleanAgentId) || ["reviewer", "critic"].includes(cleanRoleId)) {
+    return "Focus: 결함, 회귀 위험, 미검증 지점을 우선해 점검한다.";
   }
   const query = String(lens.query || "").trim();
   if (query) return `Focus: ${clip(query, 240)}`;
@@ -222,6 +227,8 @@ export class LocalContextEngine extends ContextEngineBase {
     constraintsText = "",
     pinsText = "",
     summaryText = "",
+    roleSummaryText = "",
+    deltaSummaryText = "",
     turns = [],
     toolSnippets = [],
     includeToolSnippets = true,
@@ -230,6 +237,8 @@ export class LocalContextEngine extends ContextEngineBase {
     if (focusHeader) sections.push(`[FOCUS]\n${focusHeader}`);
     if (constraintsText) sections.push(`[JOB CONSTRAINTS]\n${constraintsText}`);
     if (pinsText) sections.push(`[PINNED FACTS]\n${pinsText}`);
+    if (roleSummaryText) sections.push(`[ROLE SUMMARY]\n${roleSummaryText}`);
+    if (deltaSummaryText) sections.push(`[ITERATION DELTA]\n${deltaSummaryText}`);
     if (summaryText) sections.push(`[ROLLING SUMMARY]\n${summaryText}`);
     if (turns.length > 0) sections.push(`[RECENT TURNS]\n${formatTurns(turns)}`);
     if (includeToolSnippets && toolSnippets.length > 0) {
@@ -244,12 +253,17 @@ export class LocalContextEngine extends ContextEngineBase {
     constraintsText = "",
     pinsText = "",
     summaryText = "",
+    roleSummaryText = "",
+    deltaSummaryText = "",
     turns = [],
     toolSnippets = [],
   } = {}) {
     const maxChars = this.maxCharsFromBudget(budgetTokens);
     const workingTurns = Array.isArray(turns) ? [...turns] : [];
-    let workingSummary = String(summaryText || "");
+    const hasStructuredSummary = !!String(roleSummaryText || "").trim() || !!String(deltaSummaryText || "").trim();
+    let workingSummary = clip(String(summaryText || ""), hasStructuredSummary ? 1800 : 3200);
+    const workingRoleSummary = clip(String(roleSummaryText || ""), 1000);
+    const workingDeltaSummary = clip(String(deltaSummaryText || ""), 800);
     let includeTools = Array.isArray(toolSnippets) && toolSnippets.length > 0;
 
     let text = this._renderContext({
@@ -257,6 +271,8 @@ export class LocalContextEngine extends ContextEngineBase {
       constraintsText,
       pinsText,
       summaryText: workingSummary,
+      roleSummaryText: workingRoleSummary,
+      deltaSummaryText: workingDeltaSummary,
       turns: workingTurns,
       toolSnippets,
       includeToolSnippets: includeTools,
@@ -287,6 +303,8 @@ export class LocalContextEngine extends ContextEngineBase {
         constraintsText,
         pinsText,
         summaryText: workingSummary,
+        roleSummaryText: workingRoleSummary,
+        deltaSummaryText: workingDeltaSummary,
         turns: workingTurns,
         toolSnippets,
         includeToolSnippets: includeTools,
@@ -338,11 +356,19 @@ export class LocalContextEngine extends ContextEngineBase {
       normalized.jobId,
       clamp(process.env.LOCAL_RECENT_TURNS, 2, 30, this.defaultRecentTurns)
     );
+    const resolvedJobDir = this.jobs && typeof this.jobs.jobDir === "function" ? this.jobs.jobDir(normalized.jobId) : "";
+    const roleSummaryText = normalized.stepKind === "agent"
+      ? readRoleSummary({ jobDir: resolvedJobDir, roleId: normalized.roleId, agentId: normalized.agentId })
+      : "";
+    const deltaSummaryText = normalized.stepKind === "agent"
+      ? readIterationDelta({ jobDir: resolvedJobDir })
+      : "";
     const toolSnippets = this._loadToolSnippets(normalized.jobId, 4);
     const constraintsText = this._constraintsFromInput(normalized);
     const focusHeader = focusHeaderFor({
       stepKind: normalized.stepKind,
       agentId: normalized.agentId,
+      roleId: normalized.roleId,
       goal: normalized.goal || normalized.userMessageText,
       lensSpec: normalized.lensSpec,
     });
@@ -353,6 +379,8 @@ export class LocalContextEngine extends ContextEngineBase {
       constraintsText,
       pinsText,
       summaryText,
+      roleSummaryText,
+      deltaSummaryText,
       turns: recentTurns,
       toolSnippets,
     });
@@ -369,6 +397,8 @@ export class LocalContextEngine extends ContextEngineBase {
         localPinnedCount: Array.isArray(pinsPayload.items)
           ? pinsPayload.items.length
           : (Array.isArray(pinsPayload.facts) ? pinsPayload.facts.length : Object.keys(pinsPayload).length),
+        roleSummaryChars: roleSummaryText.length,
+        deltaSummaryChars: deltaSummaryText.length,
       },
     };
   }
@@ -439,6 +469,7 @@ export class LocalContextEngine extends ContextEngineBase {
       mode: "local",
       step_kind: String(row.stepKind || "").trim() || undefined,
       agent_id: String(row.agentId || "").trim().toLowerCase() || undefined,
+      role_id: String(row.roleId || row.role_id || "").trim().toLowerCase() || undefined,
       goal: clip(String(row.goal || "").trim(), 320) || undefined,
       run_meta: runMeta,
       context_meta: meta,
