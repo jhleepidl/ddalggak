@@ -98,6 +98,13 @@ function normalizeBlueprintSummary(value = null, { teamPlan = null } = {}) {
     description: String(merged.description || '').trim() || undefined,
     topology_pattern: String(merged.topology_pattern || merged.topologyPattern || '').trim().toLowerCase() || undefined,
     execution_pattern: String(merged.execution_pattern || merged.executionPattern || '').trim().toLowerCase() || undefined,
+    capability_status: String(merged.capability_status || merged.capabilityStatus || '').trim().toLowerCase() || undefined,
+    required_tool_count: Number.isFinite(Number(merged.required_tool_count || merged.requiredToolCount)) ? Math.max(0, Math.floor(Number(merged.required_tool_count || merged.requiredToolCount))) : undefined,
+    optional_tool_count: Number.isFinite(Number(merged.optional_tool_count || merged.optionalToolCount)) ? Math.max(0, Math.floor(Number(merged.optional_tool_count || merged.optionalToolCount))) : undefined,
+    missing_required_tool_count: Number.isFinite(Number(merged.missing_required_tool_count || merged.missingRequiredToolCount)) ? Math.max(0, Math.floor(Number(merged.missing_required_tool_count || merged.missingRequiredToolCount))) : undefined,
+    missing_optional_tool_count: Number.isFinite(Number(merged.missing_optional_tool_count || merged.missingOptionalToolCount)) ? Math.max(0, Math.floor(Number(merged.missing_optional_tool_count || merged.missingOptionalToolCount))) : undefined,
+    missing_required_tools: normalizeStringList(merged.missing_required_tools || merged.missingRequiredTools || [], { lower: true }),
+    missing_optional_tools: normalizeStringList(merged.missing_optional_tools || merged.missingOptionalTools || [], { lower: true }),
     memory_surface_count: Number.isFinite(Number(merged.memory_surface_count || merged.memorySurfaceCount))
       ? Math.max(0, Math.floor(Number(merged.memory_surface_count || merged.memorySurfaceCount)))
       : (memoryMap.length || undefined),
@@ -984,7 +991,9 @@ export function buildRuntimeRolePayload(runtimeAgent = null) {
     capability_tags: Array.isArray(agent.capability_tags) ? agent.capability_tags : [],
     attached_skills: agent.attached_skills || [],
     attached_skill_ids: Array.isArray(agent.attached_skill_ids) ? agent.attached_skill_ids : [],
-    selected_skill_ids: normalizeSkillAttachmentList(agent.attached_skills || []).map((row) => row.skill_id),
+    selected_skill_ids: normalizeStringList((Array.isArray(agent.attached_skill_ids) && agent.attached_skill_ids.length > 0)
+      ? agent.attached_skill_ids
+      : normalizeSkillAttachmentList(agent.attached_skills || []).map((row) => row.skill_id), { lower: true }),
     skill_load_levels: summarizeSkillLoadLevels(agent.attached_skills || []),
     context_pack_id: agent.context_pack_id || undefined,
     scope_id: agent.scope_id || undefined,

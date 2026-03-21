@@ -1,5 +1,6 @@
 import { parseJsonObjectFromText } from "../shared/json_extract.js";
 import { normalizeStringList } from "../shared/normalize.js";
+import { resolveProviderActionRisk } from "../application/failure_recovery_policy.js";
 
 export function normalizeForceMode(raw) {
   return String(raw || "").trim().toLowerCase() === "work" ? "work" : "normal";
@@ -267,7 +268,15 @@ export function sanitizeSupervisorRoutePlan(routePlan, {
         type: "run_agent",
         agent_id: coderAgentId,
         goal: `요청된 코드/노트북 산출물을 구현: ${String(message || "").trim()}`,
-        risk: "L3",
+        risk: resolveProviderActionRisk({
+          action: {
+            type: "run_agent",
+            agent_id: coderAgentId,
+            goal: `요청된 코드/노트북 산출물을 구현: ${String(message || "").trim()}`,
+          },
+          provider: 'codex',
+          fallback: 'L2',
+        }),
       };
       actions = actions.length < 4
         ? [...actions, coderAction]

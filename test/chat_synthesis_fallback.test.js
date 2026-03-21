@@ -40,3 +40,14 @@ test('buildChatSynthesisFallback surfaces missing tool and credential gaps befor
   assert.match(text, /write_file/);
   assert.match(text, /API 키|환경 변수/);
 });
+
+
+test('buildChatSynthesisFallback does not treat notebook setup guidance as a credential blocker', () => {
+  const text = buildChatSynthesisFallback('ignored message', {
+    outputs: [
+      { agentId: 'notebook_builder', output: 'Notebook updated. To test live calls later, set OPENAI_API_KEY in your environment and run the demo cells.' },
+    ],
+  });
+  assert.match(text, /현재까지 결과 요약/);
+  assert.doesNotMatch(text, /필요한 도구\/자격 정보가 부족/);
+});

@@ -3,8 +3,8 @@ function clean(value=''){ return String(value||'').trim(); }
 function cleanId(value=''){ return clean(value).toLowerCase().replace(/[^a-z0-9._:-]+/g, '_'); }
 function unique(values=[], {limit=16, lower=false}={}){ const out=[]; const seen=new Set(); for(const raw of asArray(values)){ const value=clean(raw); if(!value) continue; const normalized=lower ? value.toLowerCase() : value; const key=normalized.toLowerCase(); if(seen.has(key)) continue; seen.add(key); out.push(normalized); if(out.length>=limit) break; } return out; }
 
-function baseRuntimePolicy(){
-  return {
+function baseRuntimePolicy(overrides = {}){
+  const base = {
     runtime_execution: {
       checkpointing: {
         write_on_turn_end: true,
@@ -26,6 +26,20 @@ function baseRuntimePolicy(){
         gemini: {
           approval_mode: 'default',
         },
+      },
+    },
+  };
+  return {
+    runtime_execution: {
+      ...base.runtime_execution,
+      ...(overrides.runtime_execution || {}),
+      continuous_improvement: {
+        ...base.runtime_execution.continuous_improvement,
+        ...((overrides.runtime_execution || {}).continuous_improvement || {}),
+      },
+      providers: {
+        ...base.runtime_execution.providers,
+        ...((overrides.runtime_execution || {}).providers || {}),
       },
     },
   };
@@ -101,9 +115,9 @@ const TEMPLATE_DEFS = {
     good_for: ['market/technical research', 'source-grounded briefs', 'evidence-backed recommendations'],
     bad_for: ['large codebase patching', 'wide parallel build pipelines'],
     agents: [
-      { agent_id: 'research_lead', name: 'Research Lead', role: 'researcher', purpose: 'Frame the question, gather evidence, and maintain the evidence ledger.' },
-      { agent_id: 'analyst', name: 'Analyst', role: 'synthesizer', purpose: 'Synthesize findings into a concise recommendation memo and gaps list.' },
-      { agent_id: 'fact_reviewer', name: 'Fact Reviewer', role: 'reviewer', purpose: 'Challenge unsupported claims and verify the final recommendation before delivery.' },
+      { agent_id: 'research_lead', name: 'Research Lead', role: 'researcher', purpose: 'Frame the question, gather evidence, and maintain the evidence ledger.', required_tool_ids: ['web'], optional_tool_ids: ['read_only_fs'] },
+      { agent_id: 'analyst', name: 'Analyst', role: 'synthesizer', purpose: 'Synthesize findings into a concise recommendation memo and gaps list.', optional_tool_ids: ['read_only_fs'] },
+      { agent_id: 'fact_reviewer', name: 'Fact Reviewer', role: 'reviewer', purpose: 'Challenge unsupported claims and verify the final recommendation before delivery.', required_tool_ids: ['web'], optional_tool_ids: ['read_only_fs'] },
     ],
     interaction_spec: {
       execution_pattern: 'sequential_pipeline',
@@ -136,9 +150,9 @@ const TEMPLATE_DEFS = {
     good_for: ['repo fixes', 'scoped feature work', 'code review + implementation'],
     bad_for: ['open-ended ideation', 'pure research briefs'],
     agents: [
-      { agent_id: 'repo_scout', name: 'Repo Scout', role: 'researcher', purpose: 'Map the codebase, locate relevant files, and identify likely constraints.' },
-      { agent_id: 'builder', name: 'Builder', role: 'builder', purpose: 'Make the scoped implementation changes and keep the changelog precise.' },
-      { agent_id: 'reviewer', name: 'Reviewer', role: 'reviewer', purpose: 'Verify correctness, regressions, and test coverage before final delivery.' },
+      { agent_id: 'repo_scout', name: 'Repo Scout', role: 'researcher', purpose: 'Map the codebase, locate relevant files, and identify likely constraints.', required_tool_ids: ['read_only_fs'], optional_tool_ids: ['web'] },
+      { agent_id: 'builder', name: 'Builder', role: 'builder', purpose: 'Make the scoped implementation changes and keep the changelog precise.', required_tool_ids: ['workspace_fs'], optional_tool_ids: ['shell'] },
+      { agent_id: 'reviewer', name: 'Reviewer', role: 'reviewer', purpose: 'Verify correctness, regressions, and test coverage before final delivery.', required_tool_ids: ['read_only_fs'], optional_tool_ids: ['web'] },
       { agent_id: 'delivery_owner', name: 'Delivery Owner', role: 'synthesizer', purpose: 'Summarize the final patch, risks, and next steps for the user.' },
     ],
     interaction_spec: {
@@ -166,6 +180,60 @@ const TEMPLATE_DEFS = {
       ],
     },
   },
+
+  iterative_improvement: {
+    task_archetype: 'iterative_improvement',
+    title: 'Iterative Improvement Team',
+    description: 'Explore alternatives, implement the best next change, critique the result, and keep iterating until bounded quality gates are met.',
+    tags: ['iterative_improvement', 'implementation', 'review', 'multi_model', 'bounded_iteration'],
+    good_for: ['continuous code improvement', 'repo tuning with repeated review', 'multi-model propose/build/critique loops'],
+    bad_for: ['one-shot simple answers', 'pure static research with no revision cycle'],
+    agents: [
+      { agent_id: 'strategy_planner', name: 'Strategy Planner', role: 'operator', purpose: 'Choose the next best improvement target, compare candidate directions, and decide whether another iteration is worth the cost.', required_tool_ids: ['read_only_fs'], optional_tool_ids: ['web'], model: 'gpt-5.4', provider: 'openai' },
+      { agent_id: 'repo_scout', name: 'Repo Scout', role: 'researcher', purpose: 'Inspect the repository, surface constraints, and suggest competing implementation options.', required_tool_ids: ['read_only_fs'], optional_tool_ids: ['web'], model: 'gemini-2.5-pro', provider: 'gemini' },
+      { agent_id: 'builder', name: 'Builder', role: 'builder', purpose: 'Implement the chosen improvement, run bounded checks, and record concrete edits.', required_tool_ids: ['workspace_fs'], optional_tool_ids: ['shell'], model: 'gpt-5-codex', provider: 'codex' },
+      { agent_id: 'critic', name: 'Critic', role: 'reviewer', purpose: 'Challenge the current patch, look for regressions or missed opportunities, and decide whether to loop again.', required_tool_ids: ['read_only_fs'], optional_tool_ids: ['web'], model: 'gpt-5.4', provider: 'openai' },
+      { agent_id: 'delivery_owner', name: 'Delivery Owner', role: 'synthesizer', purpose: 'Summarize the best achieved state, rejected alternatives, and the next improvement frontier.' , model: 'gpt-5.4', provider: 'openai' },
+    ],
+    interaction_spec: {
+      execution_pattern: 'builder_reviewer_loop',
+      handoffs: [
+        { from: 'Strategy Planner', to: 'Repo Scout', payload: 'improvement_goal_and_quality_gates' },
+        { from: 'Repo Scout', to: 'Builder', payload: 'repo_map_and_candidate_options' },
+        { from: 'Builder', to: 'Critic', payload: 'patch_and_verification_results' },
+        { from: 'Critic', to: 'Strategy Planner', payload: 'loop_decision_and_remaining_gaps' },
+        { from: 'Critic', to: 'Delivery Owner', payload: 'signoff_or_residual_risk' },
+      ],
+      final_answer_owner: 'Delivery Owner',
+      policies: { require_reviewer_before_final: true, reviewer_visibility: 'full_workspace_summary', synthesizer_visibility: 'upstream_outputs_only', operator_visibility: 'planner_plus_critic_summary' },
+    },
+    expected_outputs: ['improvement backlog', 'best current patch', 'critic verdict', 'next iteration recommendation'],
+    runtime_policy: baseRuntimePolicy({
+      runtime_execution: {
+        continuous_improvement: {
+          enabled: true,
+          mode: 'bounded_iteration',
+          max_turns: 6,
+          min_turns_before_completion: 2,
+          progress_update_each_turn: true,
+          stop_signals: ['quality_threshold_met', 'ready_for_user', 'no_further_delta'],
+        },
+      },
+    }),
+    memory_plan: {
+      plan_id: 'iterative_improvement_memory_plan',
+      display_name: 'Iterative improvement memory plan',
+      surfaces: [
+        { surface_id: 'mission_brief', file_name: 'mission_brief.md', title: 'Mission Brief', purpose: 'Improvement target, quality gates, budget, and stop conditions.', semantic_slots: ['plan'], target_roles: ['operator', 'researcher', 'builder', 'reviewer', 'synthesizer'], load_policy: 'always', write_policy: 'shared', create_mode: 'eager' },
+        { surface_id: 'improvement_backlog', file_name: 'improvement_backlog.md', title: 'Improvement Backlog', purpose: 'Ranked candidate improvements, rejected options, and rationale.', semantic_slots: ['research', 'decisions'], target_roles: ['operator', 'researcher', 'reviewer'], load_policy: 'always', write_policy: 'append_only' },
+        { surface_id: 'working_memory', file_name: 'working_memory.md', title: 'Working Memory', purpose: 'Current iteration status, open questions, and next actions.', semantic_slots: ['research', 'progress'], target_roles: ['operator', 'researcher', 'builder', 'reviewer'], load_policy: 'always', write_policy: 'shared' },
+        { surface_id: 'implementation_notes', file_name: 'implementation_notes.md', title: 'Implementation Notes', purpose: 'Patch details, commands, experiment results, and concrete edits per iteration.', semantic_slots: ['progress'], target_roles: ['builder'], load_policy: 'on_demand', write_policy: 'append_only' },
+        { surface_id: 'critic_log', file_name: 'critic_log.md', title: 'Critic Log', purpose: 'Regression checks, objections, missed opportunities, and loop decisions.', semantic_slots: ['decisions', 'progress'], target_roles: ['reviewer', 'operator', 'synthesizer'], load_policy: 'on_demand', write_policy: 'append_only' },
+        { surface_id: 'final_answer', file_name: 'final_answer.md', title: 'Final Answer', purpose: 'Best achieved result, remaining gaps, and suggested next iteration.', semantic_slots: ['decisions'], target_roles: ['synthesizer'], load_policy: 'always', write_policy: 'final' },
+        { surface_id: 'artifact_index', file_name: 'artifact_index.md', title: 'Artifact Index', purpose: 'Touched files, exports, benchmarks, and verification artifacts.', semantic_slots: ['artifacts'], target_roles: ['builder', 'synthesizer'], load_policy: 'on_demand', write_policy: 'index' },
+      ],
+    },
+  },
   review_repair: {
     task_archetype: 'review_repair',
     title: 'Review & Repair Team',
@@ -174,9 +242,9 @@ const TEMPLATE_DEFS = {
     good_for: ['post-failure repair', 'audit + patch follow-up', 'quality-focused regression cleanup'],
     bad_for: ['greenfield implementation', 'broad web research'],
     agents: [
-      { agent_id: 'auditor', name: 'Auditor', role: 'reviewer', purpose: 'Identify the most important defects, regressions, and contract gaps.' },
-      { agent_id: 'repair_planner', name: 'Repair Planner', role: 'researcher', purpose: 'Translate review findings into a minimal repair plan and bounded scope.' },
-      { agent_id: 'repair_builder', name: 'Repair Builder', role: 'builder', purpose: 'Apply the minimal repair patch and record what changed.' },
+      { agent_id: 'auditor', name: 'Auditor', role: 'reviewer', purpose: 'Identify the most important defects, regressions, and contract gaps.', required_tool_ids: ['read_only_fs'], optional_tool_ids: ['web'] },
+      { agent_id: 'repair_planner', name: 'Repair Planner', role: 'researcher', purpose: 'Translate review findings into a minimal repair plan and bounded scope.', required_tool_ids: ['read_only_fs'], optional_tool_ids: ['web'] },
+      { agent_id: 'repair_builder', name: 'Repair Builder', role: 'builder', purpose: 'Apply the minimal repair patch and record what changed.', required_tool_ids: ['workspace_fs'], optional_tool_ids: ['shell'] },
       { agent_id: 'signoff_owner', name: 'Signoff Owner', role: 'synthesizer', purpose: 'Confirm repaired state and present residual risk clearly to the user.' },
     ],
     interaction_spec: {

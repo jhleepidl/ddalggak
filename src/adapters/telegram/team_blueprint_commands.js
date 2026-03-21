@@ -80,11 +80,11 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
         await bot.sendMessage(chatId, '대기 중인 install proposal이 없습니다. 먼저 /team proposal 로 확인해 주세요.');
         return true;
       }
-      const coverage = getCredentialCoverageForProposal(chatId, existingProposalState.proposal || {});
+      const coverage = getCredentialCoverageForProposal(chatSessionStore, chatId, existingProposalState.proposal || {});
       if (!coverage.all_satisfied) {
         await bot.sendMessage(chatId, [
           '⚠️ 먼저 필요한 credential을 바인딩해 주세요.',
-          ...coverage.missing_keys.map((key) => `- /credential set ${key} <secret> --resume`),
+          ...coverage.missing_keys.flatMap((key) => [`- /credential bind ${key} env ${key} --resume`, `- /credential set ${key} <secret> --resume`]),
         ].join('\n'));
         return true;
       }
@@ -118,8 +118,8 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
     const proposal = baseTeam
       ? buildTeamInstallProposal({ team: baseTeam, runtime: runtimeForTeam, applyState: teamState.pending_team ? 'active' : 'pending' })
       : existingProposalState?.proposal;
-    const prompt = existingProposalState ? buildInstallProposalPrompt(existingProposalState, { hasPendingTeam: !!teamState.pending_team, chatId }) : null;
-    const coverage = getCredentialCoverageForProposal(chatId, proposal || {});
+    const prompt = existingProposalState ? buildInstallProposalPrompt(existingProposalState, { hasPendingTeam: !!teamState.pending_team, chatId, sessionStore: chatSessionStore }) : null;
+    const coverage = getCredentialCoverageForProposal(chatSessionStore, chatId, proposal || {});
     const bindingState = getCredentialBindingState(chatSessionStore, chatId);
     const lines = [
       existingProposalState ? `pending install proposal state: ${existingProposalState.status}` : 'install proposal preview',
@@ -135,7 +135,9 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
       '- /team proposal apply',
       '- /team proposal dismiss',
       '- /credential pending',
-      '- /credential set <KEY> <secret> --resume',
+      '- /credential bind <KEY> env <ENV_KEY> --resume',
+      '- /credential set <KEY> <secret> --resume (group/private fallback, Telegram 노출 주의)',
+      '- 권장: 로컬 secret store / 서버 env에 저장 후 /credential bind <KEY> env <ENV_KEY>',
     ].filter(Boolean);
     await sendLong(bot, chatId, lines.join('\n'));
     return true;
@@ -181,7 +183,7 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
     try {
       const parsed = JSON.parse(jsonPayload);
       const installed = await installTeamBlueprintToSession({ sessionStore: chatSessionStore, chatId, manifest: parsed, runtime: runtimeForTeam, applyState });
-      await sendLong(bot, chatId, [`✅ blueprint를 ${applyState === 'active' ? 'active' : 'pending'} team으로 설치했습니다.`, '', formatTeamProposalMessage(installed.team)].join('\n'));
+      await sendLong(bot, chatId, [`✅ blueprint를 ${applyState === 'active' ? 'active' : 'pending'} team으로 설치했습니다.`, '', formatTeamProposalMessage(installed.team, { runtime: runtimeForTeam })].join('\n'));
     } catch (e) {
       await bot.sendMessage(chatId, `❌ blueprint 설치 실패: ${String(e?.message ?? e)}`);
     }
@@ -199,7 +201,7 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
       const client = requireGocClient();
       const manifest = await client.getTeamBlueprint({ threadId });
       const installed = await installTeamBlueprintToSession({ sessionStore: chatSessionStore, chatId, manifest, runtime: runtimeForTeam, applyState });
-      await sendLong(bot, chatId, [`✅ GoC thread team blueprint를 가져와 ${applyState === 'active' ? 'active' : 'pending'} team으로 반영했습니다.`, '', formatTeamProposalMessage(installed.team)].join('\n'));
+      await sendLong(bot, chatId, [`✅ GoC thread team blueprint를 가져와 ${applyState === 'active' ? 'active' : 'pending'} team으로 반영했습니다.`, '', formatTeamProposalMessage(installed.team, { runtime: runtimeForTeam })].join('\n'));
     } catch (e) {
       await bot.sendMessage(chatId, `❌ GoC blueprint pull 실패: ${String(e?.message ?? e)}`);
     }

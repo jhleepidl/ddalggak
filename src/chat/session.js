@@ -221,6 +221,7 @@ function normalizeSession(chatId, raw = {}) {
       blocked_actions: Number.isFinite(Number(budgetRaw.blocked_actions)) ? Math.max(0, Math.floor(Number(budgetRaw.blocked_actions))) : 0,
     },
     pending_approval: normalizePendingApproval(row.pending_approval),
+    pending_user_request: row.pending_user_request && typeof row.pending_user_request === 'object' ? row.pending_user_request : null,
     pending_user_messages: pendingUserMessages,
     interrupt,
     dashboard: dashboardMessageId ? { message_id: dashboardMessageId } : null,

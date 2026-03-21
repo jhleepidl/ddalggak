@@ -32,17 +32,13 @@ import { buildTeamSchemaOptionsText, buildTeamSchemaOptionsSummaryLines } from '
 const HELP_TEXT = [
   "Commands:",
   "- /chat [text]: 대화/작업 지시",
+  "- /team [suggest <목적>|create <자연어 팀 설명>|refine <자연어 수정>|apply|requirements|proposal|template|options]: 팀 제안/적용/점검",
+  "- /status [full|recent]: 현재 단계·팀·최근 진행 보기",
   "- /context [global]: 현재 job 컨텍스트/GoC 링크 보기",
-  "- /team [suggest <목적>|create <자연어 팀 설명>|refine <자연어 수정>|apply|requirements|proposal|export|install <JSON>|pull|push|template|validate <JSON>|options|reset|modes]: 팀 제안/생성/수정/동기화",
   "- /artifacts [limit]: 주요 산출물 후보 보기",
   "- /send <번호|path>: 산출물 파일 전송",
-  "- /files [uploads|workspace|all] [limit]: workspace 파일 목록 보기",
-  "- /status: 현재 chat/job 상태 보기",
-  "- /credential [list|pending|set <KEY> <secret> [--resume]|clear <KEY>]: install proposal용 credential 바인딩",
   "- /stop [jobId]: 현재 실행 또는 지정 job 중단",
-  "- /running: 실행 중이거나 대기 중인 job 확인",
-  "- /whoami: 현재 chat_id / user_id 확인",
-  "- /help advanced: 고급 명령 보기",
+  "- /help advanced: credential/files/running 등 고급 명령 보기",
 ].join("\n");
 
 const ADVANCED_HELP_TEXT = [
@@ -50,8 +46,8 @@ const ADVANCED_HELP_TEXT = [
   "- /chat [text]: 대화/작업 지시",
   "- /whoami: 현재 chat_id / user_id 확인",
   "- /running: 실행/대기 job 목록 확인",
-  "- /status: 현재 chat/job 상태 보기",
-  "- /credential [list|pending|set <KEY> <secret> [--resume]|clear <KEY>]: install proposal용 credential 바인딩",
+  "- /status [full|recent]: 현재 chat/job 상태와 최근 작업 보기",
+  "- /credential [list|pending|set <KEY> <secret> [--resume]|bind <KEY> env <ENV_KEY> [--resume]|clear <KEY>]: credential 바인딩 (env/local secret store 권장, set은 Telegram 노출 주의 fallback)",
   "- /stop [jobId]: 현재 실행 또는 지정 job 중단",
   "- /memory [show|md|kb|policy|routing|role|agents|note|lesson|reset]: 런타임 메모리/KB 조회·수정",
   "- /settings ...: /memory alias",
@@ -158,8 +154,8 @@ export function createTelegramCommandHandler(deps = {}) {
     return buildTeamBlueprint(baseTeam, { runtime, applyState, source, installProposalState: sessionInstallProposal });
   }
 
-  function buildTeamStatusOverview(teamState = {}, { chatId = '' } = {}) {
-    const lines = [buildTeamListMessage(teamState)];
+  function buildTeamStatusOverview(teamState = {}, { chatId = '', runtime = null } = {}) {
+    const lines = [buildTeamListMessage(teamState, { runtime })];
     const session = chatSessionStore?.get?.(chatId) || {};
     const pendingTeam = teamState?.pending_team && typeof teamState.pending_team === 'object' ? teamState.pending_team : null;
     const activeTeam = teamState?.active_team && typeof teamState.active_team === 'object' ? teamState.active_team : null;
@@ -417,7 +413,11 @@ export function createTelegramCommandHandler(deps = {}) {
     }
 
     if (cmd === "/status") {
-      await sendChatStatus(bot, chatId, { telegramUserId: userId });
+      const detailArg = String(rest[0] || '').trim().toLowerCase();
+      const detail = ['full', 'detail', 'details', 'verbose'].includes(detailArg)
+        ? 'full'
+        : (['recent', 'activity', 'progress'].includes(detailArg) ? 'recent' : 'compact');
+      await sendChatStatus(bot, chatId, { telegramUserId: userId, detail });
       return true;
     }
 
@@ -436,7 +436,7 @@ export function createTelegramCommandHandler(deps = {}) {
         teamState = getSessionTeamState(chatSessionStore, chatId);
       }
       if (!sub) {
-        await sendLong(bot, chatId, buildTeamStatusOverview(teamState, { chatId }));
+        await sendLong(bot, chatId, buildTeamStatusOverview(teamState, { chatId, runtime: runtimeForTeam }));
         return true;
       }
       if (sub === 'suggest') {
@@ -451,7 +451,7 @@ export function createTelegramCommandHandler(deps = {}) {
           ? await createFreeformTeamConfigurationAdvanced({ description: effectiveGoal, runtime: runtimeForTeam })
           : suggestTeamConfiguration({ taskText: effectiveGoal, runtime: runtimeForTeam });
         storePendingTeam(chatSessionStore, chatId, proposal);
-        await sendLong(bot, chatId, `${formatTeamProposalMessage(proposal)}
+        await sendLong(bot, chatId, `${formatTeamProposalMessage(proposal, { runtime: runtimeForTeam })}
 
 지원 모델:
 ${formatSupportedModelLines()}`);
@@ -466,7 +466,7 @@ ${formatSupportedModelLines()}`);
         await bot.sendMessage(chatId, '해당 요청에 맞는 팀을 구성하겠습니다. 잠시만 기다려주세요.');
         const proposal = await createFreeformTeamConfigurationAdvanced({ description, runtime: runtimeForTeam });
         storePendingTeam(chatSessionStore, chatId, proposal);
-        await sendLong(bot, chatId, `${formatTeamProposalMessage(proposal)}
+        await sendLong(bot, chatId, `${formatTeamProposalMessage(proposal, { runtime: runtimeForTeam })}
 
 지원 모델:
 ${formatSupportedModelLines()}`);
@@ -486,7 +486,7 @@ ${formatSupportedModelLines()}`);
         await bot.sendMessage(chatId, '기존 팀 구성을 바탕으로 수정안을 다시 설계하겠습니다. 잠시만 기다려주세요.');
         const next = await refineTeamConfigurationAdvanced({ team: baseTeam, instruction, runtime: runtimeForTeam });
         storePendingTeam(chatSessionStore, chatId, next);
-        await sendLong(bot, chatId, formatTeamProposalMessage(next));
+        await sendLong(bot, chatId, formatTeamProposalMessage(next, { runtime: runtimeForTeam }));
         return true;
       }
 
@@ -569,7 +569,7 @@ ${formatSupportedModelLines()}`);
         const proposal = baseTeam
           ? buildTeamInstallProposal({ team: baseTeam, runtime: runtimeForTeam, applyState: teamState.pending_team ? 'active' : 'pending' })
           : existingProposalState?.proposal;
-        const prompt = existingProposalState ? buildInstallProposalPrompt(existingProposalState, { hasPendingTeam: !!teamState.pending_team }) : null;
+        const prompt = existingProposalState ? buildInstallProposalPrompt(existingProposalState, { hasPendingTeam: !!teamState.pending_team, chatId, sessionStore: chatSessionStore }) : null;
         const lines = [
           existingProposalState ? `pending install proposal state: ${existingProposalState.status}` : 'install proposal preview',
           '',
@@ -629,7 +629,7 @@ ${formatSupportedModelLines()}`);
           await sendLong(bot, chatId, [
             `✅ blueprint를 ${applyState === 'active' ? 'active' : 'pending'} team으로 설치했습니다.`,
             '',
-            formatTeamProposalMessage(installed.team),
+            formatTeamProposalMessage(installed.team, { runtime: runtimeForTeam }),
           ].join('\n'));
         } catch (e) {
           await bot.sendMessage(chatId, `❌ blueprint 설치 실패: ${String(e?.message ?? e)}`);
@@ -656,7 +656,7 @@ ${formatSupportedModelLines()}`);
           await sendLong(bot, chatId, [
             `✅ GoC thread team blueprint를 가져와 ${applyState === 'active' ? 'active' : 'pending'} team으로 반영했습니다.`,
             '',
-            formatTeamProposalMessage(installed.team),
+            formatTeamProposalMessage(installed.team, { runtime: runtimeForTeam }),
           ].join('\n'));
         } catch (e) {
           await bot.sendMessage(chatId, `❌ GoC blueprint pull 실패: ${String(e?.message ?? e)}`);
@@ -711,7 +711,7 @@ ${formatSupportedModelLines()}`);
           storePendingTeam(chatSessionStore, chatId, validated);
           await sendLong(bot, chatId, `✅ 팀 템플릿 검증 완료
 
-${formatTeamProposalMessage(validated)}`);
+${formatTeamProposalMessage(validated, { runtime: runtimeForTeam })}`);
         } catch (e) {
           await bot.sendMessage(chatId, `❌ 팀 템플릿 검증 실패: ${String(e?.message ?? e)}`);
         }
@@ -722,7 +722,7 @@ ${formatTeamProposalMessage(validated)}`);
           const applied = await applyPendingTeam({ sessionStore: chatSessionStore, chatId, runtime: runtimeForTeam });
           await sendLong(bot, chatId, `✅ 활성 팀 적용 완료
 
-${buildTeamListMessage({ active_team: applied })}`);
+${buildTeamListMessage({ active_team: applied }, { runtime: runtimeForTeam })}`);
         } catch (e) {
           await bot.sendMessage(chatId, `❌ 팀 적용 실패: ${String(e?.message ?? e)}`);
         }
@@ -765,6 +765,8 @@ ${buildTeamListMessage({ active_team: applied })}`);
         userId,
         runSupervisorChat,
         normalizeForceMode,
+        chatType: msg?.chat?.type || '',
+        telegramMessageId: msg?.message_id ?? null,
       });
     }
 

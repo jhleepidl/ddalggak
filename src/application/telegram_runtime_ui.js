@@ -28,10 +28,13 @@ import {
   resolveCurrentJobIdForChat,
   getAwait,
   chatSessionStore,
+  tracking,
 } from "./telegram_runtime_state.js";
 import {
   buildContextInfo,
+  loadArtifactIndex,
   sendLong,
+  formatArtifactIndexText,
 } from "./telegram_runtime_io.js";
 import {
   composeCapabilitiesForRun,
@@ -68,6 +71,185 @@ async function sendTextWithOptionalGocButton(
     browserLabel,
     isTelegramWebAppHttpsError,
   });
+}
+
+
+
+function formatRelativeAge(tsValue = "") {
+  const ms = Date.parse(String(tsValue || ""));
+  if (!Number.isFinite(ms) || ms <= 0) return "unknown";
+  const diffSec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (diffSec < 10) return "방금 전";
+  if (diffSec < 60) return `${diffSec}초 전`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}분 전`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}시간 전`;
+  const diffDay = Math.floor(diffHr / 24);
+  return `${diffDay}일 전`;
+}
+
+function normalizeActivitySnippet(value = "", max = 160) {
+  const lines = String(value || "")
+    .split(/\r?\n/)
+    .map((line) => String(line || "").trim())
+    .filter((line) => line && !/^#/.test(line) && !/^>/.test(line) && !/^```/.test(line) && !/^\*\*20\d{2}-/.test(line));
+  if (lines.length === 0) return "";
+  return clip(lines.slice(-4).join(" ").replace(/\s+/g, " "), max);
+}
+
+function readJsonlTail(filePath = "", limit = 12) {
+  try {
+    if (!filePath || !fs.existsSync(filePath)) return [];
+    const rows = fs.readFileSync(filePath, "utf8")
+      .split(/\r?\n/)
+      .map((line) => String(line || "").trim())
+      .filter(Boolean)
+      .slice(-Math.max(1, limit));
+    return rows.map((line) => {
+      try { return JSON.parse(line); } catch { return null; }
+    }).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function summarizeRuntimeEvent(event = null) {
+  const row = event && typeof event === "object" ? event : {};
+  const type = String(row.event_type || row.type || "").trim().toLowerCase();
+  const payload = row.payload && typeof row.payload === "object" ? row.payload : {};
+  if (type === 'run.start') {
+    return normalizeTextSummary(payload.userText || payload.user_text || 'run 시작', 160) || 'run 시작';
+  }
+  if (type === 'run.queue_steps') {
+    const actions = Array.isArray(payload.actions) ? payload.actions : [];
+    const labels = actions
+      .map((action) => String(action?.display_label || action?.agent_id || action?.agentId || '').trim())
+      .filter(Boolean)
+      .slice(0, 3);
+    const suffix = labels.length > 0 ? ` · ${labels.join(', ')}` : '';
+    return `steps queued (${actions.length})${suffix}`;
+  }
+  if (type === 'run.finish') {
+    const status = String(payload.status || 'done').trim();
+    const error = normalizeTextSummary(payload.error || '', 100);
+    return error ? `run finish · ${status} · ${error}` : `run finish · ${status}`;
+  }
+  if (type === 'run.metadata') {
+    return 'run metadata updated';
+  }
+  return normalizeTextSummary(type || 'runtime event', 120) || 'runtime event';
+}
+
+function collectRuntimeActivity({ jobId = '', session = null } = {}) {
+  const items = [];
+  const cleanJobId = String(jobId || '').trim();
+  const pushItem = (entry = {}) => {
+    const ts = String(entry.ts || '').trim();
+    const summary = normalizeTextSummary(entry.summary || '', 180);
+    if (!summary) return;
+    items.push({
+      ts,
+      summary,
+      kind: String(entry.kind || 'activity').trim(),
+      label: String(entry.label || '').trim(),
+    });
+  };
+
+  if (cleanJobId) {
+    let jobDir = '';
+    try {
+      jobDir = jobs.jobDir(cleanJobId);
+    } catch {
+      jobDir = '';
+    }
+    if (jobDir) {
+      const eventFile = path.join(jobDir, 'runtime_events.jsonl');
+      const events = readJsonlTail(eventFile, 16);
+      for (const row of events.slice().reverse()) {
+        pushItem({
+          ts: String(row?.ts || '').trim(),
+          kind: 'event',
+          label: String(row?.event_type || '').trim(),
+          summary: summarizeRuntimeEvent(row),
+        });
+      }
+      for (const docName of ['progress', 'decisions', 'artifacts']) {
+        try {
+          const resolvedName = tracking.resolveDocName(cleanJobId, docName);
+          const filePath = path.join(jobDir, 'shared', resolvedName);
+          if (!fs.existsSync(filePath)) continue;
+          const stat = fs.statSync(filePath);
+          const body = fs.readFileSync(filePath, 'utf8');
+          const snippet = normalizeActivitySnippet(body, 180);
+          if (!snippet) continue;
+          pushItem({
+            ts: new Date(stat.mtimeMs).toISOString(),
+            kind: 'doc',
+            label: resolvedName,
+            summary: `${docName} 업데이트 · ${snippet}`,
+          });
+        } catch {}
+      }
+    }
+  }
+
+  const recentTurns = Array.isArray(session?.recent_agent_turns) ? session.recent_agent_turns : [];
+  for (const row of recentTurns) {
+    const agentLabel = String(row?.agent_name || row?.agent_id || '').trim();
+    const summary = normalizeTextSummary(row?.output || row?.goal || '', 170);
+    if (!agentLabel || !summary) continue;
+    pushItem({
+      ts: String(row?.ts || '').trim(),
+      kind: 'agent_turn',
+      label: agentLabel,
+      summary: `${agentLabel}: ${summary}`,
+    });
+  }
+
+  const deduped = [];
+  const seen = new Set();
+  for (const row of items.sort((a, b) => Date.parse(String(b.ts || '')) - Date.parse(String(a.ts || '')))) {
+    const key = `${row.kind}|${row.summary}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(row);
+    if (deduped.length >= 8) break;
+  }
+  const last = deduped[0] || null;
+  return {
+    last_activity_ts: last?.ts || '',
+    last_activity_summary: last?.summary || '',
+    items: deduped,
+  };
+}
+
+function summarizeHeartbeat(activity = null, { isRunning = false } = {}) {
+  const ts = String(activity?.last_activity_ts || '').trim();
+  const summary = normalizeTextSummary(activity?.last_activity_summary || '', 120);
+  if (!ts) return isRunning ? '활동 기록 없음' : 'idle';
+  return `${formatRelativeAge(ts)}${summary ? ` · ${summary}` : ''}`;
+}
+
+function summarizeActiveAgents(agentStatus = {}, agentIndex = new Map()) {
+  const rows = Object.entries(agentStatus && typeof agentStatus === 'object' ? agentStatus : {})
+    .map(([agentId, status]) => ({ agentId, ...(status && typeof status === 'object' ? status : {}) }))
+    .filter((row) => ['running', 'queued'].includes(String(row.state || '').trim().toLowerCase()));
+  if (rows.length === 0) return '';
+  return rows.slice(0, 3).map((row) => {
+    const label = formatAgentRef(row.agentId, agentIndex);
+    const state = String(row.state || '').trim().toLowerCase();
+    const startedAt = String(row.started_at || row.startedAt || '').trim();
+    const age = startedAt ? ` ${formatRelativeAge(startedAt)}` : '';
+    return `${label}(${state}${age ? ` · ${age}` : ''})`;
+  }).join(', ');
+}
+
+function deriveQualityDeltaSummary({ recentProgress = '', criticSummary = '' } = {}) {
+  const recent = normalizeTextSummary(recentProgress, 110);
+  const critic = normalizeTextSummary(criticSummary, 110);
+  if (!recent || !critic) return '';
+  return `${recent} → ${critic}`;
 }
 
 function buildAgentDisplayIndex(registry = null, runtime = null) {
@@ -269,7 +451,79 @@ function listPendingManualApprovals(jobId) {
   return pending.slice(0, 5);
 }
 
-export function buildChatStatusCard(chatId, runtime = null) {
+function normalizeTextSummary(value = "", max = 140) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return clip(text, max);
+}
+
+function inferTeamArchetype(activeTeam = null, runtimeTeamSnapshot = null) {
+  const team = activeTeam && typeof activeTeam === "object" ? activeTeam : {};
+  const snapshot = runtimeTeamSnapshot && typeof runtimeTeamSnapshot === "object" ? runtimeTeamSnapshot : {};
+  return String(
+    team.task_archetype
+    || team.archetype
+    || team.archetype_id
+    || snapshot.task_archetype
+    || snapshot.archetype
+    || snapshot.archetype_id
+    || ""
+  ).trim();
+}
+
+function findRecentProgressSummary(session = null) {
+  const recentTurns = Array.isArray(session?.recent_agent_turns) ? session.recent_agent_turns : [];
+  for (const row of recentTurns) {
+    const label = String(row?.agent_name || row?.agent_id || "").trim();
+    const summary = normalizeTextSummary(row?.output || row?.goal || "", 160);
+    if (label && summary) return `${label}: ${summary}`;
+  }
+  const capsules = Array.isArray(session?.answer_capsules) ? session.answer_capsules : [];
+  for (const row of capsules) {
+    const summary = normalizeTextSummary(row?.answer_summary || row?.answer_excerpt || "", 160);
+    if (summary) return summary;
+  }
+  return "";
+}
+
+function findCriticSummary(session = null) {
+  const recentTurns = Array.isArray(session?.recent_agent_turns) ? session.recent_agent_turns : [];
+  for (const row of recentTurns) {
+    const role = String(row?.role || "").trim().toLowerCase();
+    const agentId = String(row?.agent_id || "").trim().toLowerCase();
+    const agentName = String(row?.agent_name || "").trim().toLowerCase();
+    if (![role, agentId, agentName].some((value) => /critic|review|reviewer|qa|audit|검토/.test(value))) continue;
+    const summary = normalizeTextSummary(row?.output || row?.goal || "", 150);
+    if (summary) return summary;
+  }
+  return "";
+}
+
+function deriveNextHumanAction({ session = null, pendingApproval = null, pendingInstallProposal = null, pendingUserRequest = null, activeJobId = "", artifactCount = 0 } = {}) {
+  if (pendingApproval) return `승인 필요 · ${normalizeTextSummary(pendingApproval.reason || 'approval required', 100)}`;
+  if (pendingInstallProposal) return `install 검토 필요 · gaps=${Number(pendingInstallProposal?.proposal?.gap_count || 0)}`;
+  if (pendingUserRequest?.followup_hint) return normalizeTextSummary(pendingUserRequest.followup_hint, 120);
+  if (session?.state === 'awaiting_user' || session?.last_route?.await_user === true) {
+    return normalizeTextSummary(session?.last_route?.followup_hint || '추가 입력 필요', 120);
+  }
+  if (activeJobId) return '진행 중 · /status full 또는 더 보기';
+  if (artifactCount > 0) return '산출물 확인 · /artifacts 또는 버튼';
+  return '대기 중';
+}
+
+function buildChatStatusKeyboard({ detail = 'compact', artifactCount = 0, showRecent = false } = {}) {
+  const normalizedDetail = String(detail || '').trim().toLowerCase();
+  const isFull = normalizedDetail === 'full';
+  const isRecent = normalizedDetail === 'recent';
+  const primary = [];
+  primary.push({ text: isFull ? '요약 보기' : '더 보기', callback_data: isFull ? 'chat_status:summary' : 'chat_status:full' });
+  if (showRecent) primary.push({ text: '최근 작업', callback_data: 'chat_status:recent' });
+  if (artifactCount > 0) primary.push({ text: '산출물', callback_data: 'chat_status:artifacts' });
+  if (isRecent && primary.length > 0) primary[0] = { text: '요약 보기', callback_data: 'chat_status:summary' };
+  return primary.length > 0 ? { inline_keyboard: [primary] } : null;
+}
+
+export function buildChatStatusCard(chatId, runtime = null, { detail = "compact" } = {}) {
   const chatKey = String(chatId || "");
   const session = chatSessionStore.get(chatId);
   const activeJobId = activeJobByChat.get(chatKey) || "";
@@ -287,6 +541,9 @@ export function buildChatStatusCard(chatId, runtime = null) {
     : null;
   const pendingInstallProposal = session.pending_install_proposal && typeof session.pending_install_proposal === 'object'
     ? session.pending_install_proposal
+    : null;
+  const pendingUserRequest = session.pending_user_request && typeof session.pending_user_request === 'object'
+    ? session.pending_user_request
     : null;
   const lastInstallProposal = session.last_install_proposal && typeof session.last_install_proposal === 'object'
     ? session.last_install_proposal
@@ -322,6 +579,83 @@ export function buildChatStatusCard(chatId, runtime = null) {
       ? runtime.runtime_team_snapshot
       : null);
 
+  const artifactIndex = currentJobId ? loadArtifactIndex(currentJobId) : null;
+  const artifactCount = Array.isArray(artifactIndex?.artifacts) ? artifactIndex.artifacts.length : 0;
+  const teamArchetype = inferTeamArchetype(activeTeam, runtimeTeamSnapshot);
+  const runtimeActivity = collectRuntimeActivity({ jobId: currentJobId, session });
+  const recentProgress = findRecentProgressSummary(session) || runtimeActivity.last_activity_summary || '';
+  const criticSummary = findCriticSummary(session);
+  const qualityDelta = deriveQualityDeltaSummary({ recentProgress, criticSummary });
+  const nextHumanAction = deriveNextHumanAction({
+    session,
+    pendingApproval,
+    pendingInstallProposal,
+    pendingUserRequest,
+    activeJobId,
+    artifactCount,
+  });
+  const iterationLabel = Number.isFinite(Number(lastRoute?.turn)) ? String(lastRoute.turn) : '';
+  const heartbeatLabel = summarizeHeartbeat(runtimeActivity, { isRunning: !!activeJobId });
+  const activeAgentsLabel = summarizeActiveAgents(session?.agent_status, agentIndex);
+  const normalizedDetail = String(detail || '').trim().toLowerCase();
+  if (normalizedDetail === 'recent') {
+    const recentLines = [
+      '🕒 최근 작업',
+      `- phase: ${session.state || 'idle'}${activeJobId ? ' · running' : ''}`,
+      `- heartbeat: ${heartbeatLabel}`,
+      activeAgentsLabel ? `- active: ${activeAgentsLabel}` : '',
+      runtimeActivity.items.length > 0 ? '- recent_work:' : '- recent_work: (none)',
+      ...runtimeActivity.items.slice(0, 6).map((row) => `  • ${formatRelativeAge(row.ts)} · ${row.summary}`),
+      `- next: ${nextHumanAction}`,
+    ].filter(Boolean);
+    return {
+      text: recentLines.join("\n"),
+      reply_markup: buildChatStatusKeyboard({ detail: 'recent', artifactCount, showRecent: runtimeActivity.items.length > 0 }),
+      status: {
+        chat_id: chatKey,
+        state: session.state || 'idle',
+        job_id: currentJobId || null,
+        active_run_id: session.active_run_id || null,
+        running: !!activeJobId,
+        last_activity_ts: runtimeActivity.last_activity_ts || null,
+        last_activity_summary: runtimeActivity.last_activity_summary || null,
+      },
+    };
+  }
+  if (normalizedDetail !== 'full') {
+    const compactLines = [
+      '📋 현재 상태',
+      `- phase: ${session.state || 'idle'}${activeJobId ? ' · running' : ''}`,
+      `- team: ${String(activeTeam?.team_name || 'configured_team').trim() || '(none)'}${teamArchetype ? ` · ${teamArchetype}` : ''}`,
+      iterationLabel ? `- iteration: ${iterationLabel}` : '',
+      `- heartbeat: ${heartbeatLabel}`,
+      activeAgentsLabel ? `- active: ${activeAgentsLabel}` : '',
+      recentProgress ? `- recent: ${recentProgress}` : '',
+      criticSummary ? `- critic: ${criticSummary}` : '',
+      qualityDelta ? `- delta: ${qualityDelta}` : '',
+      `- next: ${nextHumanAction}`,
+      `- artifacts: ${artifactCount}`,
+    ].filter(Boolean);
+    return {
+      text: compactLines.join("\n"),
+      reply_markup: buildChatStatusKeyboard({ detail: 'compact', artifactCount, showRecent: runtimeActivity.items.length > 0 }),
+      status: {
+        chat_id: chatKey,
+        state: session.state || 'idle',
+        job_id: currentJobId || null,
+        active_run_id: session.active_run_id || null,
+        running: !!activeJobId,
+        queue_for_job: queueItems.length,
+        pending_interrupt: interrupt,
+        pending_approval: pendingApproval,
+        pending_user_messages: Array.isArray(session.pending_user_messages) ? session.pending_user_messages.length : 0,
+        enabled_agents: Array.isArray(enabledAgents) ? enabledAgents : [],
+        enabled_tools: Array.isArray(enabledTools) ? enabledTools : [],
+        ...buildRunAuthorityPatch({ runtime_authority: runtimeAuthority }),
+      },
+    };
+  }
+
   const lines = [
     "📋 현재 상태",
     `- state: ${session.state || "idle"}`,
@@ -332,6 +666,7 @@ export function buildChatStatusCard(chatId, runtime = null) {
     `- abort_signal: ${activeController ? (activeController.signal.aborted ? "aborted" : "active") : "none"}`,
     `- pending_interrupt: ${interrupt?.requested ? `${interrupt.mode}${interrupt.reason ? ` (${clip(interrupt.reason, 90)})` : ""}` : "none"}`,
     `- pending_approval: ${pendingApproval ? (pendingApproval.reason || "yes") : "none"}`,
+    `- pending_user_request: ${pendingUserRequest ? (pendingUserRequest.reason || pendingUserRequest.followup_hint || 'yes') : 'none'}`,
     pendingApprovalActionLabel ? `- pending_approval_action: ${pendingApprovalActionLabel}` : "",
     `- pending_install_proposal: ${pendingInstallProposal ? `${String(pendingInstallProposal.status || 'awaiting_install_approval')} (gaps=${Number(pendingInstallProposal?.proposal?.gap_count || 0)})` : 'none'}`,
     (!pendingInstallProposal && lastInstallProposal) ? `- last_install_proposal: ${String(lastInstallProposal.status || 'done')}` : '',
@@ -378,6 +713,16 @@ export function buildChatStatusCard(chatId, runtime = null) {
       lines.push(`- fallback_reason: ${clip(runtimeAuthority.fallback_reason, 180)}`);
     }
   }
+  lines.push(`- heartbeat: ${heartbeatLabel}`);
+  if (activeAgentsLabel) {
+    lines.push(`- active_agents: ${activeAgentsLabel}`);
+  }
+  if (runtimeActivity.last_activity_summary) {
+    lines.push(`- last_activity: ${runtimeActivity.last_activity_summary}`);
+  }
+  if (qualityDelta) {
+    lines.push(`- quality_delta: ${qualityDelta}`);
+  }
   if (runtimeTeamSnapshot) {
     const snapshotLines = summarizeRuntimeTeamSnapshotLines(runtimeTeamSnapshot, {
       actionSource: session?.last_route?.action_source || "",
@@ -391,11 +736,18 @@ export function buildChatStatusCard(chatId, runtime = null) {
     lines.push('- team_preview:');
     for (const row of plannedRosterRows) lines.push(`  • ${row}`);
   }
+  if (runtimeActivity.items.length > 0) {
+    lines.push('- recent_runtime_activity:');
+    for (const row of runtimeActivity.items.slice(0, 5)) {
+      lines.push(`  • ${formatRelativeAge(row.ts)} · ${row.summary}`);
+    }
+  }
   if (runtime?.jobConfigDebugSummary) {
     lines.push(`- job_config(debug): ${clip(String(runtime.jobConfigDebugSummary || ""), 240)}`);
   }
   return {
     text: lines.join("\n"),
+    reply_markup: buildChatStatusKeyboard({ detail: 'full', artifactCount, showRecent: runtimeActivity.items.length > 0 }),
     status: {
       chat_id: chatKey,
       state: session.state || "idle",
@@ -432,7 +784,7 @@ export function formatAgentMemorySummary() {
   ].join("\n");
 }
 
-export async function sendChatStatus(bot, chatId, { telegramUserId = "" } = {}) {
+export async function sendChatStatus(bot, chatId, { telegramUserId = "", detail = "compact" } = {}) {
   const currentJobId = String(resolveCurrentJobIdForChat(chatId) || "").trim();
   let runtime = null;
   if (currentJobId) {
@@ -447,7 +799,11 @@ export async function sendChatStatus(bot, chatId, { telegramUserId = "" } = {}) 
       runtime = null;
     }
   }
-  const card = buildChatStatusCard(chatId, runtime);
+  const card = buildChatStatusCard(chatId, runtime, { detail });
+  if (card.reply_markup) {
+    await bot.sendMessage(chatId, card.text, { reply_markup: card.reply_markup });
+    return;
+  }
   await sendLong(bot, chatId, card.text);
 }
 

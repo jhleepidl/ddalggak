@@ -91,7 +91,9 @@ import { buildExplicitTeamReconfigurationActions } from "./team_config_diff.js";
 import { applyTeamConfigurationToRuntime, buildAutoRefineDraftFromStructureConflict, formatTeamProposalMessage, getSessionTeamState, hydrateSessionTeamStateFromConversationStore, storePendingTeam, syncTeamConfigurationToConversationStore, validateTeamConfiguration } from "./team_configuration.js";
 import { appendRecentAgentTurn, planAgentFollowupShortcut } from "./agent_followup_shortcuts.js";
 import { buildAnswerCapsules } from "./answer_capsules.js";
+import { detectCapabilityGapsFromExecution } from "./capability_gap_detector.js";
 import { buildInstallProposalPrompt, buildInstallProposalStateFromExecution, setPendingInstallProposal } from './install_proposal_state.js';
+import { resolveCredentialEnvForChat } from './credential_binding.js';
 import { buildAgentLocalInteractionContract } from "../domain/interaction_spec.js";
 import {
   verifyConversationMembershipMutation,
@@ -178,6 +180,7 @@ async function maybeBuildStructureConflictRefineDraft({ sessionStore, chatId, te
 const {
   FENCE,
   CHAT_VERBOSE,
+  TELEGRAM_PROGRESS_DETAIL_MODE,
   MAX_PARALLEL_PER_RUN,
   AUTOPILOT_ENABLED,
   AUTOPILOT_MAX_TURNS,
@@ -494,6 +497,21 @@ function buildAgentChatUpdateText({ agentId = "", output = "" } = {}) {
   return `🧾 ${displayName} 중간 결과\n${clip(cleanOutput, 2400)}`;
 }
 
+
+function useCompactProgressUpdates(verbose = false) {
+  return !verbose && TELEGRAM_PROGRESS_DETAIL_MODE !== 'full';
+}
+
+function buildCompactExecutionUpdateText({ displayName = '', output = '', routeSignals = [], final = false } = {}) {
+  const cleanDisplayName = String(displayName || '').trim() || 'Agent';
+  const explicit = extractChatUpdateBlock(output);
+  const raw = explicit || String(output || '').split(/\r?\n/).map((line) => String(line || '').trim()).filter(Boolean).slice(0, 3).join(' ');
+  const summary = clip(String(raw || (final ? '최종 정리를 마쳤습니다.' : '작업을 마쳤습니다.')).replace(/\s+/g, ' ').trim(), final ? 600 : 220);
+  const lines = [final ? `🧩 ${cleanDisplayName} 최종 정리` : `✅ ${cleanDisplayName} 완료`, summary];
+  if (Array.isArray(routeSignals) && routeSignals.length > 0) lines.push(`route_signals=${routeSignals.join(', ')}`);
+  return lines.join('\n');
+}
+
 function buildAgentKnowledgeBaseBlock(jobId, { provider = "", roleId = "", agentId = "" } = {}) {
   try {
     const profile = tracking.loadProfile(jobId);
@@ -545,7 +563,7 @@ function ensureCliWorkspaceSupportFiles(jobId, { provider = "", roleMemo = "", k
   return {};
 }
 
-async function runToolProxyStep({ action = {}, jobId = "", signal = null, runtime = null } = {}) {
+async function runToolProxyStep({ action = {}, jobId = "", signal = null, runtime = null, chatId = '' } = {}) {
   return await executeToolProxyAction({
     action,
     jobId,
@@ -554,6 +572,7 @@ async function runToolProxyStep({ action = {}, jobId = "", signal = null, runtim
     tracking,
     signal,
     runtimeExecutionPolicy: resolveRuntimeExecutionPolicyForRuntime(runtime),
+    env: resolveCredentialEnvForChat(chatSessionStore, chatId),
   });
 }
 
@@ -655,7 +674,10 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     approvalMode: providerOptions.approvalMode,
     settingsOverwrite: providerOptions.settingsOverwrite,
     workspaceSettingsPatch: providerOptions.workspaceSettings,
-    extraEnv: providerOptions.extraEnv,
+    extraEnv: {
+      ...(providerOptions.extraEnv || {}),
+      ...resolveCredentialEnvForChat(chatSessionStore, opts.chatId || ''),
+    },
   });
   const out = (r.stdout || r.stderr || "");
   tracking.append(jobId, "research", `## ${sectionTitle}\n\n${out}\n`);
@@ -673,6 +695,7 @@ async function codexImplement(jobId, instruction, signal = null, opts = {}) {
       provider: "codex",
       workspaceRoot: runWorkspaceDir(jobId),
     });
+  const credentialEnv = resolveCredentialEnvForChat(chatSessionStore, opts.chatId || '');
   const roleMemo = memory.getAgentRole("codex");
   const ctx = await loadContextDocs(jobId, ["plan", "research"], 6000);
   const trackDocs = runtimeState.tracking.listDocs(jobId).map((entry) => `- ${path.join(runSharedDir(jobId), entry.file_name)}`).join("\n");
@@ -719,6 +742,10 @@ async function codexImplement(jobId, instruction, signal = null, opts = {}) {
       ...(providerOptions.configOverrides || {}),
       ...(cliSupport.codexInstructionFile ? { model_instructions_file: cliSupport.codexInstructionFile } : {}),
     },
+    env: {
+      ...(providerOptions.extraEnv || {}),
+      ...credentialEnv,
+    },
   });
   const out = (r.stdout || r.stderr || "");
   tracking.append(jobId, "progress", `## Codex output\n\n${out}\n`);
@@ -763,8 +790,7 @@ async function synthesizeChatReply(message, routePlan, execution = {}) {
   const hardFailures = Array.isArray(execution?.results)
     ? execution.results.filter((row) => ['error', 'blocked'].includes(String(row?.status || '').trim().toLowerCase()))
     : [];
-  const outputTextBlob = outputs.map((row) => String(row?.output || '').trim()).join('\n');
-  const capabilityGapDetected = /Tool ['"]?[a-zA-Z0-9_.-]+['"]? not found|OPENAI_API_KEY|GEMINI_API_KEY|ANTHROPIC_API_KEY|api[_ -]?key/i.test(outputTextBlob);
+  const capabilityGapDetected = detectCapabilityGapsFromExecution(execution).length > 0;
   if (outputs.length === 0 || hardFailures.length > 0 || capabilityGapDetected) {
     return buildChatSynthesisFallback(message, execution, execution?.runtime || null);
   }
@@ -1912,7 +1938,7 @@ function buildSupervisorExecutionCallbacks({
         action,
         toolName: "tool_proxy_call",
         work: async () => {
-          return await runToolProxyStep({ action, jobId, signal: controller?.signal || null, runtime });
+          return await runToolProxyStep({ action, jobId, signal: controller?.signal || null, runtime, chatId });
         },
       });
     },
@@ -2722,6 +2748,7 @@ async function runSupervisorChat(
         logger: (line) => jobs.log(currentJobId, line),
       })
       : null;
+    const currentRunId = String(executionGraph?.runId || '').trim() || undefined;
     runEventSink = runtimeCapabilities?.createRunEventSink
       ? runtimeCapabilities.createRunEventSink({ executionGraph })
       : null;
@@ -3263,6 +3290,29 @@ async function runSupervisorChat(
       const turnRemainingActions = Array.isArray(execution?.remaining_actions)
         ? execution.remaining_actions
         : [];
+      const turnAwaitUserRequest = execution?.await_user_request && typeof execution.await_user_request === 'object'
+        ? execution.await_user_request
+        : null;
+      if (turnAwaitUserRequest && !execution?.pendingApproval) {
+        routePlan = {
+          ...routePlan,
+          await_user: true,
+          done: false,
+          followup_hint: String(turnAwaitUserRequest.followup_hint || routePlan?.followup_hint || '').trim() || routePlan?.followup_hint,
+        };
+        chatSessionStore.upsert(chatId, (session) => ({
+          ...session,
+          state: 'awaiting_user',
+          pending_user_request: turnAwaitUserRequest,
+          last_route: session?.last_route && typeof session.last_route === 'object'
+            ? {
+              ...session.last_route,
+              await_user: true,
+              followup_hint: String(turnAwaitUserRequest.followup_hint || session?.last_route?.followup_hint || '').trim() || session?.last_route?.followup_hint,
+            }
+            : session?.last_route || null,
+        }));
+      }
       mergedResults = [...mergedResults, ...turnResults];
       mergedOutputs = [...mergedOutputs, ...turnOutputs];
 
@@ -3335,6 +3385,7 @@ async function runSupervisorChat(
           fallbackReasonEmpty: "(none)",
         }),
         `- actions: ${planActions.map((row) => chatActionLabel(row)).join(" -> ") || "(none)"}`,
+        turnAwaitUserRequest ? `- recovery_await_user: ${clip(String(turnAwaitUserRequest.reason || turnAwaitUserRequest.followup_hint || ''), 220)}` : '',
         `- mode: ${runtime.mode}`,
         `- pending_approval: ${execution.pendingApproval ? execution.pendingApproval.reason : "none"}`,
         `- done: ${routePlan.done === true ? "true" : "false"}`,
@@ -3657,7 +3708,7 @@ async function runSupervisorChat(
       );
       if (promptMessage) assistantReplyMessages.push(promptMessage);
     } else if (installProposalState?.proposal?.gap_count > 0) {
-      const installPrompt = buildInstallProposalPrompt(installProposalState, { hasPendingTeam: !!getSessionTeamState(chatSessionStore, chatId)?.pending_team });
+      const installPrompt = buildInstallProposalPrompt(installProposalState, { hasPendingTeam: !!getSessionTeamState(chatSessionStore, chatId)?.pending_team, chatId, sessionStore: chatSessionStore });
       if (installPrompt?.text) {
         const installMessage = await bot.sendMessage(
           chatId,
@@ -3677,7 +3728,7 @@ async function runSupervisorChat(
     const capsules = buildAnswerCapsules({
       telegramMessages: assistantReplyMessages,
       replyToMessageId: userReplyToMessageId,
-      runId,
+      runId: currentRunId,
       jobId: currentJobId,
       routePlan,
       execution: mergedExecution,
@@ -3889,7 +3940,7 @@ async function executeChatActions(
           agentId,
           buildTelegramAgentIndex({ runtime })
         );
-        if (verbose) await bot.sendMessage(chatId, `🤖 ${agentDisplay} 실행 중…`);
+        if (!useCompactProgressUpdates(verbose)) await bot.sendMessage(chatId, `🤖 ${agentDisplay} 실행 중…`);
 
         try {
           const result = await enqueue(
@@ -4029,6 +4080,7 @@ ${taskBody}`
       const output = await codexImplement(jobId, combinedInstruction, signal, {
         runtimeExecutionPolicy,
         providerOptions,
+        chatId,
       });
       const fallback = gocFallbackByJob.get(String(jobId));
       if (fallback) {
@@ -4056,6 +4108,7 @@ ${taskBody}`
         onGeminiGiveUp,
         runtimeExecutionPolicy,
         providerOptions,
+        chatId,
       });
       const fallback = gocFallbackByJob.get(String(jobId));
       if (fallback) {
@@ -4290,7 +4343,7 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
       const agentInfo = findAgentConfigInRuntime(act.agent, runtime) || findAgentConfig(act.agent);
       const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
       const displayName = formatChatAgentDisplayName(act.agent, agentIndex);
-      await bot.sendMessage(chatId, `🤖 ${displayName} 실행 중… (${provider})`);
+      if (!useCompactProgressUpdates(false)) await bot.sendMessage(chatId, `🤖 ${displayName} 실행 중… (${provider})`);
       const scopedActState = prepareScopedAction(withAgentOutputContract(act, {
         runtimeExecutionPolicy: legacyDirectRuntimeExecutionPolicy,
       }));
@@ -4308,9 +4361,11 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
       );
       const routeSignals = resolveActionRouteSignals({ action: act, result });
       for (const signal of routeSignals) activeRouteSignals.add(signal);
-      await sendLong(bot, chatId, `🤖 ${displayName} 완료 (${result.mode})${routeSignals.length > 0 ? `
-route_signals=${routeSignals.join(', ')}` : ''}
-${clip(result.output, 3500)}`);
+      if (useCompactProgressUpdates(false)) {
+        await bot.sendMessage(chatId, buildCompactExecutionUpdateText({ displayName, output: result.output, routeSignals }));
+      } else {
+        await sendLong(bot, chatId, `🤖 ${displayName} 완료 (${result.mode})${routeSignals.length > 0 ? `\nroute_signals=${routeSignals.join(', ')}` : ''}\n${clip(result.output, 3500)}`);
+      }
       if (result.provider === "chatgpt") askedChatGPT = true;
       continue;
     }
@@ -4319,7 +4374,7 @@ ${clip(result.output, 3500)}`);
       const agentInfo = findAgentConfigInRuntime(act.agent, runtime) || findAgentConfig(act.agent);
       const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
       const displayName = formatChatAgentDisplayName(act.agent, agentIndex);
-      await bot.sendMessage(chatId, `🧩 ${displayName} 최종 합성 중… (${provider})`);
+      if (!useCompactProgressUpdates(false)) await bot.sendMessage(chatId, `🧩 ${displayName} 최종 합성 중… (${provider})`);
       const scopedSynthesisState = prepareScopedAction(withAgentOutputContract({
         type: "agent_run",
         agent: act.agent,
@@ -4345,9 +4400,11 @@ ${clip(result.output, 3500)}`);
       );
       const routeSignals = resolveActionRouteSignals({ action: act, result });
       for (const signal of routeSignals) activeRouteSignals.add(signal);
-      await sendLong(bot, chatId, `🧩 ${displayName} 최종 합성 완료 (${result.mode})${routeSignals.length > 0 ? `
-route_signals=${routeSignals.join(', ')}` : ''}
-${clip(result.output, 3500)}`);
+      if (useCompactProgressUpdates(false)) {
+        await bot.sendMessage(chatId, buildCompactExecutionUpdateText({ displayName, output: result.output, routeSignals, final: true }));
+      } else {
+        await sendLong(bot, chatId, `🧩 ${displayName} 최종 합성 완료 (${result.mode})${routeSignals.length > 0 ? `\nroute_signals=${routeSignals.join(', ')}` : ''}\n${clip(result.output, 3500)}`);
+      }
       if (result.provider === "chatgpt") askedChatGPT = true;
       continue;
     }
@@ -4355,7 +4412,7 @@ ${clip(result.output, 3500)}`);
     if (act.type === "spawn_parallel") {
       const children = Array.isArray(act.agents) ? act.agents : [];
       if (children.length === 0) continue;
-      await bot.sendMessage(chatId, `📣 병렬 실행 시작 (${children.length})`);
+      if (!useCompactProgressUpdates(false)) await bot.sendMessage(chatId, `📣 병렬 실행 시작 (${children.length})`);
       const settled = await Promise.allSettled(children.map((child) => {
         const scopedChildState = prepareScopedAction(withAgentOutputContract(child, {
           runtimeExecutionPolicy: legacyDirectRuntimeExecutionPolicy,
@@ -4389,10 +4446,14 @@ ${clip(result.output, 3500)}`);
           summaries.push(`- ${displayName}: ${String(row.reason?.message || row.reason || "error")}`);
         }
       }
-      await sendLong(bot, chatId, [
-        `📣 병렬 실행 완료: ok=${okCount}, error=${errorCount}`,
-        ...summaries,
-      ].join("\n"));
+      if (useCompactProgressUpdates(false)) {
+        await bot.sendMessage(chatId, `📣 병렬 실행 완료: ok=${okCount}, error=${errorCount}`);
+      } else {
+        await sendLong(bot, chatId, [
+          `📣 병렬 실행 완료: ok=${okCount}, error=${errorCount}`,
+          ...summaries,
+        ].join("\n"));
+      }
       continue;
     }
 
@@ -4445,7 +4506,7 @@ route_signals=${routeSignals.join(', ')}` : ''}
     }
 
     if (act.type === "tool_proxy_call") {
-      const proxyResult = await runToolProxyStep({ action: act, jobId, signal, runtime });
+      const proxyResult = await runToolProxyStep({ action: act, jobId, signal, runtime, chatId });
       const routeSignals = resolveActionRouteSignals({ action: act, result: proxyResult });
       for (const signal of routeSignals) activeRouteSignals.add(signal);
       await sendLong(bot, chatId, String(proxyResult?.text || 'tool proxy step'));
@@ -4591,7 +4652,7 @@ reason=${String(note?.reason || 'parallel spawn unavailable').trim()}`
       const agentInfo = findAgentConfigInRuntime(act.agent, effectiveRuntime) || findAgentConfig(act.agent);
       const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
       const displayName = formatChatAgentDisplayName(act.agent, agentIndex);
-      await bot.sendMessage(chatId, `🤖 ${displayName} 실행 중… (${provider})`);
+      if (!useCompactProgressUpdates(false)) await bot.sendMessage(chatId, `🤖 ${displayName} 실행 중… (${provider})`);
       const r = await enqueue(
         () => executeAgentRun(bot, chatId, jobId, withAgentOutputContract(act, {
           runtimeExecutionPolicy,
@@ -4604,9 +4665,11 @@ reason=${String(note?.reason || 'parallel spawn unavailable').trim()}`
       );
       const routeSignals = resolveActionRouteSignals({ action: act, result: r });
       for (const nextSignal of routeSignals) activeRouteSignals.add(nextSignal);
-      await sendLong(bot, chatId, `🤖 ${displayName} 결과 (${r.mode})${routeSignals.length > 0 ? `
-route_signals=${routeSignals.join(', ')}` : ''}
-${clip(r.output, 3500)}`);
+      if (useCompactProgressUpdates(false)) {
+        await bot.sendMessage(chatId, buildCompactExecutionUpdateText({ displayName, output: r.output, routeSignals }));
+      } else {
+        await sendLong(bot, chatId, `🤖 ${displayName} 결과 (${r.mode})${routeSignals.length > 0 ? `\nroute_signals=${routeSignals.join(', ')}` : ''}\n${clip(r.output, 3500)}`);
+      }
       continue;
     }
 
@@ -4614,7 +4677,7 @@ ${clip(r.output, 3500)}`);
       const agentInfo = findAgentConfigInRuntime(act.agent, effectiveRuntime) || findAgentConfig(act.agent);
       const provider = String(agentInfo?.provider || "").trim().toLowerCase() || "unknown";
       const displayName = formatChatAgentDisplayName(act.agent, agentIndex);
-      await bot.sendMessage(chatId, `🧩 ${displayName} 최종 합성 중… (${provider})`);
+      if (!useCompactProgressUpdates(false)) await bot.sendMessage(chatId, `🧩 ${displayName} 최종 합성 중… (${provider})`);
       const r = await enqueue(
         () => executeAgentRun(bot, chatId, jobId, withAgentOutputContract({
           type: "agent_run",
@@ -4635,16 +4698,18 @@ ${clip(r.output, 3500)}`);
       );
       const routeSignals = resolveActionRouteSignals({ action: act, result: r });
       for (const nextSignal of routeSignals) activeRouteSignals.add(nextSignal);
-      await sendLong(bot, chatId, `🧩 ${displayName} 최종 합성 완료 (${r.mode})${routeSignals.length > 0 ? `
-route_signals=${routeSignals.join(', ')}` : ''}
-${clip(r.output, 3500)}`);
+      if (useCompactProgressUpdates(false)) {
+        await bot.sendMessage(chatId, buildCompactExecutionUpdateText({ displayName, output: r.output, routeSignals, final: true }));
+      } else {
+        await sendLong(bot, chatId, `🧩 ${displayName} 최종 합성 완료 (${r.mode})${routeSignals.length > 0 ? `\nroute_signals=${routeSignals.join(', ')}` : ''}\n${clip(r.output, 3500)}`);
+      }
       continue;
     }
 
     if (act.type === "spawn_parallel") {
       const children = Array.isArray(act.agents) ? act.agents : [];
       if (children.length === 0) continue;
-      await bot.sendMessage(chatId, `📣 병렬 실행 시작 (${children.length})`);
+      if (!useCompactProgressUpdates(false)) await bot.sendMessage(chatId, `📣 병렬 실행 시작 (${children.length})`);
       const settled = await Promise.allSettled(children.map((child) => enqueue(
         () => executeAgentRun(bot, chatId, jobId, withAgentOutputContract(child, {
           runtimeExecutionPolicy,
@@ -4671,10 +4736,14 @@ ${clip(r.output, 3500)}`);
           summaries.push(`- ${displayName}: ${String(row.reason?.message || row.reason || "error")}`);
         }
       }
-      await sendLong(bot, chatId, [
-        `📣 병렬 실행 완료: ok=${okCount}, error=${errorCount}`,
-        ...summaries,
-      ].join("\n"));
+      if (useCompactProgressUpdates(false)) {
+        await bot.sendMessage(chatId, `📣 병렬 실행 완료: ok=${okCount}, error=${errorCount}`);
+      } else {
+        await sendLong(bot, chatId, [
+          `📣 병렬 실행 완료: ok=${okCount}, error=${errorCount}`,
+          ...summaries,
+        ].join("\n"));
+      }
       continue;
     }
 
@@ -4731,7 +4800,7 @@ route_signals=${routeSignals.join(', ')}` : ''}`);
     }
 
     if (act.type === "tool_proxy_call") {
-      const proxyResult = await runToolProxyStep({ action: act, jobId, signal, runtime: effectiveRuntime });
+      const proxyResult = await runToolProxyStep({ action: act, jobId, signal, runtime: effectiveRuntime, chatId });
       const routeSignals = resolveActionRouteSignals({ action: act, result: proxyResult });
       for (const nextSignal of routeSignals) activeRouteSignals.add(nextSignal);
       await sendLong(bot, chatId, String(proxyResult?.text || 'tool proxy step'));

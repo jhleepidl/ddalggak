@@ -121,6 +121,7 @@ export async function executeToolProxyAction({
   tracking = null,
   signal = null,
   runtimeExecutionPolicy = {},
+  env = {},
 } = {}) {
   const root = path.resolve(String(workspaceRoot || process.cwd()).trim() || process.cwd());
   const plan = planVerificationCommands({ action, workspaceRoot: root });
@@ -190,6 +191,7 @@ export async function executeToolProxyAction({
       cwd: root,
       timeoutMs,
       abortSignal: signal,
+      env,
     });
     commandResults.push({
       command,

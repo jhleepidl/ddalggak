@@ -35,6 +35,8 @@ import { buildTeamStructureV2, normalizeTeamStructureV2, deriveTeamConfigFromStr
 import { deriveKnowledgeBaseDesign, summarizeKnowledgeBaseProfile, formatKnowledgeBaseMemoryMap, formatMemoryPlanMap } from '../knowledge_base/profile.js';
 import { attachTeamBlueprint, buildTaskArchetypeBlueprintDocument, inferTaskArchetype } from './team_blueprint.js';
 import { buildTeamSeedFromTaskArchetype } from './team_blueprint_templates.js';
+import { collectEffectiveAvailableToolIds } from './runtime_tool_availability.js';
+import { buildTeamCapabilityContract, formatTeamCapabilityContractLines } from './team_capability_contract.js';
 
 function asArray(v){return Array.isArray(v)?v:[]}
 function asObject(v){return v&&typeof v==='object'?v:{}}
@@ -45,7 +47,7 @@ function nowIso(){return new Date().toISOString();}
 const COMPOSITION_MODES = new Set(['structured', 'freeform']);
 const PROPOSAL_MODES = new Set(['suggest', 'create', 'refine', 'validate', 'apply']);
 const SUPPORTED_ROLES = new Set(['researcher', 'builder', 'reviewer', 'synthesizer', 'operator']);
-const SUPPORTED_TASK_ARCHETYPES = new Set(['research', 'implementation', 'review_repair']);
+const SUPPORTED_TASK_ARCHETYPES = new Set(['research', 'implementation', 'review_repair', 'iterative_improvement']);
 
 let _skillRegistry = null;
 let _presetRegistry = null;
@@ -105,14 +107,7 @@ function getPresetResolver() {
 }
 
 function collectAvailableToolIds(runtime = null, registry = null) {
-  const out = [];
-  const rows = runtime && typeof runtime === 'object' ? runtimeCatalog(runtime) : [];
-  for (const row of rows) out.push(...asArray(row.tools));
-  for (const toolId of asArray(runtime?.availableToolIds || runtime?.toolIds || runtime?.tool_ids)) out.push(toolId);
-  const reg = registry && typeof registry === 'object' ? registry : loadAgents();
-  for (const agent of asArray(reg?.agents)) out.push(...asArray(agent?.tools || agent?.tool_ids || agent?.toolIds));
-  for (const template of asArray(reg?.templates)) out.push(...asArray(template?.tools || template?.tool_ids || template?.toolIds));
-  return uniqueIds(out, { max: 32 });
+  return uniqueIds([...collectEffectiveAvailableToolIds(runtime, registry && typeof registry === 'object' ? registry : loadAgents())], { max: 32 });
 }
 
 function buildPlanningContext(taskText = '', runtime = null) {
@@ -168,10 +163,12 @@ function selectTaskArchetypeTemplate({ taskText = '', currentTeam = null, planne
   const taskType = cleanId(planning?.taskInterpretation?.task_type || planning?.taskInterpretation?.taskType || '');
   const currentArchetype = cleanId(currentTeam?.task_archetype || currentTeam?.taskArchetype || currentTeam?.team_blueprint?.task_archetype || currentTeam?.teamBlueprint?.task_archetype || '');
   const repairSignals = hints.review && /(repair|regression|incident|postmortem|bug|failure|stalled|audit|triage|root cause|fixup|회귀|장애|오류|감사|원인|수습|복구|수정)/i.test(text);
+  const improvementSignals = (hints.build || hints.review) && /(iterate|iterative|iteration|improve|improvement|optimi[sz]e|refine repeatedly|keep improving|계속 개선|반복 개선|지속 개선|계속 발전|여러 모델|multi-model|자동 개선|반복적으로)/i.test(text);
   const implementationSignals = hints.build || ['code_change', 'implementation', 'workspace_change'].includes(taskType) || /(implement|patch|refactor|code|repo|repository|workspace|script|prototype|구현|패치|리팩터|코드|레포|저장소)/i.test(text);
   const researchSignals = hints.compare || hints.debate || hints.discussion || hints.news || hints.filings || /(research|analysis|analy|brief|memo|investigate|market|survey|source-grounded|조사|분석|브리프|리서치|시장)/i.test(text);
   if (repairSignals) return { archetype: 'review_repair', reason: 'repair_or_audit_signals' };
   if (implementationSignals && hints.review && /(repair|regression|bug|fixup|회귀|장애|오류|복구|수습)/i.test(text)) return { archetype: 'review_repair', reason: 'review_then_repair' };
+  if (improvementSignals) return { archetype: 'iterative_improvement', reason: 'iterative_improvement_signals' };
   if (implementationSignals) return { archetype: 'implementation', reason: 'implementation_signals' };
   if (currentArchetype === 'review_repair' && hints.review) return { archetype: 'review_repair', reason: 'preserve_review_repair' };
   if (researchSignals) return { archetype: 'research', reason: 'research_signals' };
@@ -365,23 +362,33 @@ function resolveAgentExecutionProfile(agent = {}, planning = {}) {
     contextPolicy: agent.context_policy || agent.contextPolicy || {},
     planning,
   });
-  const requiredToolIds = [];
+  const skillRequiredToolIds = [];
   for (const skillId of attachmentIds) {
     const skill = planning.skillRegistry.resolve?.(skillId);
-    requiredToolIds.push(...asArray(skill?.required_tools));
+    skillRequiredToolIds.push(...asArray(skill?.required_tools));
   }
   const codeLikeTask = /ipynb|notebook|jupyter|file|json|python|script|workspace|코드|노트북|파일/.test(`${planning.taskText} ${agent.purpose}`.toLowerCase());
-  const autoToolIds = roleId === 'builder' && codeLikeTask ? ['workspace_fs'] : [];
-  const recommendedToolIds = uniqueIds([
+  const explicitRequiredToolIds = uniqueIds([
+    ...asArray(agent?.required_tool_ids || agent?.requiredToolIds),
     ...asArray(slot?.required_tool_ids),
+    ...skillRequiredToolIds,
+  ], { max: 6 });
+  const explicitOptionalToolIds = uniqueIds([
+    ...asArray(agent?.optional_tool_ids || agent?.optionalToolIds),
+    ...asArray(agent?.recommended_tool_ids || agent?.recommendedToolIds),
     ...asArray(preset?.selection_features?.tool_hints),
-    ...requiredToolIds,
-    ...autoToolIds,
-  ], { max: 5 });
+    ...(roleId === 'builder' && codeLikeTask ? ['workspace_fs', 'shell'] : []),
+  ], { max: 6 }).filter((toolId) => !explicitRequiredToolIds.includes(toolId));
+  const recommendedToolIds = uniqueIds([
+    ...explicitRequiredToolIds,
+    ...explicitOptionalToolIds,
+  ], { max: 6 });
   const capabilities = deriveCapabilityLabels({ role: agent.role, taskText: planning.taskText, purpose: agent.purpose, name: agent.name });
   return {
     capabilities,
     attached_skill_ids: attachmentIds,
+    required_tool_ids: explicitRequiredToolIds,
+    optional_tool_ids: explicitOptionalToolIds,
     recommended_tool_ids: recommendedToolIds,
     matched_preset_id: cleanId(preset?.preset_id || ''),
     matched_preset_name: clean(preset?.display_name || ''),
@@ -438,6 +445,8 @@ function enrichAgentDraft(agent = {}, planning = {}) {
     capabilities: executionProfile.capabilities,
     skills: executionProfile.capabilities,
     attached_skill_ids: executionProfile.attached_skill_ids,
+    required_tool_ids: executionProfile.required_tool_ids,
+    optional_tool_ids: executionProfile.optional_tool_ids,
     recommended_tool_ids: executionProfile.recommended_tool_ids,
     matched_preset_id: executionProfile.matched_preset_id || undefined,
     matched_preset_name: executionProfile.matched_preset_name || undefined,
@@ -1409,6 +1418,8 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
       skills: resolvedCapabilities,
       attached_skill_ids: rawAttachedSkillIds,
       generated_skill_briefs: normalizeGeneratedSkillBriefs(entry.generated_skill_briefs || entry.generatedSkillBriefs || []),
+      required_tool_ids: uniqueIds(entry.required_tool_ids || entry.requiredToolIds || []),
+      optional_tool_ids: uniqueIds(entry.optional_tool_ids || entry.optionalToolIds || []),
       recommended_tool_ids: uniqueIds(entry.recommended_tool_ids || entry.recommendedToolIds || []),
       matched_preset_id: cleanId(entry.matched_preset_id || entry.matchedPresetId || '' ) || undefined,
       matched_preset_name: clean(entry.matched_preset_name || entry.matchedPresetName || '' ) || undefined,
@@ -1605,8 +1616,21 @@ function overlayPlannerAgentDraft(base = {}, plannerAgent = {}, { taskText = '' 
     capabilities: capabilities.length > 0 ? capabilities : asArray(base.capabilities || base.skills),
     skills: capabilities.length > 0 ? capabilities : asArray(base.capabilities || base.skills),
     attached_skill_ids: attachedSkillIds,
-    recommended_tool_ids: uniqueIds([
+    required_tool_ids: uniqueIds([
+      ...asArray(plannerAgent.required_tool_ids || plannerAgent.requiredToolIds),
+      ...asArray(base.required_tool_ids),
+    ], { max: 6 }),
+    optional_tool_ids: uniqueIds([
+      ...asArray(plannerAgent.optional_tool_ids || plannerAgent.optionalToolIds),
+      ...asArray(base.optional_tool_ids),
       ...asArray(plannerAgent.recommended_tool_ids || plannerAgent.recommendedToolIds),
+    ], { max: 6 }),
+    recommended_tool_ids: uniqueIds([
+      ...asArray(plannerAgent.required_tool_ids || plannerAgent.requiredToolIds),
+      ...asArray(plannerAgent.optional_tool_ids || plannerAgent.optionalToolIds),
+      ...asArray(plannerAgent.recommended_tool_ids || plannerAgent.recommendedToolIds),
+      ...asArray(base.required_tool_ids),
+      ...asArray(base.optional_tool_ids),
       ...asArray(base.recommended_tool_ids),
     ], { max: 6 }),
     generated_skill_briefs: generatedSkillBriefs,
@@ -1627,6 +1651,8 @@ function buildPlannerDrivenFreeformAgents({ taskText = '', runtime = null, plann
     capabilities: uniqueIds(agent?.capabilities || []),
     attached_skill_ids: uniqueIds(agent?.attached_skill_ids || agent?.attachedSkillIds || []),
     generated_skill_briefs: normalizeGeneratedSkillBriefs(agent?.generated_skill_briefs || agent?.generatedSkillBriefs || []),
+    required_tool_ids: uniqueIds(agent?.required_tool_ids || agent?.requiredToolIds || []),
+    optional_tool_ids: uniqueIds(agent?.optional_tool_ids || agent?.optionalToolIds || []),
     recommended_tool_ids: uniqueIds(agent?.recommended_tool_ids || agent?.recommendedToolIds || []),
     context_policy: agent?.context_policy || agent?.contextPolicy || null,
   })).filter((agent) => agent.name);
@@ -1675,6 +1701,8 @@ function buildPlannerDrivenRefineAgents({ taskText = '', runtime = null, planner
     capabilities: uniqueIds(agent?.capabilities || agent?.skills || []),
     attached_skill_ids: uniqueIds(agent?.attached_skill_ids || agent?.attachedSkillIds || []),
     generated_skill_briefs: normalizeGeneratedSkillBriefs(agent?.generated_skill_briefs || agent?.generatedSkillBriefs || []),
+    required_tool_ids: uniqueIds(agent?.required_tool_ids || agent?.requiredToolIds || []),
+    optional_tool_ids: uniqueIds(agent?.optional_tool_ids || agent?.optionalToolIds || []),
     recommended_tool_ids: uniqueIds(agent?.recommended_tool_ids || agent?.recommendedToolIds || []),
     context_policy: agent?.context_policy || agent?.contextPolicy || null,
   })).filter((agent) => agent.name);
@@ -2128,6 +2156,8 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       skills: asArray(configAgent.capabilities || configAgent.skills).length > 0 ? uniqueIds(configAgent.capabilities || configAgent.skills) : asArray(base.skills),
       attached_skill_ids: uniqueIds(configAgent.attached_skill_ids || configAgent.attachedSkillIds || []),
       generated_skill_briefs: normalizeGeneratedSkillBriefs(configAgent.generated_skill_briefs || configAgent.generatedSkillBriefs || []),
+      required_tool_ids: uniqueIds(configAgent.required_tool_ids || configAgent.requiredToolIds || []),
+      optional_tool_ids: uniqueIds(configAgent.optional_tool_ids || configAgent.optionalToolIds || []),
       recommended_tool_ids: uniqueIds(configAgent.recommended_tool_ids || configAgent.recommendedToolIds || []),
       interaction_contract: configAgent.interaction_contract || buildAgentLocalInteractionContract(executionProfile.interaction_spec, clean(configAgent.name || base.name || configAgent.agent_id)),
       prompt: clean(base.prompt || configAgent.prompt || ''),
@@ -2153,6 +2183,8 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       model: merged.model,
       attached_skill_ids: uniqueIds(merged.attached_skill_ids || merged.attachedSkillIds || merged.skills),
       capability_tags: uniqueIds(merged.capabilities || merged.skills),
+      required_tool_ids: uniqueIds(merged.required_tool_ids || merged.requiredToolIds || []),
+      optional_tool_ids: uniqueIds(merged.optional_tool_ids || merged.optionalToolIds || []),
       recommended_tool_ids: uniqueIds(merged.recommended_tool_ids || merged.recommendedToolIds || []),
       assigned_goal: composeAssignedGoalText(configAgent.purpose, merged.generated_skill_briefs),
       interaction_contract: merged.interaction_contract,
@@ -2194,9 +2226,10 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
   return runtime;
 }
 
-export function buildTeamListMessage(teamState = {}) {
+export function buildTeamListMessage(teamState = {}, { runtime = null } = {}) {
   const active = teamState?.active_team;
   if (!active) return '현재 활성 팀이 없습니다.\n/team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 팀을 먼저 구성해 주세요.';
+  const capabilityLines = formatTeamCapabilityContractLines(buildTeamCapabilityContract({ team: active, runtime }), { maxMissing: 4 });
   const lines = [
     `팀 이름: ${clean(active.team_name || 'active_team')}`,
     `구성 방식: ${normalizeCompositionMode(active.composition_mode || 'structured')}`,
@@ -2205,6 +2238,7 @@ export function buildTeamListMessage(teamState = {}) {
     active.structure_v2?.topology?.pattern ? `structure 패턴: ${clean(active.structure_v2.topology.pattern)}` : null,
     active.planner_metadata ? `설계 엔진: ${summarizePlannerMetadata(active.planner_metadata)}` : null,
     active.knowledge_base_profile ? summarizeKnowledgeBaseProfile(active.knowledge_base_profile).split('\n')[0] : null,
+    ...(capabilityLines.length > 0 ? ['', 'Capability contract', ...capabilityLines] : []),
     ...(buildKnowledgeBaseMemoryMapLines(active.memory_plan || active.knowledge_base_profile, { maxLines: 6 }).length > 0 ? [
       '',
       'Memory layout',
@@ -2234,10 +2268,11 @@ export function buildTeamListMessage(teamState = {}) {
   return lines.join('\n');
 }
 
-export function formatTeamProposalMessage(team = {}) {
+export function formatTeamProposalMessage(team = {}, { runtime = null } = {}) {
   const row = team && typeof team === 'object' ? team : {};
   const compositionMode = normalizeCompositionMode(row.composition_mode || 'structured');
   const proposalMode = normalizeProposalMode(row.proposal_mode || (compositionMode === 'freeform' ? 'create' : 'suggest'));
+  const capabilityLines = formatTeamCapabilityContractLines(buildTeamCapabilityContract({ team: row, runtime }), { maxMissing: 4 });
   const lines = [
     `Team proposal · ${clean(row.team_name || 'team_config')}`,
     `구성 방식: ${compositionMode} · 제안 모드: ${proposalMode}`,
@@ -2246,6 +2281,7 @@ export function formatTeamProposalMessage(team = {}) {
     row.planner_metadata ? `설계 엔진: ${summarizePlannerMetadata(row.planner_metadata)}` : null,
     row.structure_v2?.topology?.pattern ? `structure 패턴: ${clean(row.structure_v2.topology.pattern)}` : null,
     asArray(row.good_for).length > 0 ? `good for: ${asArray(row.good_for).slice(0, 3).join(', ')}` : null,
+    ...capabilityLines,
     ...(buildKnowledgeBaseMemoryMapLines(row.memory_plan || row.knowledge_base_profile, { maxLines: 6 }).length > 0 ? [
       '',
       'Memory layout',

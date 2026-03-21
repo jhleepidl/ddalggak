@@ -5,6 +5,9 @@ import {
 import { applyPendingTeam, getSessionTeamState, storePendingTeam, buildTeamListMessage, formatTeamProposalMessage } from '../../application/team_configuration.js';
 import { getPendingInstallProposal, archivePendingInstallProposal, buildInstallProposalPrompt } from '../../application/install_proposal_state.js';
 import { handleTelegramInstallProposalCallback } from './install_proposal_callbacks.js';
+import { buildChatStatusCard } from '../../application/telegram_runtime_ui.js';
+import { loadArtifactIndex, formatArtifactIndexText } from '../../application/telegram_runtime_io.js';
+import { buildPreviewAgentIndex, buildQueuedAgentStatusFromActions, buildRoutedDashboardText } from './preview_formatting.js';
 
 export function createTelegramCallbackQueryHandler(deps = {}) {
   const telegramUi = deps.telegramUi || {};
@@ -96,27 +99,9 @@ export function createTelegramCallbackQueryHandler(deps = {}) {
           return;
         }
 
-        if (data === 'team_state:apply_pending' || data === 'team_state:show_pending' || data === 'team_state:show_active') {
-          const teamState = getSessionTeamState(chatSessionStore, chatId);
-          if (data === 'team_state:show_pending') {
-            await bot.answerCallbackQuery(q.id, { text: teamState?.pending_team ? 'pending team' : 'no pending team' });
-            if (!teamState?.pending_team) {
-              await bot.sendMessage(chatId, '현재 pending team이 없습니다.');
-              return;
-            }
-            await sendLong(bot, chatId, formatTeamProposalMessage(teamState.pending_team));
-            return;
-          }
-          if (data === 'team_state:show_active') {
-            await bot.answerCallbackQuery(q.id, { text: teamState?.active_team ? 'active team' : 'no active team' });
-            await sendLong(bot, chatId, buildTeamListMessage(teamState));
-            return;
-          }
-          await bot.answerCallbackQuery(q.id, { text: teamState?.pending_team ? 'apply pending' : 'no pending team' });
-          if (!teamState?.pending_team) {
-            await bot.sendMessage(chatId, '적용할 pending team이 없습니다.');
-            return;
-          }
+        if (data === 'plan_preview:details') {
+          const session = chatSessionStore.get(chatId) || {};
+          const actions = Array.isArray(session?.last_route?.actions) ? session.last_route.actions : [];
           let runtime = null;
           try {
             const currentJobId = resolveCurrentJobIdForChat?.(chatId);
@@ -124,8 +109,79 @@ export function createTelegramCallbackQueryHandler(deps = {}) {
               runtime = await loadSupervisorRuntime(currentJobId, { telegramUserId: userId, includeContext: false, includeGlobal: false });
             }
           } catch {}
+          const agentStatus = session?.agent_status && typeof session.agent_status === 'object'
+            ? session.agent_status
+            : buildQueuedAgentStatusFromActions(actions);
+          const detailText = buildRoutedDashboardText({
+            actions,
+            agentStatus,
+            agentIndex: buildPreviewAgentIndex({ actions, runtime }),
+          });
+          await bot.answerCallbackQuery(q.id, { text: actions.length > 0 ? 'plan details' : 'no planned actions' });
+          await sendLong(bot, chatId, detailText || '현재 계획된 action이 없습니다.');
+          return;
+        }
+
+        if (data === 'chat_status:summary' || data === 'chat_status:full' || data === 'chat_status:recent' || data === 'chat_status:artifacts') {
+          const currentJobId = resolveCurrentJobIdForChat?.(chatId);
+          let runtime = null;
+          if (currentJobId && typeof loadSupervisorRuntime === 'function') {
+            try {
+              runtime = await loadSupervisorRuntime(currentJobId, { telegramUserId: userId, includeContext: false, includeGlobal: false });
+            } catch {}
+          }
+          if (data === 'chat_status:artifacts') {
+            await bot.answerCallbackQuery(q.id, { text: currentJobId ? 'artifacts' : 'no job' });
+            if (!currentJobId) {
+              await bot.sendMessage(chatId, '현재 활성 job이 없어 산출물을 보여줄 수 없습니다.');
+              return;
+            }
+            const artifactIndex = loadArtifactIndex(currentJobId);
+            await sendLong(bot, chatId, `📎 artifacts
+${formatArtifactIndexText(currentJobId, artifactIndex, { limit: 8 })}`);
+            return;
+          }
+          const detail = data === 'chat_status:full' ? 'full' : (data === 'chat_status:recent' ? 'recent' : 'compact');
+          const card = buildChatStatusCard(chatId, runtime, { detail });
+          await bot.answerCallbackQuery(q.id, { text: detail === 'full' ? 'full status' : (detail === 'recent' ? 'recent activity' : 'status') });
+          if (card.reply_markup) {
+            await bot.sendMessage(chatId, card.text, { reply_markup: card.reply_markup });
+          } else {
+            await sendLong(bot, chatId, card.text);
+          }
+          return;
+        }
+
+        if (data === 'team_state:apply_pending' || data === 'team_state:show_pending' || data === 'team_state:show_active') {
+          const teamState = getSessionTeamState(chatSessionStore, chatId);
+          let runtime = null;
+          try {
+            const currentJobId = resolveCurrentJobIdForChat?.(chatId);
+            if (currentJobId && typeof loadSupervisorRuntime === 'function') {
+              runtime = await loadSupervisorRuntime(currentJobId, { telegramUserId: userId, includeContext: false, includeGlobal: false });
+            }
+          } catch {}
+          if (data === 'team_state:show_pending') {
+            await bot.answerCallbackQuery(q.id, { text: teamState?.pending_team ? 'pending team' : 'no pending team' });
+            if (!teamState?.pending_team) {
+              await bot.sendMessage(chatId, '현재 pending team이 없습니다.');
+              return;
+            }
+            await sendLong(bot, chatId, formatTeamProposalMessage(teamState.pending_team, { runtime }));
+            return;
+          }
+          if (data === 'team_state:show_active') {
+            await bot.answerCallbackQuery(q.id, { text: teamState?.active_team ? 'active team' : 'no active team' });
+            await sendLong(bot, chatId, buildTeamListMessage(teamState, { runtime }));
+            return;
+          }
+          await bot.answerCallbackQuery(q.id, { text: teamState?.pending_team ? 'apply pending' : 'no pending team' });
+          if (!teamState?.pending_team) {
+            await bot.sendMessage(chatId, '적용할 pending team이 없습니다.');
+            return;
+          }
           const applied = await applyPendingTeam({ sessionStore: chatSessionStore, chatId, runtime });
-          await sendLong(bot, chatId, ['✅ pending team을 active team으로 반영했습니다.', '', buildTeamListMessage({ active_team: applied })].join('\n'));
+          await sendLong(bot, chatId, ['✅ pending team을 active team으로 반영했습니다.', '', buildTeamListMessage({ active_team: applied }, { runtime })].join('\n'));
           return;
         }
 

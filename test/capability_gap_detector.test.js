@@ -45,3 +45,65 @@ test('detectTeamCapabilityGaps flags notebook builders without workspace_fs', ()
 
   assert.ok(gaps.some((gap) => gap.kind === 'missing_tool' && gap.tool_id === 'workspace_fs'));
 });
+
+
+test('detectCapabilityGapsFromExecution ignores benign API key mentions in notebook guidance', () => {
+  const gaps = detectCapabilityGapsFromExecution({
+    outputs: [
+      { agentId: 'Notebook Builder', output: 'Suggested validation: set OPENAI_API_KEY and re-run the demo notebook if you want to test live responses.' },
+    ],
+  });
+
+  assert.equal(gaps.some((gap) => gap.kind === 'missing_credential'), false);
+});
+
+test('detectTeamCapabilityGaps treats codex workspace-write as provider-backed workspace capability', () => {
+  const registry = new SkillRegistry({ skillsDir: path.resolve(process.cwd(), 'skills') });
+  registry.load({ refresh: true });
+
+  const gaps = detectTeamCapabilityGaps({
+    team: {
+      agents: [
+        {
+          name: 'Notebook Builder',
+          role: 'builder',
+          provider: 'codex',
+          purpose: 'Jupyter notebook artifacts and code patches',
+          recommended_tool_ids: ['workspace_fs'],
+        },
+      ],
+      runtime_execution: {
+        providers: {
+          codex: {
+            sandbox_mode: 'workspace-write',
+            approval_policy: 'never',
+          },
+        },
+      },
+    },
+    runtime: {
+      availableToolIds: [],
+      activeTeamConfig: {
+        agents: [
+          {
+            name: 'Notebook Builder',
+            role: 'builder',
+            provider: 'codex',
+            recommended_tool_ids: ['workspace_fs'],
+          },
+        ],
+        runtime_execution: {
+          providers: {
+            codex: {
+              sandbox_mode: 'workspace-write',
+              approval_policy: 'never',
+            },
+          },
+        },
+      },
+    },
+    skillRegistry: registry,
+  });
+
+  assert.equal(gaps.some((gap) => gap.kind === 'missing_tool' && gap.tool_id === 'workspace_fs'), false);
+});

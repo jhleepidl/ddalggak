@@ -19,6 +19,11 @@ import {
 } from "../application/run_authority.js";
 import { sanitizeExecutablePlan } from "./route_execution_contract.js";
 import {
+  buildFailureRecoveryScoutGoal,
+  classifyExecutionFailure,
+  findRecoveryScoutAgentId,
+} from "../application/failure_recovery_policy.js";
+import {
   attachRouteSignals,
   collectActiveRouteSignals,
   evaluateIncomingConditions,
@@ -193,7 +198,7 @@ function buildPendingRuntimePolicySummary({ action = {}, runtimeSnapshot = {}, a
         options,
       }).split("\n")
         .map((line) => String(line || '').trim())
-        .filter(Boolean)
+        .filter((line) => line && !line.startsWith('approval_matrix='))
         .slice(0, 6)
         .map((line) => `- ${line}`);
       summary.push(...providerSummary);
@@ -469,6 +474,121 @@ async function runVerificationRepairLoop({
   return { proxyResult: latestProxyResult, recovered: false, attemptsUsed: attemptLimit };
 }
 
+
+function buildFailureResultNote(failure = {}, fallbackMessage = '') {
+  const parts = [String(failure?.category || '').trim(), String(failure?.recovery_strategy || '').trim()].filter(Boolean);
+  const suffix = parts.length > 0 ? ` [${parts.join('/')}]` : '';
+  return `${String(fallbackMessage || failure?.message || 'failure').trim()}${suffix}`.trim();
+}
+
+function buildAwaitUserRequestFromFailure(failure = {}, { label = '', action = {} } = {}) {
+  const reason = String(failure?.summary || failure?.message || label || '추가 입력 필요').trim();
+  const hint = String(failure?.user_message || '').trim() || '추가 입력이 필요합니다.';
+  return {
+    type: 'await_user',
+    category: String(failure?.category || 'unknown_failure').trim() || 'unknown_failure',
+    reason,
+    followup_hint: hint,
+    action_label: String(label || '').trim() || String(action?.type || 'action').trim(),
+    action_type: String(action?.type || '').trim().toLowerCase() || undefined,
+  };
+}
+
+async function executeRunAgentWithRecovery({
+  action = {},
+  callbacks = {},
+  jobId = '',
+  detailContext = '',
+  label = '',
+  provider = '',
+  agents = [],
+  runtimeExecutionPolicy = {},
+  outputs = [],
+  results = [],
+  activeRouteSignals = new Set(),
+} = {}) {
+  try {
+    const runResult = await callbacks.runAgent({ action, jobId, detailContext });
+    return { runResult, detailContext, recovered: false, failure: null, awaitUserRequest: null };
+  } catch (error) {
+    const failure = classifyExecutionFailure({
+      error,
+      action,
+      provider,
+      runtimeExecutionPolicy,
+      agents,
+    });
+
+    if (failure.recovery_strategy === 'await_user' || failure.recovery_strategy === 'await_approval') {
+      results.push({ label, status: 'error', note: buildFailureResultNote(failure, String(error?.message ?? error)) });
+      outputs.push(attachRouteSignals({
+        agentId: 'system',
+        provider: 'system',
+        mode: 'failure',
+        output: `${label} 실패 · ${failure.summary}`,
+        jobId: String(jobId || ''),
+        failure: {
+          category: failure.category,
+          recovery_strategy: failure.recovery_strategy,
+          summary: failure.summary,
+        },
+      }, ['failure_detected', failure.category], { activeSignals: activeRouteSignals }));
+      return {
+        runResult: null,
+        detailContext,
+        recovered: false,
+        failure,
+        awaitUserRequest: buildAwaitUserRequestFromFailure(failure, { label, action }),
+      };
+    }
+
+    if (failure.recovery_strategy === 'retry_once') {
+      results.push({ label: `${label} retry`, status: 'ok', note: `auto retry · ${failure.category}` });
+      const retried = await callbacks.runAgent({ action, jobId, detailContext });
+      return { runResult: retried, detailContext, recovered: true, failure, awaitUserRequest: null };
+    }
+
+    if (failure.recovery_strategy === 'search_then_retry') {
+      const scoutAgentId = findRecoveryScoutAgentId(agents, { excludeAgentId: String(action?.agent_id || '').trim().toLowerCase() });
+      if (scoutAgentId) {
+        const scoutAction = {
+          type: 'run_agent',
+          agent_id: scoutAgentId,
+          goal: buildFailureRecoveryScoutGoal({ action, failure, attempt: 1 }),
+          inputs: {
+            failure_recovery_for_agent_id: String(action?.agent_id || '').trim().toLowerCase() || undefined,
+            failure_recovery_type: String(failure?.category || '').trim() || undefined,
+          },
+        };
+        const scoutResult = await callbacks.runAgent({ action: scoutAction, jobId, detailContext });
+        const scoutOutput = String(scoutResult?.output || '').trim();
+        outputs.push(attachRouteSignals({
+          agentId: scoutAgentId,
+          provider: String(scoutResult?.provider || '').trim().toLowerCase(),
+          mode: 'failure_research',
+          output: scoutOutput,
+          jobId: String(jobId || ''),
+          failure_recovery_for: String(action?.agent_id || '').trim().toLowerCase() || undefined,
+        }, ['failure_research', String(failure?.category || '').trim() || 'implementation_failure'], { activeSignals: activeRouteSignals }));
+        results.push({ label: `${label} recovery`, status: 'ok', note: `researched by ${scoutAgentId}` });
+        const recoveredDetailContext = [
+          String(detailContext || '').trim(),
+          '[failure_recovery]',
+          `category=${String(failure?.category || '').trim()}`,
+          `summary=${String(failure?.summary || '').trim()}`,
+          failure?.message ? `error=${String(failure.message || '').trim()}` : '',
+          scoutOutput ? `scout_notes:
+${scoutOutput}` : '',
+        ].filter(Boolean).join('\n\n');
+        const retried = await callbacks.runAgent({ action, jobId, detailContext: recoveredDetailContext });
+        return { runResult: retried, detailContext: recoveredDetailContext, recovered: true, failure, awaitUserRequest: null };
+      }
+    }
+
+    throw error;
+  }
+}
+
 export async function executeSupervisorActions({
   chatId,
   userId,
@@ -506,6 +626,7 @@ export async function executeSupervisorActions({
   const maxActions = Number.isFinite(Number(budgetCfg.max_actions))
     ? Math.max(1, Math.floor(Number(budgetCfg.max_actions)))
     : 4;
+  const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyFromSnapshot(runtimeSnapshot);
 
   const results = Array.isArray(initialResults) ? [...initialResults] : [];
   const outputs = Array.isArray(initialOutputs) ? [...initialOutputs] : [];
@@ -517,6 +638,7 @@ export async function executeSupervisorActions({
   let usedActions = 0;
   let blockedActions = 0;
   let interruptedByReplan = false;
+  let awaitUserRequest = null;
   const cleanOriginalUserText = String(originalUserText || "").trim();
   const cleanForceMode = String(forceMode || "").trim().toLowerCase() === "work"
     ? "work"
@@ -814,11 +936,28 @@ export async function executeSupervisorActions({
         if (typeof callbacks.runAgent !== "function") {
           throw new Error("runAgent callback is missing");
         }
-        const runResult = await callbacks.runAgent({
+        const executionOutcome = await executeRunAgentWithRecovery({
           action,
+          callbacks,
           jobId,
           detailContext,
+          label,
+          provider,
+          agents,
+          runtimeExecutionPolicy,
+          outputs,
+          results,
+          activeRouteSignals,
         });
+        if (executionOutcome?.awaitUserRequest) {
+          awaitUserRequest = executionOutcome.awaitUserRequest;
+          blockedActions += 1;
+          blockedIndex = i;
+          remainingActions = executableActions.slice(i + 1);
+          break;
+        }
+        detailContext = String(executionOutcome?.detailContext || detailContext || '');
+        const runResult = executionOutcome?.runResult;
         const outputText = String(runResult?.output || "");
         const routeSignals = resolveActionRouteSignals({ action, result: runResult });
         outputs.push(attachRouteSignals({
@@ -829,8 +968,19 @@ export async function executeSupervisorActions({
           jobId: String(jobId || ""),
           slot_id: String(action?.inputs?.slot_id || '').trim() || undefined,
           runtime_instance_id: String(action?.inputs?.runtime_instance_id || '').trim() || undefined,
+          recovered: executionOutcome?.recovered === true || undefined,
+          failure_recovery: executionOutcome?.failure ? {
+            category: executionOutcome.failure.category,
+            strategy: executionOutcome.failure.recovery_strategy,
+          } : undefined,
         }, routeSignals, { activeSignals: activeRouteSignals }));
-        results.push({ label, status: "ok", note: `provider=${provider || "unknown"}` });
+        results.push({
+          label,
+          status: "ok",
+          note: executionOutcome?.recovered === true
+            ? `provider=${provider || "unknown"} · recovered=${String(executionOutcome?.failure?.recovery_strategy || 'retry_once')}`
+            : `provider=${provider || "unknown"}`,
+        });
         usedActions += 1;
         continue;
       }
@@ -896,16 +1046,34 @@ export async function executeSupervisorActions({
         if (typeof callbacks.runAgent !== "function") {
           throw new Error("runAgent callback is missing");
         }
-        const runResult = await callbacks.runAgent({
-          action: {
-            type: "run_agent",
-            agent_id: String(action?.agent || action?.agent_id || "").trim().toLowerCase(),
-            goal: String(action?.prompt || action?.goal || "").trim(),
-            inputs: action?.inputs && typeof action.inputs === "object" ? action.inputs : {},
-          },
+        const synthesizedAction = {
+          type: "run_agent",
+          agent_id: String(action?.agent || action?.agent_id || "").trim().toLowerCase(),
+          goal: String(action?.prompt || action?.goal || "").trim(),
+          inputs: action?.inputs && typeof action.inputs === "object" ? action.inputs : {},
+        };
+        const executionOutcome = await executeRunAgentWithRecovery({
+          action: synthesizedAction,
+          callbacks,
           jobId,
           detailContext,
+          label,
+          provider: String(provider || 'unknown').trim().toLowerCase(),
+          agents,
+          runtimeExecutionPolicy,
+          outputs,
+          results,
+          activeRouteSignals,
         });
+        if (executionOutcome?.awaitUserRequest) {
+          awaitUserRequest = executionOutcome.awaitUserRequest;
+          blockedActions += 1;
+          blockedIndex = i;
+          remainingActions = executableActions.slice(i + 1);
+          break;
+        }
+        detailContext = String(executionOutcome?.detailContext || detailContext || '');
+        const runResult = executionOutcome?.runResult;
         const routeSignals = resolveActionRouteSignals({ action, result: runResult });
         outputs.push(attachRouteSignals({
           agentId: String(action?.agent || "").trim().toLowerCase() || "synthesizer",
@@ -915,8 +1083,9 @@ export async function executeSupervisorActions({
           jobId: String(jobId || ""),
           slot_id: String(action?.inputs?.slot_id || '').trim() || undefined,
           runtime_instance_id: String(action?.inputs?.runtime_instance_id || '').trim() || undefined,
+          recovered: executionOutcome?.recovered === true || undefined,
         }, routeSignals, { activeSignals: activeRouteSignals }));
-        results.push({ label, status: "ok", note: "final synthesis" });
+        results.push({ label, status: "ok", note: executionOutcome?.recovered === true ? "final synthesis · recovered" : "final synthesis" });
         usedActions += 1;
         continue;
       }
@@ -1778,8 +1947,8 @@ export async function executeSupervisorActions({
       const errorMessage = String(e?.message ?? e);
       const membershipConfirmationFailed = e?.membershipConfirmationFailed === true
         || String(e?.code || "").trim().toUpperCase() === "MEMBERSHIP_CONFIRMATION_FAILED";
-      results.push({ label, status: "error", note: errorMessage });
       if (membershipConfirmationFailed) {
+        results.push({ label, status: "error", note: errorMessage });
         blockedActions += 1;
         blockedIndex = i;
         remainingActions = executableActions.slice(i + 1);
@@ -1788,6 +1957,34 @@ export async function executeSupervisorActions({
           status: "blocked",
           note: "team membership verification failed; stopped remaining actions",
         });
+        break;
+      }
+      const failure = classifyExecutionFailure({
+        error: e,
+        action,
+        provider,
+        runtimeExecutionPolicy,
+        agents,
+      });
+      results.push({ label, status: "error", note: buildFailureResultNote(failure, errorMessage) });
+      outputs.push(attachRouteSignals({
+        agentId: 'system',
+        provider: 'system',
+        mode: 'failure',
+        output: `${label} 실패 · ${failure.summary}`,
+        jobId: String(jobId || ''),
+        failure: {
+          category: failure.category,
+          recovery_strategy: failure.recovery_strategy,
+          summary: failure.summary,
+        },
+      }, ['failure_detected', String(failure.category || '').trim() || 'unknown_failure'], { activeSignals: activeRouteSignals }));
+      if (failure.user_action_required) {
+        awaitUserRequest = buildAwaitUserRequestFromFailure(failure, { label, action });
+        blockedActions += 1;
+        blockedIndex = i;
+        remainingActions = executableActions.slice(i + 1);
+        results.push({ label: 'await_user', status: 'blocked', note: awaitUserRequest.followup_hint });
         break;
       }
     }
@@ -1815,8 +2012,11 @@ export async function executeSupervisorActions({
     sessionStore.upsert(chatId, {
       state: pendingApproval
         ? "awaiting_approval"
-        : (interruptedByReplan ? "idle" : "done"),
+        : (awaitUserRequest
+          ? "awaiting_user"
+          : (interruptedByReplan ? "idle" : "done")),
       pending_approval: pendingApproval,
+      pending_user_request: awaitUserRequest,
       interrupt: null,
       budget: {
         max_actions: maxActions,
@@ -1832,6 +2032,7 @@ export async function executeSupervisorActions({
     currentJobId: String(jobId || ""),
     detailContext,
     pendingApproval,
+    await_user_request: awaitUserRequest,
     blocked_index: blockedIndex,
     remaining_actions: remainingActions,
   };

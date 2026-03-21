@@ -29,7 +29,7 @@ function flattenConfigOverrides(raw = {}, prefix = "") {
   return out;
 }
 
-export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId = "", model = "", profile = "", addDirs = [], configOverrides = {}, sandboxMode = "", approvalPolicy = "" }) {
+export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId = "", model = "", profile = "", addDirs = [], configOverrides = {}, sandboxMode = "", approvalPolicy = "", env = {} }) {
   // Requires Codex CLI logged in on the server
   const effectiveSandboxMode = String(sandboxMode || process.env.CODEX_SANDBOX_MODE || "workspace-write").trim() || "workspace-write";
   const effectiveApprovalPolicy = String(approvalPolicy || process.env.CODEX_APPROVAL_POLICY || "never").trim() || "never";
@@ -55,7 +55,7 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
   const addDirArgs = extraDirs.flatMap((entry) => ["--add-dir", entry]);
   const configArgs = flattenConfigOverrides(mergedConfigOverrides).flatMap(([key, value]) => ["-c", `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`]);
   const modernArgs = [...modelArgs, ...profileArgs, "exec", "-C", workspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "-c", `approval_policy=${effectiveApprovalPolicy}`, ...configArgs, "-"];
-  const modern = await runCommand("codex", modernArgs, { cwd: commandCwd, timeoutMs, input: prompt, abortSignal: signal });
+  const modern = await runCommand("codex", modernArgs, { cwd: commandCwd, timeoutMs, input: prompt, abortSignal: signal, env });
   if (modern.ok) return modern;
 
   // Fallback for older codex-cli variants that still support this flag in `exec`.
@@ -68,7 +68,7 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
   if (!optionCompatibilityError) return modern;
 
   const legacyArgs = [...modelArgs, ...profileArgs, "exec", "-C", workspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "--ask-for-approval", effectiveApprovalPolicy, "-"];
-  const legacy = await runCommand("codex", legacyArgs, { cwd: commandCwd, timeoutMs, input: prompt, abortSignal: signal });
+  const legacy = await runCommand("codex", legacyArgs, { cwd: commandCwd, timeoutMs, input: prompt, abortSignal: signal, env });
   if (legacy.ok) return legacy;
 
   // If legacy flag is unsupported too, keep modern error as the primary one.

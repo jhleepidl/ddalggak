@@ -214,6 +214,60 @@ export function buildRoutedDashboardText({ actions = [], agentStatus = {}, actio
   ].join('\n');
 }
 
+
+export function buildCompactRoutedDashboardText({ actions = [], agentStatus = {}, agentIndex = new Map() } = {}) {
+  const index = asMap(agentIndex);
+  const agentLabels = [];
+  const seen = new Set();
+  let backendOnlyCount = 0;
+  let parallelCount = 0;
+  for (const action of asArray(actions)) {
+    const type = String(action?.type || '').trim().toLowerCase();
+    if (isAgentActionType(type)) {
+      const label = formatActionAgentLabel(action, { agentIndex: index });
+      if (label && !seen.has(label)) {
+        seen.add(label);
+        agentLabels.push(label);
+      }
+      continue;
+    }
+    if (type === 'spawn_agents' || type === 'spawn_parallel') {
+      const children = asArray(action?.agents);
+      parallelCount += children.length;
+      for (const child of children) {
+        const label = formatActionAgentLabel(child, { agentIndex: index });
+        if (label && !seen.has(label)) {
+          seen.add(label);
+          agentLabels.push(label);
+        }
+      }
+      continue;
+    }
+    if (isMostlyBackendOnlyAction(type)) backendOnlyCount += 1;
+  }
+  const statusLines = buildAgentStatusLines(agentStatus, { agentIndex: index });
+  const runningCount = statusLines.filter((line) => /🏃\s+running/.test(String(line || ''))).length;
+  const queuedCount = statusLines.filter((line) => /⏳\s+queued/.test(String(line || ''))).length;
+  const doneCount = statusLines.filter((line) => /✅\s+done/.test(String(line || ''))).length;
+  const pattern = parallelCount > 1 ? 'parallel' : (agentLabels.length > 1 ? 'sequential' : 'single');
+  const compactAgents = agentLabels.slice(0, 4).join(', ');
+  const overflow = Math.max(0, agentLabels.length - 4);
+  const statusSummaryParts = [];
+  if (runningCount > 0) statusSummaryParts.push(`running ${runningCount}`);
+  if (queuedCount > 0) statusSummaryParts.push(`queued ${queuedCount}`);
+  if (doneCount > 0) statusSummaryParts.push(`done ${doneCount}`);
+  const lines = [
+    '🧭 이번 턴 계획',
+    `- agents: ${compactAgents || '(none)'}${overflow > 0 ? ` 외 ${overflow}` : ''}`,
+    `- pattern: ${pattern}`,
+    `- step_count: ${asArray(actions).length}`,
+    `- status: ${statusSummaryParts.join(' · ') || 'queued'}`,
+  ];
+  if (backendOnlyCount > 0) lines.push(`- system_steps: ${backendOnlyCount}`);
+  lines.push('- 자세히 보려면 버튼 또는 /status full');
+  return lines.join('\n');
+}
+
 export function buildPreviewAgentIndex(options = {}) {
   return buildPreviewAgentDisplayIndex(options);
 }

@@ -48,6 +48,9 @@ export function summarizeRuntimeTeamSnapshotLines(snapshot = null, {
     lines.push(`- task_archetype: ${String(blueprintSummary.task_archetype || '(unknown)')}`);
     if (blueprintSummary?.title) lines.push(`- template: ${String(blueprintSummary.title)}`);
     if (blueprintSummary?.execution_pattern || blueprintSummary?.topology_pattern) lines.push(`- template_pattern: ${String(blueprintSummary.execution_pattern || blueprintSummary.topology_pattern)}`);
+    if (blueprintSummary?.capability_status) lines.push(`- capability_status: ${String(blueprintSummary.capability_status)}`);
+    if (Array.isArray(blueprintSummary?.missing_required_tools) && blueprintSummary.missing_required_tools.length > 0) lines.push(`- missing_required_tools: ${blueprintSummary.missing_required_tools.join(', ')}`);
+    if (Array.isArray(blueprintSummary?.missing_optional_tools) && blueprintSummary.missing_optional_tools.length > 0) lines.push(`- missing_optional_tools: ${blueprintSummary.missing_optional_tools.join(', ')}`);
     const memoryMap = Array.isArray(blueprintSummary?.memory_map) ? blueprintSummary.memory_map.slice(0, 4) : [];
     if (memoryMap.length > 0) lines.push(`- memory_map: ${memoryMap.map((surface) => String(surface?.surface_id || surface?.file_name || '?')).join(', ')}`);
   }

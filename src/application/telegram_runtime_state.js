@@ -30,6 +30,7 @@ const ALLOWED_USERS = (process.env.TELEGRAM_ALLOWED_USER_IDS ?? "").split(",").m
 const MAX_CONCURRENCY = Number(process.env.MAX_CONCURRENCY ?? 1);
 const AUTO_SUGGEST_ENABLED = String(process.env.AUTO_SUGGEST_GPT_PROMPT ?? "true").toLowerCase() !== "false";
 const CHAT_VERBOSE = String(process.env.CHAT_VERBOSE ?? "false").toLowerCase() === "true";
+const TELEGRAM_PROGRESS_DETAIL_MODE = String(process.env.TELEGRAM_PROGRESS_DETAIL_MODE ?? "compact").trim().toLowerCase() === "full" ? "full" : "compact";
 const TELEGRAM_REQUIRE_MENTION_IN_GROUP = String(process.env.TELEGRAM_REQUIRE_MENTION_IN_GROUP ?? "false").toLowerCase() === "true";
 const TELEGRAM_FORCE_IPV4 = String(process.env.TELEGRAM_FORCE_IPV4 ?? "true").toLowerCase() !== "false";
 const TELEGRAM_POLLING_INTERVAL_MS = Number(process.env.TELEGRAM_POLLING_INTERVAL_MS ?? 1000);
@@ -450,6 +451,7 @@ export {
   FENCE,
   AUTO_SUGGEST_ENABLED,
   CHAT_VERBOSE,
+  TELEGRAM_PROGRESS_DETAIL_MODE,
   TELEGRAM_REQUIRE_MENTION_IN_GROUP,
   TELEGRAM_FORCE_IPV4,
   TELEGRAM_POLLING_INTERVAL_MS,

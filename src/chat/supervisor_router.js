@@ -986,8 +986,8 @@ export async function routeWithSupervisor(message, {
     const hardened = filtered.map((action) => {
       if (action.type !== "run_agent") return action;
       const provider = providerById.get(String(action.agent_id || "").trim().toLowerCase());
-      if (provider === "codex" && String(action.risk || "").toUpperCase() !== "L3") {
-        return { ...action, risk: "L3" };
+      if (provider === "codex") {
+        return { ...action, risk: resolveProviderActionRisk({ action, provider: "codex", fallback: "L2" }) };
       }
       return action;
     });

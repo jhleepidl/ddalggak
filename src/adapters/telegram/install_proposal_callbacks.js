@@ -19,7 +19,7 @@ export async function handleTelegramInstallProposalCallback({ q, bot, chatId, us
     await bot.answerCallbackQuery(q.id, { text: 'no pending install proposal' });
     return true;
   }
-  const coverage = getCredentialCoverageForProposal(chatId, proposalState.proposal || {});
+  const coverage = getCredentialCoverageForProposal(chatSessionStore, chatId, proposalState.proposal || {});
   let runtime = null;
   try {
     const currentJobId = resolveCurrentJobIdForChat?.(chatId);
@@ -28,7 +28,7 @@ export async function handleTelegramInstallProposalCallback({ q, bot, chatId, us
     }
   } catch {}
   let teamState = getSessionTeamState(chatSessionStore, chatId);
-  const prompt = buildInstallProposalPrompt(proposalState, { hasPendingTeam: !!teamState.pending_team, chatId });
+  const prompt = buildInstallProposalPrompt(proposalState, { hasPendingTeam: !!teamState.pending_team, chatId, sessionStore: chatSessionStore });
   if (action === 'dismiss') {
     archivePendingInstallProposal(chatSessionStore, chatId, 'dismissed');
     await bot.answerCallbackQuery(q.id, { text: 'dismissed' });
@@ -39,11 +39,12 @@ export async function handleTelegramInstallProposalCallback({ q, bot, chatId, us
     await bot.answerCallbackQuery(q.id, { text: 'credential help' });
     await bot.sendMessage(chatId, [
       '🔐 credential binding 안내',
-      ...coverage.missing_keys.map((key) => `- /credential set ${key} <secret> --resume`),
+      ...coverage.missing_keys.flatMap((key) => [`- /credential bind ${key} env ${key} --resume`, `- /credential set ${key} <secret> --resume`]),
       '- /credential pending',
       '- /credential list',
       '',
-      '주의: 채팅 명령으로 입력한 secret은 Telegram 대화에 남습니다. 가능하면 환경 변수/비밀 저장소를 우선 사용하세요.',
+      'env reference 바인딩이 기본 권장이며, 필요하면 그룹/개인 chat 어디서든 /credential set fallback을 사용할 수 있습니다.',
+      '단, /credential set 으로 입력한 raw secret은 Telegram 히스토리에 남을 수 있으니 가능하면 로컬 secret store나 서버 env에 직접 저장 후 bind 하세요.',
     ].filter(Boolean).join('\n'));
     return true;
   }
@@ -65,7 +66,7 @@ export async function handleTelegramInstallProposalCallback({ q, bot, chatId, us
       await bot.answerCallbackQuery(q.id, { text: 'credential required' });
       await bot.sendMessage(chatId, [
         '⚠️ 먼저 필요한 credential을 바인딩해 주세요.',
-        ...coverage.missing_keys.map((key) => `- /credential set ${key} <secret> --resume`),
+        ...coverage.missing_keys.flatMap((key) => [`- /credential bind ${key} env ${key} --resume`, `- /credential set ${key} <secret> --resume`]),
       ].join('\n'));
       return true;
     }

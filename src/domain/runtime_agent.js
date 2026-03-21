@@ -54,6 +54,8 @@ export function normalizeRuntimeAgentInstance(raw = {}, {
   const attachedSkillIds = normalizeStringList([
     ...(Array.isArray(row.attached_skill_ids) ? row.attached_skill_ids : []),
     ...(Array.isArray(row.attachedSkillIds) ? row.attachedSkillIds : []),
+    ...(Array.isArray(row.selected_skill_ids) ? row.selected_skill_ids : []),
+    ...(Array.isArray(row.selectedSkillIds) ? row.selectedSkillIds : []),
     ...attachedSkills.map((entry) => entry.skill_id),
   ], { max: 64, lower: true });
   const hasExplicitTemplateId = Object.prototype.hasOwnProperty.call(row, "template_id")

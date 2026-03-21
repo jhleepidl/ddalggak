@@ -45,6 +45,7 @@ import {
   buildPlanPreviewLines as buildPlanPreviewLinesShared,
   buildQueuedAgentStatusFromActions as buildQueuedAgentStatusFromActionsShared,
   buildRoutedDashboardText as buildRoutedDashboardTextShared,
+  buildCompactRoutedDashboardText as buildCompactRoutedDashboardTextShared,
   inferApprovalPreviewReason as inferApprovalPreviewReasonShared,
   buildApprovalActionSummaryLines as buildApprovalActionSummaryLinesShared,
   buildAutopilotProgressSummary as buildAutopilotProgressSummaryShared,
@@ -142,6 +143,7 @@ const {
   chatSessionStore,
   agentRegistry,
   AGENT_STATUS_MESSAGE_THROTTLE_MS,
+  TELEGRAM_PROGRESS_DETAIL_MODE,
   agentStatusMessageStateByChat,
   runWorkspaceDir,
   resolveAgentId,
@@ -724,8 +726,15 @@ function buildQueuedAgentStatusFromActions(actions = []) {
   return buildQueuedAgentStatusFromActionsShared(actions);
 }
 
-function buildRoutedDashboardText({ actions = [], agentStatus = {} } = {}) {
+function buildRoutedDashboardText({ actions = [], agentStatus = {}, compact = false } = {}) {
   const agentIndex = buildTelegramAgentIndex({ actions });
+  if (compact) {
+    return buildCompactRoutedDashboardTextShared({
+      actions,
+      agentStatus,
+      agentIndex,
+    });
+  }
   return buildRoutedDashboardTextShared({
     actions,
     agentStatus,
@@ -764,13 +773,23 @@ async function sendPlanPreviewMessage(bot, chatId, { actions = [], replyToMessag
   const text = buildRoutedDashboardText({
     actions,
     agentStatus,
+    compact: true,
   });
+  const options = {
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '더 보기', callback_data: 'plan_preview:details' },
+        { text: '상태', callback_data: 'chat_status:summary' },
+      ]],
+    },
+  };
+  if (Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0) {
+    options.reply_to_message_id = Number(replyToMessageId);
+  }
   const sent = await bot.sendMessage(
     chatId,
     text || "🧭 분담\n- (system) no actions",
-    Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
-      ? { reply_to_message_id: Number(replyToMessageId) }
-      : undefined
+    options
   );
   const messageId = Number(sent?.message_id || 0);
   chatSessionStore.upsert(chatId, {
@@ -830,9 +849,10 @@ async function sendAgentStatusTransitionMessage(
   const cleanState = String(state || "").trim().toLowerCase();
   if (!cleanAgentId || !cleanState) return;
   if (!["running", "done", "error"].includes(cleanState)) return;
-  if (!shouldSendAgentStatusMessage(chatId, cleanAgentId, cleanState)) return;
 
   const fallbackReply = getCurrentTurnReplyMessageId(chatId);
+  if (TELEGRAM_PROGRESS_DETAIL_MODE !== 'full' && cleanState !== 'error' && fallbackReply) return;
+  if (!shouldSendAgentStatusMessage(chatId, cleanAgentId, cleanState)) return;
   const replyId = Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
     ? Number(replyToMessageId)
     : (Number.isFinite(Number(fallbackReply)) && Number(fallbackReply) > 0 ? Number(fallbackReply) : null);

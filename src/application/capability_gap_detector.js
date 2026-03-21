@@ -1,3 +1,5 @@
+import { collectEffectiveAvailableToolIds } from './runtime_tool_availability.js';
+
 function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -24,11 +26,7 @@ function uniqueIds(values = [], { max = 64 } = {}) {
 }
 
 function collectAvailableToolIds(runtime = null) {
-  const out = [];
-  for (const row of asArray(runtime?.agentsCatalog)) out.push(...asArray(row?.tools || row?.tool_ids || row?.toolIds));
-  for (const row of asArray(runtime?.agents)) out.push(...asArray(row?.tools || row?.tool_ids || row?.toolIds));
-  out.push(...asArray(runtime?.availableToolIds || runtime?.toolIds || runtime?.tool_ids));
-  return new Set(uniqueIds(out, { max: 128 }));
+  return collectEffectiveAvailableToolIds(runtime, runtime);
 }
 
 function normalizeCapabilityGap(raw = {}) {
@@ -71,6 +69,16 @@ function inferToolSuggestion(toolId = '') {
   return `${toolId} 도구 정의 또는 연결이 필요합니다.`;
 }
 
+function findExplicitCredentialRequest(raw = '') {
+  const text = clean(raw);
+  if (!text) return '';
+  const keyMatch = text.match(/\b([A-Z][A-Z0-9_]*API[_-]?KEY|OPENAI_API_KEY|GEMINI_API_KEY|ANTHROPIC_API_KEY)\b/);
+  const explicitNeed = /(please\s+(provide|set|configure|supply)|missing|not\s+set|not\s+configured|not\s+available|need(?:ed)?|requires?|required|without)\b[^\n]{0,80}\b(api[_ -]?key|credential|token|[A-Z][A-Z0-9_]*API[_-]?KEY)\b/i;
+  const explicitNeedReverse = /\b(api[_ -]?key|credential|token|[A-Z][A-Z0-9_]*API[_-]?KEY)\b[^\n]{0,80}\b(missing|required|needed|not\s+set|not\s+configured|not\s+available|please\s+provide|please\s+set)\b/i;
+  if (!explicitNeed.test(text) && !explicitNeedReverse.test(text)) return '';
+  return clean(keyMatch?.[1] || 'API_KEY');
+}
+
 export function detectCapabilityGapsFromText(text = '', { label = 'agent' } = {}) {
   const raw = clean(text);
   if (!raw) return [];
@@ -91,12 +99,12 @@ export function detectCapabilityGapsFromText(text = '', { label = 'agent' } = {}
     });
   }
 
-  const credentialMatch = raw.match(/\b([A-Z][A-Z0-9_]*API[_-]?KEY|OPENAI_API_KEY|GEMINI_API_KEY|ANTHROPIC_API_KEY)\b/);
-  if (credentialMatch || /api[_ -]?key|credential|token required/i.test(raw)) {
+  const credentialKey = findExplicitCredentialRequest(raw);
+  if (credentialKey) {
     push({
       kind: 'missing_credential',
       severity: 'blocking',
-      credential_key: clean(credentialMatch?.[1] || 'API_KEY'),
+      credential_key: credentialKey,
       detail: '외부 API 자격 증명이 필요합니다.',
       suggested_action: '사용 가능한 API 키 또는 환경 변수를 제공해 주세요.',
     });

@@ -5,6 +5,7 @@ import { normalizeCredentialBindingState } from './credential_binding.js';
 import { buildTeamStructureV2, normalizeTeamStructureV2, deriveTeamConfigFromStructureV2 } from '../shared/team_structure_v2.js';
 import { deriveKnowledgeBaseDesign, normalizeMemoryPlan } from '../knowledge_base/profile.js';
 import { buildTeamSeedFromTaskArchetype, listTeamBlueprintTemplateSeeds } from './team_blueprint_templates.js';
+import { buildTeamCapabilityContract, summarizeCapabilityContract } from './team_capability_contract.js';
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -46,6 +47,7 @@ export function inferTaskArchetype({ team = {}, structure = {}, memoryPlan = {} 
   const pattern = cleanId(structure?.topology?.pattern || team?.structure_v2?.topology?.pattern || team?.structure?.topology?.pattern || '');
   const goal = clean(`${team?.task_brief || structure?.intent?.task_brief || ''}`).toLowerCase();
   if (profileId.includes('review_repair') || /review|audit|repair|regression|fixup|회귀|감사|수습|수정/.test(goal)) return 'review_repair';
+  if (profileId.includes('iterative_improvement') || /iterate|iterative|iteration|improve|improvement|optimi[sz]e|계속 개선|반복 개선|지속 개선|계속 발전|여러 모델|multi-model|자동 개선/.test(goal)) return 'iterative_improvement';
   if (profileId.includes('implementation') || /implement|fix|patch|code|repo|구현|수정|패치/.test(goal)) return 'implementation';
   if (profileId.includes('analysis') || profileId.includes('research') || /analysis|research|brief|memo|조사|분석|브리프/.test(goal)) return 'research';
   if (profileId.includes('deliberation') || pattern === 'debate' || pattern === 'committee') return 'deliberation';
@@ -172,6 +174,7 @@ export function attachTeamBlueprint(team = {}, { runtime = null, applyState = 'p
   const blueprintId = cleanId(team.blueprint_id || team.team_blueprint?.blueprint_id || `${team.team_name || structure?.metadata?.team_name || 'team'}:${archetype}`) || 'team_blueprint';
   const roleContracts = buildRoleContracts(team, structure, memoryPlan);
   const artifactContract = buildArtifactContract(team, structure);
+  const capabilityContract = buildTeamCapabilityContract({ team: { ...team, requirements }, runtime });
   const teamSeed = {
     ...deriveTeamConfigFromStructureV2(structure),
     ...team,
@@ -200,6 +203,7 @@ export function attachTeamBlueprint(team = {}, { runtime = null, applyState = 'p
     memory_map: summarizeMemoryMap(memoryPlan),
     role_contracts: roleContracts,
     artifact_contract: artifactContract,
+    capability_contract: capabilityContract,
     runtime_policy: { runtime_execution: asObject(structure.control_policy?.runtime_execution) },
     team_seed: teamSeed,
     catalog,
@@ -222,6 +226,7 @@ export function buildTeamBlueprintDocument(team = {}, { runtime = null, applySta
   const requirements = normalizeManifestRequirements(normalizedTeam.requirements || {});
   const installHints = buildManifestInstallHints(requirements, { hasGocThreadTarget: !!clean(runtime?.map?.threadId || runtime?.threadId || '') });
   const cleanApplyState = cleanState(applyState);
+  const capabilitySummary = summarizeCapabilityContract(normalizedTeam.team_blueprint?.capability_contract || {});
   return {
     kind: 'ddalggak_team_blueprint',
     version: 1,
@@ -237,6 +242,8 @@ export function buildTeamBlueprintDocument(team = {}, { runtime = null, applySta
       structure_pattern: normalizedTeam.structure_v2?.topology?.pattern || 'hybrid',
       memory_surface_count: asArray(normalizedTeam.memory_plan?.surfaces).length,
       task_archetype: normalizedTeam.team_blueprint?.task_archetype || 'general',
+      capability_status: capabilitySummary.capability_status,
+      missing_required_tool_count: capabilitySummary.missing_required_tool_count,
       tool_requirements: requirements.summary?.tool_count || 0,
       credential_requirements: requirements.summary?.credential_count || 0,
     },
@@ -282,11 +289,11 @@ export function normalizeTeamBlueprintPayload(payload = {}, { runtime = null, ap
 
 function normalizePreviewArchetype(value = '') {
   const key = cleanId(value);
-  if (key === 'implementation' || key === 'review_repair' || key === 'research') return key;
+  if (key === 'implementation' || key === 'review_repair' || key === 'research' || key === 'iterative_improvement') return key;
   return 'research';
 }
 
-export function resolveExecutionBlueprintSummary({ team = null, goal = '', taskInterpretation = null, runtimeTeamSnapshot = null } = {}) {
+export function resolveExecutionBlueprintSummary({ team = null, goal = '', taskInterpretation = null, runtimeTeamSnapshot = null, runtime = null } = {}) {
   const sourceTeam = team && typeof team === 'object' ? team : {};
   const snapshot = runtimeTeamSnapshot && typeof runtimeTeamSnapshot === 'object' ? runtimeTeamSnapshot : {};
   const snapshotPlan = asObject(snapshot.team_plan);
@@ -303,7 +310,7 @@ export function resolveExecutionBlueprintSummary({ team = null, goal = '', taskI
       structure_v2: Object.keys(snapshotStructure).length > 0 ? snapshotStructure : sourceTeam.structure_v2,
       memory_plan: asArray(snapshotMemoryPlan.surfaces).length > 0 ? snapshotMemoryPlan : (sourceTeam.memory_plan || sourceTeam.memoryPlan),
     };
-    normalizedTeam = attachTeamBlueprint(merged, { runtime: null, applyState: 'active', source: 'execution_preview' });
+    normalizedTeam = attachTeamBlueprint(merged, { runtime, applyState: 'active', source: 'execution_preview' });
     source = Object.keys(sourceTeam).length > 0 ? 'active_team' : 'runtime_snapshot';
   } else {
     const inferred = inferTaskArchetype({
@@ -314,7 +321,7 @@ export function resolveExecutionBlueprintSummary({ team = null, goal = '', taskI
     const archetype = normalizePreviewArchetype(taskInterpretation?.task_archetype || taskInterpretation?.taskArchetype || inferred);
     normalizedTeam = attachTeamBlueprint(
       buildTeamSeedFromTaskArchetype(archetype, { taskBrief: clean(goal || taskInterpretation?.goal || '') }),
-      { runtime: null, applyState: 'pending', source: 'task_archetype_template' }
+      { runtime, applyState: 'pending', source: 'task_archetype_template' }
     );
   }
 
@@ -323,6 +330,7 @@ export function resolveExecutionBlueprintSummary({ team = null, goal = '', taskI
   const topology = asObject(blueprint.topology);
   const executionGraph = asObject(snapshot.execution_graph || snapshotPlan.execution_graph);
   const effectivePattern = cleanId(executionGraph.pattern || topology.execution_pattern || topology.pattern || '');
+  const capabilitySummary = summarizeCapabilityContract(blueprint.capability_contract || {});
   return {
     source,
     blueprint_id: clean(blueprint.blueprint_id || normalizedTeam?.blueprint_id || '') || undefined,
@@ -333,6 +341,13 @@ export function resolveExecutionBlueprintSummary({ team = null, goal = '', taskI
     execution_pattern: clean(effectivePattern || topology.execution_pattern || topology.pattern || '') || undefined,
     memory_surface_count: memoryMap.length,
     memory_map: memoryMap.slice(0, 8),
+    capability_status: capabilitySummary.capability_status,
+    required_tool_count: capabilitySummary.required_tool_count,
+    optional_tool_count: capabilitySummary.optional_tool_count,
+    missing_required_tool_count: capabilitySummary.missing_required_tool_count,
+    missing_optional_tool_count: capabilitySummary.missing_optional_tool_count,
+    missing_required_tools: capabilitySummary.missing_required_tools,
+    missing_optional_tools: capabilitySummary.missing_optional_tools,
   };
 }
 
@@ -345,6 +360,9 @@ export function formatExecutionBlueprintSummaryLines(summary = null, { maxSurfac
   ];
   if (clean(row.execution_pattern || row.topology_pattern || '')) lines.push(`- runtime pattern: ${clean(row.execution_pattern || row.topology_pattern)}`);
   if (clean(row.source || '')) lines.push(`- source: ${clean(row.source)}`);
+  if (clean(row.capability_status || '')) lines.push(`- capability status: ${clean(row.capability_status)}`);
+  if (asArray(row.missing_required_tools).length > 0) lines.push(`- missing required tools: ${asArray(row.missing_required_tools).join(', ')}`);
+  if (asArray(row.missing_optional_tools).length > 0) lines.push(`- missing optional tools: ${asArray(row.missing_optional_tools).join(', ')}`);
   const surfaces = asArray(row.memory_map).slice(0, Math.max(1, maxSurfaces));
   if (surfaces.length > 0) {
     lines.push('- memory map:');

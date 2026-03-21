@@ -142,13 +142,13 @@ export function updatePendingInstallProposalStatus(sessionStore, chatId, status 
   return next;
 }
 
-export function buildInstallProposalPrompt(state = {}, { hasPendingTeam = false, chatId = '' } = {}) {
+export function buildInstallProposalPrompt(state = {}, { hasPendingTeam = false, chatId = '', sessionStore = null } = {}) {
   const normalized = normalizeInstallProposalState(state);
   if (!normalized) return null;
   const proposal = normalized.proposal || {};
   const line = proposal.gap_preview_lines?.[0] || '추가 설치/승인이 필요한 capability gap이 있습니다.';
   const applyLabel = hasPendingTeam ? 'Apply active + resume' : 'Retry active + resume';
-  const coverage = chatId ? getCredentialCoverageForProposal(chatId, proposal) : { missing_keys: [] };
+  const coverage = chatId ? getCredentialCoverageForProposal(sessionStore, chatId, proposal) : { missing_keys: [] };
   return {
     text: [
       `⚠️ install proposal 승인 필요`,

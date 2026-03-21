@@ -57,6 +57,7 @@ export async function executeRunCommand({
         goal,
         taskInterpretation: route?.task_interpretation || null,
         runtimeTeamSnapshot: route?.runtime_team_snapshot || route?.runtimeTeamSnapshot || null,
+        runtime: runtimeForRoute,
       });
       const runtimeTeamSnapshot = createRuntimeTeamSnapshot({
         runtime_team_snapshot: route?.runtime_team_snapshot || route?.runtimeTeamSnapshot || null,
@@ -170,6 +171,7 @@ export async function executeContinueCommand({
       goal,
       taskInterpretation: route?.task_interpretation || null,
       runtimeTeamSnapshot: route?.runtime_team_snapshot || route?.runtimeTeamSnapshot || null,
+      runtime: runtimeForRoute,
     });
     const runtimeTeamSnapshot = createRuntimeTeamSnapshot({
       runtime_team_snapshot: route?.runtime_team_snapshot || route?.runtimeTeamSnapshot || null,
