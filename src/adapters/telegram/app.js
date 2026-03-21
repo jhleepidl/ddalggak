@@ -169,6 +169,8 @@ function buildGroupedDeps({ bot, botUsername, chatRunManager, uploadService }) {
     refreshArtifactIndex: runtimeCore.refreshArtifactIndex,
     formatArtifactIndexText: runtimeCore.formatArtifactIndexText,
     sendArtifactBySelection: runtimeCore.sendArtifactBySelection,
+    sendArtifactBundle: runtimeCore.sendArtifactBundle,
+    parseArtifactBundleSelection: runtimeCore.parseArtifactBundleSelection,
     formatByteSize: runtimeCore.formatByteSize,
     runWorkspaceDir: runtimeCore.runWorkspaceDir,
     uploadService,

@@ -37,6 +37,7 @@ const HELP_TEXT = [
   "- /context [global]: 현재 job 컨텍스트/GoC 링크 보기",
   "- /artifacts [limit]: 주요 산출물 후보 보기",
   "- /send <번호|path>: 산출물 파일 전송",
+  "- /send bundle <번호,번호|path,...>: 여러 산출물을 zip으로 전송",
   "- /stop [jobId]: 현재 실행 또는 지정 job 중단",
   "- /help advanced: credential/files/running 등 고급 명령 보기",
 ].join("\n");
@@ -57,6 +58,7 @@ const ADVANCED_HELP_TEXT = [
   "- /tools: 현재 job의 tool 상태 보기",
   "- /artifacts [limit]: 주요 산출물 후보 보기",
   "- /send <번호|path>: 산출물 파일 전송",
+  "- /send bundle <번호,번호|path,...>: 여러 산출물을 zip으로 전송",
   "- /files [uploads|workspace|all] [limit]: workspace 파일 목록 보기",
   "- /outputs [limit]: legacy alias of /artifacts",
   "- /sendfile <relative_path>: legacy alias of /send",
@@ -117,6 +119,8 @@ export function createTelegramCommandHandler(deps = {}) {
   const refreshArtifactIndex = fileOps.refreshArtifactIndex || deps.refreshArtifactIndex;
   const formatArtifactIndexText = fileOps.formatArtifactIndexText || deps.formatArtifactIndexText;
   const sendArtifactBySelection = fileOps.sendArtifactBySelection || deps.sendArtifactBySelection;
+  const sendArtifactBundle = fileOps.sendArtifactBundle || deps.sendArtifactBundle;
+  const parseArtifactBundleSelection = fileOps.parseArtifactBundleSelection || deps.parseArtifactBundleSelection || (() => null);
   const formatByteSize = fileOps.formatByteSize || deps.formatByteSize;
   const runWorkspaceDir = fileOps.runWorkspaceDir || deps.runWorkspaceDir;
 
@@ -828,11 +832,28 @@ ${formatArtifactIndexText(currentJobId, artifactIndex, { limit })}`);
       }
       const selection = String(args || '').trim();
       if (!selection) {
-        await bot.sendMessage(chatId, cmd === '/sendfile' ? 'Usage: /sendfile <relative_path>' : 'Usage: /send <번호|path>');
+        await bot.sendMessage(chatId, cmd === '/sendfile' ? 'Usage: /sendfile <relative_path>' : 'Usage: /send <번호|path>\n또는 /send bundle <번호,번호|path,...>');
         return true;
       }
       try {
         const artifactIndex = refreshArtifactIndex(currentJobId, { maxFiles: 12 });
+        const bundle = cmd === '/send' ? parseArtifactBundleSelection(selection) : null;
+        if (bundle) {
+          if (!sendArtifactBundle) throw new Error('bundle send is not available');
+          const sentBundle = await sendArtifactBundle(bot, chatId, currentJobId, bundle.items, {
+            replyToMessageId: msg.message_id,
+            artifactIndex,
+          });
+          await bot.sendMessage(
+            chatId,
+            `✅ 번들 전송 완료
+job_id=${currentJobId}
+files=${sentBundle.entries.length}
+name=${sentBundle.fileName}
+size=${formatByteSize(sentBundle.size)}`
+          );
+          return true;
+        }
         const sent = await sendArtifactBySelection(bot, chatId, currentJobId, selection, {
           replyToMessageId: msg.message_id,
           artifactIndex,

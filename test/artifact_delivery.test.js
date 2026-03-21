@@ -9,6 +9,7 @@ import {
   collectWorkspaceFileEntries,
   refreshArtifactIndex,
   sendArtifactBySelection,
+  sendArtifactBundle,
   maybeSendArtifactSummary,
 } from '../src/application/telegram_runtime_io.js';
 
@@ -106,5 +107,35 @@ test('maybeSendArtifactSummary announces candidates without auto-sending documen
     assert.match(sentMessages[0].text, /주요 산출물 후보/);
     assert.match(sentMessages[0].text, /\/send 1/);
     assert.match(sentMessages[0].text, /final\/summary\.md/);
+  });
+});
+
+
+test('sendArtifactBundle packages selected workspace artifacts into a zip document', async () => {
+  await withTempRunsDir(async () => {
+    const job = jobs.createJob({ title: 'artifact bundle' });
+    fs.mkdirSync(path.dirname(jobs.ensureWorkspacePath(job.jobId, 'docs/report.md')), { recursive: true });
+    fs.writeFileSync(jobs.ensureWorkspacePath(job.jobId, 'docs/report.md'), 'report-body', 'utf8');
+    fs.mkdirSync(path.dirname(jobs.ensureWorkspacePath(job.jobId, 'src/app.js')), { recursive: true });
+    fs.writeFileSync(jobs.ensureWorkspacePath(job.jobId, 'src/app.js'), 'console.log("bundle")', 'utf8');
+
+    const artifactIndex = refreshArtifactIndex(job.jobId, { maxFiles: 5 });
+    const sent = [];
+    const bot = {
+      async sendDocument(chatId, filePath, options) {
+        sent.push({ chatId, filePath, options });
+        return { ok: true };
+      },
+    };
+
+    const bundle = await sendArtifactBundle(bot, 'chat-1', job.jobId, ['1', '2'], { artifactIndex });
+    assert.equal(sent.length, 1);
+    assert.equal(String(sent[0].options.caption || '').includes('artifact bundle'), true);
+    assert.equal(bundle.entries.length, 2);
+    assert.equal(String(sent[0].filePath).endsWith('.zip'), true);
+    const zipBytes = fs.readFileSync(bundle.bundlePath);
+    assert.equal(zipBytes.slice(0, 2).toString('utf8'), 'PK');
+    assert.equal(zipBytes.includes(Buffer.from('docs/report.md')), true);
+    assert.equal(zipBytes.includes(Buffer.from('src/app.js')), true);
   });
 });

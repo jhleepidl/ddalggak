@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
+import { spawnSync } from "node:child_process";
 import process from "node:process";
 
 import { Jobs } from "../jobs.js";
@@ -731,7 +733,8 @@ async function maybeSendArtifactSummary(bot, chatId, jobId, { execution = null, 
     ...rows.map((row, index) => `${index + 1}. ${row.path} (${formatByteSize(row.size || 0)}${row.sendable ? '' : ', too_large'})`),
     '',
     `예: /send 1 또는 /send ${rows[0]?.path || 'path/to/file'}`,
-    '파일을 받으려면 /send <번호> 또는 /send <path> 를 사용하세요.',
+    '여러 파일은 /send bundle 1,2,3 처럼 zip으로 받을 수 있어요.',
+    '파일을 받으려면 /send <번호|path> 또는 /send bundle <번호,번호|path,...> 를 사용하세요.',
   ];
   await bot.sendMessage(
     chatId,
@@ -791,6 +794,100 @@ async function sendWorkspaceFileByRelativePath(bot, chatId, jobId, relativePath,
     rel,
     size: Number(stat.size || 0),
   };
+}
+
+
+function parseArtifactBundleSelection(rawSelection = "") {
+  const raw = String(rawSelection || '').trim();
+  if (!raw) return null;
+  const bundleMatch = raw.match(/^bundle(?:\s+|:)(.+)$/i);
+  if (!bundleMatch) return null;
+  const body = String(bundleMatch[1] || '').trim();
+  if (!body) return { mode: 'bundle', items: [] };
+  const items = body
+    .split(/[\s,]+/)
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+  return { mode: 'bundle', items };
+}
+
+function findPythonForBundling() {
+  const candidates = [process.env.DDALGGAK_PYTHON_BIN, process.env.PYTHON, 'python3', 'python']
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  for (const candidate of candidates) {
+    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
+    if (!probe.error && Number(probe.status || 0) === 0) return candidate;
+  }
+  return '';
+}
+
+function buildBundleFileName(jobId = '', entries = []) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const cleanJobId = String(jobId || '').trim().replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 48) || 'job';
+  const rootName = String(entries?.[0]?.arc || 'bundle').split('/').filter(Boolean).pop() || 'bundle';
+  const stem = rootName.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 48) || 'bundle';
+  return `artifact_bundle_${cleanJobId}_${stem}_${stamp}.zip`;
+}
+
+function createArtifactBundle(jobId, selections, { artifactIndex = null } = {}) {
+  const cleanJobId = String(jobId || '').trim();
+  const items = Array.isArray(selections) ? selections.map((row) => String(row || '').trim()).filter(Boolean) : [];
+  if (!cleanJobId) throw new Error('jobId is required');
+  if (items.length === 0) throw new Error('bundle selection is empty');
+  const workspaceRoot = runWorkspaceDir(cleanJobId);
+  const seen = new Set();
+  const entries = [];
+  for (const selection of items) {
+    const rel = resolveArtifactSelection(cleanJobId, selection, { artifactIndex });
+    const abs = jobs.resolveWorkspacePath(cleanJobId, rel);
+    let stat = null;
+    try {
+      stat = fs.statSync(abs);
+    } catch {
+      stat = null;
+    }
+    if (!stat || !stat.isFile()) throw new Error(`file not found: ${rel}`);
+    const normalizedRel = path.relative(workspaceRoot, abs).replace(/\\/g, '/');
+    if (!normalizedRel || normalizedRel.startsWith('..')) throw new Error('Path outside workspace');
+    if (normalizedRel.startsWith('.') || normalizedRel.includes('/.telegram_')) throw new Error('internal workspace metadata cannot be bundled');
+    if (seen.has(normalizedRel)) continue;
+    seen.add(normalizedRel);
+    entries.push({ src: abs, arc: normalizedRel, size: Number(stat.size || 0) });
+  }
+  if (entries.length === 0) throw new Error('bundle selection is empty');
+  const pythonBin = findPythonForBundling();
+  if (!pythonBin) throw new Error('python runtime not found for zip bundle creation');
+  const bundleDir = path.join(os.tmpdir(), 'ddalggak-telegram-bundles');
+  fs.mkdirSync(bundleDir, { recursive: true });
+  const bundlePath = path.join(bundleDir, buildBundleFileName(cleanJobId, entries));
+  const payload = JSON.stringify(entries.map((entry) => ({ src: entry.src, arc: entry.arc })));
+  const script = 'import json,sys,zipfile; out=sys.argv[1]; entries=json.loads(sys.argv[2]); z=zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED); [z.write(e["src"], e["arc"]) for e in entries]; z.close()';
+  const result = spawnSync(pythonBin, ['-c', script, bundlePath, payload], { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
+  if (result.error || Number(result.status || 0) !== 0) {
+    const details = String(result.error?.message || result.stderr || result.stdout || '').trim();
+    throw new Error(`bundle creation failed${details ? `: ${details}` : ''}`);
+  }
+  const stat = fs.statSync(bundlePath);
+  return {
+    bundlePath,
+    fileName: path.basename(bundlePath),
+    size: Number(stat.size || 0),
+    entries,
+  };
+}
+
+async function sendArtifactBundle(bot, chatId, jobId, selections, { replyToMessageId = null, artifactIndex = null } = {}) {
+  const bundle = createArtifactBundle(jobId, selections, { artifactIndex });
+  if (bundle.size > TELEGRAM_SEND_MAX_BYTES) {
+    throw new Error(`bundle is too large for sendDocument (limit=${formatByteSize(TELEGRAM_SEND_MAX_BYTES)}, size=${formatByteSize(bundle.size)})`);
+  }
+  await bot.sendDocument(chatId, bundle.bundlePath, {
+    caption: `📦 artifact bundle\njob_id=${String(jobId || '').trim()}\nfiles=${bundle.entries.length}\nname=${bundle.fileName}`,
+    filename: bundle.fileName,
+    reply_to_message_id: Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0 ? Number(replyToMessageId) : undefined,
+  });
+  return bundle;
 }
 
 function resolveArtifactSelection(jobId, selection, { artifactIndex = null } = {}) {
@@ -854,8 +951,10 @@ export {
   refreshArtifactIndex,
   formatArtifactIndexText,
   sendArtifactBySelection,
+  sendArtifactBundle,
   sendWorkspaceFileByRelativePath,
   deliverWorkspaceOutputs,
+  parseArtifactBundleSelection,
   convoToText,
   sendLong,
   ensureCommandOk,
