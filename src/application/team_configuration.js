@@ -24,7 +24,9 @@ import {
   formatRoleOverlayProfile,
   formatSkillLabels,
   formatToolLabels,
+  humanizeExecutionPattern,
   humanizeModel,
+  humanizeVisibility,
   inferAgentSpecialty,
   inferTaskDomain,
   roleLabel,
@@ -2275,47 +2277,69 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
   return runtime;
 }
 
+
+function buildCompactCapabilityHeadline(team = {}, runtime = null) {
+  const contract = buildTeamCapabilityContract({ team, runtime });
+  const required = formatToolLabels(contract.required_tool_ids || [], { max: 3 }).join(', ');
+  const optionalMissing = formatToolLabels(contract.missing_optional_tool_ids || [], { max: 3 }).join(', ');
+  if (contract.status === 'ready') return '실행 준비: 바로 실행 가능';
+  if (contract.status === 'degraded') return `실행 준비: 일부 제약 있음${required ? ` · 필수 tool ${required}` : ''}`;
+  if (contract.status === 'unbound') return `실행 준비: runtime 연결 정보 부족${optionalMissing ? ` · 없으면 아쉬운 tool ${optionalMissing}` : ''}`;
+  if (contract.status === 'advisory_gap') return `실행 준비: 기본 진행 가능${optionalMissing ? ` · 있으면 더 좋은 tool ${optionalMissing}` : ''}`;
+  return `실행 준비: ${contract.status}`;
+}
+
+function buildCompactInteractionSummaryLines(spec = {}, shortcutPolicy = null) {
+  const row = spec && typeof spec === 'object' ? spec : {};
+  const policies = row.policies && typeof row.policies === 'object' ? row.policies : {};
+  const handoffCount = asArray(row.handoffs).length;
+  const lines = [
+    `흐름: ${humanizeExecutionPattern(row.execution_pattern)}`,
+    `최종 답변 담당: ${clean(row.final_answer_owner) || '미정'}`,
+  ];
+  if (policies.reviewer_visibility) lines.push(`검토 범위: ${humanizeVisibility(policies.reviewer_visibility)}`);
+  if (typeof policies.builder_direct_response === 'boolean') lines.push(`Builder 직접 응답: ${policies.builder_direct_response ? '허용' : '비허용'}`);
+  if (shortcutPolicy && typeof shortcutPolicy === 'object') {
+    const enabled = shortcutPolicy.enabled !== false;
+    lines.push(`짧은 후속 질문 shortcut: ${enabled ? '켜짐' : '꺼짐'}`);
+  }
+  if (handoffCount > 0) lines.push(`handoff: ${handoffCount}개`);
+  return lines;
+}
+
+function buildCompactAgentPresentationLines(agent = {}, index = 0) {
+  const requiredToolLabels = formatToolLabels(agent.required_tool_ids || [], { max: 3 });
+  const optionalToolLabels = formatToolLabels(agent.optional_tool_ids || agent.recommended_tool_ids || [], { max: 3 });
+  const capabilityLabels = formatSkillLabels(agent.capabilities || agent.skills, { max: 3 });
+  const generatedSkillLabels = normalizeGeneratedSkillBriefs(agent.generated_skill_briefs || agent.generatedSkillBriefs || []).map((entry) => entry.label).slice(0, 2);
+  const overlayProfile = formatRoleOverlayProfile(agent.role, agent, { includeBaseLabel: true });
+  const hasOverlay = /overlay=/.test(String(overlayProfile || ''));
+  return [
+    `${index + 1}. ${agent.name} · ${roleLabel(agent.role)} · ${humanizeModel(agent.provider || inferProviderForModel(agent.model || ''), agent.model)}`,
+    hasOverlay ? `   - 역할 프로필: ${overlayProfile}` : null,
+    `   - 맡은 일: ${clean(agent.purpose) || '설명 없음'}`,
+    capabilityLabels.length > 0 ? `   - 주력 역량: ${capabilityLabels.join(', ')}` : null,
+    generatedSkillLabels.length > 0 ? `   - 생성 skill: ${generatedSkillLabels.join(', ')}` : null,
+    requiredToolLabels.length > 0 ? `   - 필수 tool: ${requiredToolLabels.join(', ')}` : null,
+    optionalToolLabels.length > 0 ? `   - 선호 tool: ${optionalToolLabels.join(', ')}` : null,
+  ].filter(Boolean);
+}
+
 export function buildTeamListMessage(teamState = {}, { runtime = null } = {}) {
   const active = teamState?.active_team;
   if (!active) return '현재 활성 팀이 없습니다.\n/team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 팀을 먼저 구성해 주세요.';
-  const capabilityLines = formatTeamCapabilityContractLines(buildTeamCapabilityContract({ team: active, runtime }), { maxMissing: 4 });
   const lines = [
     `팀 이름: ${clean(active.team_name || 'active_team')}`,
     `구성 방식: ${normalizeCompositionMode(active.composition_mode || 'structured')}`,
-    `agent 수: ${asArray(active.agents).length}`,
     active.task_archetype ? `task archetype: ${clean(active.task_archetype)}` : null,
     active.structure_v2?.topology?.pattern ? `structure 패턴: ${clean(active.structure_v2.topology.pattern)}` : null,
-    active.planner_metadata ? `설계 엔진: ${summarizePlannerMetadata(active.planner_metadata)}` : null,
-    active.knowledge_base_profile ? summarizeKnowledgeBaseProfile(active.knowledge_base_profile).split('\n')[0] : null,
-    ...(capabilityLines.length > 0 ? ['', 'Capability contract', ...capabilityLines] : []),
-    ...(buildKnowledgeBaseMemoryMapLines(active.memory_plan || active.knowledge_base_profile, { maxLines: 6 }).length > 0 ? [
-      '',
-      'Memory layout',
-      ...buildKnowledgeBaseMemoryMapLines(active.memory_plan || active.knowledge_base_profile, { maxLines: 6 }),
-    ] : []),
+    buildCompactCapabilityHeadline(active, runtime),
     '',
     'Agents',
-    ...asArray(active.agents).flatMap((agent, index) => {
-      const capabilityLabels = formatSkillLabels(agent.capabilities || agent.skills, { max: 3 });
-      const packageLabels = formatSkillLabels(agent.attached_skill_ids || [], { max: 3 });
-      const requiredToolLabels = formatToolLabels(agent.required_tool_ids || [], { max: 3 });
-      const optionalToolLabels = formatToolLabels(agent.optional_tool_ids || agent.recommended_tool_ids || [], { max: 3 });
-      const generatedSkillLabels = normalizeGeneratedSkillBriefs(agent.generated_skill_briefs || agent.generatedSkillBriefs || []).map((entry) => entry.label).slice(0, 2);
-      return [
-        `${index + 1}. ${agent.name} · ${roleLabel(agent.role)}`,
-        `   - 역할 프로필: ${formatRoleOverlayProfile(agent.role, agent, { includeBaseLabel: true })}`,
-        `   - 맡은 일: ${clean(agent.purpose) || '설명 없음'}`,
-        `   - 주력 역량: ${capabilityLabels.join(', ') || '(none)'}`,
-        `   - 실행 skill: ${packageLabels.join(', ') || '(none)'}`,
-        generatedSkillLabels.length > 0 ? `   - 생성 skill: ${generatedSkillLabels.join(', ')}` : null,
-        `   - 필수 tool: ${requiredToolLabels.join(', ') || '(none)'}`,
-        `   - 선호 tool: ${optionalToolLabels.join(', ') || '(none)'}`,
-        `   - 모델: ${humanizeModel(agent.provider || inferProviderForModel(agent.model || ''), agent.model)}` + (agent.matched_preset_name ? ` · preset=${agent.matched_preset_name}` : ''),
-      ].filter(Boolean);
-    }),
+    ...asArray(active.agents).flatMap((agent, index) => buildCompactAgentPresentationLines(agent, index)),
     '',
     'Interaction',
-    ...buildReadableInteractionLines(active.interaction_spec || {}, active.shortcut_policy || {}),
+    ...buildCompactInteractionSummaryLines(active.interaction_spec || {}, active.shortcut_policy || {}),
   ];
   return lines.join('\n');
 }
@@ -2324,44 +2348,21 @@ export function formatTeamProposalMessage(team = {}, { runtime = null } = {}) {
   const row = team && typeof team === 'object' ? team : {};
   const compositionMode = normalizeCompositionMode(row.composition_mode || 'structured');
   const proposalMode = normalizeProposalMode(row.proposal_mode || (compositionMode === 'freeform' ? 'create' : 'suggest'));
-  const capabilityLines = formatTeamCapabilityContractLines(buildTeamCapabilityContract({ team: row, runtime }), { maxMissing: 4 });
   const lines = [
     `Team proposal · ${clean(row.team_name || 'team_config')}`,
     `구성 방식: ${compositionMode} · 제안 모드: ${proposalMode}`,
     row.task_brief ? `목표: ${clean(row.task_brief)}` : null,
     row.task_archetype ? `task archetype: ${clean(row.task_archetype)}` : null,
-    row.planner_metadata ? `설계 엔진: ${summarizePlannerMetadata(row.planner_metadata)}` : null,
     row.structure_v2?.topology?.pattern ? `structure 패턴: ${clean(row.structure_v2.topology.pattern)}` : null,
-    asArray(row.good_for).length > 0 ? `good for: ${asArray(row.good_for).slice(0, 3).join(', ')}` : null,
-    ...capabilityLines,
-    ...(buildKnowledgeBaseMemoryMapLines(row.memory_plan || row.knowledge_base_profile, { maxLines: 6 }).length > 0 ? [
-      '',
-      'Memory layout',
-      ...buildKnowledgeBaseMemoryMapLines(row.memory_plan || row.knowledge_base_profile, { maxLines: 6 }),
-    ] : []),
+    row.planner_metadata ? `설계 엔진: ${summarizePlannerMetadata(row.planner_metadata)}` : null,
+    asArray(row.good_for).length > 0 ? `good for: ${asArray(row.good_for).slice(0, 2).join(', ')}` : null,
+    buildCompactCapabilityHeadline(row, runtime),
     '',
     'Agents',
-    ...asArray(row.agents).flatMap((agent, index) => {
-      const capabilityLabels = formatSkillLabels(agent.capabilities || agent.skills, { max: 3 });
-      const packageLabels = formatSkillLabels(agent.attached_skill_ids || [], { max: 3 });
-      const requiredToolLabels = formatToolLabels(agent.required_tool_ids || [], { max: 3 });
-      const optionalToolLabels = formatToolLabels(agent.optional_tool_ids || agent.recommended_tool_ids || [], { max: 3 });
-      const generatedSkillLabels = normalizeGeneratedSkillBriefs(agent.generated_skill_briefs || agent.generatedSkillBriefs || []).map((entry) => entry.label).slice(0, 2);
-      return [
-        `${index + 1}. ${agent.name} · ${roleLabel(agent.role)}`,
-        `   - 역할 프로필: ${formatRoleOverlayProfile(agent.role, agent, { includeBaseLabel: true })}`,
-        `   - 맡은 일: ${clean(agent.purpose) || '설명 없음'}`,
-        `   - 주력 역량: ${capabilityLabels.join(', ') || '(none)'}`,
-        `   - 실행 skill: ${packageLabels.join(', ') || '(none)'}`,
-        generatedSkillLabels.length > 0 ? `   - 생성 skill: ${generatedSkillLabels.join(', ')}` : null,
-        `   - 필수 tool: ${requiredToolLabels.join(', ') || '(none)'}`,
-        `   - 선호 tool: ${optionalToolLabels.join(', ') || '(none)'}`,
-        `   - 모델: ${humanizeModel(agent.provider || inferProviderForModel(agent.model || ''), agent.model)}` + (agent.matched_preset_name ? ` · preset=${agent.matched_preset_name}` : ''),
-      ].filter(Boolean);
-    }),
+    ...asArray(row.agents).flatMap((agent, index) => buildCompactAgentPresentationLines(agent, index)),
     '',
     'Interaction',
-    ...buildReadableInteractionLines(row.interaction_spec || {}, row.shortcut_policy || {}),
+    ...buildCompactInteractionSummaryLines(row.interaction_spec || {}, row.shortcut_policy || {}),
     ...(formatManifestRequirementLines(row.requirements || buildManifestRequirements({
       team: row,
       capabilityGaps: row.capability_gaps || row.capabilityGaps || [],

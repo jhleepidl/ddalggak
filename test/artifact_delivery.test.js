@@ -77,7 +77,7 @@ test('refreshArtifactIndex prioritizes execution artifact refs and /send selecti
     assert.equal(result.rel, 'docs/report.md');
     assert.equal(sent.length, 1);
     assert.equal(String(sent[0].filePath).endsWith(path.join('docs', 'report.md')), true);
-    assert.match(String(sent[0].options.caption || ''), /docs\/report\.md/);
+    assert.equal(String(sent[0].options.caption || ''), '📄 report.md');
   });
 });
 
@@ -131,6 +131,7 @@ test('sendArtifactBundle packages selected workspace artifacts into a zip docume
     const bundle = await sendArtifactBundle(bot, 'chat-1', job.jobId, ['1', '2'], { artifactIndex });
     assert.equal(sent.length, 1);
     assert.equal(String(sent[0].options.caption || '').includes('artifact bundle'), true);
+    assert.equal(String(sent[0].options.caption || '').includes(job.jobId), false);
     assert.equal(bundle.entries.length, 2);
     assert.equal(String(sent[0].filePath).endsWith('.zip'), true);
     const zipBytes = fs.readFileSync(bundle.bundlePath);

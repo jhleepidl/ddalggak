@@ -68,6 +68,8 @@ import {
 } from "./job_runtime.js";
 import { summarizeRuntimeTeamSnapshotLines } from "./runtime_snapshot_display.js";
 import { createRuntimeTeamSnapshot } from "./runtime_metadata.js";
+import { interpretTask } from "../control_plane/task_interpreter.js";
+import { repairRoutePlanForTeamExecution } from "./team_route_repair.js";
 import { buildExecutionInsightSnapshot } from "./team_execution_insights.js";
 import { recordExecutionFeedback } from "./execution_feedback.js";
 import { buildScopedPromptAssembly, hydrateRuntimeScopesViaGoC, resolveScopeExecutionState } from "./goc_scope_runtime.js";
@@ -3266,6 +3268,15 @@ async function runSupervisorChat(
       const selectedExistingAgents = Array.isArray(teamRecommendation?.selected_existing_agents)
         ? teamRecommendation.selected_existing_agents
         : [];
+      const interpretedTask = interpretTask({
+        goal: lastUserText,
+        task: lastUserText,
+        message: lastUserText,
+        mode: 'run',
+        preferredRoles: selectedExistingAgents.map((row) => String(row?.role || '').trim().toLowerCase()).filter(Boolean),
+        registry: { agents: turnAgentsCatalog },
+        toolHints: Array.isArray(runtime?.tools) ? runtime.tools.map((tool) => String(tool?.id || tool?.name || '').trim()).filter(Boolean) : [],
+      });
       const existingRuntimeSnapshot = turnRuntimeTeamSnapshot && typeof turnRuntimeTeamSnapshot === 'object'
         ? turnRuntimeTeamSnapshot
         : (runtime?.runtime_team_snapshot && typeof runtime.runtime_team_snapshot === 'object'
@@ -3295,6 +3306,7 @@ async function runSupervisorChat(
           ? "selected_existing_agents"
           : "missing_capabilities").trim(),
         budget: {},
+        task_interpretation: interpretedTask,
       };
       const fallbackRuntimeAgents = selectedExistingAgents
         .map((row) => ({
@@ -3320,8 +3332,9 @@ async function runSupervisorChat(
           ...(existingRuntimeSnapshot && typeof existingRuntimeSnapshot === 'object' ? existingRuntimeSnapshot : {}),
           source: 'team_builder',
           generated_at: new Date().toISOString(),
+          task_interpretation: interpretedTask,
           team_plan: (existingRuntimeSnapshot?.team_plan && typeof existingRuntimeSnapshot.team_plan === 'object')
-            ? existingRuntimeSnapshot.team_plan
+            ? { ...existingRuntimeSnapshot.team_plan, task_interpretation: existingRuntimeSnapshot.team_plan.task_interpretation || interpretedTask }
             : fallbackTeamPlan,
           runtime_agents: Array.isArray(existingRuntimeSnapshot?.runtime_agents) && existingRuntimeSnapshot.runtime_agents.length > 0
             ? existingRuntimeSnapshot.runtime_agents
@@ -3399,6 +3412,11 @@ async function runSupervisorChat(
       routePlan = rewritePlanToReuseAgents(routePlan, runtime, {
         message: lastUserText,
         teamRecommendation,
+      });
+      routePlan = repairRoutePlanForTeamExecution(routePlan, {
+        message: lastUserText,
+        runtime,
+        runtimeTeamSnapshot,
       });
       const routeActionSource = (
         usedSuggestedActionsFallback
@@ -3703,13 +3721,15 @@ async function runSupervisorChat(
           stopReason = 'max_turns';
           break;
         }
-        await bot.sendMessage(
-          chatId,
-          '♻️ 결과를 더 끌어올리기 위해 self-refine를 계속합니다…',
-          Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
-            ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
-            : undefined
-        ).catch(() => null);
+        if (!useCompactProgressUpdates(false)) {
+          await bot.sendMessage(
+            chatId,
+            '♻️ 결과를 더 끌어올리기 위해 self-refine를 계속합니다…',
+            Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
+              ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
+              : undefined
+          ).catch(() => null);
+        }
         lastUserText = buildContinuousImprovementFollowup({
           originalUserText: message,
           followupHint,
@@ -3752,13 +3772,15 @@ async function runSupervisorChat(
         break;
       }
 
-      await bot.sendMessage(
-        chatId,
-        "🔄 다음 단계 진행 중…",
-        Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
-          ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
-          : undefined
-      );
+      if (!useCompactProgressUpdates(false)) {
+        await bot.sendMessage(
+          chatId,
+          "🔄 다음 단계 진행 중…",
+          Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
+            ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
+            : undefined
+        );
+      }
       lastUserText = buildAutopilotFollowupMessage({
         originalUserText: message,
         deliverables,

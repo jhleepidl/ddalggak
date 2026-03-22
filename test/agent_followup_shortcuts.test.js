@@ -26,19 +26,27 @@ test("appendRecentAgentTurn keeps newest unique agent turns first", () => {
   assert.equal(turns[1].agent_id, "researcher");
 });
 
-test("planAgentFollowupShortcut targets the most recent eligible agent turn when reply is used", () => {
+test("planAgentFollowupShortcut only bypasses router when reply is anchored to an answer capsule", () => {
   const shortcut = planAgentFollowupShortcut({
     message: "그 답변의 이유를 조금 더 자세히 설명해줘",
     session: {
+      answer_capsules: [
+        {
+          telegram_message_id: 123,
+          agent_id: "researcher",
+          answer_summary: "수요 회복과 재고 정상화 때문에 개선될 가능성이 높다",
+          answer_excerpt: "메모리 업황은 점진적으로 회복 중이다.",
+          original_goal_summary: "삼성전자 업황을 분석",
+        },
+      ],
       recent_agent_turns: [
         {
-          agent_id: "researcher",
-          agent_name: "Researcher",
-          role: "researcher",
+          agent_id: "reviewer",
+          agent_name: "Reviewer",
+          role: "reviewer",
           provider: "gemini",
-          model: "gemini-2.5-pro",
-          goal: "삼성전자 업황을 분석",
-          output: "수요 회복과 재고 정상화 때문에 개선될 가능성이 높다",
+          goal: "별도 검토",
+          output: "별도 검토 출력",
         },
       ],
     },
@@ -53,10 +61,34 @@ test("planAgentFollowupShortcut targets the most recent eligible agent turn when
   assert.equal(shortcut.target_agent_id, "researcher");
   assert.equal(shortcut.action.agent_id, "researcher");
   assert.match(shortcut.action.goal, /FOLLOW-UP SHORTCUT/);
-  assert.match(shortcut.action.goal, /YOUR PREVIOUS ANSWER/);
+  assert.match(shortcut.action.goal, /PREVIOUS ANSWER SUMMARY/);
 });
 
-test("planAgentFollowupShortcut ignores recent codex builder turns", () => {
+test("planAgentFollowupShortcut keeps reply-anchored routing even when the reply text looks like a new task", () => {
+  const shortcut = planAgentFollowupShortcut({
+    message: "그럼 이 구조로 실제 구현도 진행해줘",
+    session: {
+      answer_capsules: [
+        {
+          telegram_message_id: 456,
+          agent_id: "reviewer",
+          answer_summary: "이전 답변에서는 reviewer가 구조 리스크를 설명했다.",
+          answer_excerpt: "핵심 문제는 capability contract drift였다.",
+          original_goal_summary: "구조 문제를 설명해줘",
+        },
+      ],
+    },
+    runtime: {},
+    teamConfig: { shortcut_policy: { enabled: true } },
+    replyToMessageId: 456,
+  });
+
+  assert.equal(shortcut.matched, true);
+  assert.equal(shortcut.target_agent_id, "reviewer");
+  assert.equal(shortcut.reason, "reply_anchor_capsule");
+});
+
+test("planAgentFollowupShortcut routes through router when reply target is not an agent answer capsule", () => {
   const shortcut = planAgentFollowupShortcut({
     message: "왜 그렇게 수정했어?",
     session: {
@@ -78,7 +110,7 @@ test("planAgentFollowupShortcut ignores recent codex builder turns", () => {
   });
 
   assert.equal(shortcut.matched, false);
-  assert.equal(shortcut.reason, "no_eligible_recent_agent_turn");
+  assert.equal(shortcut.reason, "reply_not_agent_answer");
 });
 
 test("planAgentFollowupShortcut now requires an explicit Telegram reply target", () => {

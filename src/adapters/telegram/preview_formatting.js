@@ -24,6 +24,28 @@ function isMostlyBackendOnlyAction(type = '') {
   return ['summarize', 'checkpoint', 'supervisor_decision', 'gate_wait', 'human_checkpoint', 'tool_proxy_call', 'memory_sync', 'committee_consensus'].includes(String(type || '').trim().toLowerCase())
 }
 
+
+function compactRoleGoalLabel(roleId = '', { finalSynthesis = false } = {}) {
+  const key = String(roleId || '').trim().toLowerCase();
+  if (finalSynthesis || key === 'synthesizer') return '최종 결과를 정리하고 사용자 전달 형식으로 마감';
+  if (key === 'builder') return '실제 구현 산출물을 만들고 실행 가능한 결과를 남김';
+  if (key === 'reviewer') return '구현 결과를 검토하고 blocker/리스크를 정리';
+  if (key === 'researcher') return '구현 전 핵심 요구사항·가정·리스크를 정리';
+  return '';
+}
+
+function summarizeActionGoalForTelegram(action = {}, goalClipMax = 160) {
+  const inputs = action && typeof action.inputs === 'object' ? action.inputs : {};
+  const roleId = String(inputs.role_id || inputs.roleId || '').trim().toLowerCase();
+  const finalSynthesis = inputs.final_synthesis === true || inputs.finalSynthesis === true;
+  const compact = compactRoleGoalLabel(roleId, { finalSynthesis });
+  const rawGoal = String(getActionGoal(action) || '').trim();
+  if (compact && (!rawGoal || rawGoal.length > 140 || /^(사용자 요청을 계획하고 필요한 agent 작업을 제안\/수행|요청된 코드\/노트북 산출물을 구현|기존 agent를 재사용해 요청 처리|구현을 바로 진행할 수 있도록|원 요청과 upstream handoff를 바탕으로|현재 구현 산출물을 검토하고|upstream 결과와 검토 결과를 합쳐)/i.test(rawGoal))) {
+    return compact;
+  }
+  return clip(rawGoal || compact || '(goal 없음)', Math.min(goalClipMax, 110));
+}
+
 function formatActionMeta(action = {}) {
   const inputs = action && typeof action.inputs === 'object' ? action.inputs : {}
   const skillIds = asArray(inputs.attached_skill_ids || inputs.attachedSkillIds).map((item) => String(item || '').trim()).filter(Boolean).slice(0, 3)
@@ -115,7 +137,7 @@ export function buildPlanPreviewLines(actions = [], {
     const type = String(action?.type || '').trim().toLowerCase();
     if (isAgentActionType(type)) {
       const agentId = formatActionAgentLabel(action, { agentIndex: index });
-      const goal = clip(getActionGoal(action) || '(goal 없음)', goalClipMax);
+      const goal = summarizeActionGoalForTelegram(action, goalClipMax);
       const meta = formatActionMeta(action);
       lines.push(`- ${agentId}${meta ? ` · ${meta}` : ''}: ${goal}`);
       continue;
@@ -124,7 +146,7 @@ export function buildPlanPreviewLines(actions = [], {
       const children = asArray(action?.agents);
       for (const child of children) {
         const childId = formatActionAgentLabel(child, { agentIndex: index });
-        const goal = clip(String(child?.goal || child?.prompt || child?.task || '(goal 없음)'), goalClipMax);
+        const goal = summarizeActionGoalForTelegram(child, goalClipMax);
         const meta = formatActionMeta(child);
         lines.push(`- ${childId}${meta ? ` · ${meta}` : ''}: ${goal}`);
       }
@@ -258,13 +280,13 @@ export function buildCompactRoutedDashboardText({ actions = [], agentStatus = {}
   if (doneCount > 0) statusSummaryParts.push(`done ${doneCount}`);
   const lines = [
     '🧭 이번 턴 계획',
-    `- agents: ${compactAgents || '(none)'}${overflow > 0 ? ` 외 ${overflow}` : ''}`,
-    `- pattern: ${pattern}`,
-    `- step_count: ${asArray(actions).length}`,
-    `- status: ${statusSummaryParts.join(' · ') || 'queued'}`,
+    `- 핵심 agent: ${compactAgents || '(none)'}${overflow > 0 ? ` 외 ${overflow}` : ''}`,
+    `- 실행 방식: ${pattern}`,
+    `- 단계 수: ${asArray(actions).length}`,
+    `- 상태: ${statusSummaryParts.join(' · ') || 'queued'}`,
   ];
-  if (backendOnlyCount > 0) lines.push(`- system_steps: ${backendOnlyCount}`);
-  lines.push('- 자세히 보려면 버튼 또는 /status full');
+  if (backendOnlyCount > 0) lines.push(`- 내부 준비 단계: ${backendOnlyCount}`);
+  lines.push('- 세부 단계는 버튼 또는 /status full');
   return lines.join('\n');
 }
 

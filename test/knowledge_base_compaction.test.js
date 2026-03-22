@@ -78,7 +78,7 @@ test('non-codex providers are told to avoid direct KB file writes', () => {
 });
 
 
-test('team messages expose memory layout to the user', () => {
+test('team messages keep operator view compact without dumping memory layout files', () => {
   const profile = deriveKnowledgeBaseProfile({ goal: '수업용 실습 노트북과 과제를 설계해줘' });
   const team = {
     team_name: 'Notebook Course Team',
@@ -96,10 +96,10 @@ test('team messages expose memory layout to the user', () => {
   };
   const proposalMsg = formatTeamProposalMessage(team);
   const activeMsg = buildTeamListMessage({ active_team: team });
-  assert.match(proposalMsg, /Memory layout/);
-  assert.match(proposalMsg, new RegExp(profile.docs[0].file_name.replace('.', '\\.')));
-  assert.match(activeMsg, /Memory layout/);
-  assert.match(activeMsg, /Memory layout ·/);
+  assert.doesNotMatch(proposalMsg, /Memory layout/);
+  assert.doesNotMatch(activeMsg, /Memory layout/);
+  assert.match(proposalMsg, /Agents/);
+  assert.match(activeMsg, /Interaction/);
 });
 
 

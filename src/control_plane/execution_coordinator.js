@@ -725,6 +725,10 @@ function buildSlotPrompt({
   let prompt = '';
   if (cleanRoleId === "builder") {
     prompt = normalizeText(seedInstruction || goal || slot?.purpose || runtimeAgent?.assigned_goal);
+    prompt = appendPromptSuffix(
+      prompt,
+      'Treat upstream research/review outputs, shared mission_brief, working_memory, and implementation_notes as the source of truth. Do not just restate the raw user request; convert upstream handoff into concrete implementation steps and produce tangible workspace changes or runnable deliverables when possible.'
+    );
   } else if (cleanRoleId === "synthesizer") {
     prompt = normalizeText(
       slot?.purpose

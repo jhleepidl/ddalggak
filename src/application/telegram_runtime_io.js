@@ -795,7 +795,7 @@ async function sendWorkspaceFileByRelativePath(bot, chatId, jobId, relativePath,
     chatId,
     abs,
     {
-      caption: `📄 file\njob_id=${cleanJobId}\npath=${rel}`,
+      caption: `📄 ${path.basename(rel)}`,
       reply_to_message_id: Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
         ? Number(replyToMessageId)
         : undefined,
@@ -836,10 +836,9 @@ function findPythonForBundling() {
 
 function buildBundleFileName(jobId = '', entries = []) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const cleanJobId = String(jobId || '').trim().replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 48) || 'job';
   const rootName = String(entries?.[0]?.arc || 'bundle').split('/').filter(Boolean).pop() || 'bundle';
   const stem = rootName.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 48) || 'bundle';
-  return `artifact_bundle_${cleanJobId}_${stem}_${stamp}.zip`;
+  return `artifact_bundle_${stem}_${stamp}.zip`;
 }
 
 function createArtifactBundle(jobId, selections, { artifactIndex = null } = {}) {
@@ -895,7 +894,9 @@ async function sendArtifactBundle(bot, chatId, jobId, selections, { replyToMessa
     throw new Error(`bundle is too large for sendDocument (limit=${formatByteSize(TELEGRAM_SEND_MAX_BYTES)}, size=${formatByteSize(bundle.size)})`);
   }
   await bot.sendDocument(chatId, bundle.bundlePath, {
-    caption: `📦 artifact bundle\njob_id=${String(jobId || '').trim()}\nfiles=${bundle.entries.length}\nname=${bundle.fileName}`,
+    caption: `📦 artifact bundle
+- files: ${bundle.entries.length}
+- name: ${bundle.fileName}`,
     filename: bundle.fileName,
     reply_to_message_id: Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0 ? Number(replyToMessageId) : undefined,
   });

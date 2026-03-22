@@ -23,9 +23,9 @@ test("compact routed dashboard keeps the default preview short", () => {
   });
 
   assert.match(text, /🧭 이번 턴 계획/);
-  assert.match(text, /agents:/);
-  assert.match(text, /status:/);
-  assert.match(text, /자세히 보려면 버튼 또는 \/status full/);
+  assert.match(text, /핵심 agent:/);
+  assert.match(text, /상태:/);
+  assert.match(text, /세부 단계는 버튼 또는 \/status full/);
   assert.doesNotMatch(text, /🧭 핵심 agent/);
 });
 

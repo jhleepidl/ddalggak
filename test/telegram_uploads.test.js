@@ -148,7 +148,7 @@ test("createTelegramUploadService stores Telegram uploads in the workspace and r
   assert.equal(manifest.file_id, "doc-file-id");
   assert.equal(manifest.upload_note, "spec v2 입력 샘플");
   assert.match(manifest.workspace_path, /^uploads\//);
-  assert.match(harness.state.sentMessages[0].text, /upload note: spec v2 입력 샘플/);
+  assert.match(harness.state.sentMessages[0].text, /메모: spec v2 입력 샘플/);
 });
 
 test("createTelegramUploadService rejects files outside the allowed extension list", async () => {

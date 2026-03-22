@@ -313,13 +313,11 @@ export function createTelegramUploadService(deps = {}) {
       chatId,
       [
         "📎 파일 업로드 저장 완료",
-        `- kind: ${cleanKind}`,
-        `- job_id: ${jobId}`,
-        `- workspace: ${runWorkspaceDir(jobId)}`,
-        `- path: ${workspaceRelPath}`,
-        `- size: ${formatByteSize(actualSize)}`,
-        cleanUploadNote ? `- upload note: ${cleanUploadNote}` : "",
-        createdJob ? "- note: 새 job 생성됨" : "",
+        `- 파일: ${cleanName}`,
+        `- 종류: ${cleanKind}`,
+        `- 크기: ${formatByteSize(actualSize)}`,
+        cleanUploadNote ? `- 메모: ${cleanUploadNote}` : "",
+        createdJob ? "- 상태: 새 작업에 저장됨" : "- 상태: 현재 작업에 연결됨",
       ].filter(Boolean).join("\n"),
       replyToMessageOptions(msg)
     );

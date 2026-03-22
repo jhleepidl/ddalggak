@@ -70,14 +70,16 @@ export function defaultScopeGrantsForRole({ roleId = '', mode = 'shared_memory' 
     grants.global_memory = role === 'builder' || role === 'operator';
     grants.user_pinned_nodes = role !== 'synthesizer';
     grants.explicit_uploaded_files = role === 'builder' || role === 'reviewer';
-    grants.upstream_results = role === 'reviewer' || role === 'synthesizer';
-    grants.upstream_summaries = role === 'reviewer' || role === 'synthesizer' || role === 'operator';
+    grants.upstream_results = role === 'builder' || role === 'reviewer' || role === 'synthesizer';
+    grants.upstream_summaries = role === 'builder' || role === 'reviewer' || role === 'synthesizer' || role === 'operator';
     return grants;
   }
 
   if (role === 'builder') {
     grants.explicit_uploaded_files = true;
     grants.user_pinned_nodes = true;
+    grants.upstream_results = true;
+    grants.upstream_summaries = true;
   }
   if (role === 'reviewer') {
     grants.upstream_results = true;

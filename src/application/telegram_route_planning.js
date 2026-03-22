@@ -770,10 +770,9 @@ async function sendRouterAckMessage(bot, chatId, { replyToMessageId = null } = {
 
 async function sendPlanPreviewMessage(bot, chatId, { actions = [], replyToMessageId = null } = {}) {
   const agentStatus = buildQueuedAgentStatusFromActions(actions);
-  const text = buildRoutedDashboardText({
+  const text = buildCompactRoutedDashboardText({
     actions,
     agentStatus,
-    compact: true,
   });
   const options = {
     reply_markup: {

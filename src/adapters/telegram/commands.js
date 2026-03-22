@@ -459,10 +459,7 @@ export function createTelegramCommandHandler(deps = {}) {
           ? await createFreeformTeamConfigurationAdvanced({ description: effectiveGoal, runtime: runtimeForTeam, jobId: currentJobId })
           : suggestTeamConfiguration({ taskText: effectiveGoal, runtime: runtimeForTeam });
         storePendingTeam(chatSessionStore, chatId, proposal);
-        await sendLong(bot, chatId, `${formatTeamProposalMessage(proposal, { runtime: runtimeForTeam })}
-
-지원 모델:
-${formatSupportedModelLines()}`);
+        await sendLong(bot, chatId, formatTeamProposalMessage(proposal, { runtime: runtimeForTeam }));
         return true;
       }
       if (sub === 'create') {
@@ -474,10 +471,7 @@ ${formatSupportedModelLines()}`);
         await bot.sendMessage(chatId, '해당 요청에 맞는 팀을 구성하겠습니다. 잠시만 기다려주세요.');
         const proposal = await createFreeformTeamConfigurationAdvanced({ description, runtime: runtimeForTeam, jobId: currentJobId });
         storePendingTeam(chatSessionStore, chatId, proposal);
-        await sendLong(bot, chatId, `${formatTeamProposalMessage(proposal, { runtime: runtimeForTeam })}
-
-지원 모델:
-${formatSupportedModelLines()}`);
+        await sendLong(bot, chatId, formatTeamProposalMessage(proposal, { runtime: runtimeForTeam }));
         return true;
       }
       if (sub === 'refine') {
