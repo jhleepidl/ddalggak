@@ -114,16 +114,17 @@ function roleIdForAction(action = {}, teamAgents = []) {
 }
 
 function buildRoleGoal(roleId = '', message = '') {
-  const request = clip(String(message || '').trim(), 420);
+  const request = clip(String(message || '').trim(), 180);
+  const requestLine = request ? ` 요청 요약: ${request}` : '';
   switch (cleanId(roleId)) {
     case 'researcher':
-      return `구현을 바로 진행할 수 있도록 핵심 요구사항, 제품 흐름, 외부 제약/리스크를 짧게 정리하고 builder에게 handoff를 남겨라. 원 요청: ${request}`;
+      return `구현을 바로 진행할 수 있도록 핵심 요구사항, 제품 흐름, 외부 제약/리스크를 짧게 정리하고 builder에게 handoff를 남겨라.${requestLine}`;
     case 'builder':
-      return `원 요청과 upstream handoff를 바탕으로 실제 구현 산출물을 만들어라. raw user request를 그대로 반복하지 말고, mission_brief/working_memory/연구 결과를 실행 가능한 작업 단계로 변환하라. 설계 설명만으로 끝내지 말고 가능한 파일 생성/수정, 구현 초안, 실행 방법, implementation_notes를 남겨라. 원 요청: ${request}`;
+      return `upstream handoff와 mission_brief/working_memory를 source of truth로 삼아 실제 구현 산출물을 만들어라. raw user request를 되풀이하지 말고, 연구 결과를 실행 가능한 작업 단계와 파일 변경으로 변환하라. 설계 설명만으로 끝내지 말고 가능한 파일 생성/수정, 구현 초안, 실행 방법, implementation_notes를 남겨라.${requestLine}`;
     case 'reviewer':
-      return `현재 구현 산출물과 upstream handoff를 함께 검토하고 blocker, 빠진 테스트, 리스크, 수정 제안을 우선순위와 함께 review_findings에 남겨라. 원 요청: ${request}`;
+      return `현재 구현 산출물과 upstream handoff를 함께 검토하고 blocker, 빠진 테스트, 리스크, 수정 제안을 우선순위와 함께 review_findings에 남겨라.${requestLine}`;
     case 'synthesizer':
-      return `upstream 결과와 검토 결과를 합쳐 사용자에게 전달 가능한 최종 구현 요약, 생성된 산출물, 실행 방법, 남은 리스크를 정리하라. 원 요청: ${request}`;
+      return `upstream 결과와 검토 결과를 합쳐 사용자에게 전달 가능한 최종 구현 요약, 생성된 산출물, 실행 방법, 남은 리스크를 정리하라.${requestLine}`;
     default:
       return request;
   }

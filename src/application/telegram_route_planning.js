@@ -743,6 +743,14 @@ function buildRoutedDashboardText({ actions = [], agentStatus = {}, compact = fa
   });
 }
 
+function buildCompactRoutedDashboardText({ actions = [], agentStatus = {} } = {}) {
+  return buildRoutedDashboardText({
+    actions,
+    agentStatus,
+    compact: true,
+  });
+}
+
 function getCurrentTurnReplyMessageId(chatId) {
   const session = chatSessionStore.get(chatId);
   const planMessageId = Number(session?.current_turn_plan_message_id || 0);

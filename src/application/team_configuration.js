@@ -1379,6 +1379,19 @@ export function buildTeamConfigurationTemplate(team = {}) {
   }, null, 2);
 }
 
+function stripBlueprintFieldsForRefinement(raw = {}) {
+  const row = asObject(raw);
+  const next = { ...row };
+  delete next.structure_v2;
+  delete next.structureV2;
+  delete next.structure;
+  delete next.team_blueprint;
+  delete next.teamBlueprint;
+  delete next.primary_schema;
+  delete next.primarySchema;
+  return next;
+}
+
 function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames = true } = {}) {
   const input = asObject(raw);
   const explicitStructure = input.kind === 'team_structure_v2'
@@ -1818,8 +1831,7 @@ export async function refineTeamConfigurationAdvanced({ team = {}, instruction =
     current: plannerResult.plan.interaction_spec || current.interaction_spec,
   });
   return normalizeTeamConfig({
-    ...current,
-    primary_schema: undefined,
+    ...stripBlueprintFieldsForRefinement(current),
     team_name: clean(plannerResult.plan.team_name || current.team_name || 'refined_team'),
     composition_mode: current.composition_mode || 'freeform',
     proposal_mode: 'refine',
@@ -2012,7 +2024,7 @@ export function createFreeformTeamConfiguration({ description = '', runtime = nu
 export function refineTeamConfiguration(team = {}, instruction = '', { runtime = null } = {}) {
   const fallbackRuntime = runtime || { agentsCatalog: asArray(team?.agents).map((agent) => ({ id: agent.agent_id, name: agent.name, role: agent.role, model: agent.model, provider: agent.provider, skills: agent.skills })) };
   const current = normalizeTeamConfig(team, { runtime: fallbackRuntime });
-  const next = { ...current, agents: [...current.agents] };
+  const next = { ...stripBlueprintFieldsForRefinement(current), agents: [...current.agents] };
   const text = clean(instruction);
   const lower = text.toLowerCase();
   if (/builder\s+추가|builder\s+add|coder\s+agent|coder\s+add|코더\s*agent|코더\s*추가|ipython|jupyter|notebook/i.test(text)) {

@@ -227,22 +227,65 @@ export function planAgentFollowupShortcut({ message = "", session = null, runtim
   }
 
   const replyCapsule = findAnswerCapsuleByTelegramMessageId(session, cleanReplyToMessageId);
-  if (!replyCapsule) {
-    return { matched: false, reason: "reply_not_agent_answer", intent };
+  const replyShortcutAllowed = replyCapsule && !isLikelyNewTask(message);
+  if (replyShortcutAllowed) {
+    const anchored = buildReplyAnchoredFollowup({ capsule: replyCapsule, message });
+    if (anchored) {
+      return {
+        ...anchored,
+        intent: {
+          ...intent,
+          matched: true,
+          score: Math.max(3, Number(intent?.score || 0)),
+          reasons: [...new Set([...(Array.isArray(intent?.reasons) ? intent.reasons : []), "reply_anchor"])],
+        },
+      };
+    }
   }
 
-  const anchored = buildReplyAnchoredFollowup({ capsule: replyCapsule, message });
-  if (!anchored) {
-    return { matched: false, reason: "reply_capsule_unresolved", intent };
-  }
+  if (!intent.matched) return { matched: false, reason: "intent_not_matched", intent };
+
+  const recentTurns = normalizeRecentAgentTurns(session?.recent_agent_turns || session?.recentAgentTurns || []);
+  if (recentTurns.length === 0) return { matched: false, reason: "no_recent_agent_turn", intent };
+
+  const explicitMentions = collectExplicitMentions(message, runtime);
+  const eligibleTurns = recentTurns.filter(isShortcutEligibleTurn);
+  if (eligibleTurns.length === 0) return { matched: false, reason: "no_eligible_recent_agent_turn", intent };
+
+  const targetTurn = explicitMentions.size > 0
+    ? eligibleTurns.find((row) => explicitMentions.has(row.agent_id)) || eligibleTurns[0]
+    : eligibleTurns[0];
+
+  if (!targetTurn?.agent_id) return { matched: false, reason: "no_target_agent", intent };
+
+  const followupPrompt = [
+    "[FOLLOW-UP SHORTCUT]",
+    "너는 방금 직전 응답을 작성했던 동일한 agent다.",
+    "이번 요청은 team router를 다시 거치지 않는 짧은 후속 질문이다.",
+    "가능하면 방금 네가 제시한 논리와 근거를 그대로 이어서 설명하라.",
+    "새 팀 구성이나 새 agent 분배를 제안하지 말고, 필요한 설명만 바로 답하라.",
+    targetTurn.goal ? `[PREVIOUS GOAL]\n${targetTurn.goal}` : "",
+    targetTurn.output ? `[YOUR PREVIOUS ANSWER]\n${clipText(targetTurn.output, 3600)}` : "",
+    `[USER FOLLOW-UP]\n${clean(message)}`,
+    "[RESPONSE STYLE] 한국어로 직접 답하고, 필요하면 핵심 근거만 짧게 덧붙여라.",
+  ].filter(Boolean).join("\n\n");
 
   return {
-    ...anchored,
-    intent: {
-      ...intent,
-      matched: true,
-      score: Math.max(3, Number(intent?.score || 0)),
-      reasons: [...new Set([...(Array.isArray(intent?.reasons) ? intent.reasons : []), "reply_anchor"])],
+    matched: true,
+    reason: "recent_agent_followup",
+    intent,
+    target_agent_id: targetTurn.agent_id,
+    target_turn: targetTurn,
+    action: {
+      type: "run_agent",
+      agent_id: targetTurn.agent_id,
+      goal: followupPrompt,
+      inputs: {
+        runtime_instance_id: targetTurn.runtime_instance_id || undefined,
+        slot_id: targetTurn.slot_id || undefined,
+        scope_id: targetTurn.scope_id || undefined,
+        shortcut_followup: true,
+      },
     },
   };
 }

@@ -200,3 +200,59 @@ test('advanced refine restores builder coverage for web-service refinement even 
   assert.ok(refined.agents.some((agent) => agent.role === 'builder'));
   assert.equal(refined.interaction_spec.execution_pattern, 'builder_reviewer_loop');
 });
+
+
+test('advanced refine rebuilds structure from the refined roster instead of stale blueprint participants', async () => {
+  const baseTeam = await createFreeformTeamConfigurationAdvanced({
+    description: '새로운 웹 서비스를 개발하기 위한 팀.',
+    planner: async () => ({
+      ok: true,
+      planner_metadata: { planner_type: 'codex_cli', planner_model: 'gpt-5.4', planning_source: 'codex_gpt_5_4' },
+      plan: {
+        team_name: 'web_service_team',
+        agents: [
+          { name: 'Product Researcher', role: 'researcher', purpose: '요구사항과 근거를 조사한다', model: 'gemini-2.5-pro', provider: 'gemini' },
+          { name: 'Service Builder', role: 'builder', purpose: '실제 변경안과 실행 계획을 만든다', model: 'gpt-5-codex', provider: 'codex' },
+          { name: 'Quality Reviewer', role: 'reviewer', purpose: '리스크와 검증 누락을 검토한다', model: 'gpt-5.4', provider: 'chatgpt' },
+          { name: 'Delivery Synthesizer', role: 'synthesizer', purpose: '최종 답변을 정리한다', model: 'gpt-5.4', provider: 'chatgpt' },
+          { name: 'Repo Scout', role: 'researcher', purpose: '코드베이스를 탐색한다', model: 'gemini-2.5-pro', provider: 'gemini' },
+        ],
+      },
+    }),
+  });
+
+  const refined = await refineTeamConfigurationAdvanced({
+    team: baseTeam,
+    instruction: 'Delivery Synthesizer는 Gemini 3.0을 사용해줘.',
+    planner: async () => ({
+      ok: true,
+      planner_metadata: {
+        planner_type: 'codex_cli',
+        planner_model: 'gpt-5.4',
+        planning_source: 'codex_gpt_5_4_refine',
+        reasoning_summary: ['updated synthesizer model'],
+      },
+      plan: {
+        team_name: 'web_service_team',
+        agents: [
+          { name: 'Product Researcher', role: 'researcher', purpose: '요구사항과 근거를 조사한다', model: 'gemini-2.5-pro', provider: 'gemini' },
+          { name: 'Service Builder', role: 'builder', purpose: '실제 변경안과 실행 계획을 만든다', model: 'gpt-5-codex', provider: 'codex' },
+          { name: 'Quality Reviewer', role: 'reviewer', purpose: '리스크와 검증 누락을 검토한다', model: 'gpt-5.4', provider: 'chatgpt' },
+          { name: 'Delivery Synthesizer', role: 'synthesizer', purpose: '최종 답변을 정리한다', model: 'gemini-3-flash-preview', provider: 'gemini' },
+        ],
+      },
+    }),
+  });
+
+  assert.equal(refined.agents.length, 4);
+  assert.equal(refined.agents.some((agent) => agent.name === 'Repo Scout'), false);
+  const synth = refined.agents.find((agent) => agent.name === 'Delivery Synthesizer');
+  assert.equal(synth?.provider, 'gemini');
+  assert.equal(synth?.model, 'gemini-3-flash-preview');
+  const participantIds = (refined.structure_v2?.participants || []).map((row) => row.participant_id);
+  assert.equal(participantIds.includes('repo_scout'), false);
+  const finalParticipant = refined.structure_v2?.topology?.final_participant_id;
+  assert.equal(finalParticipant, 'delivery_synthesizer');
+  const finalParticipantRow = (refined.structure_v2?.participants || []).find((row) => row.participant_id === 'delivery_synthesizer');
+  assert.equal(finalParticipantRow?.model, 'gemini-3-flash-preview');
+});

@@ -184,34 +184,60 @@ function summarizeTeamForPlanner(team = null) {
   const row = asObject(team);
   const structure = row.structure_v2 || row.structureV2;
   const source = structure && typeof structure === 'object' ? { ...row, ...deriveTeamConfigFromStructureV2(structure) } : row;
+  const interactionSpec = asObject(source.interaction_spec || source.interactionSpec);
+  const runtimeExecution = asObject(source.runtime_execution || source.runtimeExecution || structure?.control_policy?.runtime_execution || structure?.control_policy?.runtimeExecution);
+  const memoryPlan = asObject(source.memory_plan || source.memoryPlan || structure?.memory_plan || structure?.memoryPlan);
   return {
     team_name: clean(source.team_name || source.teamName || ''),
     task_brief: clean(source.task_brief || source.taskBrief || source.task || source.design_prompt || source.designPrompt || ''),
-    agents: asArray(source.agents).map((agent) => ({
+    agents: asArray(source.agents).slice(0, 10).map((agent) => ({
       name: clean(agent?.name),
       role: cleanId(agent?.role || agent?.role_id || agent?.roleId || 'researcher') || 'researcher',
       purpose: clean(agent?.purpose),
       model: clean(agent?.model),
       provider: cleanId(agent?.provider || ''),
-      capabilities: asArray(agent?.capabilities || agent?.skills).map((entry) => clean(entry)).filter(Boolean).slice(0, 5),
-      attached_skill_ids: asArray(agent?.attached_skill_ids || agent?.attachedSkillIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 6),
-      generated_skill_briefs: asArray(agent?.generated_skill_briefs || agent?.generatedSkillBriefs).map((entry) => ({
-        label: clean(entry?.label || entry?.name || entry?.title),
-        goal: clean(entry?.goal || entry?.objective || entry?.description),
-      })).filter((entry) => entry.label).slice(0, 3),
-      required_tool_ids: asArray(agent?.required_tool_ids || agent?.requiredToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 6),
-      optional_tool_ids: asArray(agent?.optional_tool_ids || agent?.optionalToolIds || agent?.recommended_tool_ids || agent?.recommendedToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 6),
+      attached_skill_ids: asArray(agent?.attached_skill_ids || agent?.attachedSkillIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 4),
+      generated_skill_labels: asArray(agent?.generated_skill_briefs || agent?.generatedSkillBriefs).map((entry) => clean(entry?.label || entry?.name || entry?.title)).filter(Boolean).slice(0, 2),
+      required_tool_ids: asArray(agent?.required_tool_ids || agent?.requiredToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 4),
+      optional_tool_ids: asArray(agent?.optional_tool_ids || agent?.optionalToolIds || agent?.recommended_tool_ids || agent?.recommendedToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 4),
       context_policy: asObject(agent?.context_policy || agent?.contextPolicy),
     })).filter((agent) => agent.name),
-    interaction_spec: asObject(source.interaction_spec || source.interactionSpec),
+    interaction_spec: {
+      execution_pattern: cleanId(interactionSpec.execution_pattern || interactionSpec.executionPattern || ''),
+      reviewer_visibility: cleanId(interactionSpec.reviewer_visibility || interactionSpec.reviewerVisibility || ''),
+      builder_direct_response: interactionSpec.builder_direct_response === true,
+      final_answer_owner: clean(interactionSpec.final_answer_owner || interactionSpec.finalAnswerOwner || ''),
+      handoffs: asArray(interactionSpec.handoffs).slice(0, 12).map((handoff) => ({
+        from: clean(handoff?.from),
+        to: clean(handoff?.to),
+        payload: clean(handoff?.payload),
+      })),
+    },
     shortcut_policy: asObject(source.shortcut_policy || source.shortcutPolicy),
-    memory_plan: asObject(source.memory_plan || source.memoryPlan || structure?.memory_plan || structure?.memoryPlan),
-    memory_plan: asObject(source.memory_plan || source.memoryPlan || structure?.memory_plan || structure?.memoryPlan),
-    knowledge_surface: asObject(source.knowledge_surface || source.knowledgeSurface || structure?.knowledge_surface || structure?.knowledgeSurface),
-    memory_policy: asObject(source.memory_policy || source.memoryPolicy || structure?.memory_policy || structure?.memoryPolicy),
-    runtime_execution: asObject(source.runtime_execution || source.runtimeExecution || structure?.control_policy?.runtime_execution || structure?.control_policy?.runtimeExecution),
-    structure_v2: structure || undefined,
-    planner_metadata: asObject(source.planner_metadata || source.plannerMetadata),
+    memory_surfaces: asArray(memoryPlan.surfaces).slice(0, 10).map((surface) => ({
+      surface_id: cleanId(surface?.surface_id || surface?.surfaceId || ''),
+      target_roles: asArray(surface?.target_roles || surface?.targetRoles).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 4),
+      load_policy: cleanId(surface?.load_policy || surface?.loadPolicy || ''),
+      write_policy: cleanId(surface?.write_policy || surface?.writePolicy || ''),
+    })),
+    runtime_execution: {
+      approval_mode: cleanId(runtimeExecution.approval_mode || runtimeExecution.approvalMode || ''),
+      provider_runtime_policy: cleanId(runtimeExecution.provider_runtime_policy || runtimeExecution.providerRuntimePolicy || ''),
+      memory_strategy: cleanId(runtimeExecution.memory_strategy || runtimeExecution.memoryStrategy || ''),
+    },
+    topology: structure && typeof structure === 'object'
+      ? {
+          pattern: cleanId(structure?.topology?.pattern || ''),
+          execution_pattern: cleanId(structure?.topology?.execution_pattern || structure?.topology?.executionPattern || ''),
+          final_participant_id: cleanId(structure?.topology?.final_participant_id || structure?.topology?.finalParticipantId || ''),
+          participant_count: asArray(structure?.participants).length,
+        }
+      : undefined,
+    planner_metadata: {
+      planner_type: clean(source?.planner_metadata?.planner_type || source?.plannerMetadata?.planner_type || source?.plannerMetadata?.plannerType || ''),
+      planning_source: clean(source?.planner_metadata?.planning_source || source?.plannerMetadata?.planning_source || source?.plannerMetadata?.planningSource || ''),
+      reasoning_summary: asArray(source?.planner_metadata?.reasoning_summary || source?.plannerMetadata?.reasoning_summary || source?.plannerMetadata?.reasoningSummary).map((entry) => clean(entry)).filter(Boolean).slice(0, 6),
+    },
   };
 }
 
