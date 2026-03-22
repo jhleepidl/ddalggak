@@ -111,7 +111,7 @@ test('advanced refine uses planner output to add coder/builder and update intera
 
   assert.ok(refined.agents.some((agent) => agent.role === 'builder'));
   assert.ok(refined.agents.some((agent) => /notebook/i.test(`${agent.name} ${agent.purpose}`)));
-  assert.equal(refined.interaction_spec.execution_pattern, 'sequential_pipeline');
+  assert.equal(refined.interaction_spec.execution_pattern, 'builder_reviewer_loop');
   assert.ok(refined.interaction_spec.handoffs.some((handoff) => /builder/i.test(handoff.from) || /builder/i.test(handoff.to)));
   assert.equal(refined.planner_metadata.planner_model, 'gpt-5.4');
 });
@@ -155,4 +155,48 @@ test('advanced refine removes omitted agents when instruction explicitly asks fo
   });
 
   assert.equal(refined.agents.some((agent) => agent.name === 'Pedagogy Reviewer'), false);
+});
+
+
+test('advanced refine restores builder coverage for web-service refinement even when planner returns research-heavy roster', async () => {
+  const baseTeam = await createFreeformTeamConfigurationAdvanced({
+    description: '서비스 요구사항을 분석하는 팀을 구성해줘.',
+    planner: async () => ({
+      ok: true,
+      planner_metadata: { planner_type: 'codex_cli', planner_model: 'gpt-5.4', planning_source: 'codex_gpt_5_4' },
+      plan: {
+        team_name: 'service_analysis_team',
+        agents: [
+          { name: 'Lead Researcher', role: 'researcher', purpose: '요구사항을 정리한다', model: 'gemini-2.5-pro', provider: 'gemini' },
+          { name: 'Quality Reviewer', role: 'reviewer', purpose: '리스크를 검토한다', model: 'gpt-5.4', provider: 'chatgpt' },
+        ],
+      },
+    }),
+  });
+
+  const refined = await refineTeamConfigurationAdvanced({
+    team: baseTeam,
+    instruction: '이제 실제 웹 서비스 개발 팀으로 바꿔줘. 백엔드 API와 프론트엔드 구현이 필요해.',
+    planner: async () => ({
+      ok: true,
+      planner_metadata: { planner_type: 'codex_cli', planner_model: 'gpt-5.4', planning_source: 'codex_gpt_5_4_refine' },
+      plan: {
+        team_name: 'service_build_team',
+        agents: [
+          { name: 'Lead Researcher', role: 'researcher', purpose: '요구사항을 정리한다', model: 'gemini-2.5-pro', provider: 'gemini' },
+          { name: 'Quality Reviewer', role: 'reviewer', purpose: '리스크를 검토한다', model: 'gpt-5.4', provider: 'chatgpt' },
+        ],
+        interaction_spec: {
+          execution_pattern: 'sequential_pipeline',
+          final_answer_owner: 'Quality Reviewer',
+          handoffs: [
+            { from: 'Lead Researcher', to: 'Quality Reviewer', payload: 'summary_plus_key_evidence' },
+          ],
+        },
+      },
+    }),
+  });
+
+  assert.ok(refined.agents.some((agent) => agent.role === 'builder'));
+  assert.equal(refined.interaction_spec.execution_pattern, 'builder_reviewer_loop');
 });

@@ -139,3 +139,25 @@ test('sendArtifactBundle packages selected workspace artifacts into a zip docume
     assert.equal(zipBytes.includes(Buffer.from('src/app.js')), true);
   });
 });
+
+
+test('collectWorkspaceFileEntries and artifact index exclude internal support files like GEMINI.md and .codex instructions', async () => {
+  await withTempRunsDir(() => {
+    const job = jobs.createJob({ title: 'artifact skip internal support files' });
+    fs.writeFileSync(jobs.ensureWorkspacePath(job.jobId, 'GEMINI.md'), 'internal gemini memory', 'utf8');
+    fs.writeFileSync(jobs.ensureWorkspacePath(job.jobId, '.orchestrator/runtime_execution_policy.md'), 'policy', 'utf8');
+    fs.writeFileSync(jobs.ensureWorkspacePath(job.jobId, '.codex/instructions.md'), 'codex instructions', 'utf8');
+    fs.writeFileSync(jobs.ensureWorkspacePath(job.jobId, 'deliverable.ipynb'), '{}', 'utf8');
+
+    const workspaceFiles = collectWorkspaceFileEntries(job.jobId, { scope: 'workspace' }).map((row) => row.rel);
+    const artifactIndex = refreshArtifactIndex(job.jobId, { maxFiles: 5 });
+    const artifactPaths = artifactIndex.artifacts.map((row) => row.path);
+
+    assert.equal(workspaceFiles.includes('GEMINI.md'), false);
+    assert.equal(workspaceFiles.some((row) => row.startsWith('.orchestrator/')), false);
+    assert.equal(artifactPaths.includes('GEMINI.md'), false);
+    assert.equal(artifactPaths.some((row) => row.startsWith('.orchestrator/')), false);
+    assert.equal(artifactPaths.includes('deliverable.ipynb'), true);
+    assert.equal(artifactPaths.some((entry) => entry.startsWith('.codex/')), false);
+  });
+});

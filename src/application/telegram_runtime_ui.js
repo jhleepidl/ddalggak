@@ -12,6 +12,8 @@ import {
   resolveActionAgentNameHint,
 } from "../shared/agent_labels.js";
 import { clip } from "../textutil.js";
+import { buildExecutionInsightSnapshot } from "./team_execution_insights.js";
+import { loadExecutionFeedbackSummary } from "./execution_feedback.js";
 import {
   agentRegistry,
   bindGocActor,
@@ -135,6 +137,20 @@ function summarizeRuntimeEvent(event = null) {
     const error = normalizeTextSummary(payload.error || '', 100);
     return error ? `run finish · ${status} · ${error}` : `run finish · ${status}`;
   }
+  if (type === 'run.agent_start') {
+    const label = String(payload.agent_id || payload.role_id || 'agent').trim();
+    return `${label} started`;
+  }
+  if (type === 'run.agent_finish') {
+    const label = String(payload.agent_id || payload.role_id || 'agent').trim();
+    const chars = Number(payload.output_chars || 0);
+    return `${label} finished${chars > 0 ? ` · ${chars} chars` : ''}`;
+  }
+  if (type === 'run.agent_error') {
+    const label = String(payload.agent_id || payload.role_id || 'agent').trim();
+    const error = normalizeTextSummary(payload.error || '', 100);
+    return error ? `${label} error · ${error}` : `${label} error`;
+  }
   if (type === 'run.metadata') {
     return 'run metadata updated';
   }
@@ -229,6 +245,21 @@ function summarizeHeartbeat(activity = null, { isRunning = false } = {}) {
   const summary = normalizeTextSummary(activity?.last_activity_summary || '', 120);
   if (!ts) return isRunning ? '활동 기록 없음' : 'idle';
   return `${formatRelativeAge(ts)}${summary ? ` · ${summary}` : ''}`;
+}
+
+function formatMemoryWriteEvent(row = null) {
+  const event = row && typeof row === "object" ? row : {};
+  const resolved = String(event.resolved_doc || '').trim();
+  const requested = String(event.requested_doc || '').trim();
+  const status = String(event.status || '').trim().toLowerCase();
+  const role = String(event.role_id || event.provider || event.source || '').trim();
+  const reason = normalizeTextSummary(event.reason || '', 90);
+  const pathText = requested && resolved && requested !== resolved
+    ? `${requested} → ${resolved}`
+    : (resolved || requested || '(unknown)');
+  const statusText = status ? ` · ${status}` : '';
+  const reasonText = reason ? ` · ${reason}` : '';
+  return `${role || 'writer'} · ${pathText}${statusText}${reasonText}`;
 }
 
 function summarizeActiveAgents(agentStatus = {}, agentIndex = new Map()) {
@@ -557,6 +588,19 @@ function summarizePromptComponents(rows = []) {
     .map(([key, tokens]) => ({ key, avg_tokens: Math.round(tokens / Math.max(1, Array.isArray(rows) ? rows.length : 1)) }));
 }
 
+function summarizePromptSurfaces(rows = []) {
+  const totals = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const key = String(row?.surface_id || row?.kind || row?.provider || '').trim();
+    if (!key) continue;
+    totals.set(key, (totals.get(key) || 0) + Number(row?.actual_prompt_tokens || 0));
+  }
+  return Array.from(totals.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(([key, tokens]) => ({ key, avg_tokens: Math.round(tokens / Math.max(1, Array.isArray(rows) ? rows.length : 1)) }));
+}
+
 function deriveOverlayPromptMemo(overlayStats = null, averages = null) {
   if (!overlayStats || !overlayStats.overlay_prompt_count) return 'overlay 없음 · 기본 role memo만 사용 중';
   const avgOverlayTokens = Number(overlayStats.avg_overlay_tokens || 0);
@@ -601,6 +645,7 @@ function collectPromptTelemetry(jobId = '') {
     savings_vs_shared_pct: avgShared > 0 ? Math.round((1 - (avgActual / avgShared)) * 1000) / 10 : 0,
   };
   const topComponents = summarizePromptComponents(recent);
+  const topSurfaces = summarizePromptSurfaces(recent);
   const overlay = overlayRows.length > 0 ? {
     overlay_prompt_count: overlayRows.length,
     avg_overlay_tokens: avgOverlayTokens,
@@ -616,13 +661,15 @@ function collectPromptTelemetry(jobId = '') {
       delta_vs_plain_prompt_tokens: deltaVsPlain,
     }, averages),
   } : null;
-  return { rows: recent, averages, overlay, top_components: topComponents };
+  return { rows: recent, averages, overlay, top_components: topComponents, top_surfaces: topSurfaces };
 }
+
 
 function formatPromptTelemetryRow(row = {}) {
   const provider = String(row?.provider || 'agent').trim();
   const model = String(row?.model || '').trim();
   const actor = String(row?.agent_id || row?.role_id || provider || 'agent').trim();
+  const surface = String(row?.surface_label || row?.surface_id || row?.kind || '').trim();
   const actual = Number(row?.actual_prompt_tokens || 0);
   const baseline = Number(row?.baseline?.conversation_plus_shared_tokens || row?.baseline?.conversation_only_tokens || 0);
   const savedPct = baseline > 0 ? Math.round((1 - (actual / baseline)) * 1000) / 10 : 0;
@@ -630,8 +677,9 @@ function formatPromptTelemetryRow(row = {}) {
   const overlayTokens = Number(row?.overlay?.tokens || 0);
   const overlayTitle = String(row?.overlay?.overlay_title || row?.metadata?.agency_overlay_title || '').trim();
   const overlaySuffix = overlayTokens > 0 ? ` · +overlay ${overlayTokens} tok${overlayTitle ? ` (${overlayTitle})` : ''}` : '';
-  return `${actor} · ${provider}${suffix} · ${actual} tok${overlaySuffix}${baseline > 0 ? ` · ${formatSignedPct(savedPct)} vs conv+shared` : ''}`;
+  return `${surface ? `[${surface}] ` : ''}${actor} · ${provider}${suffix} · ${actual} tok${overlaySuffix}${baseline > 0 ? ` · ${formatSignedPct(savedPct)} vs conv+shared` : ''}`;
 }
+
 
 function buildChatStatusKeyboard({ detail = 'compact', artifactCount = 0, showRecent = false, showPrompt = false } = {}) {
   const normalizedDetail = String(detail || '').trim().toLowerCase();
@@ -728,6 +776,23 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
   const activeAgentsLabel = summarizeActiveAgents(session?.agent_status, agentIndex);
   const normalizedDetail = String(detail || '').trim().toLowerCase();
   const promptTelemetry = collectPromptTelemetry(currentJobId);
+  const memoryWriteEvents = currentJobId ? tracking.readRecentWriteEvents(currentJobId, 6).slice().reverse() : [];
+  const executionFeedbackSummary = lastRoute?.execution_feedback && typeof lastRoute.execution_feedback === 'object'
+    ? lastRoute.execution_feedback
+    : (() => {
+      let jobDir = '';
+      try { jobDir = currentJobId ? jobs.jobDir(currentJobId) : ''; } catch { jobDir = ''; }
+      return loadExecutionFeedbackSummary(jobDir) || null;
+    })();
+  const executionInsights = lastRoute?.execution_insights && typeof lastRoute.execution_insights === 'object'
+    ? lastRoute.execution_insights
+    : buildExecutionInsightSnapshot({
+      runtimeTeamSnapshot,
+      actions: session?.last_route?.actions || [],
+      outputs: [],
+      recentTurns: session?.recent_agent_turns || [],
+      currentJobId,
+    });
   if (normalizedDetail === 'prompt') {
     const lines = [
       '🧮 Prompt 상태',
@@ -740,6 +805,9 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
       lines.push(`- baseline(conversation+shared_docs): ${promptTelemetry.averages.conversation_plus_shared_tokens}`);
       lines.push(`- delta_vs_conversation_only: ${formatSignedPct(promptTelemetry.averages.savings_vs_conversation_pct)}`);
       lines.push(`- delta_vs_conversation+shared: ${formatSignedPct(promptTelemetry.averages.savings_vs_shared_pct)}`);
+      if (Array.isArray(promptTelemetry.top_surfaces) && promptTelemetry.top_surfaces.length > 0) {
+        lines.push(`- prompt_surfaces: ${promptTelemetry.top_surfaces.map((row) => `${row.key}~${row.avg_tokens} tok`).join(', ')}`);
+      }
       if (Array.isArray(promptTelemetry.top_components) && promptTelemetry.top_components.length > 0) {
         lines.push(`- biggest_components: ${promptTelemetry.top_components.map((row) => `${row.key}~${row.avg_tokens} tok`).join(', ')}`);
       }
@@ -753,6 +821,13 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
           lines.push(`- overlay_titles: ${promptTelemetry.overlay.titles.join(', ')}`);
         }
         lines.push(`- overlay_memo: ${promptTelemetry.overlay.memo}`);
+      }
+      if (executionFeedbackSummary && Array.isArray(executionFeedbackSummary.patterns) && executionFeedbackSummary.patterns.length > 0) {
+        const topPattern = executionFeedbackSummary.patterns[0];
+        lines.push(`- pattern_feedback: ${topPattern.execution_pattern} · ${topPattern.run_count} runs · avg participation ${topPattern.avg_participation_pct}%`);
+      }
+      if (executionFeedbackSummary && Array.isArray(executionFeedbackSummary.overlays) && executionFeedbackSummary.overlays.length > 0) {
+        lines.push(`- overlay_feedback: ${executionFeedbackSummary.overlays.slice(0, 3).map((row) => `${row.title || row.overlay_id}~${row.avg_overlay_tokens} tok/${row.avg_participation_pct}%`).join(', ')}`);
       }
     } else {
       lines.push('- prompt_metrics: (none yet)');
@@ -782,6 +857,7 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
       activeAgentsLabel ? `- active: ${activeAgentsLabel}` : '',
       runtimeActivity.items.length > 0 ? '- recent_work:' : '- recent_work: (none)',
       ...runtimeActivity.items.slice(0, 6).map((row) => `  • ${formatRelativeAge(row.ts)} · ${row.summary}`),
+      memoryWriteEvents.length > 0 ? `- recent_memory_writes: ${memoryWriteEvents.length}` : '',
       `- next: ${nextHumanAction}`,
     ].filter(Boolean);
     return {
@@ -917,10 +993,49 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
     lines.push('- team_preview:');
     for (const row of plannedRosterRows) lines.push(`  • ${row}`);
   }
+  if (Array.isArray(executionInsights?.selection?.planner_facts) && executionInsights.selection.planner_facts.length > 0) {
+    lines.push(`- planner_facts: ${executionInsights.selection.planner_facts.join(', ')}`);
+  }
+  if (Array.isArray(executionInsights?.selection?.selected) && executionInsights.selection.selected.length > 0) {
+    lines.push('- team_selection:');
+    for (const row of executionInsights.selection.selected.slice(0, 5)) lines.push(`  • ${row}`);
+  }
+  if (Array.isArray(executionInsights?.selection?.suppressed) && executionInsights.selection.suppressed.length > 0) {
+    lines.push('- suppressed_roles:');
+    for (const row of executionInsights.selection.suppressed.slice(0, 4)) lines.push(`  • ${row}`);
+  }
+  if (executionInsights?.execution) {
+    const exec = executionInsights.execution;
+    lines.push(`- agent_participation: planned=${Number(exec.planned_agent_count || 0)}, observed=${Number(exec.observed_agent_count || 0)}, participation=${Number(exec.participation_pct || 0)}%`);
+    if (Array.isArray(exec.participation_by_role) && exec.participation_by_role.length > 0) {
+      lines.push(`- participation_by_role: ${exec.participation_by_role.join(', ')}`);
+    }
+    if (Array.isArray(exec.missing_agents) && exec.missing_agents.length > 0) {
+      lines.push(`- missing_agents: ${exec.missing_agents.join(', ')}`);
+    }
+  }
+  if (executionFeedbackSummary && Array.isArray(executionFeedbackSummary.patterns) && executionFeedbackSummary.patterns.length > 0) {
+    lines.push('- execution_pattern_feedback:');
+    for (const row of executionFeedbackSummary.patterns.slice(0, 3)) {
+      lines.push(`  • ${row.execution_pattern} · runs=${row.run_count} · avg participation=${row.avg_participation_pct}% · completion=${row.completion_rate_pct}%`);
+    }
+  }
+  if (executionFeedbackSummary && Array.isArray(executionFeedbackSummary.overlays) && executionFeedbackSummary.overlays.length > 0) {
+    lines.push('- overlay_feedback:');
+    for (const row of executionFeedbackSummary.overlays.slice(0, 3)) {
+      lines.push(`  • ${row.title || row.overlay_id} · runs=${row.run_count} · avg participation=${row.avg_participation_pct}% · prompt=${row.avg_overlay_tokens} tok (${row.avg_overlay_share_pct}%)`);
+    }
+  }
   if (runtimeActivity.items.length > 0) {
     lines.push('- recent_runtime_activity:');
     for (const row of runtimeActivity.items.slice(0, 5)) {
       lines.push(`  • ${formatRelativeAge(row.ts)} · ${row.summary}`);
+    }
+  }
+  if (memoryWriteEvents.length > 0) {
+    lines.push('- memory_write_contract:');
+    for (const row of memoryWriteEvents.slice(0, 5)) {
+      lines.push(`  • ${formatRelativeAge(row.ts)} · ${formatMemoryWriteEvent(row)}`);
     }
   }
   if (runtime?.jobConfigDebugSummary) {

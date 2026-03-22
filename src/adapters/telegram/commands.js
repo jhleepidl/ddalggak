@@ -456,7 +456,7 @@ export function createTelegramCommandHandler(deps = {}) {
         const freeformMatch = goal.match(/^--mode\s+freeform\s+([\s\S]+)$/i);
         const effectiveGoal = String(freeformMatch?.[1] || goal).trim();
         const proposal = freeformMatch
-          ? await createFreeformTeamConfigurationAdvanced({ description: effectiveGoal, runtime: runtimeForTeam })
+          ? await createFreeformTeamConfigurationAdvanced({ description: effectiveGoal, runtime: runtimeForTeam, jobId: currentJobId })
           : suggestTeamConfiguration({ taskText: effectiveGoal, runtime: runtimeForTeam });
         storePendingTeam(chatSessionStore, chatId, proposal);
         await sendLong(bot, chatId, `${formatTeamProposalMessage(proposal, { runtime: runtimeForTeam })}
@@ -472,7 +472,7 @@ ${formatSupportedModelLines()}`);
           return true;
         }
         await bot.sendMessage(chatId, '해당 요청에 맞는 팀을 구성하겠습니다. 잠시만 기다려주세요.');
-        const proposal = await createFreeformTeamConfigurationAdvanced({ description, runtime: runtimeForTeam });
+        const proposal = await createFreeformTeamConfigurationAdvanced({ description, runtime: runtimeForTeam, jobId: currentJobId });
         storePendingTeam(chatSessionStore, chatId, proposal);
         await sendLong(bot, chatId, `${formatTeamProposalMessage(proposal, { runtime: runtimeForTeam })}
 
@@ -492,7 +492,7 @@ ${formatSupportedModelLines()}`);
           return true;
         }
         await bot.sendMessage(chatId, '기존 팀 구성을 바탕으로 수정안을 다시 설계하겠습니다. 잠시만 기다려주세요.');
-        const next = await refineTeamConfigurationAdvanced({ team: baseTeam, instruction, runtime: runtimeForTeam });
+        const next = await refineTeamConfigurationAdvanced({ team: baseTeam, instruction, runtime: runtimeForTeam, jobId: currentJobId });
         storePendingTeam(chatSessionStore, chatId, next);
         await sendLong(bot, chatId, formatTeamProposalMessage(next, { runtime: runtimeForTeam }));
         return true;

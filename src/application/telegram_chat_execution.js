@@ -68,6 +68,8 @@ import {
 } from "./job_runtime.js";
 import { summarizeRuntimeTeamSnapshotLines } from "./runtime_snapshot_display.js";
 import { createRuntimeTeamSnapshot } from "./runtime_metadata.js";
+import { buildExecutionInsightSnapshot } from "./team_execution_insights.js";
+import { recordExecutionFeedback } from "./execution_feedback.js";
 import { buildScopedPromptAssembly, hydrateRuntimeScopesViaGoC, resolveScopeExecutionState } from "./goc_scope_runtime.js";
 import { markActionsSkipped, wasInterruptedByReplan } from "./run_status_cleanup.js";
 import {
@@ -148,7 +150,7 @@ import { GocExecutionGraphRecorder } from "../chat/goc_execution_graph.js";
 import { mergePreferredRuntimeTeamSnapshot, sanitizeExecutablePlan } from "../chat/route_execution_contract.js";
 import { updateAgentStatus } from "./agent_status_store.js";
 import { detectPatternConflict, applyTemporaryExecutionOverrideToRuntimeSnapshot, buildPatternRecoveryState, inferCompatibilityFallbackState, summarizePatternConflictLines } from "./pattern_conflict_detector.js";
-import { buildAgentKnowledgeBaseGuidance } from "../knowledge_base/runtime.js";
+import { buildAgentKnowledgeBaseGuidance, buildRoleMemoryContract } from "../knowledge_base/runtime.js";
 import { executeToolProxyAction } from "./tool_proxy_runtime.js";
 import { writeGeminiMemoryFile, writeCodexInstructionFile } from "./cli_workspace_contract.js";
 import { normalizeRuntimeExecutionPolicy } from "./runtime_execution_policy.js";
@@ -550,7 +552,7 @@ function buildCompactExecutionUpdateText({ displayName = '', output = '', routeS
   return lines.join('\n');
 }
 
-function buildAgentKnowledgeBaseBlock(jobId, { provider = "", roleId = "", agentId = "" } = {}) {
+function buildAgentKnowledgeBaseBlock(jobId, { provider = "", roleId = "", agentId = "", detailLevel = "compact" } = {}) {
   try {
     const profile = tracking.loadProfile(jobId);
     if (!profile) return "";
@@ -560,9 +562,59 @@ function buildAgentKnowledgeBaseBlock(jobId, { provider = "", roleId = "", agent
       provider,
       roleId,
       agentId,
+      detailLevel,
     });
   } catch {
     return "";
+  }
+}
+
+function compactTaskText(value = '', { maxChars = 2400 } = {}) {
+  const text = String(value || '').trim();
+  const limit = Number.isFinite(Number(maxChars)) ? Math.max(600, Math.floor(Number(maxChars))) : 2400;
+  if (!text || text.length <= limit) return text;
+  const head = clip(text, Math.max(400, Math.floor(limit * 0.75)));
+  const tail = text.slice(Math.max(0, text.length - Math.max(240, Math.floor(limit * 0.15)))).trim();
+  return [
+    head,
+    '',
+    '[truncated for prompt efficiency]',
+    '- Full request and working details are preserved in the shared memory surfaces.',
+    '- Use mission_brief / working_memory as the source of truth for the complete task context.',
+    tail ? `- tail excerpt: ${tail}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+
+function buildRoleAwareContextDocList(jobId, { provider = '', roleId = '', fallbackDocIds = ['plan', 'research'] } = {}) {
+  try {
+    const profile = tracking.loadProfile(jobId);
+    if (!profile) return fallbackDocIds;
+    const contract = buildRoleMemoryContract({ profile, provider, roleId, maxReadDocs: 4 });
+    const docIds = (Array.isArray(contract.primary_docs) ? contract.primary_docs : contract.read_docs)
+      .map((doc) => String(doc?.doc_id || '').trim().toLowerCase())
+      .filter(Boolean);
+    return docIds.length > 0 ? docIds : fallbackDocIds;
+  } catch {
+    return fallbackDocIds;
+  }
+}
+
+function appendRoleAwareTracking(jobId, markdown, { provider = '', roleId = '', purpose = 'worklog', fallbackDoc = 'progress', requestedDoc = '' } = {}) {
+  const cleanMarkdown = String(markdown || '').trim();
+  if (!cleanMarkdown) return null;
+  try {
+    return tracking.appendWithContract(jobId, requestedDoc || fallbackDoc, cleanMarkdown, {
+      provider,
+      roleId,
+      purpose,
+      fallbackDoc,
+      strict: false,
+      source: 'agent_output',
+    });
+  } catch {
+    tracking.append(jobId, fallbackDoc, cleanMarkdown);
+    return { status: 'fallback', resolved_doc: fallbackDoc, reason: 'append_with_contract_failed' };
   }
 }
 
@@ -657,7 +709,8 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const concurrencyKey = String(opts.concurrencyKey || "").trim() || `job:${String(jobId || "").trim()}`;
   const preferredModel = String(opts.model || "").trim();
   const roleMemo = memory.getAgentRole("gemini");
-  const ctx = await loadContextDocs(jobId, ["research"]);
+  const ctxDocNames = buildRoleAwareContextDocList(jobId, { provider: 'gemini', roleId: String(opts.roleId || 'researcher').trim().toLowerCase(), fallbackDocIds: ['plan', 'research', 'progress'] });
+  const ctx = await loadContextDocs(jobId, ctxDocNames, 2600);
   const workspacePath = runWorkspaceDir(jobId);
   const providerOptions = opts.providerOptions && typeof opts.providerOptions === 'object'
     ? opts.providerOptions
@@ -667,19 +720,15 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
       workspaceRoot: workspacePath,
     });
   const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 5 });
-  const kbContract = buildAgentKnowledgeBaseBlock(jobId, { provider: "gemini", roleId: "researcher", agentId: "gemini" });
+  const kbContract = buildAgentKnowledgeBaseBlock(jobId, { provider: "gemini", roleId: String(opts.roleId || 'researcher').trim().toLowerCase(), agentId: String(opts.agentId || 'gemini').trim().toLowerCase() || 'gemini', detailLevel: "compact" });
   ensureCliWorkspaceSupportFiles(jobId, { provider: "gemini", roleMemo, kbContract, goal, runtimeExecutionPolicy, providerOptions });
+  const compactGoal = compactTaskText(goal, { maxChars: 2600 });
   const prompt = [
     ctx,
     "",
+    "Gemini workspace context is preloaded via GEMINI.md.",
     kbContract,
-    "",
-    "역할 메모리:",
-    roleMemo,
-    "",
     `run workspace: ${workspacePath}`,
-    `tracking docs dir: ${runSharedDir(jobId)}`,
-    "",
     workspaceFilesText,
     "",
     "제약:",
@@ -690,7 +739,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     "",
     "다음 목표를 달성하기 위한 구현 단계와 리스크를 한국어로 간결하게 작성해줘.",
     "",
-    `목표: ${goal}`,
+    `목표: ${compactGoal}`,
     "",
     outputGuide || [
       "출력:",
@@ -715,9 +764,9 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
       components: {
         local_context: ctx,
         kb_contract: kbContract,
-        role_memo: roleMemo,
+        workspace_memory_file: 'GEMINI.md',
         workspace_files: workspaceFilesText,
-        task_goal: goal,
+        task_goal: compactGoal,
         output_guide: outputGuide || [
           "출력:",
           "- 요약",
@@ -751,7 +800,14 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     },
   });
   const out = (r.stdout || r.stderr || "");
-  tracking.append(jobId, "research", `## ${sectionTitle}\n\n${out}\n`);
+  const researchPurpose = ['reviewer', 'critic'].includes(String(opts.roleId || '').trim().toLowerCase()) ? 'review' : 'research';
+  appendRoleAwareTracking(jobId, `## ${sectionTitle}\n\n${out}\n`, {
+    provider: 'gemini',
+    roleId: String(opts.roleId || 'researcher').trim().toLowerCase(),
+    purpose: researchPurpose,
+    fallbackDoc: 'research',
+    requestedDoc: researchPurpose === "review" ? "critic_log" : "research",
+  });
   jobs.appendConversation(jobId, "gemini", out, { kind: "research" });
   ensureCommandOk("Gemini", r);
   return out;
@@ -768,35 +824,30 @@ async function codexImplement(jobId, instruction, signal = null, opts = {}) {
     });
   const credentialEnv = resolveCredentialEnvForChat(chatSessionStore, opts.chatId || '');
   const roleMemo = memory.getAgentRole("codex");
-  const ctx = await loadContextDocs(jobId, ["plan", "research"], 6000);
-  const trackDocs = runtimeState.tracking.listDocs(jobId).map((entry) => `- ${path.join(runSharedDir(jobId), entry.file_name)}`).join("\n");
+  const ctxDocNames = buildRoleAwareContextDocList(jobId, { provider: 'codex', roleId: String(opts.roleId || 'builder').trim().toLowerCase(), fallbackDocIds: ['plan', 'progress', 'research'] });
+  const ctx = await loadContextDocs(jobId, ctxDocNames, 3200);
   const workspacePath = runWorkspaceDir(jobId);
   const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 5 });
-  const kbContract = buildAgentKnowledgeBaseBlock(jobId, { provider: "codex", roleId: "builder", agentId: "codex" });
+  const kbContract = buildAgentKnowledgeBaseBlock(jobId, { provider: "codex", roleId: String(opts.roleId || 'builder').trim().toLowerCase(), agentId: String(opts.agentId || 'codex').trim().toLowerCase() || 'codex', detailLevel: "compact" });
   const cliSupport = ensureCliWorkspaceSupportFiles(jobId, { provider: "codex", roleMemo, kbContract, instruction, goal: instruction, runtimeExecutionPolicy, providerOptions });
+  const compactInstruction = compactTaskText(instruction, { maxChars: 2800 });
   const prompt = [
     ctx,
     "",
+    "Codex workspace context is preloaded via .codex/instructions.md.",
     kbContract,
-    "",
-    "역할 메모리:",
-    roleMemo,
-    "",
     "너는 코드 수정 에이전트다.",
     "규칙:",
     "- 네트워크 접근 금지.",
     `- CODEX_WORKSPACE_ROOT(코드 작업 영역) 내부 파일만 수정: ${workspacePath}`,
     `- 현재 run workspace: ${workspacePath}`,
     "- 필요하면 uploads/ 경로의 파일 내용을 참고해라.",
-    "- 아래 트래킹 문서는 run/shared에서만 관리하고, CODEX_WORKSPACE_ROOT 루트에 동명 파일을 만들지 말 것:",
-    trackDocs,
-    "",
     workspaceFilesText,
     "- 테스트/빌드 실행은 별도의 tool_proxy 검증 단계가 담당한다. 수정 내용에 맞는 검증 명령을 염두에 두고 변경하라.",
     "- 변경 요약(파일별 이유) 포함.",
     "",
     "작업:",
-    instruction,
+    compactInstruction,
     "",
   ].join("\n");
   appendPromptTelemetry({
@@ -814,10 +865,9 @@ async function codexImplement(jobId, instruction, signal = null, opts = {}) {
       components: {
         local_context: ctx,
         kb_contract: kbContract,
-        role_memo: roleMemo,
-        tracking_docs: trackDocs,
+        instructions_file: '.codex/instructions.md',
         workspace_files: workspaceFilesText,
-        task_instruction: instruction,
+        task_instruction: compactInstruction,
       },
       metadata: {
         sandbox_mode: providerOptions.sandboxMode || undefined,
@@ -845,7 +895,13 @@ async function codexImplement(jobId, instruction, signal = null, opts = {}) {
     },
   });
   const out = (r.stdout || r.stderr || "");
-  tracking.append(jobId, "progress", `## Codex output\n\n${out}\n`);
+  appendRoleAwareTracking(jobId, `## Codex output\n\n${out}\n`, {
+    provider: 'codex',
+    roleId: String(opts.roleId || 'builder').trim().toLowerCase(),
+    purpose: opts.finalSynthesis === true ? 'final' : 'implementation',
+    fallbackDoc: 'progress',
+    requestedDoc: opts.finalSynthesis === true ? 'final_answer' : 'implementation_notes',
+  });
   jobs.appendConversation(jobId, "codex", out, { kind: "implementation" });
   ensureCommandOk("Codex", r);
   return out;
@@ -856,15 +912,15 @@ async function gitSummary(jobId, signal = null) {
   const status = await runCommand("git", ["status", "--porcelain=v1"], { cwd: commandCwd, abortSignal: signal });
   if (!status.ok && /not a git repository/i.test(String(status.stderr || ""))) {
     const note = `workspace is not a git repository: ${commandCwd}`;
-    tracking.append(jobId, "progress", `## git status\n\n${note}\n`);
+    appendRoleAwareTracking(jobId, `## git status\n\n${note}\n`, { provider: 'codex', roleId: 'builder', purpose: 'implementation', fallbackDoc: 'progress' });
     return { status: "", diff: "", note };
   }
   const diff = await runCommand("git", ["diff"], { cwd: commandCwd, timeoutMs: 120000, abortSignal: signal });
   ensureCommandOk("git status", status);
   ensureCommandOk("git diff", diff);
 
-  tracking.append(jobId, "progress", `## git status\n\n${FENCE}\n${status.stdout}\n${FENCE}\n`);
-  tracking.append(jobId, "progress", `## git diff\n\n${FENCE}diff\n${diff.stdout}\n${FENCE}\n`);
+  appendRoleAwareTracking(jobId, `## git status\n\n${FENCE}\n${status.stdout}\n${FENCE}\n`, { provider: 'codex', roleId: 'builder', purpose: 'implementation', fallbackDoc: 'progress' });
+  appendRoleAwareTracking(jobId, `## git diff\n\n${FENCE}diff\n${diff.stdout}\n${FENCE}\n`, { provider: 'codex', roleId: 'builder', purpose: 'implementation', fallbackDoc: 'progress' });
 
   return { status: status.stdout || "", diff: diff.stdout || "" };
 }
@@ -971,6 +1027,7 @@ function buildSupervisorExecutionCallbacks({
   onAgentStatusChanged = null,
   executionGraph = null,
   contextEngine = null,
+  runEventSink = null,
 }) {
   const sharedContextSetId = String(runtime?.map?.ctxSharedId || "").trim();
   const threadId = String(runtime?.map?.threadId || "").trim();
@@ -1573,6 +1630,7 @@ function buildSupervisorExecutionCallbacks({
   }) => {
     const cleanAgentId = String(agentId || "").trim().toLowerCase();
     const cleanGoal = String(goal || "").trim();
+    const roleKey = String(actionInputs?.role_id || actionInputs?.roleId || cleanAgentId || '').trim().toLowerCase();
     if (cleanAgentId) {
       updateAgentStatus(chatId, cleanAgentId, {
         state: "running",
@@ -1587,6 +1645,16 @@ function buildSupervisorExecutionCallbacks({
           state: "running",
           goal: cleanGoal,
         });
+      }
+      if (runEventSink && typeof runEventSink.recordAgentEvent === "function") {
+        await runEventSink.recordAgentEvent("run.agent_start", {
+          agent_id: cleanAgentId,
+          role_id: roleKey || undefined,
+          goal: cleanGoal,
+          runtime_instance_id: runtimeInstanceId || undefined,
+          slot_id: slotId || undefined,
+          scope_id: scopeId || undefined,
+        }, { jobId }).catch(() => null);
       }
     }
 
@@ -1604,7 +1672,6 @@ function buildSupervisorExecutionCallbacks({
         scopeId,
       });
     const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
-    const roleKey = String(actionInputs?.role_id || actionInputs?.roleId || cleanAgentId || '').trim().toLowerCase();
     const agencyRoleOverlay = resolveAgencyRoleOverlay(
       actionInputs?.agency_role_overlay,
       actionInputs?.agencyRoleOverlay,
@@ -1732,6 +1799,19 @@ function buildSupervisorExecutionCallbacks({
             goal: cleanGoal,
           });
         }
+        if (runEventSink && typeof runEventSink.recordAgentEvent === "function") {
+          await runEventSink.recordAgentEvent("run.agent_finish", {
+            agent_id: cleanAgentId,
+            role_id: roleKey || undefined,
+            goal: cleanGoal,
+            provider: String(result?.provider || "").trim().toLowerCase() || undefined,
+            model: String(result?.model || "").trim() || undefined,
+            output_chars: String(result?.output || "").length || 0,
+            runtime_instance_id: runtimeInstanceId || undefined,
+            slot_id: slotId || undefined,
+            scope_id: scopeId || undefined,
+          }, { jobId }).catch(() => null);
+        }
       }
       if (executionGraph && cleanAgentId && stepNodeId && String(result?.output || "").trim()) {
         await executionGraph.attachArtifact(String(stepNodeId || "").trim(), {
@@ -1762,6 +1842,17 @@ function buildSupervisorExecutionCallbacks({
             goal: cleanGoal,
             error: String(e?.message ?? e),
           });
+        }
+        if (runEventSink && typeof runEventSink.recordAgentEvent === "function") {
+          await runEventSink.recordAgentEvent("run.agent_error", {
+            agent_id: cleanAgentId,
+            role_id: roleKey || undefined,
+            goal: cleanGoal,
+            error: String(e?.message ?? e),
+            runtime_instance_id: runtimeInstanceId || undefined,
+            slot_id: slotId || undefined,
+            scope_id: scopeId || undefined,
+          }, { jobId }).catch(() => null);
         }
       }
       throw e;
@@ -2775,6 +2866,8 @@ async function runSupervisorChat(
   activeJobByChat.set(chatKey, currentJobId);
   let executionGraph = null;
   let runEventSink = null;
+  let executionInsights = null;
+  let executionFeedback = null;
   let runtime = null;
   let contextEngine = null;
   let finalAssistantText = "";
@@ -2947,6 +3040,7 @@ async function runSupervisorChat(
         });
       },
       executionGraph,
+      runEventSink,
     });
 
     let turn = 0;
@@ -3703,6 +3797,21 @@ async function runSupervisorChat(
       outputs: mergedOutputs,
     };
 
+    executionInsights = buildExecutionInsightSnapshot({
+      runtimeTeamSnapshot: routePlan?.runtime_team_snapshot || runtime?.runtimeTeamSnapshot || runtime?.runtime_team_snapshot || null,
+      actions: routePlan?.actions || [],
+      outputs: mergedOutputs,
+      recentTurns: chatSessionStore.get(chatId)?.recent_agent_turns || [],
+      currentJobId,
+    });
+    executionFeedback = recordExecutionFeedback({
+      jobDir: runDir(currentJobId),
+      runId: String(executionGraph?.runId || '').trim(),
+      executionInsights,
+      runtimeTeamSnapshot: routePlan?.runtime_team_snapshot || runtime?.runtimeTeamSnapshot || runtime?.runtime_team_snapshot || null,
+      status: mergedExecution.pendingApproval || routePlan.await_user === true ? 'await_user' : 'done',
+    });
+
     let installProposalState = null;
     const existingPendingInstallProposal = getPendingInstallProposal(chatSessionStore, chatId);
     const compatibilityRecovery = inferCompatibilityFallbackState(routePlan);
@@ -3838,6 +3947,16 @@ async function runSupervisorChat(
       const resultRows = Array.isArray(mergedExecution.results) ? mergedExecution.results : [];
       const errorCount = resultRows.filter((row) => String(row?.status || '').trim().toLowerCase() === 'error').length;
       const blockedCount = resultRows.filter((row) => ['blocked', 'skip'].includes(String(row?.status || '').trim().toLowerCase())).length;
+      if (typeof runEventSink.updateRunMetadata === 'function') {
+        await runEventSink.updateRunMetadata({
+          runtime_team_snapshot: routePlan?.runtime_team_snapshot || runtime?.runtimeTeamSnapshot || runtime?.runtime_team_snapshot || null,
+          execution_insights: executionInsights || undefined,
+          execution_feedback: executionFeedback?.summary || undefined,
+          ...buildRunAuthorityPatch(runtime),
+        }, {
+          jobId: currentJobId,
+        }).catch(() => null);
+      }
       await runEventSink.finishRun({
         status: (mergedExecution.pendingApproval || routePlan.await_user === true)
           ? "await_user"
@@ -3992,6 +4111,13 @@ async function runSupervisorChat(
     jobAbortControllers.delete(currentJobId);
     chatSessionStore.upsert(chatId, (session) => ({
       ...session,
+      last_route: session?.last_route && typeof session.last_route === "object"
+        ? {
+          ...session.last_route,
+          execution_insights: executionInsights,
+          execution_feedback: executionFeedback?.summary || undefined,
+        }
+        : session?.last_route || null,
       state: session.pending_approval
         ? "awaiting_approval"
         : (session.pending_install_proposal ? 'awaiting_install_approval' : "idle"),
@@ -4239,11 +4365,15 @@ ${taskBody}`
 
     const appendLocalLogs = (output, mode) => {
       const section = `## Agent ${agentId} output (${mode})`;
-      if (provider === "codex") {
-        tracking.append(jobId, "progress", `${section}\n\n${output}\n`);
-      } else {
-        tracking.append(jobId, "research", `${section}\n\n${output}\n`);
-      }
+      const rolePurpose = provider === 'codex'
+        ? (act?.inputs?.final_synthesis === true ? 'final' : 'implementation')
+        : (['reviewer', 'critic'].includes(roleId) ? 'review' : 'research');
+      appendRoleAwareTracking(jobId, `${section}\n\n${output}\n`, {
+        provider,
+        roleId,
+        purpose: rolePurpose,
+        fallbackDoc: provider === 'codex' ? 'progress' : 'research',
+      });
       jobs.appendConversation(jobId, agentId, output, { kind: "agent_run", provider, model, mode });
     };
 
@@ -4257,6 +4387,7 @@ ${taskBody}`
         preparedContextInfo: act?.inputs?._prompt_context_info && typeof act.inputs._prompt_context_info === 'object'
           ? act.inputs._prompt_context_info
           : {},
+        finalSynthesis: act?.inputs?.final_synthesis === true,
       });
       const fallback = gocFallbackByJob.get(String(jobId));
       if (fallback) {
@@ -4823,9 +4954,19 @@ reason=${String(note?.reason || 'parallel spawn unavailable').trim()}`
     }
 
     if (act.type === "track_append") {
-      tracking.append(jobId, act.doc || "plan", String(act.markdown || ""));
-      const resolvedDocName = tracking.resolveDocName(jobId, act.doc || "plan");
-      await bot.sendMessage(chatId, `📝 기록 업데이트: ${resolvedDocName}`);
+      const writeEvent = tracking.appendWithContract(jobId, act.doc || "plan", String(act.markdown || ""), {
+        provider: String(act.provider || act.inputs?.provider || 'chatgpt').trim().toLowerCase(),
+        roleId: String(act.role_id || act.roleId || act.inputs?.role_id || act.inputs?.roleId || 'operator').trim().toLowerCase(),
+        purpose: String(act.memory_purpose || act.memoryPurpose || act.inputs?.memory_purpose || act.inputs?.memoryPurpose || '').trim().toLowerCase(),
+        fallbackDoc: 'progress',
+        strict: false,
+        source: 'plan_action',
+      });
+      const resolvedDocName = String(writeEvent?.resolved_doc || tracking.resolveDocName(jobId, act.doc || "plan")).trim();
+      const rerouteNote = writeEvent?.requested_doc && writeEvent?.requested_doc !== resolvedDocName
+        ? ` (requested=${writeEvent.requested_doc} → resolved=${resolvedDocName})`
+        : '';
+      await bot.sendMessage(chatId, `📝 기록 업데이트: ${resolvedDocName}${rerouteNote}`);
       continue;
     }
 

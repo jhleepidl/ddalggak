@@ -141,6 +141,68 @@ function normalizeExecutionGraphValue(value, { teamPlan = null } = {}) {
     : {};
 }
 
+function normalizeExecutionInsightValue(value = null) {
+  const row = asObject(value);
+  if (Object.keys(row).length === 0) return null;
+  const selection = asObject(row.selection);
+  const execution = asObject(row.execution);
+  const out = omitUndefinedFields({
+    execution_pattern: String(row.execution_pattern || row.executionPattern || '').trim().toLowerCase() || undefined,
+    selection: omitUndefinedFields({
+      selected: normalizeStringList(selection.selected || [], { lower: false }),
+      suppressed: normalizeStringList(selection.suppressed || [], { lower: false }),
+      planner_facts: normalizeStringList(selection.planner_facts || selection.plannerFacts || [], { lower: false }),
+    }),
+    execution: omitUndefinedFields({
+      planned_agent_count: Number.isFinite(Number(execution.planned_agent_count || execution.plannedAgentCount)) ? Math.max(0, Math.floor(Number(execution.planned_agent_count || execution.plannedAgentCount))) : undefined,
+      observed_agent_count: Number.isFinite(Number(execution.observed_agent_count || execution.observedAgentCount)) ? Math.max(0, Math.floor(Number(execution.observed_agent_count || execution.observedAgentCount))) : undefined,
+      participation_pct: Number.isFinite(Number(execution.participation_pct || execution.participationPct)) ? Math.max(0, Math.round(Number(execution.participation_pct || execution.participationPct) * 10) / 10) : undefined,
+      planned_agents: normalizeStringList(execution.planned_agents || execution.plannedAgents || [], { lower: false }),
+      observed_agents: normalizeStringList(execution.observed_agents || execution.observedAgents || [], { lower: false }),
+      missing_agents: normalizeStringList(execution.missing_agents || execution.missingAgents || [], { lower: false }),
+      extra_agents: normalizeStringList(execution.extra_agents || execution.extraAgents || [], { lower: false }),
+      participation_by_role: normalizeStringList(execution.participation_by_role || execution.participationByRole || [], { lower: false }),
+    }),
+  });
+  if (out.selection && Object.keys(out.selection).length === 0) delete out.selection;
+  if (out.execution && Object.keys(out.execution).length === 0) delete out.execution;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function normalizeExecutionFeedbackValue(value = null) {
+  const row = asObject(value);
+  if (Object.keys(row).length === 0) return null;
+  const patterns = Array.isArray(row.patterns)
+    ? row.patterns.map((entry) => omitUndefinedFields({
+      execution_pattern: String(entry?.execution_pattern || entry?.executionPattern || '').trim().toLowerCase() || undefined,
+      run_count: Number.isFinite(Number(entry?.run_count || entry?.runCount)) ? Math.max(0, Math.floor(Number(entry?.run_count || entry?.runCount))) : undefined,
+      avg_participation_pct: Number.isFinite(Number(entry?.avg_participation_pct || entry?.avgParticipationPct)) ? Math.round(Number(entry?.avg_participation_pct || entry?.avgParticipationPct) * 10) / 10 : undefined,
+      avg_planned_agents: Number.isFinite(Number(entry?.avg_planned_agents || entry?.avgPlannedAgents)) ? Math.round(Number(entry?.avg_planned_agents || entry?.avgPlannedAgents) * 10) / 10 : undefined,
+      avg_observed_agents: Number.isFinite(Number(entry?.avg_observed_agents || entry?.avgObservedAgents)) ? Math.round(Number(entry?.avg_observed_agents || entry?.avgObservedAgents) * 10) / 10 : undefined,
+      avg_missing_agents: Number.isFinite(Number(entry?.avg_missing_agents || entry?.avgMissingAgents)) ? Math.round(Number(entry?.avg_missing_agents || entry?.avgMissingAgents) * 10) / 10 : undefined,
+      completion_rate_pct: Number.isFinite(Number(entry?.completion_rate_pct || entry?.completionRatePct)) ? Math.round(Number(entry?.completion_rate_pct || entry?.completionRatePct) * 10) / 10 : undefined,
+    })).filter((entry) => Object.keys(entry).length > 0)
+    : [];
+  const overlays = Array.isArray(row.overlays)
+    ? row.overlays.map((entry) => omitUndefinedFields({
+      overlay_id: String(entry?.overlay_id || entry?.overlayId || '').trim().toLowerCase() || undefined,
+      title: String(entry?.title || '').trim() || undefined,
+      run_count: Number.isFinite(Number(entry?.run_count || entry?.runCount)) ? Math.max(0, Math.floor(Number(entry?.run_count || entry?.runCount))) : undefined,
+      prompt_count: Number.isFinite(Number(entry?.prompt_count || entry?.promptCount)) ? Math.max(0, Math.floor(Number(entry?.prompt_count || entry?.promptCount))) : undefined,
+      avg_participation_pct: Number.isFinite(Number(entry?.avg_participation_pct || entry?.avgParticipationPct)) ? Math.round(Number(entry?.avg_participation_pct || entry?.avgParticipationPct) * 10) / 10 : undefined,
+      avg_overlay_tokens: Number.isFinite(Number(entry?.avg_overlay_tokens || entry?.avgOverlayTokens)) ? Math.max(0, Math.round(Number(entry?.avg_overlay_tokens || entry?.avgOverlayTokens))) : undefined,
+      avg_overlay_share_pct: Number.isFinite(Number(entry?.avg_overlay_share_pct || entry?.avgOverlaySharePct)) ? Math.round(Number(entry?.avg_overlay_share_pct || entry?.avgOverlaySharePct) * 10) / 10 : undefined,
+    })).filter((entry) => Object.keys(entry).length > 0)
+    : [];
+  const out = omitUndefinedFields({
+    updated_at: String(row.updated_at || row.updatedAt || '').trim() || undefined,
+    run_count: Number.isFinite(Number(row.run_count || row.runCount)) ? Math.max(0, Math.floor(Number(row.run_count || row.runCount))) : undefined,
+    patterns,
+    overlays,
+  });
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 function normalizeAuthorityGraphValue(value = [], { teamPlan = null, runtimeAgents = [], supervisorRuntime = null } = {}) {
   const rows = Array.isArray(value)
     ? value
@@ -641,6 +703,16 @@ export function normalizeRuntimeTeamSnapshot(input = null, {
     row.blueprint_summary ?? row.blueprintSummary ?? null,
     { teamPlan }
   );
+  const executionInsights = normalizeExecutionInsightValue(
+    row.execution_insights
+    ?? row.executionInsights
+    ?? null
+  );
+  const executionFeedback = normalizeExecutionFeedbackValue(
+    row.execution_feedback
+    ?? row.executionFeedback
+    ?? null
+  );
 
   return {
     task_interpretation: taskInterpretation,
@@ -678,6 +750,8 @@ export function normalizeRuntimeTeamSnapshot(input = null, {
     skill_usage_summary: skillUsageSummary,
     supervisor_runtime: supervisorRuntime,
     runtime_authority: runtimeAuthority,
+    execution_insights: executionInsights || undefined,
+    execution_feedback: executionFeedback || undefined,
     structure_v2: structureV2 || undefined,
     runtime_participants: runtimeParticipants,
     topology_pattern: topologyPattern,
@@ -738,6 +812,10 @@ export function createRuntimeTeamSnapshot({
   supervisor_runtime = undefined,
   runtimeAuthority = undefined,
   runtime_authority = undefined,
+  executionInsights = undefined,
+  execution_insights = undefined,
+  executionFeedback = undefined,
+  execution_feedback = undefined,
   blueprintSummary = undefined,
   blueprint_summary = undefined,
   generated_at = undefined,
@@ -776,6 +854,8 @@ export function createRuntimeTeamSnapshot({
     skill_usage_summary: skill_usage_summary ?? skillUsageSummary,
     supervisor_runtime: supervisor_runtime ?? supervisorRuntime,
     runtime_authority: runtime_authority ?? runtimeAuthority,
+    execution_insights: execution_insights ?? executionInsights,
+    execution_feedback: execution_feedback ?? executionFeedback,
     blueprint_summary: blueprint_summary ?? blueprintSummary,
     generated_at: generated_at ?? generatedAt,
     source,
@@ -802,6 +882,8 @@ export function normalizeRuntimeMetadataEnvelope(input = {}) {
   return {
     runtime_team_snapshot: snapshot || null,
     runtime_authority: runtimeAuthority || null,
+    execution_insights: snapshot?.execution_insights || null,
+    execution_feedback: snapshot?.execution_feedback || null,
     task_interpretation: snapshot?.task_interpretation || null,
     team_plan: snapshot?.team_plan || null,
     runtime_agents: snapshot?.runtime_agents || [],
@@ -915,6 +997,8 @@ export function buildRuntimeMetadataPatch(metadata = null, {
   if (!includeFlattened) return patch;
   return {
     ...patch,
+    execution_insights: snapshot?.execution_insights || undefined,
+    execution_feedback: snapshot?.execution_feedback || undefined,
     task_interpretation: snapshot?.task_interpretation || undefined,
     team_plan: snapshot?.team_plan || undefined,
     runtime_agents: Array.isArray(snapshot?.runtime_agents) && snapshot.runtime_agents.length > 0

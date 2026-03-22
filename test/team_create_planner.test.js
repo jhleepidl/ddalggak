@@ -117,3 +117,34 @@ test('advanced freeform team creation reconciles planner handoffs that target pr
   assert.equal(team.interaction_spec.handoffs.some((handoff) => handoff.to === 'Assignment Builder' || handoff.from === 'Assignment Builder'), false);
   assert.equal(team.interaction_spec.handoffs.some((handoff) => handoff.to === 'Decision Synthesizer'), true);
 });
+
+
+test('advanced freeform team creation injects builder coverage for web-service build requests even when planner omits it', async () => {
+  const team = await createFreeformTeamConfigurationAdvanced({
+    description: '웹 서비스 개발을 위한 팀을 만들어줘. 백엔드 API와 프론트엔드 구현이 필요해.',
+    planner: async () => ({
+      ok: true,
+      planner_metadata: { planner_type: 'codex_cli', planner_model: 'gpt-5.4', planning_source: 'codex_gpt_5_4' },
+      plan: {
+        team_name: 'web_service_team',
+        agents: [
+          { name: 'Product Researcher', role: 'researcher', purpose: '요구사항과 사용자 시나리오를 정리한다', model: 'gemini-2.5-pro', provider: 'gemini' },
+          { name: 'Quality Reviewer', role: 'reviewer', purpose: '품질과 리스크를 검토한다', model: 'gpt-5.4', provider: 'chatgpt' },
+        ],
+        interaction_spec: {
+          execution_pattern: 'sequential_pipeline',
+          final_answer_owner: 'Quality Reviewer',
+          handoffs: [
+            { from: 'Product Researcher', to: 'Quality Reviewer', payload: 'summary_plus_key_evidence' },
+          ],
+        },
+      },
+    }),
+  });
+
+  assert.ok(team.agents.some((agent) => agent.role === 'builder'));
+  assert.equal(team.interaction_spec.execution_pattern, 'builder_reviewer_loop');
+  const builderAgent = team.agents.find((agent) => agent.role === 'builder');
+  assert.ok(builderAgent);
+  assert.ok(team.interaction_spec.handoffs.some((handoff) => handoff.from === builderAgent.name || handoff.to === builderAgent.name));
+});

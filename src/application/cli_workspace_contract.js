@@ -9,6 +9,20 @@ function clean(value = "") {
   return String(value || "").trim();
 }
 
+function clipForSupportFile(value = "", { maxChars = 2200, label = "content" } = {}) {
+  const text = clean(value);
+  const limit = Number.isFinite(Number(maxChars)) ? Math.max(400, Math.floor(Number(maxChars))) : 2200;
+  if (!text || text.length <= limit) return text;
+  const head = text.slice(0, Math.max(280, Math.floor(limit * 0.78))).trim();
+  const tail = text.slice(Math.max(0, text.length - Math.max(140, Math.floor(limit * 0.12)))).trim();
+  return [
+    head,
+    "",
+    `[truncated ${label}; full details remain in shared memory surfaces]`,
+    tail ? `tail excerpt: ${tail}` : "",
+  ].filter(Boolean).join("\n");
+}
+
 function safeWrite(filePath = "", content = "") {
   const target = path.resolve(String(filePath || ""));
   fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -54,9 +68,9 @@ export function writeGeminiMemoryFile({ workspaceRoot = process.cwd(), roleMemo 
   const body = [
     "# Gemini workspace memory",
     "",
-    goal ? `## Goal\n${clean(goal)}\n` : "",
-    roleMemo ? `## Role memory\n${clean(roleMemo)}\n` : "",
-    kbContract ? `## Knowledge base contract\n${clean(kbContract)}\n` : "",
+    goal ? `## Goal\n${clipForSupportFile(goal, { maxChars: 2200, label: 'goal' })}\n` : "",
+    roleMemo ? `## Role memory\n${clipForSupportFile(roleMemo, { maxChars: 1800, label: 'role memory' })}\n` : "",
+    kbContract ? `## Knowledge base contract\n${clipForSupportFile(kbContract, { maxChars: 2600, label: 'knowledge base contract' })}\n` : "",
     restore.restoreSummary ? `## Runtime restore context\n${clean(restore.restoreSummary)}\n` : "",
     `## Runtime execution policy\n${clean(buildProviderRuntimePolicySummary({ runtimeExecutionPolicy, provider: 'gemini', options: providerOptions }))}\n`,
     "## Rules",
@@ -78,12 +92,12 @@ export function writeCodexInstructionFile({ workspaceRoot = process.cwd(), roleM
   const body = [
     "# Codex workspace instructions",
     "",
-    goal ? `## Goal\n${clean(goal)}\n` : "",
-    roleMemo ? `## Role memory\n${clean(roleMemo)}\n` : "",
-    kbContract ? `## Knowledge base contract\n${clean(kbContract)}\n` : "",
+    goal ? `## Goal\n${clipForSupportFile(goal, { maxChars: 2200, label: 'goal' })}\n` : "",
+    roleMemo ? `## Role memory\n${clipForSupportFile(roleMemo, { maxChars: 1800, label: 'role memory' })}\n` : "",
+    kbContract ? `## Knowledge base contract\n${clipForSupportFile(kbContract, { maxChars: 2600, label: 'knowledge base contract' })}\n` : "",
     restore.restoreSummary ? `## Runtime restore context\n${clean(restore.restoreSummary)}\n` : "",
     `## Runtime execution policy\n${clean(buildProviderRuntimePolicySummary({ runtimeExecutionPolicy, provider: 'codex', options: providerOptions }))}\n`,
-    instruction ? `## Current task\n${clean(instruction)}\n` : "",
+    instruction ? `## Current task\n${clipForSupportFile(instruction, { maxChars: 2400, label: 'current task' })}\n` : "",
     "## Rules",
     "- Modify files only inside CODEX_WORKSPACE_ROOT.",
     "- Use concrete KB filenames when referring to tracking docs.",

@@ -5,6 +5,9 @@ import { normalizeActionPlan } from "./actions.js";
 import { parseJsonObjectFromText } from "../shared/json_extract.js";
 import { buildInteractionSummaryLines, buildRouterInteractionContract, normalizeInteractionSpec } from "../domain/interaction_spec.js";
 import { canParallelSpawnInRuntime, sanitizeExecutablePlan } from "./route_execution_contract.js";
+import { appendPromptTelemetry } from "../application/prompt_telemetry.js";
+import { runDir, runSharedDir } from "../application/telegram_runtime_state.js";
+import { compactPromptJson } from "../application/prompt_surface_builder.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -646,7 +649,7 @@ function buildRouterPrompt(message, context = {}) {
       .map((tool) => `- name=${tool.name || tool.id || "tool"}, action_types=${Array.isArray(tool.action_types) ? tool.action_types.join(",") : ""}, risk=${tool.risk || "L1"}`)
       .join("\n")
     : "(none)";
-  const jobConfigText = clip(JSON.stringify(jobConfig, null, 2), 3200);
+  const jobConfigText = compactPromptJson(jobConfig, { maxDepth: 4, maxItems: 10, maxStringChars: 180 });
   const contextSummary = clip(String(row.contextSummary || ""), 4500) || "(none)";
   const progressSummary = clip(String(row.progressSummary || ""), 3200) || "(none)";
   const originalUserMessage = String(row.originalUserMessage || "").trim();
@@ -657,7 +660,7 @@ function buildRouterPrompt(message, context = {}) {
     const rows = Array.isArray(row.suggestedActions) ? row.suggestedActions : [];
     if (rows.length === 0) return "(none)";
     try {
-      return clip(JSON.stringify(rows.slice(0, 8), null, 2), 2800);
+      return compactPromptJson(rows.slice(0, 8), { maxDepth: 4, maxItems: 8, maxStringChars: 160 });
     } catch {
       return "(none)";
     }
@@ -933,6 +936,40 @@ export async function routeWithSupervisor(message, {
     teamInteractionSpec,
     parallelSpawnAllowed,
   });
+
+  const cleanJobId = String(currentJobId || '').trim();
+  if (cleanJobId) {
+    appendPromptTelemetry({
+      jobDir: runDir(cleanJobId),
+      sharedDir: runSharedDir(cleanJobId),
+      row: {
+        kind: 'supervisor_prompt',
+        surface_id: 'supervisor_router',
+        surface_label: 'supervisor_router',
+        provider: 'gemini',
+        model: geminiModel || '',
+        agent_id: 'supervisor_router',
+        role_id: 'supervisor',
+        prompt_text: prompt,
+        components: {
+          router_policy: String(routerPolicy || '').trim(),
+          job_config: compactPromptJson(jobConfig, { maxDepth: 4, maxItems: 10, maxStringChars: 180 }),
+          agents: compactPromptJson((Array.isArray(agents) ? agents : []).slice(0, 8), { maxDepth: 3, maxItems: 8, maxStringChars: 120 }),
+          tools: compactPromptJson((Array.isArray(tools) ? tools : []).slice(0, 8), { maxDepth: 3, maxItems: 8, maxStringChars: 120 }),
+          team_recommendation: compactPromptJson(teamRecommendation, { maxDepth: 4, maxItems: 10, maxStringChars: 140 }),
+          context_summary: String(contextSummary || ''),
+          progress_summary: String(progressSummary || ''),
+          suggested_actions: compactPromptJson((Array.isArray(suggestedActions) ? suggestedActions : []).slice(0, 8), { maxDepth: 4, maxItems: 8, maxStringChars: 160 }),
+          user_message: String(message || ''),
+        },
+        metadata: {
+          current_context_set_id: String(currentContextSetId || '').trim() || undefined,
+          autopilot_turn: autopilotTurn,
+          team_locked: teamLocked,
+        },
+      },
+    });
+  }
 
   try {
     const r = await runGeminiPrompt({

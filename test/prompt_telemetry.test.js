@@ -25,6 +25,8 @@ test('appendPromptTelemetry records prompt sizes and baseline savings', () => {
     sharedDir,
     row: {
       provider: 'codex',
+      surface_id: 'team_create_planner',
+      surface_label: 'team_create_planner',
       agent_id: 'builder',
       role_id: 'builder',
       prompt_text: 'short prompt',
@@ -42,6 +44,7 @@ test('appendPromptTelemetry records prompt sizes and baseline savings', () => {
   assert.equal(lines.length, 1);
   const parsed = JSON.parse(lines[0]);
   assert.equal(parsed.agent_id, 'builder');
+  assert.equal(parsed.surface_id, 'team_create_planner');
   assert.ok(parsed.savings_vs_conversation_tokens < parsed.baseline.conversation_only_tokens);
 });
 

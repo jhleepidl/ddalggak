@@ -165,7 +165,7 @@ function selectTaskArchetypeTemplate({ taskText = '', currentTeam = null, planne
   const currentArchetype = cleanId(currentTeam?.task_archetype || currentTeam?.taskArchetype || currentTeam?.team_blueprint?.task_archetype || currentTeam?.teamBlueprint?.task_archetype || '');
   const repairSignals = hints.review && /(repair|regression|incident|postmortem|bug|failure|stalled|audit|triage|root cause|fixup|회귀|장애|오류|감사|원인|수습|복구|수정)/i.test(text);
   const improvementSignals = (hints.build || hints.review) && /(iterate|iterative|iteration|improve|improvement|optimi[sz]e|refine repeatedly|keep improving|계속 개선|반복 개선|지속 개선|계속 발전|여러 모델|multi-model|자동 개선|반복적으로)/i.test(text);
-  const implementationSignals = hints.build || ['code_change', 'implementation', 'workspace_change'].includes(taskType) || /(implement|patch|refactor|code|repo|repository|workspace|script|prototype|구현|패치|리팩터|코드|레포|저장소)/i.test(text);
+  const implementationSignals = hints.build || ['code_change', 'implementation', 'workspace_change'].includes(taskType) || /(implement|patch|refactor|code|repo|repository|workspace|script|prototype|web\s*service|web\s*app|frontend|backend|api|server|client|full[- ]?stack|react|next(?:\.js)?|node|express|fastapi|flask|django|spring|구현|패치|리팩터|코드|레포|저장소|웹\s*서비스|웹앱|프론트엔드|백엔드|서버|클라이언트|서비스\s*개발)/i.test(text);
   const researchSignals = hints.compare || hints.debate || hints.discussion || hints.news || hints.filings || /(research|analysis|analy|brief|memo|investigate|market|survey|source-grounded|조사|분석|브리프|리서치|시장)/i.test(text);
   if (repairSignals) return { archetype: 'review_repair', reason: 'repair_or_audit_signals' };
   if (implementationSignals && hints.review && /(repair|regression|bug|fixup|회귀|장애|오류|복구|수습)/i.test(text)) return { archetype: 'review_repair', reason: 'review_then_repair' };
@@ -822,7 +822,7 @@ function inferTaskStructureHints(taskText = '') {
     discussion: /서로\s*(토의|논의|질의응답)|back[- ]?and[- ]?forth|토의하듯|discuss with each other|debate each other/i.test(text),
     review: /review|검토|검수|반박|critic|judge|검증|verify|fact check|red[ -]?team/i.test(text),
     synthesize: /요약|정리|synth|summary|memo|보고서|final/i.test(text),
-    build: /코드|구현|build|builder|coder|coding|programming|notebook|ipython|jupyter|refactor|리팩토|patch|fix/i.test(text),
+    build: /코드|구현|build|builder|coder|coding|programming|notebook|ipython|jupyter|refactor|리팩토|patch|fix|web\s*service|web\s*app|frontend|backend|api|server|client|full[- ]?stack|react|next(?:\.js)?|node|express|fastapi|flask|django|spring|웹\s*서비스|웹앱|프론트엔드|백엔드|서버|클라이언트|서비스\s*개발/i.test(text),
     news: /뉴스|news|이벤트|발표|headline/i.test(text),
     filings: /공시|filing|dart|financial|실적|10-k|10q/i.test(text),
     parallel: /각각|나눠서|분담|병렬|parallel/i.test(text),
@@ -896,7 +896,15 @@ function ensureFreeformBlueprintCoverage(blueprints = [], taskText = '', structu
     pushRole('Reviewer', 'reviewer', '결과를 검토하고 리스크를 정리한다', 'gpt-5.4');
   }
   if (hints.build && !hasRole('builder')) {
-    pushRole('Builder', 'builder', '구현 또는 코드 수정 초안을 만든다', 'gpt-5-codex');
+    pushRole('Builder', 'builder', /web\s*service|web\s*app|frontend|backend|api|server|client|react|next(?:\.js)?|node|express|fastapi|flask|django|spring|웹\s*서비스|웹앱|프론트엔드|백엔드|서버|클라이언트|서비스\s*개발/i.test(taskText)
+      ? '웹 서비스/애플리케이션 구현과 코드 산출물을 만든다'
+      : '구현 또는 코드 수정 초안을 만든다', 'gpt-5-codex');
+  }
+  if (hints.build && !hasRole('reviewer')) {
+    pushRole('Reviewer', 'reviewer', '구현 결과와 회귀 위험을 검토한다', 'gpt-5.4');
+  }
+  if (hints.build && next.length >= 2 && !hasRole('synthesizer')) {
+    pushRole('Synthesizer', 'synthesizer', '구현 결과와 검토 결과를 사용자 전달용으로 정리한다', 'gpt-5.4');
   }
   if (hints.news && !next.some((row) => /news/i.test(clean(row.name)) || /news/i.test(clean(row.purpose)))) {
     pushRole('News Researcher', 'researcher', '최근 뉴스와 이벤트를 수집한다');
@@ -1136,8 +1144,31 @@ function buildInteractionSpecForTeam({ taskText = '', agents = [], current = nul
   });
   const hints = inferTaskStructureHints(taskText);
   const researchers = asArray(agents).filter((agent) => normalizeTeamRole(agent?.role) === 'researcher');
+  const builders = asArray(agents).filter((agent) => normalizeTeamRole(agent?.role) === 'builder');
   const reviewer = asArray(agents).find((agent) => normalizeTeamRole(agent?.role) === 'reviewer') || null;
   const synthesizer = asArray(agents).find((agent) => normalizeTeamRole(agent?.role) === 'synthesizer') || null;
+  const explicitSequential = /순차|pipeline|sequential/i.test(taskText);
+  const explicitParallel = /병렬|parallel/i.test(taskText);
+  const explicitDebate = hints.debate || hints.discussion;
+  if (!explicitSequential && !explicitParallel && !explicitDebate && hints.build && builders.length > 0 && reviewer) {
+    const finalOwner = clean(synthesizer?.name || reviewer?.name || builders[0]?.name);
+    spec = normalizeInteractionSpec({
+      ...spec,
+      execution_pattern: 'builder_reviewer_loop',
+      final_answer_owner: finalOwner,
+      handoffs: mergeHandoffs([
+        researchers[0] && builders[0] ? { from: researchers[0].name, to: builders[0].name, payload: 'repo_map_and_constraints' } : null,
+        builders[0] && reviewer ? { from: builders[0].name, to: reviewer.name, payload: 'draft_plus_change_summary' } : null,
+        reviewer && synthesizer ? { from: reviewer.name, to: synthesizer.name, payload: 'approved_summary_only' } : null,
+      ], spec.handoffs),
+      policies: {
+        ...asObject(spec.policies),
+        reviewer_visibility: 'full_workspace_summary',
+        synthesizer_visibility: synthesizer ? 'upstream_outputs_only' : spec?.policies?.synthesizer_visibility,
+        require_reviewer_before_final: true,
+      },
+    });
+  }
   if ((hints.debate || hints.discussion) && researchers.length >= 2) {
     const counter = researchers.find((agent) => /counter|skeptic|반대|bear|리스크/i.test(`${clean(agent?.name)} ${clean(agent?.purpose)}`)) || researchers[1];
     const lead = researchers.find((agent) => agent !== counter) || researchers[0];
@@ -1218,7 +1249,7 @@ function inferFreeformAgentBlueprints(description = '') {
   if (/비관|bear|pessimis/i.test(text)) pushIfMissing('Bear Analyst', 'researcher', '비관적 시나리오와 리스크 근거를 수집한다');
   if (/뉴스|news/i.test(text)) pushIfMissing('News Researcher', 'researcher', '최근 뉴스와 이벤트를 수집한다');
   if (/공시|filing|dart|financial/i.test(text)) pushIfMissing('Filings Analyst', 'researcher', '공시와 수치 근거를 확인한다');
-  if (/코드|구현|build|builder|refactor|리팩토/i.test(text)) pushIfMissing('Builder', 'builder', '구현과 수정 초안을 만든다');
+  if (/코드|구현|build|builder|refactor|리팩토|web\s*service|web\s*app|frontend|backend|api|server|client|react|next(?:\.js)?|node|express|fastapi|flask|django|spring|웹\s*서비스|웹앱|프론트엔드|백엔드|서버|클라이언트|서비스\s*개발/i.test(text)) pushIfMissing('Builder', 'builder', '구현과 수정 초안을 만든다');
   if (/red[ -]?team|반박|adversarial|critic/i.test(text)) pushIfMissing('Red-Team Reviewer', 'reviewer', '약한 주장과 반례를 지적한다');
   if (/review|검토|reviewer|검수|adjudicat|judge|조정/i.test(text)) pushIfMissing('Reviewer', 'reviewer', '결과를 검토하고 모순을 정리한다');
   if (/요약|정리|synth|summary|memo|보고서|final/i.test(text)) pushIfMissing('Synthesizer', 'synthesizer', '최종 답변과 요약을 작성한다');
@@ -1725,10 +1756,25 @@ function buildPlannerDrivenRefineAgents({ taskText = '', runtime = null, planner
       drafts.push(enrichAgentDraft(agentDraft(row, { seen, taskText, index: drafts.length + 1 }), planning));
     }
   }
-  return pruneAgentLineup(drafts, taskText, planning);
+  const structuredFallback = buildStructuredAgentDrafts({ taskText, runtime, currentTeam: { agents: currentAgents } });
+  const covered = ensureFreeformBlueprintCoverage(drafts.map((agent) => ({
+    name: agent.name,
+    role: agent.role,
+    purpose: agent.purpose,
+    model: agent.model,
+    provider: agent.provider,
+    context_policy: agent.context_policy || null,
+  })), taskText, structuredFallback);
+  const finalSeen = new Set();
+  const finalDrafts = covered.map((item, index) => {
+    const matched = drafts.find((agent) => cleanId(agent.name) === cleanId(item.name) || normalizeTeamRole(agent.role) === normalizeTeamRole(item.role));
+    if (matched) return enrichAgentDraft(agentDraft(matched, { seen: finalSeen, taskText, index: index + 1 }), planning);
+    return enrichAgentDraft(agentDraft(item, { seen: finalSeen, taskText, index: index + 1 }), planning);
+  });
+  return pruneAgentLineup(finalDrafts, taskText, planning);
 }
 
-export async function refineTeamConfigurationAdvanced({ team = {}, instruction = '', runtime = null, planner = null } = {}) {
+export async function refineTeamConfigurationAdvanced({ team = {}, instruction = '', runtime = null, planner = null, jobId = '' } = {}) {
   const fallbackRuntime = runtime || { agentsCatalog: asArray(team?.agents).map((agent) => ({ id: agent.agent_id, name: agent.name, role: agent.role, model: agent.model, provider: agent.provider, skills: agent.skills })) };
   const current = normalizeTeamConfig(team, { runtime: fallbackRuntime });
   const instructionText = clean(instruction);
@@ -1743,6 +1789,7 @@ export async function refineTeamConfigurationAdvanced({ team = {}, instruction =
       availableToolIds: collectAvailableToolIds(fallbackRuntime, loadAgents()),
       skillRegistry: getSkillRegistry(),
       presetRegistry: getPresetRegistry(),
+      jobId,
     });
   } catch (error) {
     plannerResult = { ok: false, reason: `planner_exception:${String(error?.message || error)}` };
@@ -1821,7 +1868,7 @@ export async function buildAutoRefineDraftFromStructureConflict({ team = {}, ins
   }, { runtime: baseRuntime });
 }
 
-export async function createFreeformTeamConfigurationAdvanced({ description = '', runtime = null, planner = null } = {}) {
+export async function createFreeformTeamConfigurationAdvanced({ description = '', runtime = null, planner = null, jobId = '' } = {}) {
   const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
   const taskText = clean(description);
   const initialSelection = selectTaskArchetypeTemplate({ taskText });
@@ -1836,6 +1883,7 @@ export async function createFreeformTeamConfigurationAdvanced({ description = ''
       availableToolIds: collectAvailableToolIds(effectiveRuntime, loadAgents()),
       skillRegistry: getSkillRegistry(),
       presetRegistry: getPresetRegistry(),
+      jobId,
     });
   } catch (error) {
     plannerResult = { ok: false, reason: `planner_exception:${String(error?.message || error)}` };

@@ -45,3 +45,18 @@ test('task interpreter does not pin KR filing preset for generic non-Korean fili
     false,
   );
 });
+
+
+test('task interpreter keeps delivery owner coverage for web-service software-delivery tasks', () => {
+  const interpreted = interpretTask({
+    goal: '웹 서비스 개발을 하고 싶어. 프론트엔드와 백엔드 API 구현 결과를 최종 전달용으로 정리해줘',
+    seedInstruction: 'builder, reviewer, final handoff가 필요하다',
+  });
+
+  assert.equal(interpreted.task_type, 'code_change');
+  assert.equal(interpreted.deliverable_type, 'software_delivery');
+  assert.ok(interpreted.candidate_capability_slots.some((slot) => slot.role_id === 'builder'));
+  assert.ok(interpreted.candidate_capability_slots.some((slot) => slot.role_id === 'reviewer'));
+  assert.ok(interpreted.candidate_capability_slots.some((slot) => slot.role_id === 'synthesizer'));
+  assert.equal(interpreted.suppressed_role_ids.includes('synthesizer'), false);
+});

@@ -441,7 +441,18 @@ async function appendWorkspaceUploadArtifactToGoc(jobId, {
 }
 
 const ARTIFACT_INDEX_FILE = "artifact_index.json";
-const WORKSPACE_FILE_SKIP_DIRS = new Set(["uploads", "outputs", ".git", "node_modules", ".codex", ".gemini"]);
+const WORKSPACE_FILE_SKIP_DIRS = new Set(["uploads", "outputs", ".git", "node_modules", ".codex", ".gemini", ".orchestrator"]);
+const WORKSPACE_FILE_SKIP_NAMES = new Set(["GEMINI.md"]);
+
+function isInternalWorkspaceSupportFile(relPath = "") {
+  const cleanRel = String(relPath || "").trim().replace(/\\/g, "/");
+  if (!cleanRel) return false;
+  const base = path.basename(cleanRel);
+  if (WORKSPACE_FILE_SKIP_NAMES.has(base)) return true;
+  if (cleanRel.startsWith('.orchestrator/')) return true;
+  if (cleanRel.startsWith('.codex/')) return true;
+  return false;
+}
 
 function listWorkspaceFilesRecursive(rootDir, { skipDirNames = null, includeHiddenFiles = false } = {}) {
   const out = [];
@@ -517,7 +528,7 @@ function collectWorkspaceFileEntries(jobId, { scope = "all" } = {}) {
       }
       if (!stat || !stat.isFile()) continue;
       const rel = path.relative(workspaceRoot, abs).replace(/\\/g, "/");
-      if (!rel || rel.startsWith("..")) continue;
+      if (!rel || rel.startsWith("..") || isInternalWorkspaceSupportFile(rel)) continue;
       out.push({
         bucket: target.bucket,
         abs,
@@ -569,6 +580,7 @@ function buildWorkspaceFilesPromptSection(jobId, { limitPerBucket = 5 } = {}) {
     "지시:",
     "- 필요하면 uploads/ 경로의 파일 내용을 참고해라.",
     "- 최종 산출물은 원래 workspace 경로에 유지된다. outputs/ 복사본을 만들지 마라.",
+    "- 내부 지원 파일(GEMINI.md, .codex/*, .orchestrator/*)은 사용자 산출물 후보에서 제외된다.",
     "- 매우 큰 파일은 목록만 참고하고 필요한 부분만 선택해 사용해라.",
   ].join("\n");
 }
@@ -640,7 +652,7 @@ function buildArtifactIndexEntries(jobId, { execution = null, maxFiles = 12 } = 
 
   const pushEntry = (rel, source = 'workspace_recent', final = false) => {
     const cleanRel = String(rel || '').trim().replace(/\\/g, '/').replace(/^workspace\//i, '').replace(/^\.\//, '');
-    if (!cleanRel || cleanRel.startsWith('uploads/') || cleanRel.startsWith('outputs/')) return;
+    if (!cleanRel || cleanRel.startsWith('uploads/') || cleanRel.startsWith('outputs/') || isInternalWorkspaceSupportFile(cleanRel)) return;
     if (seen.has(cleanRel)) return;
     let meta = fileMetaByRel.get(cleanRel) || null;
     if (!meta) {
@@ -771,7 +783,7 @@ async function sendWorkspaceFileByRelativePath(bot, chatId, jobId, relativePath,
   if (!rel || rel.startsWith("..")) {
     throw new Error("Path outside workspace");
   }
-  if (rel.startsWith('.') || rel.includes('/.telegram_')) {
+  if (rel.startsWith('.') || rel.includes('/.telegram_') || isInternalWorkspaceSupportFile(rel)) {
     throw new Error('internal workspace metadata cannot be sent');
   }
   if (Number(stat.size || 0) > TELEGRAM_SEND_MAX_BYTES) {
@@ -850,7 +862,7 @@ function createArtifactBundle(jobId, selections, { artifactIndex = null } = {}) 
     if (!stat || !stat.isFile()) throw new Error(`file not found: ${rel}`);
     const normalizedRel = path.relative(workspaceRoot, abs).replace(/\\/g, '/');
     if (!normalizedRel || normalizedRel.startsWith('..')) throw new Error('Path outside workspace');
-    if (normalizedRel.startsWith('.') || normalizedRel.includes('/.telegram_')) throw new Error('internal workspace metadata cannot be bundled');
+    if (normalizedRel.startsWith('.') || normalizedRel.includes('/.telegram_') || isInternalWorkspaceSupportFile(normalizedRel)) throw new Error('internal workspace metadata cannot be bundled');
     if (seen.has(normalizedRel)) continue;
     seen.add(normalizedRel);
     entries.push({ src: abs, arc: normalizedRel, size: Number(stat.size || 0) });

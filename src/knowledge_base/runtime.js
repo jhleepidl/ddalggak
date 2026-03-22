@@ -18,6 +18,32 @@ function cleanText(raw = '', { lower = false } = {}) {
   return lower ? value.toLowerCase() : value;
 }
 
+function docMatchesName(doc = {}, rawName = '') {
+  const cleanName = cleanText(rawName, { lower: true });
+  if (!cleanName) return false;
+  const candidates = [
+    doc?.doc_id,
+    doc?.surface_id,
+    doc?.surfaceId,
+    doc?.file_name,
+    doc?.fileName,
+    ...(Array.isArray(doc?.legacy_names) ? doc.legacy_names : []),
+  ].map((entry) => cleanText(entry, { lower: true })).filter(Boolean);
+  return candidates.includes(cleanName);
+}
+
+function dedupeDocs(docs = []) {
+  const seen = new Set();
+  const out = [];
+  for (const doc of asArray(docs)) {
+    const key = cleanText(doc?.file_name, { lower: true });
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(doc);
+  }
+  return out;
+}
+
 export function listStableKnowledgeMemoryFiles({ sharedDir = '' } = {}) {
   const prefix = cleanText(sharedDir);
   const withDir = (fileName) => (prefix ? path.join(prefix, fileName) : fileName);
@@ -46,46 +72,171 @@ function recommendRoleBucket({ provider = '', roleId = '' } = {}) {
   return 'general';
 }
 
-export function recommendKnowledgeAccess({ profile = null, provider = '', roleId = '' } = {}) {
+function sortDocsByPreference(docs = [], preferredDocIds = []) {
+  const preferred = new Map(asArray(preferredDocIds).map((entry, index) => [cleanText(entry, { lower: true }), index]));
+  return [...asArray(docs)].sort((left, right) => {
+    const leftRank = preferred.has(cleanText(left?.doc_id, { lower: true })) ? preferred.get(cleanText(left?.doc_id, { lower: true })) : 999;
+    const rightRank = preferred.has(cleanText(right?.doc_id, { lower: true })) ? preferred.get(cleanText(right?.doc_id, { lower: true })) : 999;
+    if (leftRank !== rightRank) return leftRank - rightRank;
+    const leftLoad = cleanText(left?.load_policy || left?.loadPolicy || 'on_demand', { lower: true });
+    const rightLoad = cleanText(right?.load_policy || right?.loadPolicy || 'on_demand', { lower: true });
+    if (leftLoad !== rightLoad) return leftLoad === 'always' ? -1 : 1;
+    return cleanText(left?.file_name).localeCompare(cleanText(right?.file_name));
+  });
+}
+
+function canRoleAccessDoc(doc = {}, roleKey = '', { allowUntargeted = true } = {}) {
+  const targets = asArray(doc.target_roles).map((entry) => cleanText(entry, { lower: true })).filter(Boolean);
+  if (!roleKey) return allowUntargeted || targets.length === 0;
+  if (targets.length === 0) return allowUntargeted;
+  return targets.includes(roleKey);
+}
+
+function isWritablePolicy(writePolicy = '') {
+  const policy = cleanText(writePolicy, { lower: true });
+  return !['read_only', 'readonly', 'none'].includes(policy);
+}
+
+export function buildRoleMemoryContract({ profile = null, provider = '', roleId = '', maxReadDocs = 8 } = {}) {
   const normalized = normalizeKnowledgeBaseProfile(profile || {});
   const bucket = recommendRoleBucket({ provider, roleId });
   const roleKey = cleanText(roleId, { lower: true });
   const docIdsByBucket = {
     implementation: {
-      read: ['plan', 'research', 'progress', 'decisions', 'artifacts'],
-      write: ['progress', 'artifacts', 'decisions'],
+      preferred_reads: ['plan', 'progress', 'research', 'decisions', 'artifacts'],
+      preferred_writes: ['progress', 'artifacts', 'decisions', 'research'],
       primary: ['plan', 'progress'],
     },
     analysis: {
-      read: ['plan', 'research', 'progress', 'decisions'],
-      write: ['research', 'decisions', 'progress'],
+      preferred_reads: ['plan', 'research', 'progress', 'decisions'],
+      preferred_writes: ['research', 'decisions', 'progress'],
       primary: ['plan', 'research'],
     },
     coordination: {
-      read: ['plan', 'research', 'progress', 'decisions', 'artifacts'],
-      write: ['plan', 'decisions'],
+      preferred_reads: ['plan', 'decisions', 'research', 'progress', 'artifacts'],
+      preferred_writes: ['decisions', 'plan', 'artifacts'],
       primary: ['plan', 'decisions'],
     },
     general: {
-      read: ['plan', 'research', 'progress', 'decisions', 'artifacts'],
-      write: ['progress', 'decisions'],
+      preferred_reads: ['plan', 'research', 'progress', 'decisions', 'artifacts'],
+      preferred_writes: ['progress', 'decisions', 'research'],
       primary: ['plan', 'research'],
     },
   };
   const desired = docIdsByBucket[bucket] || docIdsByBucket.general;
-  const resolve = (docIds = []) => docIds
-    .map((docId) => getKnowledgeDocEntry(normalized, docId))
-    .filter((doc) => {
-      if (!doc) return false;
-      const targets = asArray(doc.target_roles).map((entry) => cleanText(entry, { lower: true })).filter(Boolean);
-      if (!roleKey || targets.length == 0) return true;
-      return targets.includes(roleKey);
-    });
+  const readableDocs = sortDocsByPreference(
+    normalized.docs.filter((doc) => {
+      const loadPolicy = cleanText(doc.load_policy || doc.loadPolicy || 'on_demand', { lower: true });
+      const targeted = canRoleAccessDoc(doc, roleKey, { allowUntargeted: true });
+      return targeted || loadPolicy === 'always';
+    }),
+    desired.preferred_reads,
+  ).slice(0, Math.max(1, maxReadDocs));
+  const writableDocs = sortDocsByPreference(
+    normalized.docs.filter((doc) => isWritablePolicy(doc.write_policy || doc.writePolicy) && canRoleAccessDoc(doc, roleKey, { allowUntargeted: true })),
+    desired.preferred_writes,
+  );
+  const primaryDocs = sortDocsByPreference(
+    readableDocs.filter((doc) => desired.primary.includes(cleanText(doc.doc_id, { lower: true })) || desired.primary.includes(cleanText(doc.surface_id || '', { lower: true }))),
+    desired.primary,
+  );
+  const publishDocs = writableDocs.filter((doc) => ['final', 'index'].includes(cleanText(doc.write_policy || doc.writePolicy, { lower: true })));
   return {
     bucket,
-    read_docs: resolve(desired.read),
-    write_docs: resolve(desired.write),
-    primary_docs: resolve(desired.primary),
+    role_id: roleKey,
+    read_docs: readableDocs,
+    primary_docs: primaryDocs.length > 0 ? primaryDocs : readableDocs.slice(0, 2),
+    write_docs: writableDocs,
+    publish_docs: publishDocs,
+    can_write_directly: cleanText(provider, { lower: true }) === 'codex',
+  };
+}
+
+export function pickRoleWriteTarget({ profile = null, provider = '', roleId = '', purpose = 'worklog' } = {}) {
+  const contract = buildRoleMemoryContract({ profile, provider, roleId, maxReadDocs: 8 });
+  const purposeKey = cleanText(purpose, { lower: true }) || 'worklog';
+  const preferredByPurpose = {
+    research: ['research', 'defect_log', 'evidence_ledger', 'working_memory'],
+    implementation: ['implementation_notes', 'repair_log', 'progress', 'working_memory'],
+    review: ['critic_log', 'defect_log', 'review_findings', 'research', 'progress'],
+    final: ['final_answer', 'decisions'],
+    artifact: ['artifact_index', 'artifacts'],
+    worklog: ['progress', 'working_memory', 'implementation_notes', 'critic_log'],
+  };
+  const preferred = preferredByPurpose[purposeKey] || preferredByPurpose.worklog;
+  const candidate = sortDocsByPreference(contract.write_docs, preferred)[0] || null;
+  return {
+    contract,
+    target_doc: candidate,
+  };
+}
+
+export function resolveRoleWriteDecision({
+  profile = null,
+  provider = '',
+  roleId = '',
+  requestedDoc = '',
+  purpose = 'worklog',
+  fallbackDoc = 'progress',
+} = {}) {
+  const normalized = normalizeKnowledgeBaseProfile(profile || {});
+  const contract = buildRoleMemoryContract({ profile: normalized, provider, roleId, maxReadDocs: 8 });
+  const requested = cleanText(requestedDoc, { lower: true });
+  const requestedEntry = requested ? (getKnowledgeDocEntry(normalized, requested) || normalized.docs.find((doc) => docMatchesName(doc, requested))) : null;
+  const allowedRequested = requestedEntry
+    ? contract.write_docs.find((doc) => cleanText(doc.file_name, { lower: true }) === cleanText(requestedEntry.file_name, { lower: true })) || null
+    : null;
+  if (allowedRequested) {
+    return {
+      contract,
+      status: 'allowed',
+      reason: 'requested_surface_allowed',
+      requested_doc: requestedEntry,
+      target_doc: allowedRequested,
+      fallback_used: false,
+    };
+  }
+  const preferred = pickRoleWriteTarget({ profile: normalized, provider, roleId, purpose });
+  if (preferred.target_doc) {
+    return {
+      contract,
+      status: requestedEntry ? 'rerouted' : 'resolved_default',
+      reason: requestedEntry ? 'requested_surface_not_writable_for_role' : 'requested_surface_missing_or_unknown',
+      requested_doc: requestedEntry,
+      target_doc: preferred.target_doc,
+      fallback_used: true,
+    };
+  }
+  const fallbackEntry = fallbackDoc ? (getKnowledgeDocEntry(normalized, fallbackDoc) || normalized.docs.find((doc) => docMatchesName(doc, fallbackDoc))) : null;
+  if (fallbackEntry && isWritablePolicy(fallbackEntry.write_policy || fallbackEntry.writePolicy)) {
+    return {
+      contract,
+      status: 'rerouted',
+      reason: 'role_has_no_primary_target_using_fallback',
+      requested_doc: requestedEntry,
+      target_doc: fallbackEntry,
+      fallback_used: true,
+    };
+  }
+  return {
+    contract,
+    status: 'rejected',
+    reason: requestedEntry ? 'requested_surface_not_writable_and_no_fallback' : 'unknown_surface_and_no_fallback',
+    requested_doc: requestedEntry,
+    target_doc: null,
+    fallback_used: false,
+  };
+}
+
+export function recommendKnowledgeAccess({ profile = null, provider = '', roleId = '' } = {}) {
+  const contract = buildRoleMemoryContract({ profile, provider, roleId, maxReadDocs: 8 });
+  return {
+    bucket: contract.bucket,
+    read_docs: contract.read_docs,
+    write_docs: contract.write_docs,
+    primary_docs: contract.primary_docs,
+    publish_docs: contract.publish_docs,
+    can_write_directly: contract.can_write_directly,
   };
 }
 
@@ -144,6 +295,7 @@ export function buildAgentKnowledgeBaseGuidance({
   provider = '',
   roleId = '',
   agentId = '',
+  detailLevel = 'standard',
 } = {}) {
   const normalized = normalizeKnowledgeBaseProfile(profile || {});
   const access = recommendKnowledgeAccess({ profile: normalized, provider, roleId });
@@ -152,18 +304,11 @@ export function buildAgentKnowledgeBaseGuidance({
   const sharedPrefix = cleanText(sharedDir);
   const concretePath = (fileName) => (sharedPrefix ? path.join(sharedPrefix, fileName) : fileName);
   const providerKey = cleanText(provider, { lower: true });
-  const canWriteTrackingFilesDirectly = providerKey === 'codex';
-  const dedupeDocs = (docs = []) => {
-    const seen = new Set();
-    const out = [];
-    for (const doc of asArray(docs)) {
-      const key = cleanText(doc?.file_name, { lower: true });
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      out.push(doc);
-    }
-    return out;
-  };
+  const canWriteTrackingFilesDirectly = access.can_write_directly === true || providerKey === 'codex';
+  const compactMode = cleanText(detailLevel, { lower: true }) === 'compact';
+  const readDocs = dedupeDocs(access.read_docs).map((doc) => ({ ...doc, file_name: concretePath(doc.file_name) }));
+  const writeDocs = dedupeDocs(access.write_docs).map((doc) => ({ ...doc, file_name: concretePath(doc.file_name) }));
+  const publishDocs = dedupeDocs(access.publish_docs).map((doc) => ({ ...doc, file_name: concretePath(doc.file_name) }));
   const lines = [
     '[KNOWLEDGE BASE CONTRACT]',
     `profile=${normalized.profile_id} (${normalized.display_name})`,
@@ -171,30 +316,39 @@ export function buildAgentKnowledgeBaseGuidance({
     roleId ? `role=${roleId}` : '',
     provider ? `provider=${provider}` : '',
     '규칙:',
-    '- 아래에 명시된 concrete tracking file만 참조하라.',
-    '- plan.md/research.md/progress.md/decisions.md/artifacts.md는 semantic alias일 뿐이며, 사람에게 설명하거나 파일명을 언급할 때는 concrete file_name을 사용하라.',
-    '- shared tracking 파일은 run/shared 안에만 존재한다. CODEX_WORKSPACE_ROOT 또는 repo 루트에 같은 이름 파일을 새로 만들지 마라.',
+    '- concrete tracking file_name만 사용하라. 임의의 tracking 파일을 만들지 마라.',
     '- 목록에 없는 tracking 파일명을 추측하거나 invent 하지 마라.',
-    '- stable memory file은 읽기 전용이다. knowledge_base_profile.json / knowledge_base_contract.md를 수정 대상으로 삼지 마라.',
+    '- shared tracking 파일은 run/shared 안에만 존재한다. workspace 루트에 동명 파일을 만들지 마라.',
+    '- knowledge_base_profile.json / knowledge_base_contract.md 는 읽기 전용이다.',
     canWriteTrackingFilesDirectly
-      ? '- Codex만 tracking 문서를 직접 수정할 수 있다. 수정이 필요하면 아래 주요 작성 대상에만 append/update 하라.'
-      : '- 이 provider는 tracking 문서를 직접 수정하지 않는다. write_file/create_file/save_file 같은 도구를 호출하지 말고, 필요한 내용은 응답 본문으로만 반환하라. 오케스트레이터가 적절한 memory 파일에 반영한다.',
-    `- 안정적으로 보존되는 semantic slot: ${memoryPolicy.stable_semantic_slots.join(', ') || '(none)'}.`,
-    `- 변경 가능 slot: ${memoryPolicy.mutable_semantic_slots.join(', ') || '(none)'}.`,
+      ? '- 직접 수정이 필요하면 아래 주요 작성 대상에만 append/update 하라.'
+      : '- write_file/create_file/save_file 같은 도구를 호출하지 말고 필요한 내용은 응답 본문으로만 반환하라.',
+    !canWriteTrackingFilesDirectly
+      ? '- 이 provider는 tracking 문서를 직접 수정하지 않는다.'
+      : '',
+    `- stable slots: ${memoryPolicy.stable_semantic_slots.join(', ') || '(none)'}`,
+    `- mutable slots: ${memoryPolicy.mutable_semantic_slots.join(', ') || '(none)'}`,
     '',
     '추천 읽기 순서:',
-    ...dedupeDocs(access.read_docs).map((doc) => formatDocBullet({ ...doc, file_name: concretePath(doc.file_name) }, { includeAliases: false })),
+    ...readDocs.map((doc) => formatDocBullet(doc, { includeAliases: false })),
     '',
     '주요 작성 대상:',
     ...(canWriteTrackingFilesDirectly
-      ? dedupeDocs(access.write_docs).map((doc) => formatDocBullet({ ...doc, file_name: concretePath(doc.file_name) }, { includeAliases: false }))
+      ? writeDocs.map((doc) => formatDocBullet(doc, { includeAliases: false }))
       : ['- (direct file writes disabled for this provider)']),
-    '',
-    '전체 semantic slot 매핑:',
-    ...dedupeDocs(normalized.docs).map((doc) => formatDocBullet({ ...doc, file_name: concretePath(doc.file_name) })),
-    '',
-    '고정 메모리 파일:',
-    ...stableFiles.map((file) => `- ${file.path} (${file.mode}): ${file.purpose}`),
+    publishDocs.length > 0 ? '' : '',
+    publishDocs.length > 0 ? '승격/발행 대상:' : '',
+    ...publishDocs.map((doc) => formatDocBullet(doc, { includeAliases: false })),
   ].filter(Boolean);
-  return lines.join('\n');
+  if (!compactMode) {
+    lines.push(
+      '',
+      '역할별 관련 semantic slot 매핑:',
+      ...dedupeDocs([...access.read_docs, ...access.write_docs, ...(access.publish_docs || [])]).map((doc) => formatDocBullet({ ...doc, file_name: concretePath(doc.file_name) })),
+      '',
+      '고정 메모리 파일:',
+      ...stableFiles.map((file) => `- ${file.path} (${file.mode}): ${file.purpose}`),
+    );
+  }
+  return lines.filter(Boolean).join('\n');
 }

@@ -16,8 +16,8 @@ function normalizeText(raw = "", {
 }
 
 const WORKFLOW_TERMS = ["workflow", "membership", "runtime", "polling", "shutdown", "operator", "thread team", "운영"];
-const CODE_REQUEST_TERMS = ["code", "implement", "fix", "bug", "patch", "refactor", "ipynb", "notebook", "script", "repository", "repo", "workspace", "python", "javascript", "typescript", "sql", "bash", "shell", "commit", "pull request", "코드", "구현", "리팩터", "패치", "노트북", "스크립트", "파이썬", "자바스크립트", "타입스크립트", "레포"];
-const CODE_ARTIFACT_TERMS = ["ipynb", "notebook", "jupyter", "script", "patch", "commit", "workspace", "repo", "repository", "python", "javascript", "typescript", "sql", "bash", "shell", "pr", "pull request", "주피터", "노트북", "스크립트", "패치", "커밋", "파이썬", "자바스크립트", "타입스크립트", "레포"];
+const CODE_REQUEST_TERMS = ["code", "implement", "fix", "bug", "patch", "refactor", "ipynb", "notebook", "script", "repository", "repo", "workspace", "python", "javascript", "typescript", "sql", "bash", "shell", "commit", "pull request", "web service", "web app", "frontend", "backend", "full stack", "fullstack", "api", "server", "client", "ui", "ux", "react", "next.js", "nextjs", "node", "express", "fastapi", "flask", "django", "spring", "코드", "구현", "리팩터", "패치", "노트북", "스크립트", "파이썬", "자바스크립트", "타입스크립트", "레포", "웹 서비스", "웹앱", "프론트엔드", "백엔드", "서버", "클라이언트", "api", "서비스 개발"];
+const CODE_ARTIFACT_TERMS = ["ipynb", "notebook", "jupyter", "script", "patch", "commit", "workspace", "repo", "repository", "python", "javascript", "typescript", "sql", "bash", "shell", "pr", "pull request", "web service", "web app", "frontend", "backend", "api", "server", "react", "nextjs", "node", "express", "fastapi", "flask", "django", "주피터", "노트북", "스크립트", "패치", "커밋", "파이썬", "자바스크립트", "타입스크립트", "레포", "웹 서비스", "웹앱", "프론트엔드", "백엔드", "서버", "api", "서비스 개발"];
 const FINANCE_RESEARCH_TERMS = ["stock", "equity", "stock market", "market news", "filing", "valuation", "invest", "investment", "주식", "주식시장", "증시", "뉴스", "공시", "투자", "밸류"];
 
 function includesAny(text = "", needles = []) {
@@ -91,7 +91,7 @@ ${routeText}`;
 }
 
 function inferDeliverableType(taskType = "", text = "") {
-  if (taskType === "code_change") return "code_patch";
+  if (taskType === "code_change") return includesAny(text, ["web service", "web app", "api", "frontend", "backend", "웹 서비스", "웹앱", "프론트엔드", "백엔드", "서버"]) ? "software_delivery" : "code_patch";
   if (taskType === "workflow") return "workflow_update";
   if (taskType === "review") return "review_findings";
   if (includesAny(text, ["telegram", "brief", "요약"])) return "brief";
@@ -157,7 +157,7 @@ function inferSuppressedRoles({
 } = {}) {
   const suppressed = [];
   if (taskType !== "workflow") suppressed.push("operator");
-  if (taskType === "code_change") suppressed.push("synthesizer");
+  if (taskType === "code_change" && deliverableType !== "software_delivery") suppressed.push("synthesizer");
   if (deliverableType === "brief" || deliverableType === "report") {
     return normalizeStringList(suppressed.filter((entry) => entry !== "synthesizer"), { max: 8, lower: true });
   }
@@ -222,6 +222,16 @@ function buildCandidateSlots({
         parallelizable: true,
         deliverable_type: "research_notes",
         selection_reason: "code task also requires external analysis",
+      });
+    }
+    if (deliverableType === "software_delivery" || includesAny(lowerGoal, ["summary", "handoff", "delivery", "final", "deploy", "release", "요약", "정리", "전달", "최종", "배포"])) {
+      addSlot({
+        role_id: "synthesizer",
+        purpose: "Summarize the delivered build, residual risks, and next handoff steps",
+        required_context_types: ["upstream_results", "aggregation"],
+        parallelizable: false,
+        deliverable_type: deliverableType === "software_delivery" ? "software_delivery" : "report",
+        selection_reason: "software delivery tasks benefit from an explicit delivery owner",
       });
     }
   } else {

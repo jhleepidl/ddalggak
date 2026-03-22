@@ -69,3 +69,12 @@ test('freeform create generates readable agent names and display-friendly propos
   assert.doesNotMatch(message, /skills=/);
   assert.doesNotMatch(message, /execution_pattern=/);
 });
+
+
+test('freeform create treats web-service development as build-heavy and includes builder coverage', () => {
+  const team = createFreeformTeamConfiguration({ description: '웹 서비스 개발을 위한 팀을 만들어줘. 프론트엔드와 백엔드 구현을 같이 진행하고 싶어.' });
+  assert.ok(team.agents.some((agent) => agent.role === 'builder'));
+  assert.ok(team.agents.some((agent) => agent.role === 'reviewer'));
+  assert.ok(team.agents.some((agent) => agent.role === 'synthesizer'));
+  assert.equal(team.interaction_spec.execution_pattern, 'builder_reviewer_loop');
+});

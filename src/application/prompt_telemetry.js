@@ -145,6 +145,8 @@ export function appendPromptTelemetry({
       model: safeString(row?.model || '').trim() || undefined,
       agent_id: safeString(row?.agent_id || '').trim().toLowerCase() || undefined,
       role_id: safeString(row?.role_id || '').trim().toLowerCase() || undefined,
+      surface_id: safeString(row?.surface_id || row?.kind || '').trim().toLowerCase() || undefined,
+      surface_label: safeString(row?.surface_label || '').trim() || undefined,
       actual_prompt_chars: actualPromptChars,
       actual_prompt_tokens: actualPromptTokens,
       components,

@@ -366,6 +366,7 @@ export function normalizeKnowledgeBaseProfile(raw = {}) {
   for (const doc of finalDocs) {
     legacyMap[doc.doc_id] = doc.file_name;
     legacyMap[doc.file_name] = doc.file_name;
+    if (cleanText(doc.surface_id || doc.surfaceId, { lower: true })) legacyMap[cleanText(doc.surface_id || doc.surfaceId, { lower: true })] = doc.file_name;
     for (const alias of asArray(doc.legacy_names)) legacyMap[alias] = doc.file_name;
   }
   const memoryPolicy = normalizeMemoryPolicy(row.memory_policy || row.memoryPolicy || {}, { docs: finalDocs });

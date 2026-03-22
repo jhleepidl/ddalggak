@@ -81,6 +81,11 @@ export class LocalRunEventSink {
     return null;
   }
 
+  async recordAgentEvent(eventType = "", input = {}, { jobId = "" } = {}) {
+    this.record(eventType, input, { jobId });
+    return null;
+  }
+
   async finishRun(input = {}, { jobId = "" } = {}) {
     this.record("run.finish", input, { jobId });
     return null;
@@ -127,6 +132,13 @@ export class GocRunEventSink {
     }
     if (this.fallbackSink && typeof this.fallbackSink.updateRunMetadata === "function") {
       return await this.fallbackSink.updateRunMetadata(metadata, { jobId });
+    }
+    return null;
+  }
+
+  async recordAgentEvent(eventType = "", input = {}, { jobId = "" } = {}) {
+    if (this.fallbackSink && typeof this.fallbackSink.recordAgentEvent === "function") {
+      return await this.fallbackSink.recordAgentEvent(eventType, input, { jobId });
     }
     return null;
   }

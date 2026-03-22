@@ -5,6 +5,9 @@ import { parseJsonObjectFromText } from '../shared/json_extract.js';
 import { listSupportedModels } from '../catalog/model_catalog.js';
 import { normalizeTeamStructureV2, deriveTeamConfigFromStructureV2 } from '../shared/team_structure_v2.js';
 import { buildPlannerSchemaHintText } from '../shared/team_schema_catalog.js';
+import { appendPromptTelemetry } from './prompt_telemetry.js';
+import { runDir, runSharedDir } from './telegram_runtime_state.js';
+import { compactPromptJson } from './prompt_surface_builder.js';
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -110,6 +113,8 @@ function buildPlannerPrompt({
     '- team must have 1 to 6 agents',
     '- each agent role must be one of: researcher, builder, reviewer, synthesizer, operator',
     '- if the user asks for opposing views, counterarguments, debate, discussion, devil\'s advocate, or back-and-forth, DO NOT collapse to a single generalist researcher',
+    '- if the request is about building or shipping software artifacts such as a web service, web app, frontend, backend, API, repository change, notebook, script, or implementation, include a builder with a concrete delivery purpose',
+    '- for implementation/build teams, do not return a research-only roster; include builder coverage unless the user explicitly rejects code-writing agents',
     '- if multiple upstream agents exist, include a synthesizer unless the user explicitly rejects it',
     '- prefer existing executable skill ids from the registry for attached_skill_ids',
     '- do not attach irrelevant domain-specific skills (for example KR equity analysis) unless the request actually targets that domain',
@@ -143,7 +148,7 @@ function buildPlannerPrompt({
     '    }',
     '  ],',
     '  "interaction_spec": {',
-    '    "execution_pattern": "parallel_research_then_review_then_synthesize|multi_research_adjudication|sequential_pipeline",',
+    '    "execution_pattern": "parallel_research_then_review_then_synthesize|multi_research_adjudication|sequential_pipeline|builder_reviewer_loop|operator_gated_workflow",',
     '    "final_answer_owner": "agent name",',
     '    "handoffs": [{"from":"...","to":"...","payload":"summary_plus_key_evidence"}],',
     '    "policies": {"reviewer_visibility":"...","synthesizer_visibility":"..."}',
@@ -167,9 +172,9 @@ function buildPlannerPrompt({
     `Supported models: ${models.join(', ')}`,
     `Available tools: ${asArray(availableToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 24).join(', ') || '(none listed)'}`,
     '',
-    `Runtime catalog: ${JSON.stringify(catalog)}`,
-    `Skill registry sample: ${JSON.stringify(skills)}`,
-    `Preset registry sample: ${JSON.stringify(presets)}`,
+    `Runtime catalog: ${compactPromptJson(catalog, { maxDepth: 3, maxItems: 12, maxStringChars: 120 })}`,
+    `Skill registry sample: ${compactPromptJson(skills, { maxDepth: 3, maxItems: 12, maxStringChars: 120 })}`,
+    `Preset registry sample: ${compactPromptJson(presets, { maxDepth: 3, maxItems: 12, maxStringChars: 120 })}`,
   ].join('\n');
 }
 
@@ -230,7 +235,8 @@ function buildRefinementPlannerPrompt({
     buildPlannerSchemaHintText(),
     '- return the full next team, not a patch',
     '- preserve existing strong agents unless the instruction clearly asks to remove or replace them',
-    '- if the user asks for coding, notebook work, IPython, Jupyter, implementation, or a Coder Agent, include a builder agent with a concrete coding/notebook purpose',
+    '- if the user asks for coding, notebook work, IPython, Jupyter, implementation, a web service, web app, frontend, backend, API, repository work, or a Coder Agent, include a builder agent with a concrete delivery purpose',
+    '- if the refinement still describes a build/implementation team, do not keep a research-only roster; preserve or add builder coverage unless the user explicitly removes code-writing roles',
     '- consider interaction_spec as first-class: update handoffs, execution_pattern, rebuttal/adjudication shape, reviewer_visibility, synthesizer_visibility, builder_direct_response, and final_answer_owner when the refinement implies a new workflow',
     '- if multiple upstream agents remain, keep or add a synthesizer unless the user rejects it',
     '- prefer existing executable skill ids from the registry for attached_skill_ids',
@@ -273,15 +279,15 @@ function buildRefinementPlannerPrompt({
     '  "runtime_execution": {"continuous_improvement": {"enabled": false, "max_turns": 8}}',
     '}',
     '',
-    `Current team: ${JSON.stringify(current)}`,
+    `Current team: ${compactPromptJson(current, { maxDepth: 4, maxItems: 14, maxStringChars: 140 })}`,
     `Refinement instruction: ${clean(instruction)}`,
     '',
     `Supported models: ${models.join(', ')}`,
     `Available tools: ${asArray(availableToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 24).join(', ') || '(none listed)'}`,
     '',
-    `Runtime catalog: ${JSON.stringify(catalog)}`,
-    `Skill registry sample: ${JSON.stringify(skills)}`,
-    `Preset registry sample: ${JSON.stringify(presets)}`,
+    `Runtime catalog: ${compactPromptJson(catalog, { maxDepth: 3, maxItems: 12, maxStringChars: 120 })}`,
+    `Skill registry sample: ${compactPromptJson(skills, { maxDepth: 3, maxItems: 12, maxStringChars: 120 })}`,
+    `Preset registry sample: ${compactPromptJson(presets, { maxDepth: 3, maxItems: 12, maxStringChars: 120 })}`,
   ].join('\n');
 }
 
@@ -347,11 +353,36 @@ export async function planFreeformTeamWithCodex({
   skillRegistry = null,
   presetRegistry = null,
   workspaceRoot = process.cwd(),
+  jobId = '',
 } = {}) {
   if (!isCodexPlannerEnabled()) {
     return { ok: false, reason: 'planner_disabled_or_codex_unavailable' };
   }
   const prompt = buildPlannerPrompt({ taskText, runtime, availableToolIds, skillRegistry, presetRegistry });
+  const cleanJobId = clean(jobId);
+  if (cleanJobId) {
+    appendPromptTelemetry({
+      jobDir: runDir(cleanJobId),
+      sharedDir: runSharedDir(cleanJobId),
+      row: {
+        kind: 'planner_prompt',
+        surface_id: 'team_create_planner',
+        surface_label: 'team_create_planner',
+        provider: 'codex',
+        model: process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4',
+        agent_id: 'team_create_planner',
+        role_id: 'planner',
+        prompt_text: prompt,
+        components: {
+          user_request: clean(taskText),
+          runtime_catalog: compactPromptJson(summarizeRuntimeAgents(runtime), { maxDepth: 3, maxItems: 10, maxStringChars: 120 }),
+          skill_registry: compactPromptJson(summarizeSkills(skillRegistry), { maxDepth: 3, maxItems: 10, maxStringChars: 120 }),
+          preset_registry: compactPromptJson(summarizePresets(presetRegistry), { maxDepth: 3, maxItems: 10, maxStringChars: 120 }),
+          available_tools: asArray(availableToolIds).join(', '),
+        },
+      },
+    });
+  }
   let result;
   try {
     result = await runCodexExec({
@@ -396,11 +427,37 @@ export async function planTeamRefinementWithCodex({
   skillRegistry = null,
   presetRegistry = null,
   workspaceRoot = process.cwd(),
+  jobId = '',
 } = {}) {
   if (!isCodexPlannerEnabled()) {
     return { ok: false, reason: 'planner_disabled_or_codex_unavailable' };
   }
   const prompt = buildRefinementPlannerPrompt({ currentTeam, instruction, runtime, availableToolIds, skillRegistry, presetRegistry });
+  const cleanJobId = clean(jobId);
+  if (cleanJobId) {
+    appendPromptTelemetry({
+      jobDir: runDir(cleanJobId),
+      sharedDir: runSharedDir(cleanJobId),
+      row: {
+        kind: 'planner_prompt',
+        surface_id: 'team_refine_planner',
+        surface_label: 'team_refine_planner',
+        provider: 'codex',
+        model: process.env.TEAM_REFINE_PLANNER_MODEL || process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4',
+        agent_id: 'team_refine_planner',
+        role_id: 'planner',
+        prompt_text: prompt,
+        components: {
+          refinement_instruction: clean(instruction),
+          current_team: compactPromptJson(summarizeTeamForPlanner(currentTeam), { maxDepth: 4, maxItems: 12, maxStringChars: 140 }),
+          runtime_catalog: compactPromptJson(summarizeRuntimeAgents(runtime), { maxDepth: 3, maxItems: 10, maxStringChars: 120 }),
+          skill_registry: compactPromptJson(summarizeSkills(skillRegistry), { maxDepth: 3, maxItems: 10, maxStringChars: 120 }),
+          preset_registry: compactPromptJson(summarizePresets(presetRegistry), { maxDepth: 3, maxItems: 10, maxStringChars: 120 }),
+          available_tools: asArray(availableToolIds).join(', '),
+        },
+      },
+    });
+  }
   let result;
   try {
     result = await runCodexExec({

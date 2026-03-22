@@ -193,26 +193,80 @@ test("chat status prompt view shows recent prompt telemetry and savings", () => 
   const jobId = created.jobId;
   const jobDir = created.dir;
   fs.writeFileSync(path.join(jobDir, 'prompt_metrics.jsonl'), [
-    JSON.stringify({ ts: new Date().toISOString(), provider: 'codex', model: 'gpt-5-codex', agent_id: 'builder', actual_prompt_tokens: 900, baseline: { conversation_only_tokens: 10000, conversation_plus_shared_tokens: 20000 }, overlay: { overlay_id: 'agency:engineering/frontend-developer', overlay_title: 'Frontend Developer', tokens: 96, share_pct: 10.7 } }),
-    JSON.stringify({ ts: new Date().toISOString(), provider: 'gemini', model: 'gemini-2.5-pro', agent_id: 'critic', actual_prompt_tokens: 1100, baseline: { conversation_only_tokens: 10000, conversation_plus_shared_tokens: 20000 } }),
+    JSON.stringify({ ts: new Date().toISOString(), provider: 'codex', model: 'gpt-5-codex', surface_id: 'team_create_planner', surface_label: 'team_create_planner', agent_id: 'builder', actual_prompt_tokens: 900, baseline: { conversation_only_tokens: 10000, conversation_plus_shared_tokens: 20000 }, overlay: { overlay_id: 'agency:engineering/frontend-developer', overlay_title: 'Frontend Developer', tokens: 96, share_pct: 10.7 } }),
+    JSON.stringify({ ts: new Date().toISOString(), provider: 'gemini', model: 'gemini-2.5-pro', surface_id: 'supervisor_router', surface_label: 'supervisor_router', agent_id: 'critic', actual_prompt_tokens: 1100, baseline: { conversation_only_tokens: 10000, conversation_plus_shared_tokens: 20000 } }),
   ].join('\n') + '\n', 'utf8');
   chatSessionStore.clear(chatId);
   activeJobByChat.delete(chatId);
   try {
     activeJobByChat.set(chatId, jobId);
-    chatSessionStore.upsert(chatId, { state: 'executing', jobId });
+    chatSessionStore.upsert(chatId, { state: 'executing', jobId, last_route: { execution_feedback: { run_count: 2, patterns: [{ execution_pattern: 'builder_reviewer_loop', run_count: 2, avg_participation_pct: 75 }], overlays: [{ overlay_id: 'agency:engineering/frontend-developer', title: 'Frontend Developer', run_count: 2, avg_participation_pct: 75, avg_overlay_tokens: 96, avg_overlay_share_pct: 10.7 }] } } });
     const card = buildChatStatusCard(chatId, null, { detail: 'prompt' });
     assert.match(card.text, /Prompt 상태/);
     assert.match(card.text, /avg_prompt_tokens:/);
     assert.match(card.text, /delta_vs_conversation_only:/);
+    assert.match(card.text, /prompt_surfaces:/);
     assert.match(card.text, /overlay_overhead_avg:/);
     assert.match(card.text, /overlay_memo:/);
-    assert.match(card.text, /builder · codex\/gpt-5-codex/);
+    assert.match(card.text, /pattern_feedback:/);
+    assert.match(card.text, /overlay_feedback:/);
+    assert.match(card.text, /\[team_create_planner\] builder · codex\/gpt-5-codex/);
     assert.ok(card.reply_markup);
     assert.ok(card.reply_markup.inline_keyboard[0].some((button) => button.text === 'Prompt'));
   } finally {
     chatSessionStore.clear(chatId);
     activeJobByChat.delete(chatId);
     fs.rmSync(jobDir, { recursive: true, force: true });
+  }
+});
+
+test("chat status full view exposes team selection and agent participation insights", () => {
+  const chatId = "status-test-execution-insights";
+  chatSessionStore.clear(chatId);
+  activeJobByChat.delete(chatId);
+  try {
+    chatSessionStore.upsert(chatId, {
+      state: "idle",
+      jobId: "job-demo-insights",
+      team_config: {
+        active_team: {
+          team_name: "Web Delivery Team",
+          interaction_spec: {
+            execution_pattern: 'builder_reviewer_loop',
+            final_answer_owner: 'Delivery Owner',
+          },
+        },
+      },
+      last_route: {
+        actions: [
+          { type: 'run_agent', agent_id: 'builder', inputs: { role_id: 'builder', display_label: 'Builder' } },
+          { type: 'run_agent', agent_id: 'reviewer', inputs: { role_id: 'reviewer', display_label: 'Reviewer' } },
+          { type: 'synthesize_final', agent_id: 'synthesizer', inputs: { role_id: 'synthesizer', display_label: 'Delivery Owner' } },
+        ],
+        execution_insights: {
+          selection: {
+            planner_facts: ['task_type=code_change', 'deliverable=software_delivery', 'pattern=builder_reviewer_loop'],
+            selected: ['Builder(구현) · implementation coverage · active', 'Reviewer(검토) · reviewer coverage · active'],
+            suppressed: ['최종 정리 · preferred_role requested but not present in runtime team'],
+          },
+          execution: {
+            planned_agent_count: 3,
+            observed_agent_count: 2,
+            participation_by_role: ['구현 1/1', '검토 1/1', '최종 정리 0/1'],
+            missing_agents: ['Delivery Owner'],
+          },
+        },
+      },
+    });
+
+    const card = buildChatStatusCard(chatId, null, { detail: 'full' });
+    assert.match(card.text, /planner_facts:/);
+    assert.match(card.text, /team_selection:/);
+    assert.match(card.text, /agent_participation: planned=3, observed=2/);
+    assert.match(card.text, /participation_by_role: 구현 1\/1, 검토 1\/1, 최종 정리 0\/1/);
+    assert.match(card.text, /missing_agents: Delivery Owner/);
+  } finally {
+    chatSessionStore.clear(chatId);
+    activeJobByChat.delete(chatId);
   }
 });

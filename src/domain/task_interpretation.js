@@ -105,7 +105,7 @@ export function normalizeTaskInterpretation(raw = {}, {
     task_summary: normalizeText(row.task_summary || row.taskSummary || goal) || goal,
     deliverable_type: normalizeEnum(
       row.deliverable_type || row.deliverableType,
-      ["report", "brief", "code_patch", "review_findings", "workflow_update", "research_notes", "artifact"],
+      ["report", "brief", "code_patch", "software_delivery", "review_findings", "workflow_update", "research_notes", "artifact"],
       "report"
     ),
     risk_level: normalizeEnum(
