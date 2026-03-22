@@ -174,7 +174,7 @@ export function createTelegramCommandHandler(deps = {}) {
     const stateLines = [
       `active team: ${activeTeam ? String(activeTeam.team_name || 'configured').trim() : 'none'}`,
       `pending team: ${pendingTeam ? `${String(pendingTeam.team_name || 'pending_team').trim()}${pendingTeam?.planner_metadata?.auto_refine_from_pattern_conflict ? ' · auto_refine_draft' : ''}` : 'none'}`,
-      `install proposal: ${pendingInstallProposal ? `${String(pendingInstallProposal.status || 'awaiting_install_approval')} · gaps=${Number(pendingInstallProposal?.proposal?.gap_count || 0)}` : 'none'}`,
+      `capability proposal: ${pendingInstallProposal ? `${String(pendingInstallProposal.status || 'awaiting_install_approval')} · gaps=${Number(pendingInstallProposal?.proposal?.gap_count || 0)}` : 'none'}`,
       `credential bindings: ${Number(credentialBindingState?.summary?.bound_count || 0)}`,
     ];
     if (patternConflict?.classification) {

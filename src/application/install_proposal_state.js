@@ -176,16 +176,16 @@ export function buildInstallProposalPrompt(state = {}, { hasPendingTeam = false,
   const coverage = chatId ? getCredentialCoverageForProposal(sessionStore, chatId, proposal) : { missing_keys: [] };
   return {
     text: [
-      `⚠️ install proposal 승인 필요`,
+      `⚠️ capability proposal 검토 필요`,
       line,
       `blocking=${proposal.blocking ? 'yes' : 'no'} · gaps=${Number(proposal.gap_count || 0)} · credential_requests=${Number(proposal?.actions?.summary?.credential_request_count || 0)}`,
       ...(coverage.missing_keys.length > 0 ? [`missing_credentials=${coverage.missing_keys.join(', ')}`] : []),
       '',
-      '선택:',
+      '선택 (대부분은 실제 tool 설치가 아니라 team requirement / runtime 연결 힌트 반영):',
       (resumeOnApply
-        ? `- ${applyLabel}: pending team이 있으면 active로 적용하고 같은 요청을 재개`
-        : `- ${applyLabel}: pending team이 있으면 active로 적용 (현재 런타임에서 자동 설치/재개는 없음)`),
-      '- Install pending: 현재 제안을 pending 상태로 유지',
+        ? `- ${applyLabel}: pending team requirement를 active로 반영하고, blocking gap이면 같은 요청을 재개`
+        : `- ${applyLabel}: pending team requirement를 active로 반영 (실제 runtime tool 설치는 자동이 아닐 수 있음)`),
+      '- Install pending: 현재 requirement 제안을 pending 상태로 보관',
       ...(coverage.missing_keys.length > 0 ? ['- Credential help: 필요한 secret 바인딩 방법 보기'] : []),
       '- Dismiss: 제안을 닫기',
     ].join('\n'),

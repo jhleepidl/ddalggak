@@ -433,7 +433,10 @@ function buildStructuralNodeAction({
       gate_type: actionType === 'gate_wait' ? (gateRole || roleId || 'approval') : undefined,
       approval_required: actionType === 'gate_wait' ? ['approval', 'mutating_confirm'].includes(gateRole || roleId) : (actionType === 'human_checkpoint'),
       required_tool_ids: actionType === 'tool_proxy_call'
-        ? asArray(participant?.recommended_tool_ids || participant?.required_tool_ids || participant?.tool_ids).map((toolId) => normalizeText(toolId, { lower: true })).filter(Boolean)
+        ? asArray(participant?.required_tool_ids || participant?.requiredToolIds || participant?.tool_ids).map((toolId) => normalizeText(toolId, { lower: true })).filter(Boolean)
+        : undefined,
+      optional_tool_ids: actionType === 'tool_proxy_call'
+        ? asArray(participant?.optional_tool_ids || participant?.optionalToolIds || participant?.recommended_tool_ids || participant?.recommendedToolIds).map((toolId) => normalizeText(toolId, { lower: true })).filter(Boolean)
         : undefined,
       memory_keys: actionType === 'memory_sync'
         ? asArray(participant?.memory_keys || participant?.bound_memory_keys).map((key) => normalizeText(key)).filter(Boolean)

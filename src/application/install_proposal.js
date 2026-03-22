@@ -99,13 +99,13 @@ export function formatTeamInstallProposalMessage(proposal = {}, { maxLines = 8 }
   const requirements = normalizeManifestRequirements(row.requirements || {});
   const actions = normalizeInstallRequirementActions(row.actions || {});
   const lines = [
-    `Install proposal · ${row.blocking ? 'blocking' : 'advisory'}`,
+    `Capability proposal · ${row.blocking ? 'blocking' : 'advisory'}`,
     `source: ${clean(row.source || 'team_requirement')}`,
     `requirements: tools=${requirements.summary.tool_count} · credentials=${requirements.summary.credential_count} · skills=${requirements.summary.skill_count}`,
-    `actions: tool_installs=${actions.summary.tool_install_count} · credential_requests=${actions.summary.credential_request_count} · generated_skills=${actions.summary.generated_skill_count}`,
+    `actions: tool_requirements=${actions.summary.tool_install_count} · credential_requests=${actions.summary.credential_request_count} · generated_skills=${actions.summary.generated_skill_count}`,
     ...(asArray(row.gap_preview_lines).length > 0 ? ['', 'Capability gaps', ...asArray(row.gap_preview_lines)] : []),
     ...(formatManifestRequirementLines(requirements, { maxLines }).length > 0 ? ['', 'Requirements', ...formatManifestRequirementLines(requirements, { maxLines })] : []),
-    ...(formatInstallRequirementActionLines(actions, { maxLines }).length > 0 ? ['', 'Action proposals', ...formatInstallRequirementActionLines(actions, { maxLines })] : []),
+    ...(formatInstallRequirementActionLines(actions, { maxLines }).length > 0 ? ['', 'Proposed actions', ...formatInstallRequirementActionLines(actions, { maxLines })] : []),
     ...(asArray(row.suggested_commands).length > 0 ? ['', 'Suggested commands', ...asArray(row.suggested_commands).map((entry) => `- ${entry}`)] : []),
   ].filter(Boolean);
   return lines.join('\n');

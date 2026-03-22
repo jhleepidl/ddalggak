@@ -107,3 +107,24 @@ test('detectTeamCapabilityGaps treats codex workspace-write as provider-backed w
 
   assert.equal(gaps.some((gap) => gap.kind === 'missing_tool' && gap.tool_id === 'workspace_fs'), false);
 });
+
+
+test('detectTeamCapabilityGaps distinguishes required and optional tools', () => {
+  const gaps = detectTeamCapabilityGaps({
+    team: {
+      agents: [
+        {
+          name: 'Builder',
+          role: 'builder',
+          purpose: '웹 서비스 구현',
+          required_tool_ids: ['workspace_fs'],
+          optional_tool_ids: ['shell'],
+        },
+      ],
+    },
+    runtime: { availableToolIds: [] },
+  });
+
+  assert.ok(gaps.some((gap) => gap.tool_id === 'workspace_fs' && gap.severity === 'blocking'));
+  assert.ok(gaps.some((gap) => gap.tool_id === 'shell' && gap.severity === 'advisory'));
+});

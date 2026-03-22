@@ -70,3 +70,52 @@ test('runtime metadata envelope preserves execution insights and feedback', () =
   assert.equal(patch.execution_insights.execution.observed_agent_count, 1);
   assert.equal(patch.execution_feedback.run_count, 3);
 });
+
+
+test('execution feedback classifies pattern and overlay recommendation signals', () => {
+  const created = jobs.createJob({ title: 'job-feedback-recommend' });
+  const jobDir = created.dir;
+  try {
+    fs.writeFileSync(path.join(jobDir, 'prompt_metrics.jsonl'), [
+      JSON.stringify({ ts: new Date().toISOString(), overlay: { overlay_id: 'agency:engineering/frontend-developer', overlay_title: 'Frontend Developer', tokens: 90, share_pct: 11 } }),
+      JSON.stringify({ ts: new Date().toISOString(), overlay: { overlay_id: 'agency:engineering/frontend-developer', overlay_title: 'Frontend Developer', tokens: 95, share_pct: 12 } }),
+    ].join('\n') + '\n', 'utf8');
+
+    recordExecutionFeedback({
+      jobDir,
+      runId: 'run_a',
+      status: 'done',
+      runtimeTeamSnapshot: {
+        runtime_agents: [
+          { role_id: 'builder', agency_overlay_id: 'agency:engineering/frontend-developer', agency_overlay: { display: { title: 'Frontend Developer' } } },
+        ],
+      },
+      executionInsights: {
+        execution_pattern: 'builder_reviewer_loop',
+        execution: { planned_agent_count: 3, observed_agent_count: 3, participation_pct: 100, missing_agents: [] },
+      },
+    });
+    const result = recordExecutionFeedback({
+      jobDir,
+      runId: 'run_b',
+      status: 'done',
+      runtimeTeamSnapshot: {
+        runtime_agents: [
+          { role_id: 'builder', agency_overlay_id: 'agency:engineering/frontend-developer', agency_overlay: { display: { title: 'Frontend Developer' } } },
+        ],
+      },
+      executionInsights: {
+        execution_pattern: 'builder_reviewer_loop',
+        execution: { planned_agent_count: 3, observed_agent_count: 3, participation_pct: 100, missing_agents: [] },
+      },
+    });
+
+    assert.equal(result.summary.patterns[0].recommendation, 'recommended');
+    assert.match(String(result.summary.patterns[0].reason || ''), /avg participation/i);
+    assert.equal(result.summary.overlays[0].recommendation, 'recommended');
+    assert.equal(result.summary.recommended_patterns[0].execution_pattern, 'builder_reviewer_loop');
+    assert.equal(result.summary.recommended_overlays[0].title, 'Frontend Developer');
+  } finally {
+    fs.rmSync(jobDir, { recursive: true, force: true });
+  }
+});

@@ -47,11 +47,11 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
     const baseTeam = currentTeamForManifest(teamState);
     if (proposalAction === 'dismiss' || proposalAction === 'clear') {
       if (!existingProposalState) {
-        await bot.sendMessage(chatId, '대기 중인 install proposal이 없습니다.');
+        await bot.sendMessage(chatId, '대기 중인 capability proposal이 없습니다.');
         return true;
       }
       archivePendingInstallProposal(chatSessionStore, chatId, 'dismissed');
-      await bot.sendMessage(chatId, '✅ install proposal을 닫았습니다.');
+      await bot.sendMessage(chatId, '✅ capability proposal을 닫았습니다.');
       return true;
     }
     if (proposalAction === 'install' || proposalAction === 'pending') {
@@ -72,12 +72,12 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
       autoInstallRuntimeSupport({ proposal: state?.proposal || {}, jobs, jobId: resolveLiveJobIdForChat?.(chatId) });
       const archived = state || getPendingInstallProposal(chatSessionStore, chatId);
       if (archived) archivePendingInstallProposal(chatSessionStore, chatId, 'installed_pending', { apply_state: 'pending' });
-      await bot.sendMessage(chatId, '✅ install proposal을 pending 상태로 보관했습니다. 필요하면 /team apply 후 다시 시도해 주세요.');
+      await bot.sendMessage(chatId, '✅ capability proposal을 pending 상태로 보관했습니다. 필요하면 /team apply 후 다시 시도해 주세요.');
       return true;
     }
     if (proposalAction === 'apply' || proposalAction === 'active' || proposalAction === 'resume') {
       if (!existingProposalState) {
-        await bot.sendMessage(chatId, '대기 중인 install proposal이 없습니다. 먼저 /team proposal 로 확인해 주세요.');
+        await bot.sendMessage(chatId, '대기 중인 capability proposal이 없습니다. 먼저 /team proposal 로 확인해 주세요.');
         return true;
       }
       const coverage = getCredentialCoverageForProposal(chatSessionStore, chatId, existingProposalState.proposal || {});
@@ -97,7 +97,7 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
       }
       archivePendingInstallProposal(chatSessionStore, chatId, 'applied_active', { apply_state: 'active' });
       const shouldResume = shouldResumeInstallProposal(existingProposalState);
-      await bot.sendMessage(chatId, shouldResume ? '✅ install proposal을 반영했고 같은 요청을 재개합니다.' : '✅ install proposal을 반영했습니다.');
+      await bot.sendMessage(chatId, shouldResume ? '✅ capability proposal을 반영했고 같은 요청을 재개합니다.' : '✅ capability proposal을 반영했습니다.');
       const resume = existingProposalState.resume_request && typeof existingProposalState.resume_request === 'object' ? existingProposalState.resume_request : null;
       if (shouldResume && resume?.message && typeof runSupervisorChat === 'function') {
         await runSupervisorChat(bot, chatId, userId, resume.message, {
@@ -123,7 +123,7 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
     const coverage = getCredentialCoverageForProposal(chatSessionStore, chatId, proposal || {});
     const bindingState = getCredentialBindingState(chatSessionStore, chatId);
     const lines = [
-      existingProposalState ? `pending install proposal state: ${existingProposalState.status}` : 'install proposal preview',
+      existingProposalState ? `pending capability proposal state: ${existingProposalState.status}` : 'capability proposal preview',
       '',
       formatTeamInstallProposalMessage(proposal),
       '',

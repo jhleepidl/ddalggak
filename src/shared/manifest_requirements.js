@@ -168,10 +168,10 @@ export function buildManifestInstallHints(requirements = {}, { hasGocThreadTarge
   const row = normalizeManifestRequirements(requirements);
   const hints = [];
   if (row.tools.some((entry) => /workspace_fs|write_file|create_file|save_file|ipynb/.test(entry.tool_id))) {
-    hints.push('파일·노트북 산출물이 필요하면 workspace_fs 또는 file writer tool을 연결하세요.');
+    hints.push('파일·노트북 산출물이 필요하면 workspace_fs 또는 file writer tool을 runtime에 연결하세요.');
   }
   if (row.tools.some((entry) => /web|browser|search/.test(entry.tool_id))) {
-    hints.push('검색형 작업이면 web/browser/search tool을 가진 agent로 팀을 refine 하세요.');
+    hints.push('검색형 작업이면 web/browser/search tool이 runtime에 있는지 확인하거나, 해당 tool을 쓸 수 있는 agent로 팀을 refine 하세요.');
   }
   if (row.credentials.length > 0) {
     const keys = row.credentials.map((entry) => entry.credential_key).filter(Boolean).slice(0, 3).join(', ');
@@ -179,7 +179,7 @@ export function buildManifestInstallHints(requirements = {}, { hasGocThreadTarge
   }
   if (row.summary.tool_count > 0 || row.summary.credential_count > 0 || row.summary.skill_count > 0) {
     hints.push('/team requirements 로 실행 전제조건을 다시 확인할 수 있습니다.');
-    hints.push('/team export 로 blueprint JSON을 내보내 GoC에서 Validate/Install 할 수 있습니다.');
+    hints.push('/team export 로 blueprint JSON을 내보내 GoC에서 Validate/Install 할 수 있습니다. 이 단계는 주로 team metadata와 requirement를 동기화합니다.');
   }
   if (hasGocThreadTarget) {
     hints.push('현재 GoC thread가 연결되어 있으면 /team push 로 thread team config에 바로 동기화할 수 있습니다.');
@@ -190,7 +190,7 @@ export function buildManifestInstallHints(requirements = {}, { hasGocThreadTarge
 export function formatManifestRequirementLines(requirements = {}, { maxLines = 6 } = {}) {
   const row = normalizeManifestRequirements(requirements);
   const lines = [
-    ...row.tools.map((entry) => `- tool: ${entry.tool_id} · by ${entry.required_by}`),
+    ...row.tools.map((entry) => `- tool: ${entry.tool_id} · by ${entry.required_by} · severity=${entry.severity || 'blocking'}`),
     ...row.credentials.map((entry) => `- credential: ${entry.credential_key} · by ${entry.required_by}`),
     ...row.skills.map((entry) => `- skill: ${entry.skill_id} · by ${entry.required_by}`),
     ...row.warnings.map((entry) => `- note: ${entry}`),

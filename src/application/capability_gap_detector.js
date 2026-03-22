@@ -135,15 +135,32 @@ export function detectTeamCapabilityGaps({ team = {}, runtime = null, skillRegis
 
   for (const agent of asArray(team?.agents)) {
     const agentName = clean(agent?.name || agent?.agent_id || 'agent') || 'agent';
-    const recommendedTools = uniqueIds(agent?.recommended_tool_ids || agent?.recommendedToolIds || []);
-    for (const toolId of recommendedTools) {
+    const explicitRequired = uniqueIds(agent?.required_tool_ids || agent?.requiredToolIds || []);
+    const explicitOptional = uniqueIds(agent?.optional_tool_ids || agent?.optionalToolIds || []);
+    const legacyRecommended = uniqueIds(agent?.recommended_tool_ids || agent?.recommendedToolIds || []);
+    const requiredTools = explicitRequired;
+    const optionalTools = explicitRequired.length === 0 && explicitOptional.length === 0
+      ? legacyRecommended
+      : uniqueIds([...explicitOptional, ...legacyRecommended.filter((toolId) => !explicitRequired.includes(toolId))]);
+    for (const toolId of requiredTools) {
+      if (availableTools.has(toolId)) continue;
+      push({
+        kind: 'missing_tool',
+        severity: 'blocking',
+        agent_name: agentName,
+        tool_id: toolId,
+        detail: `${agentName}에 필수 ${toolId} 도구가 현재 runtime에 없습니다.`,
+        suggested_action: inferToolSuggestion(toolId),
+      });
+    }
+    for (const toolId of optionalTools) {
       if (availableTools.has(toolId)) continue;
       push({
         kind: 'missing_tool',
         severity: /workspace_fs|write_file|create_file|save_file/.test(toolId) ? 'blocking' : 'advisory',
         agent_name: agentName,
         tool_id: toolId,
-        detail: `${agentName}에 추천된 ${toolId} 도구가 현재 runtime에 없습니다.`,
+        detail: `${agentName}에 선호 ${toolId} 도구가 현재 runtime에 연결되어 있지 않습니다.`,
         suggested_action: inferToolSuggestion(toolId),
       });
     }
@@ -188,7 +205,8 @@ export function formatCapabilityGapLines(gaps = [], { maxLines = 4 } = {}) {
       }
       if (gap.kind === 'missing_tool') {
         const toolId = gap.tool_id || 'tool';
-        return `- ${gap.agent_name}: ${toolId} 도구가 부족합니다. ${gap.suggested_action}`;
+        const qualifier = String(gap.severity || '').trim().toLowerCase() === 'blocking' ? '필수' : '선호';
+        return `- ${gap.agent_name}: ${qualifier} ${toolId} 도구가 부족합니다. ${gap.suggested_action}`;
       }
       return `- ${gap.agent_name}: ${gap.detail || '필요한 실행 조건이 부족합니다.'}`;
     });

@@ -134,6 +134,53 @@ function buildFeedbackRecord({ runId = '', executionInsights = null, runtimeTeam
   };
 }
 
+function classifyPatternRecommendation(row = {}) {
+  const runCount = Number(row.run_count || 0);
+  const participation = Number(row.avg_participation_pct || 0);
+  const completion = Number(row.completion_rate_pct || 0);
+  const missing = Number(row.avg_missing_agents || 0);
+  if (runCount >= 2 && participation >= 75 && completion >= 80 && missing <= 0.5) {
+    return {
+      recommendation: 'recommended',
+      reason: `avg participation ${round1(participation)}%, completion ${round1(completion)}%, missing ${round1(missing)}`,
+    };
+  }
+  if (runCount >= 2 && (participation < 55 || completion < 60 || missing >= 1.5)) {
+    return {
+      recommendation: 'discouraged',
+      reason: `avg participation ${round1(participation)}%, completion ${round1(completion)}%, missing ${round1(missing)}`,
+    };
+  }
+  return {
+    recommendation: 'neutral',
+    reason: runCount > 0 ? `runs ${runCount}, avg participation ${round1(participation)}%` : 'insufficient data',
+  };
+}
+
+function classifyOverlayRecommendation(row = {}) {
+  const runCount = Number(row.run_count || 0);
+  const participation = Number(row.avg_participation_pct || 0);
+  const promptCount = Number(row.prompt_count || 0);
+  const overlayShare = Number(row.avg_overlay_share_pct || 0);
+  const overlayTokens = Number(row.avg_overlay_tokens || 0);
+  if (runCount >= 2 && participation >= 70 && overlayShare <= 15 && overlayTokens <= 180) {
+    return {
+      recommendation: 'recommended',
+      reason: `avg participation ${round1(participation)}%, prompt share ${round1(overlayShare)}%, avg overlay ${Math.round(overlayTokens)} tok`,
+    };
+  }
+  if (runCount >= 2 && ((participation < 55 && overlayShare >= 10) || overlayShare >= 22 || overlayTokens >= 260)) {
+    return {
+      recommendation: 'discouraged',
+      reason: `avg participation ${round1(participation)}%, prompt share ${round1(overlayShare)}%, avg overlay ${Math.round(overlayTokens)} tok`,
+    };
+  }
+  return {
+    recommendation: 'neutral',
+    reason: promptCount > 0 ? `runs ${runCount}, prompt share ${round1(overlayShare)}%` : 'insufficient data',
+  };
+}
+
 function aggregateFeedbackRecords(records = []) {
   const rows = asArray(records).filter((row) => row && typeof row === 'object');
   const patterns = new Map();
@@ -185,31 +232,39 @@ function aggregateFeedbackRecords(records = []) {
       overlays.set(key, current);
     }
   }
+  const patternRows = Array.from(patterns.values())
+    .map((row) => ({
+      execution_pattern: row.execution_pattern,
+      run_count: row.run_count,
+      avg_participation_pct: row.run_count > 0 ? round1(row.total_participation_pct / row.run_count) : 0,
+      avg_planned_agents: row.run_count > 0 ? round1(row.total_planned_agents / row.run_count) : 0,
+      avg_observed_agents: row.run_count > 0 ? round1(row.total_observed_agents / row.run_count) : 0,
+      avg_missing_agents: row.run_count > 0 ? round1(row.total_missing_agents / row.run_count) : 0,
+      completion_rate_pct: row.run_count > 0 ? round1((row.completion_count / row.run_count) * 100) : 0,
+    }))
+    .map((row) => ({ ...row, ...classifyPatternRecommendation(row) }))
+    .sort((a, b) => (b.run_count - a.run_count) || (b.avg_participation_pct - a.avg_participation_pct));
+  const overlayRows = Array.from(overlays.values())
+    .map((row) => ({
+      overlay_id: row.overlay_id,
+      title: row.title,
+      run_count: row.run_count,
+      avg_participation_pct: row.run_count > 0 ? round1(row.total_participation_pct / row.run_count) : 0,
+      prompt_count: row.prompt_count,
+      avg_overlay_tokens: row.prompt_count > 0 ? Math.round(row.total_overlay_tokens / row.prompt_count) : 0,
+      avg_overlay_share_pct: row.prompt_count > 0 ? round1(row.total_overlay_share_pct / row.prompt_count) : 0,
+    }))
+    .map((row) => ({ ...row, ...classifyOverlayRecommendation(row) }))
+    .sort((a, b) => (b.run_count - a.run_count) || (b.avg_participation_pct - a.avg_participation_pct) || (b.prompt_count - a.prompt_count));
   return {
     updated_at: new Date().toISOString(),
     run_count: rows.length,
-    patterns: Array.from(patterns.values())
-      .map((row) => ({
-        execution_pattern: row.execution_pattern,
-        run_count: row.run_count,
-        avg_participation_pct: row.run_count > 0 ? round1(row.total_participation_pct / row.run_count) : 0,
-        avg_planned_agents: row.run_count > 0 ? round1(row.total_planned_agents / row.run_count) : 0,
-        avg_observed_agents: row.run_count > 0 ? round1(row.total_observed_agents / row.run_count) : 0,
-        avg_missing_agents: row.run_count > 0 ? round1(row.total_missing_agents / row.run_count) : 0,
-        completion_rate_pct: row.run_count > 0 ? round1((row.completion_count / row.run_count) * 100) : 0,
-      }))
-      .sort((a, b) => (b.run_count - a.run_count) || (b.avg_participation_pct - a.avg_participation_pct)),
-    overlays: Array.from(overlays.values())
-      .map((row) => ({
-        overlay_id: row.overlay_id,
-        title: row.title,
-        run_count: row.run_count,
-        avg_participation_pct: row.run_count > 0 ? round1(row.total_participation_pct / row.run_count) : 0,
-        prompt_count: row.prompt_count,
-        avg_overlay_tokens: row.prompt_count > 0 ? Math.round(row.total_overlay_tokens / row.prompt_count) : 0,
-        avg_overlay_share_pct: row.prompt_count > 0 ? round1(row.total_overlay_share_pct / row.prompt_count) : 0,
-      }))
-      .sort((a, b) => (b.run_count - a.run_count) || (b.avg_participation_pct - a.avg_participation_pct) || (b.prompt_count - a.prompt_count)),
+    patterns: patternRows,
+    overlays: overlayRows,
+    recommended_patterns: patternRows.filter((row) => row.recommendation === 'recommended').slice(0, 6),
+    discouraged_patterns: patternRows.filter((row) => row.recommendation === 'discouraged').slice(0, 6),
+    recommended_overlays: overlayRows.filter((row) => row.recommendation === 'recommended').slice(0, 6),
+    discouraged_overlays: overlayRows.filter((row) => row.recommendation === 'discouraged').slice(0, 6),
   };
 }
 

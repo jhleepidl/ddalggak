@@ -32,3 +32,25 @@ test('tool install adapter can materialize workspace for auto-installable runtim
   assert.equal(called, true);
   assert.equal(applied[0].tool_id, 'workspace_fs');
 });
+
+
+test('tool install adapter preserves required vs optional tool expectations', () => {
+  const team = {
+    agents: [
+      { agent_id: 'builder', name: 'Builder', role: 'builder', required_tool_ids: [], optional_tool_ids: [] },
+    ],
+  };
+  const proposal = {
+    actions: {
+      tool_install_proposals: [
+        { tool_id: 'workspace_fs', required_by: 'Builder', severity: 'blocking', strategy: 'enable_workspace_fs', auto_installable: true },
+        { tool_id: 'shell', required_by: 'Builder', severity: 'advisory', strategy: 'enable_shell_access', auto_installable: false },
+      ],
+    },
+  };
+  const patched = applyInstallProposalActionsToTeam(team, proposal).team;
+  assert.deepEqual(patched.agents[0].required_tool_ids, ['workspace_fs']);
+  assert.deepEqual(patched.agents[0].optional_tool_ids, ['shell']);
+  assert.ok(patched.agents[0].recommended_tool_ids.includes('workspace_fs'));
+  assert.ok(patched.agents[0].recommended_tool_ids.includes('shell'));
+});

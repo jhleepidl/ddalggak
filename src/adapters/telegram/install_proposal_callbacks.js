@@ -16,7 +16,7 @@ export async function handleTelegramInstallProposalCallback({ q, bot, chatId, us
   const action = String(data.split(':')[1] || '').trim().toLowerCase();
   const proposalState = getPendingInstallProposal(chatSessionStore, chatId);
   if (!proposalState) {
-    await bot.answerCallbackQuery(q.id, { text: 'no pending install proposal' });
+    await bot.answerCallbackQuery(q.id, { text: 'no pending capability proposal' });
     return true;
   }
   const coverage = getCredentialCoverageForProposal(chatSessionStore, chatId, proposalState.proposal || {});
@@ -32,7 +32,7 @@ export async function handleTelegramInstallProposalCallback({ q, bot, chatId, us
   if (action === 'dismiss') {
     archivePendingInstallProposal(chatSessionStore, chatId, 'dismissed');
     await bot.answerCallbackQuery(q.id, { text: 'dismissed' });
-    await bot.sendMessage(chatId, '✅ install proposal을 닫았습니다.');
+    await bot.sendMessage(chatId, '✅ capability proposal을 닫았습니다.');
     return true;
   }
   if (action === 'credential_help') {
@@ -58,7 +58,7 @@ export async function handleTelegramInstallProposalCallback({ q, bot, chatId, us
     }
     archivePendingInstallProposal(chatSessionStore, chatId, 'installed_pending', { apply_state: 'pending' });
     await bot.answerCallbackQuery(q.id, { text: 'stored as pending' });
-    await bot.sendMessage(chatId, '✅ install proposal을 pending 상태로 보관했습니다.');
+    await bot.sendMessage(chatId, '✅ capability proposal을 pending 상태로 보관했습니다.');
     return true;
   }
   if (action === 'apply_active_resume') {
@@ -86,7 +86,7 @@ export async function handleTelegramInstallProposalCallback({ q, bot, chatId, us
     archivePendingInstallProposal(chatSessionStore, chatId, 'applied_active', { apply_state: 'active' });
     const shouldResume = shouldResumeInstallProposal(proposalState);
     await bot.answerCallbackQuery(q.id, { text: shouldResume ? 'resuming with active team' : 'applied' });
-    await bot.sendMessage(chatId, shouldResume ? '✅ install proposal을 반영했고 같은 요청을 재개합니다.' : '✅ install proposal을 반영했습니다.');
+    await bot.sendMessage(chatId, shouldResume ? '✅ capability proposal을 반영했고 같은 요청을 재개합니다.' : '✅ capability proposal을 반영했습니다.');
     const resume = proposalState.resume_request && typeof proposalState.resume_request === 'object' ? proposalState.resume_request : null;
     if (shouldResume && resume?.message && typeof runSupervisorChat === 'function') {
       await runSupervisorChat(bot, chatId, userId, resume.message, {

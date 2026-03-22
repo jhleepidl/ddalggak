@@ -2298,7 +2298,8 @@ export function buildTeamListMessage(teamState = {}, { runtime = null } = {}) {
     ...asArray(active.agents).flatMap((agent, index) => {
       const capabilityLabels = formatSkillLabels(agent.capabilities || agent.skills, { max: 3 });
       const packageLabels = formatSkillLabels(agent.attached_skill_ids || [], { max: 3 });
-      const toolLabels = formatToolLabels(agent.recommended_tool_ids || [], { max: 3 });
+      const requiredToolLabels = formatToolLabels(agent.required_tool_ids || [], { max: 3 });
+      const optionalToolLabels = formatToolLabels(agent.optional_tool_ids || agent.recommended_tool_ids || [], { max: 3 });
       const generatedSkillLabels = normalizeGeneratedSkillBriefs(agent.generated_skill_briefs || agent.generatedSkillBriefs || []).map((entry) => entry.label).slice(0, 2);
       return [
         `${index + 1}. ${agent.name} · ${roleLabel(agent.role)}`,
@@ -2307,7 +2308,8 @@ export function buildTeamListMessage(teamState = {}, { runtime = null } = {}) {
         `   - 주력 역량: ${capabilityLabels.join(', ') || '(none)'}`,
         `   - 실행 skill: ${packageLabels.join(', ') || '(none)'}`,
         generatedSkillLabels.length > 0 ? `   - 생성 skill: ${generatedSkillLabels.join(', ')}` : null,
-        `   - 추천 tool: ${toolLabels.join(', ') || '(none)'}`,
+        `   - 필수 tool: ${requiredToolLabels.join(', ') || '(none)'}`,
+        `   - 선호 tool: ${optionalToolLabels.join(', ') || '(none)'}`,
         `   - 모델: ${humanizeModel(agent.provider || inferProviderForModel(agent.model || ''), agent.model)}` + (agent.matched_preset_name ? ` · preset=${agent.matched_preset_name}` : ''),
       ].filter(Boolean);
     }),
@@ -2342,7 +2344,8 @@ export function formatTeamProposalMessage(team = {}, { runtime = null } = {}) {
     ...asArray(row.agents).flatMap((agent, index) => {
       const capabilityLabels = formatSkillLabels(agent.capabilities || agent.skills, { max: 3 });
       const packageLabels = formatSkillLabels(agent.attached_skill_ids || [], { max: 3 });
-      const toolLabels = formatToolLabels(agent.recommended_tool_ids || [], { max: 3 });
+      const requiredToolLabels = formatToolLabels(agent.required_tool_ids || [], { max: 3 });
+      const optionalToolLabels = formatToolLabels(agent.optional_tool_ids || agent.recommended_tool_ids || [], { max: 3 });
       const generatedSkillLabels = normalizeGeneratedSkillBriefs(agent.generated_skill_briefs || agent.generatedSkillBriefs || []).map((entry) => entry.label).slice(0, 2);
       return [
         `${index + 1}. ${agent.name} · ${roleLabel(agent.role)}`,
@@ -2351,7 +2354,8 @@ export function formatTeamProposalMessage(team = {}, { runtime = null } = {}) {
         `   - 주력 역량: ${capabilityLabels.join(', ') || '(none)'}`,
         `   - 실행 skill: ${packageLabels.join(', ') || '(none)'}`,
         generatedSkillLabels.length > 0 ? `   - 생성 skill: ${generatedSkillLabels.join(', ')}` : null,
-        `   - 추천 tool: ${toolLabels.join(', ') || '(none)'}`,
+        `   - 필수 tool: ${requiredToolLabels.join(', ') || '(none)'}`,
+        `   - 선호 tool: ${optionalToolLabels.join(', ') || '(none)'}`,
         `   - 모델: ${humanizeModel(agent.provider || inferProviderForModel(agent.model || ''), agent.model)}` + (agent.matched_preset_name ? ` · preset=${agent.matched_preset_name}` : ''),
       ].filter(Boolean);
     }),

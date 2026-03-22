@@ -131,3 +131,22 @@ test('normalizeTeamBlueprint prefers structure_v2 over stale legacy team payload
   assert.equal(normalized.team.agents[0].agent_id, 'router');
   assert.equal(normalized.blueprint.blueprint.structure.validation.errors.length, 0);
 });
+
+
+test('buildTeamBlueprint preserves required and optional tool expectations', () => {
+  const manifest = buildTeamBlueprint({
+    team_name: 'Implementation Team',
+    agents: [
+      {
+        agent_id: 'builder',
+        name: 'Builder',
+        role: 'builder',
+        required_tool_ids: ['workspace_fs'],
+        optional_tool_ids: ['shell'],
+      },
+    ],
+  }, { runtime: null, applyState: 'pending' });
+
+  assert.deepEqual(manifest.team.agents[0].required_tool_ids, ['workspace_fs']);
+  assert.deepEqual(manifest.team.agents[0].optional_tool_ids, ['shell']);
+});

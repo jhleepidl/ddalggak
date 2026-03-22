@@ -48,6 +48,25 @@ function addUnique(list = [], value = '') {
   return out;
 }
 
+function applyToolExpectation(agent = {}, toolId = '', severity = 'blocking') {
+  const cleanToolId = cleanId(toolId);
+  const optionalBase = asArray(agent.optional_tool_ids || agent.optionalToolIds || []);
+  const recommendedBase = asArray(agent.recommended_tool_ids || agent.recommendedToolIds || agent.tools || []);
+  if (cleanId(severity || 'blocking') === 'blocking') {
+    agent.required_tool_ids = addUnique(agent.required_tool_ids || agent.requiredToolIds || [], cleanToolId);
+    agent.optional_tool_ids = optionalBase.filter((entry) => cleanId(entry) !== cleanToolId);
+  } else {
+    agent.required_tool_ids = addUnique(agent.required_tool_ids || agent.requiredToolIds || [], '');
+    agent.optional_tool_ids = addUnique(optionalBase, cleanToolId).filter((entry) => cleanId(entry));
+  }
+  agent.recommended_tool_ids = addUnique([
+    ...asArray(agent.required_tool_ids || []),
+    ...asArray(agent.optional_tool_ids || []),
+    ...recommendedBase,
+  ], cleanToolId);
+  return agent;
+}
+
 export function applyInstallProposalActionsToTeam(team = {}, proposal = {}) {
   const nextTeam = cloneJson(team);
   nextTeam.agents = asArray(nextTeam.agents);
@@ -57,10 +76,9 @@ export function applyInstallProposalActionsToTeam(team = {}, proposal = {}) {
   for (const entry of actions.tool_install_proposals) {
     for (const index of targetAgentIndexes(nextTeam, entry.required_by)) {
       const agent = nextTeam.agents[index] || {};
-      agent.recommended_tool_ids = addUnique(agent.recommended_tool_ids || agent.recommendedToolIds || agent.tools || [], entry.tool_id);
-      nextTeam.agents[index] = agent;
+      nextTeam.agents[index] = applyToolExpectation(agent, entry.tool_id, entry.severity);
     }
-    appliedActions.push({ kind: 'tool_install', tool_id: entry.tool_id, required_by: entry.required_by, strategy: entry.strategy });
+    appliedActions.push({ kind: 'tool_requirement', tool_id: entry.tool_id, required_by: entry.required_by, severity: entry.severity, strategy: entry.strategy });
   }
 
   for (const entry of actions.generated_skill_proposals) {

@@ -147,7 +147,7 @@ export function buildInstallRequirementActions(requirements = {}) {
 export function formatInstallRequirementActionLines(actions = {}, { maxLines = 8 } = {}) {
   const row = normalizeInstallRequirementActions(actions);
   const lines = [
-    ...row.tool_install_proposals.map((entry) => `- tool install: ${entry.tool_id} · by ${entry.required_by} · ${entry.strategy}`),
+    ...row.tool_install_proposals.map((entry) => `- tool requirement: ${entry.tool_id} · by ${entry.required_by} · ${entry.strategy}`),
     ...row.credential_requests.map((entry) => `- credential request: ${entry.credential_key} · by ${entry.required_by}`),
     ...row.generated_skill_proposals.map((entry) => `- generated skill: ${entry.skill_id} · by ${entry.required_by}`),
   ].filter(Boolean);
