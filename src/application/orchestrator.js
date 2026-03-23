@@ -1,4 +1,5 @@
 import { buildTeamFromRegistry, rerankResolvedTeamComposition } from "./team_builder.js";
+import { resolveRoutingContractSummary, buildRouteContractSelectionExplanations } from "./route_contract.js";
 import { normalizeRoutePlan } from "../domain/route_plan.js";
 import {
   normalizeTeamPlan,
@@ -9,6 +10,7 @@ import {
   createRuntimeTeamSnapshot,
   attachRuntimeTeamSnapshot,
 } from "./runtime_metadata.js";
+import { resolveExecutionBlueprintSummary } from "./team_blueprint.js";
 import {
   normalizeSkillAttachmentList,
   summarizeSkillLoadLevels,
@@ -416,6 +418,8 @@ export function buildRuntimeOrchestration({
   preferredRoles = [],
   conversationPreferences = null,
   conversationHints = [],
+  activeTeam = null,
+  runtimeTeamSnapshot = null,
   toolHints = [],
   availableToolIds = [],
   maxAgents = 6,
@@ -496,6 +500,17 @@ export function buildRuntimeOrchestration({
     ...asArray(teamBuild.team_plan?.selection_explanations),
     ...asArray(presetResolution.selection_explanations),
   ];
+
+  const routeContract = resolveRoutingContractSummary({
+    activeTeam,
+    runtimeTeamSnapshot,
+  });
+  if (routeContract) {
+    combinedSelectionExplanations = [
+      ...combinedSelectionExplanations,
+      ...buildRouteContractSelectionExplanations(routeContract),
+    ];
+  }
 
   let teamPlan = normalizeTeamPlan({
     ...(teamBuild.team_plan || {}),
@@ -774,7 +789,23 @@ export function buildRuntimeOrchestration({
     persist: persistSkillEvents === true,
   });
   const skillUsageSummary = summarizeSkillUsageEvents(skillUsageEvents);
-  const runtimeTeamSnapshot = createRuntimeTeamSnapshot({
+  const executionBlueprintSummary = resolveExecutionBlueprintSummary({
+    team: activeTeam || { structure_v2: teamPlan?.structure_v2, memory_plan: teamPlan?.memory_plan },
+    goal: effectiveGoal,
+    taskInterpretation,
+    runtimeTeamSnapshot: { team_plan: teamPlan },
+  });
+  if (routeContract) {
+    executionBlueprintSummary.publish_contract_readiness = {
+      final_owner: routeContract.final_owner || undefined,
+      final_answer_publish_ok: routeContract.final_answer_publish_ok !== false,
+      artifact_publish_ok: routeContract.artifact_publish_ok !== false,
+      artifact_publishers: routeContract.artifact_publishers || [],
+    };
+    executionBlueprintSummary.memory_contract_enforcement = routeContract.memory_contract_enforcement;
+  }
+
+  const builtRuntimeTeamSnapshot = createRuntimeTeamSnapshot({
     taskInterpretation,
     teamPlan,
     runtimeAgents,
@@ -798,6 +829,8 @@ export function buildRuntimeOrchestration({
     selectionReasonSummary,
     skillUsageEvents,
     skillUsageSummary,
+    routeContract,
+    blueprintSummary: executionBlueprintSummary,
     source: "control_plane",
   });
   const routePlanWithSkills = attachRuntimeTeamSnapshot({
@@ -819,7 +852,9 @@ export function buildRuntimeOrchestration({
     execution_graph: teamPlan?.execution_graph,
     supervisor_runtime: teamPlan?.supervisor_runtime,
     selection_explanations: combinedSelectionExplanations,
-  }, runtimeTeamSnapshot);
+    route_contract: routeContract || undefined,
+    blueprint_summary: executionBlueprintSummary,
+  }, builtRuntimeTeamSnapshot);
   const missingRoles = normalizeStringList(
     presetResolution.missing_roles || teamBuild.missing_roles || [],
     { max: 24, lower: true }
@@ -864,7 +899,7 @@ export function buildRuntimeOrchestration({
     skill_usage_events: skillUsageEvents,
     skill_usage_summary: skillUsageSummary,
     route_plan: routePlanWithSkills,
-    runtime_team_snapshot: runtimeTeamSnapshot,
+    runtime_team_snapshot: builtRuntimeTeamSnapshot,
     planner_metadata: plannerMetadata,
     missing_roles: missingRoles,
   };

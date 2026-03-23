@@ -107,6 +107,8 @@ export async function invokeRuntimePlanner({
     registry,
     preferredRoles,
     conversationPreferences: persistedConversationPreferences,
+    activeTeam: runtime?.activeTeamConfig && typeof runtime.activeTeamConfig === 'object' ? runtime.activeTeamConfig : null,
+    runtimeTeamSnapshot: runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === 'object' ? runtime.runtimeTeamSnapshot : null,
     maxAgents,
     runId: `route_${String(jobId || "").trim()}_${Date.now().toString(36)}`,
     jobId: String(jobId || "").trim(),

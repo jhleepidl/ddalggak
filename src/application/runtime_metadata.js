@@ -90,6 +90,8 @@ function normalizeBlueprintSummary(value = null, { teamPlan = null } = {}) {
   const merged = Object.keys(row).length > 0 ? row : planRow;
   if (Object.keys(merged).length === 0) return null;
   const memoryMap = normalizeMemoryMapSummary(merged.memory_map || merged.memoryMap || []);
+  const memoryContract = asObject(merged.memory_contract_enforcement || merged.memoryContractEnforcement);
+  const publishReadiness = asObject(merged.publish_contract_readiness || merged.publishContractReadiness);
   return omitUndefinedFields({
     source: String(merged.source || '').trim() || undefined,
     blueprint_id: String(merged.blueprint_id || merged.blueprintId || '').trim() || undefined,
@@ -109,6 +111,24 @@ function normalizeBlueprintSummary(value = null, { teamPlan = null } = {}) {
       ? Math.max(0, Math.floor(Number(merged.memory_surface_count || merged.memorySurfaceCount)))
       : (memoryMap.length || undefined),
     memory_map: memoryMap,
+    memory_contract_enforcement: Object.keys(memoryContract).length > 0 ? omitUndefinedFields({
+      read_scope: String(memoryContract.read_scope || memoryContract.readScope || '').trim().toLowerCase() || undefined,
+      write_scope: String(memoryContract.write_scope || memoryContract.writeScope || '').trim().toLowerCase() || undefined,
+      publish_scope: String(memoryContract.publish_scope || memoryContract.publishScope || '').trim().toLowerCase() || undefined,
+      final_publish_rule: String(memoryContract.final_publish_rule || memoryContract.finalPublishRule || '').trim().toLowerCase() || undefined,
+      artifact_publish_rule: String(memoryContract.artifact_publish_rule || memoryContract.artifactPublishRule || '').trim().toLowerCase() || undefined,
+    }) : undefined,
+    publish_contract_readiness: Object.keys(publishReadiness).length > 0 ? omitUndefinedFields({
+      final_owner: String(publishReadiness.final_owner || publishReadiness.finalOwner || '').trim() || undefined,
+      final_owner_id: String(publishReadiness.final_owner_id || publishReadiness.finalOwnerId || '').trim() || undefined,
+      final_owner_missing: publishReadiness.final_owner_missing === true || publishReadiness.finalOwnerMissing === true ? true : undefined,
+      final_answer_publish_ok: typeof publishReadiness.final_answer_publish_ok === 'boolean' ? publishReadiness.final_answer_publish_ok : (typeof publishReadiness.finalAnswerPublishOk === 'boolean' ? publishReadiness.finalAnswerPublishOk : undefined),
+      final_answer_publish_state: String(publishReadiness.final_answer_publish_state || publishReadiness.finalAnswerPublishState || '').trim().toLowerCase() || undefined,
+      artifact_publish_ok: typeof publishReadiness.artifact_publish_ok === 'boolean' ? publishReadiness.artifact_publish_ok : (typeof publishReadiness.artifactPublishOk === 'boolean' ? publishReadiness.artifactPublishOk : undefined),
+      artifact_publish_state: String(publishReadiness.artifact_publish_state || publishReadiness.artifactPublishState || '').trim().toLowerCase() || undefined,
+      artifact_publishers: normalizeStringList(publishReadiness.artifact_publishers || publishReadiness.artifactPublishers || [], { lower: false }),
+      artifact_publisher_ids: normalizeStringList(publishReadiness.artifact_publisher_ids || publishReadiness.artifactPublisherIds || [], { lower: false }),
+    }) : undefined,
   });
 }
 
@@ -517,6 +537,8 @@ function hasSnapshotFields(row = {}) {
     || row.topologyPattern
     || Array.isArray(row.non_executable_participants)
     || Array.isArray(row.nonExecutableParticipants)
+    || row.route_contract
+    || row.routeContract
   );
 }
 
@@ -713,6 +735,7 @@ export function normalizeRuntimeTeamSnapshot(input = null, {
     ?? row.executionFeedback
     ?? null
   );
+  const routeContract = asObject(row.route_contract ?? row.routeContract ?? {});
 
   return {
     task_interpretation: taskInterpretation,
@@ -759,6 +782,24 @@ export function normalizeRuntimeTeamSnapshot(input = null, {
     generated_at: String(row.generated_at || row.generatedAt || defaultGeneratedAt || new Date().toISOString()),
     source: String(row.source || defaultSource || "team_builder").trim() || "team_builder",
     blueprint_summary: blueprintSummary || undefined,
+    route_contract: Object.keys(routeContract).length > 0 ? omitUndefinedFields({
+      available: routeContract.available === true,
+      final_owner: String(routeContract.final_owner || routeContract.finalOwner || '').trim() || undefined,
+      final_owner_id: String(routeContract.final_owner_id || routeContract.finalOwnerId || '').trim() || undefined,
+      final_owner_missing: routeContract.final_owner_missing === true || routeContract.finalOwnerMissing === true ? true : undefined,
+      final_owner_role: String(routeContract.final_owner_role || routeContract.finalOwnerRole || '').trim().toLowerCase() || undefined,
+      final_answer_publish_ok: typeof routeContract.final_answer_publish_ok === 'boolean' ? routeContract.final_answer_publish_ok : (typeof routeContract.finalAnswerPublishOk === 'boolean' ? routeContract.finalAnswerPublishOk : undefined),
+      final_answer_publish_state: String(routeContract.final_answer_publish_state || routeContract.finalAnswerPublishState || '').trim().toLowerCase() || undefined,
+      artifact_publish_ok: typeof routeContract.artifact_publish_ok === 'boolean' ? routeContract.artifact_publish_ok : (typeof routeContract.artifactPublishOk === 'boolean' ? routeContract.artifactPublishOk : undefined),
+      artifact_publish_state: String(routeContract.artifact_publish_state || routeContract.artifactPublishState || '').trim().toLowerCase() || undefined,
+      artifact_publishers: normalizeStringList(routeContract.artifact_publishers || routeContract.artifactPublishers || [], { lower: false }),
+      artifact_publisher_ids: normalizeStringList(routeContract.artifact_publisher_ids || routeContract.artifactPublisherIds || [], { lower: false }),
+      summary_line: String(routeContract.summary_line || routeContract.summaryLine || '').trim() || undefined,
+      planner_facts: normalizeStringList(routeContract.planner_facts || routeContract.plannerFacts || [], { lower: false }),
+    }) : undefined,
+    route_contract_adjusted: row.route_contract_adjusted === true || row.routeContractAdjusted === true ? true : undefined,
+    route_contract_preferred_agent: String(row.route_contract_preferred_agent || row.routeContractPreferredAgent || '').trim().toLowerCase() || undefined,
+    route_contract_adjustment_type: String(row.route_contract_adjustment_type || row.routeContractAdjustmentType || '').trim().toLowerCase() || undefined,
   };
 }
 
@@ -818,6 +859,11 @@ export function createRuntimeTeamSnapshot({
   execution_feedback = undefined,
   blueprintSummary = undefined,
   blueprint_summary = undefined,
+  routeContract = undefined,
+  route_contract = undefined,
+  route_contract_adjusted = undefined,
+  route_contract_preferred_agent = undefined,
+  route_contract_adjustment_type = undefined,
   generated_at = undefined,
   runtime_team_snapshot = undefined,
   runtimeTeamSnapshot = undefined,
@@ -857,6 +903,10 @@ export function createRuntimeTeamSnapshot({
     execution_insights: execution_insights ?? executionInsights,
     execution_feedback: execution_feedback ?? executionFeedback,
     blueprint_summary: blueprint_summary ?? blueprintSummary,
+    route_contract: route_contract ?? routeContract,
+    route_contract_adjusted: route_contract_adjusted === true ? true : undefined,
+    route_contract_preferred_agent: String(route_contract_preferred_agent || '').trim().toLowerCase() || undefined,
+    route_contract_adjustment_type: String(route_contract_adjustment_type || '').trim().toLowerCase() || undefined,
     generated_at: generated_at ?? generatedAt,
     source,
   }, {

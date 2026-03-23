@@ -117,6 +117,21 @@ const POLICY_PATTERNS = [
   /authority approval/,
   /blocked by policy/,
   /verification blocked/,
+  /publish contract blocked/,
+  /final synthesis.*final_answer surface/,
+  /final_answer_owner/,
+  /declared .*publish surface/,
+];
+
+
+const INTERRUPT_PATTERNS = [
+  /\[aborted\]/,
+  /cancelled/,
+  /canceled/,
+  /interrupt(?:ed|ion)?/,
+  /superseded by replan/,
+  /user requested stop/,
+  /stopped by user/,
 ];
 
 export function classifyExecutionFailure({ error, action = {}, provider = '', runtimeExecutionPolicy = {}, agents = [] } = {}) {
@@ -129,16 +144,27 @@ export function classifyExecutionFailure({ error, action = {}, provider = '', ru
 
   let category = 'unknown_failure';
   let recoveryStrategy = 'stop';
-  let summary = '자동 복구 경로를 아직 결정하지 못했습니다.';
-  let userMessage = '실패 원인을 더 확인한 뒤 다시 지시해 주세요.';
+  let summary = '실패 원인을 자동 분류하지 못해 이번 턴을 멈췄습니다.';
+  let userMessage = '오류 로그를 확인하거나 요청을 조금 더 구체화해 다시 지시해 주세요.';
   let retryable = false;
   let userActionRequired = false;
 
-  if (matchAny(lower, POLICY_PATTERNS)) {
+  if (matchAny(lower, INTERRUPT_PATTERNS)) {
+    category = 'user_interrupted';
+    recoveryStrategy = 'stop';
+    summary = '사용자 중단 또는 재계획 요청으로 현재 실행을 정리했습니다.';
+    userMessage = '새 요청 기준으로 다시 이어서 진행하면 됩니다.';
+  } else if (matchAny(lower, POLICY_PATTERNS)) {
     category = 'policy_blocked';
-    recoveryStrategy = 'await_approval';
-    summary = '정책/승인에 막혀 자동 진행하지 못했습니다.';
-    userMessage = '승인하거나 요청 범위를 낮춰 주세요.';
+    recoveryStrategy = /publish contract/.test(lower) || /final_answer/.test(lower)
+      ? 'await_user'
+      : 'await_approval';
+    summary = /publish contract/.test(lower) || /final_answer/.test(lower)
+      ? '팀의 publish contract에 막혀 자동 진행하지 못했습니다.'
+      : '정책/승인에 막혀 자동 진행하지 못했습니다.';
+    userMessage = /publish contract/.test(lower) || /final_answer/.test(lower)
+      ? '최종 답변 담당 또는 publish surface 선언을 조정해 주세요.'
+      : '승인하거나 요청 범위를 낮춰 주세요.';
     userActionRequired = true;
   } else if (matchAny(lower, CREDENTIAL_PATTERNS)) {
     category = 'credential_gap';

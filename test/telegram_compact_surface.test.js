@@ -68,7 +68,8 @@ test("chat status card defaults to a compact operator-facing summary", () => {
     });
 
     const card = buildChatStatusCard(chatId, null);
-    assert.match(card.text, /phase: executing/);
+    assert.match(card.text, /phase: 실행 중/);
+    assert.match(card.text, /situation:/);
     assert.match(card.text, /team: Iterative Improvement Studio · iterative_improvement/);
     assert.match(card.text, /role_profiles:/);
     assert.match(card.text, /Builder\(base=구현 · overlay=Frontend Developer\)/);
@@ -265,6 +266,63 @@ test("chat status full view exposes team selection and agent participation insig
     assert.match(card.text, /agent_participation: planned=3, observed=2/);
     assert.match(card.text, /participation_by_role: 구현 1\/1, 검토 1\/1, 최종 정리 0\/1/);
     assert.match(card.text, /missing_agents: Delivery Owner/);
+  } finally {
+    chatSessionStore.clear(chatId);
+    activeJobByChat.delete(chatId);
+  }
+});
+
+
+test("compact routed dashboard can surface route readiness briefly", () => {
+  const text = buildCompactRoutedDashboardText({
+    actions: [
+      { type: "run_agent", agent_id: "synth", goal: "최종 답변 정리" },
+    ],
+    agentStatus: {
+      synth: { state: "queued" },
+    },
+    routeReadiness: 'owner=Delivery Synthesizer · final ready · artifact ready',
+  });
+
+  assert.match(text, /라우팅 준비: owner=Delivery Synthesizer · final ready · artifact ready/);
+});
+
+
+test("chat status card compact view includes route readiness when team contract exists", () => {
+  const chatId = "status-test-route-ready";
+  chatSessionStore.clear(chatId);
+  activeJobByChat.delete(chatId);
+  try {
+    chatSessionStore.upsert(chatId, {
+      state: "executing",
+      team_config: {
+        active_team: {
+          team_name: "Delivery Studio",
+          archetype: "implementation",
+          agents: [
+            { agent_id: 'builder', name: 'Client Companion Builder', role: 'builder', provider: 'codex' },
+            { agent_id: 'synth', name: 'Delivery Synthesizer', role: 'synthesizer', provider: 'gemini' },
+          ],
+          structure_v2: {
+            participants: [
+              { participant_id: 'builder', kind: 'agent', name: 'Client Companion Builder', role: 'builder', provider: 'codex' },
+              { participant_id: 'synth', kind: 'agent', name: 'Delivery Synthesizer', role: 'synthesizer', provider: 'gemini' },
+            ],
+            topology: { pattern: 'pipeline', final_participant_id: 'synth' },
+            control_policy: { final_answer_owner_participant_id: 'synth' },
+            memory_plan: {
+              surfaces: [
+                { surface_id: 'final_answer', file_name: 'final_answer.md', write_policy: 'final', semantic_slots: ['final_answer'], target_roles: ['synthesizer'] },
+                { surface_id: 'artifact_index', file_name: 'artifact_index.md', write_policy: 'index', semantic_slots: ['artifact_index'], target_roles: ['builder'] },
+              ],
+            },
+          },
+        },
+      },
+    });
+
+    const card = buildChatStatusCard(chatId, null);
+    assert.match(card.text, /route_ready: owner=Delivery Synthesizer · final ready · artifact ready/);
   } finally {
     chatSessionStore.clear(chatId);
     activeJobByChat.delete(chatId);

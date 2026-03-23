@@ -74,6 +74,30 @@ function findRoleAgent(teamAgents = [], roleId = '') {
   return null;
 }
 
+function resolveFinalOwnerAgent(runtime = {}, runtimeTeamSnapshot = null, teamAgents = []) {
+  const activeTeam = runtime?.activeTeamConfig && typeof runtime.activeTeamConfig === 'object' ? runtime.activeTeamConfig : {};
+  const structure = activeTeam?.structure_v2 && typeof activeTeam.structure_v2 === 'object' ? activeTeam.structure_v2 : {};
+  const finalOwnerId = cleanId(
+    structure?.control_policy?.final_answer_owner_participant_id
+    || structure?.control_policy?.finalAnswerOwnerParticipantId
+    || structure?.topology?.final_participant_id
+    || structure?.topology?.finalParticipantId
+    || runtimeTeamSnapshot?.structure_v2?.control_policy?.final_answer_owner_participant_id
+    || runtimeTeamSnapshot?.structure_v2?.topology?.final_participant_id
+    || ''
+  );
+  const finalOwnerName = String(activeTeam?.interaction_spec?.final_answer_owner || runtimeTeamSnapshot?.team_plan?.interaction_spec?.final_answer_owner || '').trim();
+  if (finalOwnerId) {
+    const byId = teamAgents.find((row) => cleanId(row.agent_id) === finalOwnerId);
+    if (byId) return byId;
+  }
+  if (finalOwnerName) {
+    const byName = teamAgents.find((row) => String(row.name || '').trim() === finalOwnerName);
+    if (byName) return byName;
+  }
+  return null;
+}
+
 function inferPreferredPattern(runtime = {}, routePlan = {}, runtimeTeamSnapshot = null) {
   return cleanId(
     runtime?.teamInteractionSpec?.execution_pattern
@@ -162,17 +186,20 @@ function repairExistingGoals(actions = [], teamAgents = [], message = '') {
     const rewritten = (!goal || goal === String(message || '').trim() || isGenericRawGoal(goal))
       ? buildRoleGoal(roleId || matched.role_id, message)
       : goal;
+    const finalOwnerOverride = type === 'synthesize_final' && finalOwnerAgent ? finalOwnerAgent : null;
+    const effectiveAgentId = cleanId(finalOwnerOverride?.agent_id || agentId || matched.agent_id || roleId);
     return {
       ...action,
-      agent_id: agentId || cleanId(matched.agent_id || roleId),
+      agent_id: effectiveAgentId,
+      agent: type === 'synthesize_final' ? effectiveAgentId : (action?.agent || effectiveAgentId),
       goal: rewritten,
       inputs: {
         ...(action?.inputs && typeof action.inputs === 'object' ? action.inputs : {}),
-        display_label: String(action?.inputs?.display_label || matched.name || '').trim() || undefined,
-        agent_name: String(action?.inputs?.agent_name || matched.name || '').trim() || undefined,
-        role_id: roleId || cleanId(matched.role_id) || undefined,
-        provider: String(action?.inputs?.provider || matched.provider || '').trim() || undefined,
-        model: String(action?.inputs?.model || matched.model || '').trim() || undefined,
+        display_label: String(action?.inputs?.display_label || finalOwnerOverride?.name || matched.name || '').trim() || undefined,
+        agent_name: String(action?.inputs?.agent_name || finalOwnerOverride?.name || matched.name || '').trim() || undefined,
+        role_id: cleanId(finalOwnerOverride?.role_id || roleId || matched.role_id) || undefined,
+        provider: String(action?.inputs?.provider || finalOwnerOverride?.provider || matched.provider || '').trim() || undefined,
+        model: String(action?.inputs?.model || finalOwnerOverride?.model || matched.model || '').trim() || undefined,
       },
       scope: action?.scope && typeof action.scope === 'object' ? action.scope : { mode: 'shared_only' },
     };
@@ -193,10 +220,11 @@ export function repairRoutePlanForTeamExecution(routePlan = {}, {
   const taskArchetype = runtime?.activeTeamConfig?.task_archetype || runtimeTeamSnapshot?.blueprint_summary?.task_archetype || '';
   const implementationLike = isImplementationLikeRequest(message, { taskInterpretation, taskArchetype });
   const builder = findRoleAgent(teamAgents, 'builder');
+  const finalOwnerAgent = resolveFinalOwnerAgent(runtime, runtimeTeamSnapshot, teamAgents);
   if (!implementationLike || !builder) {
     return {
       ...row,
-      actions: repairExistingGoals(row.actions, teamAgents, message),
+      actions: repairExistingGoals(row.actions, teamAgents, message, { finalOwnerAgent }),
     };
   }
 
@@ -219,7 +247,7 @@ export function repairRoutePlanForTeamExecution(routePlan = {}, {
   if (!shouldRebuildPipeline) {
     return {
       ...row,
-      actions: repairExistingGoals(row.actions, teamAgents, message),
+      actions: repairExistingGoals(row.actions, teamAgents, message, { finalOwnerAgent }),
       done: row.done === true && !currentBuilderPresent ? false : row.done,
     };
   }
@@ -228,8 +256,22 @@ export function repairRoutePlanForTeamExecution(routePlan = {}, {
   if (researcher) orderedAgents.push(researcher);
   orderedAgents.push(builder);
   if (reviewer) orderedAgents.push(reviewer);
-  if (synthesizer) orderedAgents.push(synthesizer);
-  const rebuiltActions = orderedAgents.slice(0, 4).map((agent) => buildRunAction(agent, message, { finalSynthesis: cleanId(agent.role_id) === 'synthesizer' }));
+  const finalSynthesisAgent = finalOwnerAgent || synthesizer;
+  if (finalSynthesisAgent) {
+    if (!orderedAgents.find((row) => cleanId(row.agent_id) === cleanId(finalSynthesisAgent.agent_id))) orderedAgents.push(finalSynthesisAgent);
+  } else if (synthesizer) {
+    orderedAgents.push(synthesizer);
+  }
+  const rebuiltActions = orderedAgents.slice(0, 4).map((agent, index, rows) => {
+    const isLast = index === rows.length - 1;
+    const isFinalOwner = finalSynthesisAgent && cleanId(agent.agent_id) === cleanId(finalSynthesisAgent.agent_id);
+    const built = buildRunAction(agent, message, { finalSynthesis: isLast || isFinalOwner || cleanId(agent.role_id) === 'synthesizer' });
+    if (isLast || isFinalOwner) {
+      built.type = 'synthesize_final';
+      built.agent = built.agent_id;
+    }
+    return built;
+  });
   const nextDeliverables = unique([
     ...asArray(row.deliverables),
     '구현 산출물',

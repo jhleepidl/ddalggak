@@ -45,11 +45,41 @@ export function normalizePattern(raw = '', executionPattern = '', participantCou
   return participantCount <= 1 ? 'single' : 'hybrid';
 }
 
+function inferParticipantRole(raw = {}) {
+  const row = asObject(raw);
+  const explicit = cleanId(row.role || row.role_id || row.roleId || row.role_label || row.roleLabel || '');
+  if (explicit && explicit !== 'specialist' && explicit !== 'agent' && explicit !== 'participant' && explicit !== 'worker') return explicit;
+  const text = [
+    row.role,
+    row.role_id,
+    row.roleId,
+    row.role_label,
+    row.roleLabel,
+    row.name,
+    row.label,
+    row.display_name,
+    row.displayName,
+    row.participant_id,
+    row.participantId,
+    row.agent_id,
+    row.agentId,
+    row.id,
+    row.purpose,
+    row.description,
+  ].filter(Boolean).join(' ').toLowerCase();
+  if (/(^|[^a-z])(builder|coder|developer|implementer|frontend|backend|fullstack|engineer)([^a-z]|$)|구현|코더|개발자|빌더/.test(text)) return 'builder';
+  if (/(^|[^a-z])(reviewer|review|critic|verifier|quality|qa)([^a-z]|$)|리뷰어|검토|검수|비평|품질/.test(text)) return 'reviewer';
+  if (/(^|[^a-z])(synthesizer|synth|summarizer|summary|writer|delivery)([^a-z]|$)|요약|정리|합성|전달/.test(text)) return 'synthesizer';
+  if (/(^|[^a-z])(operator|coordinator|orchestrator|router|manager)([^a-z]|$)|운영|조정|오퍼레이터/.test(text)) return 'operator';
+  if (/(^|[^a-z])(researcher|scout|analyst|investigator|planner|research)([^a-z]|$)|조사|연구|분석|스카우트/.test(text)) return 'researcher';
+  return explicit || 'specialist';
+}
+
 function normalizeParticipant(raw = {}, index = 0) {
   const row = asObject(raw);
   const participantId = cleanId(row.participant_id || row.participantId || row.id || row.agent_id || row.agentId || row.name || `participant_${index + 1}`);
   if (!participantId) return null;
-  const role = cleanId(row.role || row.role_id || row.roleId || row.role_label || row.roleLabel || 'specialist') || 'specialist';
+  const role = inferParticipantRole(row);
   const requestedKind = cleanId(row.kind || (role === 'approval' ? 'gate' : 'agent')) || 'agent';
   const kind = ALLOWED_PARTICIPANT_KINDS.has(requestedKind) ? requestedKind : 'agent';
   const metadata = {
@@ -64,6 +94,7 @@ function normalizeParticipant(raw = {}, index = 0) {
     role,
     purpose: clean(row.purpose || row.description || ''),
     model: clean(row.model || ''),
+    provider: cleanId(row.provider || row.transport || ''),
     capabilities: uniqStrings(row.capabilities || row.skills || [], { limit: 8 }),
     attached_skill_ids: uniqStrings(row.attached_skill_ids || row.attachedSkillIds || [], { limit: 8 }),
     required_tool_ids: uniqStrings(row.required_tool_ids || row.requiredToolIds || [], { limit: 8 }),
@@ -84,6 +115,7 @@ function buildParticipantsFromAgents(agents = []) {
       role: agent?.role,
       purpose: agent?.purpose,
       model: agent?.model,
+      provider: agent?.provider,
       capabilities: agent?.capabilities || agent?.skills,
       attached_skill_ids: agent?.attached_skill_ids || agent?.attachedSkillIds,
       required_tool_ids: agent?.required_tool_ids || agent?.requiredToolIds,
@@ -430,7 +462,8 @@ function validatePatternConstraints(structure = {}) {
   }
   if (participants.length === 0) errors.push('structure_v2 must include at least one participant');
   if (executableParticipants.length === 0) errors.push('structure_v2 must include at least one executable participant');
-  if (cyclic === true && (pattern === 'graph' || pattern === 'workflow')) errors.push(`${pattern} pattern contains a cycle in executable topology`);
+  if (cyclic === true && pattern === 'graph') errors.push(`${pattern} pattern contains a cycle in executable topology`);
+  if (cyclic === true && pattern === 'workflow') warnings.push('workflow pattern contains a review/build cycle; runtime will execute with workflow-aware compatibility ordering');
   if (pattern === 'single' && participants.length > 1) warnings.push('single pattern currently has multiple participants; runtime will degrade to a compatibility pipeline');
   if (pattern === 'parallel') {
     if (executableParticipants.length < 2) errors.push('parallel pattern requires at least two executable participants');
@@ -732,6 +765,7 @@ export function buildRuntimeExecutionProfileFromStructureV2(raw = {}, {
     name: entry.name,
     role: entry.role,
     model: entry.model || '',
+    provider: cleanId(entry.provider || ''),
     attached_skill_ids: uniqStrings(entry.attached_skill_ids || [], { limit: 8, lower: true }),
     required_tool_ids: uniqStrings(entry.required_tool_ids || [], { limit: 8, lower: true }),
     optional_tool_ids: uniqStrings(entry.optional_tool_ids || entry.recommended_tool_ids || [], { limit: 8, lower: true }),
@@ -750,7 +784,7 @@ export function buildRuntimeExecutionProfileFromStructureV2(raw = {}, {
     role: EXECUTION_COMPATIBLE_ROLES.has(cleanId(entry.role)) ? cleanId(entry.role) : (entry.kind === 'judge' ? 'reviewer' : 'researcher'),
     purpose: entry.purpose || '',
     model: entry.model || '',
-    provider: '',
+    provider: cleanId(entry.provider || ''),
     capabilities: uniqStrings(entry.capabilities || [], { limit: 8 }),
     skills: uniqStrings(entry.capabilities || [], { limit: 8 }),
     attached_skill_ids: uniqStrings(entry.attached_skill_ids || [], { limit: 8, lower: true }),
@@ -799,6 +833,7 @@ export function deriveTeamConfigFromStructureV2(raw = {}) {
       role: entry.role || 'specialist',
       purpose: entry.purpose || '',
       model: entry.model || '',
+      provider: cleanId(entry.provider || ''),
       capabilities: uniqStrings(entry.capabilities || [], { limit: 8 }),
       skills: uniqStrings(entry.capabilities || [], { limit: 8 }),
       attached_skill_ids: uniqStrings(entry.attached_skill_ids || [], { limit: 8 }),

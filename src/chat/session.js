@@ -193,12 +193,16 @@ function compactStructureV2ForSession(raw = {}) {
         return Object.fromEntries(Object.entries({
           participant_id: String(agent.participant_id || agent.participantId || '').trim() || undefined,
           kind: String(agent.kind || '').trim() || undefined,
-          role_id: String(agent.role_id || agent.roleId || '').trim().toLowerCase() || undefined,
+          role: String(agent.role || agent.role_id || agent.roleId || '').trim().toLowerCase() || undefined,
+          role_id: String(agent.role_id || agent.roleId || agent.role || '').trim().toLowerCase() || undefined,
           label: clipSessionText(agent.label || agent.name || agent.display_label || '', 80) || undefined,
           provider: String(agent.provider || '').trim().toLowerCase() || undefined,
           model: String(agent.model || '').trim() || undefined,
+          purpose: clipSessionText(agent.purpose || agent.goal || '', 160) || undefined,
           required_tool_ids: clipSessionList(agent.required_tool_ids || agent.requiredToolIds || [], { max: 6, maxText: 40, lower: true }),
           optional_tool_ids: clipSessionList(agent.optional_tool_ids || agent.optionalToolIds || [], { max: 6, maxText: 40, lower: true }),
+          recommended_tool_ids: clipSessionList(agent.recommended_tool_ids || agent.recommendedToolIds || [], { max: 6, maxText: 40, lower: true }),
+          context_policy: agent.context_policy && typeof agent.context_policy === 'object' ? agent.context_policy : undefined,
         }).filter(([, value]) => value !== undefined && !(Array.isArray(value) && value.length === 0)));
       })
     : [];

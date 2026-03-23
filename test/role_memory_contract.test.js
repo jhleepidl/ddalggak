@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { normalizeKnowledgeBaseProfile } from '../src/knowledge_base/profile.js';
-import { buildRoleMemoryContract, pickRoleWriteTarget, buildAgentKnowledgeBaseGuidance } from '../src/knowledge_base/runtime.js';
+import { buildRoleMemoryContract, pickRoleWriteTarget, buildAgentKnowledgeBaseGuidance, summarizeRoleMemoryEnforcement, canRolePublishSurface } from '../src/knowledge_base/runtime.js';
 
 const profile = normalizeKnowledgeBaseProfile({
   profile_id: 'implementation_memory_plan',
@@ -48,4 +48,20 @@ test('buildAgentKnowledgeBaseGuidance exposes direct write surfaces only for the
   assert.match(guidance, /implementation_notes\.md/);
   assert.doesNotMatch(guidance, /defect_log\.md \(slot=research\):/);
   assert.match(guidance, /승격\/발행 대상:/);
+});
+
+
+test('summarizeRoleMemoryEnforcement reports scoped read/write/publish surfaces', () => {
+  const summary = summarizeRoleMemoryEnforcement({ profile, provider: 'codex', roleId: 'builder' });
+  assert.equal(summary.read_scope_mode, 'role_scoped_local_only');
+  assert.deepEqual(summary.read_surface_ids, ['mission_brief', 'implementation_notes', 'final_answer', 'artifact_index']);
+  assert.deepEqual(summary.write_surface_ids, ['implementation_notes', 'artifact_index', 'mission_brief']);
+  assert.deepEqual(summary.publish_surface_ids, ['artifact_index']);
+});
+
+
+test('canRolePublishSurface requires declared publish surfaces only', () => {
+  assert.equal(canRolePublishSurface({ profile, provider: 'codex', roleId: 'builder', surfaceId: 'artifact_index' }), true);
+  assert.equal(canRolePublishSurface({ profile, provider: 'codex', roleId: 'builder', surfaceId: 'final_answer' }), false);
+  assert.equal(canRolePublishSurface({ profile, provider: 'codex', roleId: 'synthesizer', surfaceId: 'final_answer' }), true);
 });

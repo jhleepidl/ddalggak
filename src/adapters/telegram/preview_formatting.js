@@ -237,7 +237,7 @@ export function buildRoutedDashboardText({ actions = [], agentStatus = {}, actio
 }
 
 
-export function buildCompactRoutedDashboardText({ actions = [], agentStatus = {}, agentIndex = new Map() } = {}) {
+export function buildCompactRoutedDashboardText({ actions = [], agentStatus = {}, agentIndex = new Map(), routeReadiness = "" } = {}) {
   const index = asMap(agentIndex);
   const agentLabels = [];
   const seen = new Set();
@@ -286,6 +286,7 @@ export function buildCompactRoutedDashboardText({ actions = [], agentStatus = {}
     `- 상태: ${statusSummaryParts.join(' · ') || 'queued'}`,
   ];
   if (backendOnlyCount > 0) lines.push(`- 내부 준비 단계: ${backendOnlyCount}`);
+  if (String(routeReadiness || '').trim()) lines.push(`- 라우팅 준비: ${String(routeReadiness || '').trim()}`);
   lines.push('- 세부 단계는 버튼 또는 /status full');
   return lines.join('\n');
 }

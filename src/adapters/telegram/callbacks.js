@@ -2,11 +2,12 @@ import {
   isActionApprovalCallbackData,
   handleActionApprovalCallback,
 } from "../../application/approval_flow.js";
-import { applyPendingTeam, getSessionTeamState, storePendingTeam, buildTeamListMessage, formatTeamProposalMessage } from '../../application/team_configuration.js';
+import { applyPendingTeam, getSessionTeamState, storePendingTeam, buildTeamListMessage, formatTeamProposalMessage, buildTeamTransitionGuardrails, formatTeamTransitionGuardrailLines } from '../../application/team_configuration.js';
+import crypto from 'node:crypto';
 import { getPendingInstallProposal, archivePendingInstallProposal, buildInstallProposalPrompt } from '../../application/install_proposal_state.js';
 import { handleTelegramInstallProposalCallback } from './install_proposal_callbacks.js';
 import { buildChatStatusCard } from '../../application/telegram_runtime_ui.js';
-import { loadArtifactIndex, formatArtifactIndexText } from '../../application/telegram_runtime_io.js';
+import { loadArtifactIndex, formatArtifactIndexText, resolveArtifactDeliveryContract, formatArtifactDeliveryContractLines } from '../../application/telegram_runtime_io.js';
 import { buildPreviewAgentIndex, buildQueuedAgentStatusFromActions, buildRoutedDashboardText } from './preview_formatting.js';
 
 export function createTelegramCallbackQueryHandler(deps = {}) {
@@ -137,8 +138,13 @@ export function createTelegramCallbackQueryHandler(deps = {}) {
               return;
             }
             const artifactIndex = loadArtifactIndex(currentJobId);
-            await sendLong(bot, chatId, `📎 artifacts
-${formatArtifactIndexText(currentJobId, artifactIndex, { limit: 8 })}`);
+            const contract = resolveArtifactDeliveryContract(currentJobId, runtime);
+            const sections = [`📎 artifacts
+${formatArtifactIndexText(currentJobId, artifactIndex, { limit: 8 })}`];
+            const contractLines = formatArtifactDeliveryContractLines(contract);
+            if (contractLines.length > 0) sections.push(`publish contract
+${contractLines.join('\n')}`);
+            await sendLong(bot, chatId, sections.join('\n\n'));
             return;
           }
           const detail = data === 'chat_status:full' ? 'full' : (data === 'chat_status:recent' ? 'recent' : (data === 'chat_status:prompt' ? 'prompt' : 'compact'));
@@ -180,8 +186,48 @@ ${formatArtifactIndexText(currentJobId, artifactIndex, { limit: 8 })}`);
             await bot.sendMessage(chatId, '적용할 pending team이 없습니다.');
             return;
           }
+          const transitionGuardrails = buildTeamTransitionGuardrails(teamState?.active_team, teamState?.pending_team);
+          const confirmationKey = crypto.createHash('sha1').update(JSON.stringify({
+            team_name: teamState?.pending_team?.team_name || '',
+            warnings: transitionGuardrails?.warnings || [],
+            risk_level: transitionGuardrails?.risk_level || 'low',
+          })).digest('hex');
+          const sessionRow = chatSessionStore?.get?.(chatId) || {};
+          const confirmationState = sessionRow.pending_team_apply_confirmation && typeof sessionRow.pending_team_apply_confirmation === 'object'
+            ? sessionRow.pending_team_apply_confirmation
+            : null;
+          const confirmationValid = confirmationState
+            && String(confirmationState.key || '').trim() === confirmationKey
+            && Date.parse(String(confirmationState.expires_at || '')) > Date.now();
+          if (transitionGuardrails?.destructive_changes_present && !confirmationValid) {
+            chatSessionStore?.upsert?.(chatId, (session) => ({
+              ...session,
+              pending_team_apply_confirmation: {
+                key: confirmationKey,
+                expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+                warning_count: Number(transitionGuardrails.warning_count || 0),
+              },
+            }));
+            await sendLong(bot, chatId, [
+              '⚠️ pending team 적용 전에 확인이 필요합니다.',
+              '이 변경은 현재 active team의 일부 역할/에이전트/도구 구성을 줄일 수 있습니다.',
+              ...formatTeamTransitionGuardrailLines(transitionGuardrails, { maxWarnings: 5 }),
+              '',
+              '같은 버튼을 한 번 더 누르면 적용합니다. 다른 변경을 하면 확인은 초기화됩니다.',
+            ].join('\n'));
+            return;
+          }
           const applied = await applyPendingTeam({ sessionStore: chatSessionStore, chatId, runtime });
-          await sendLong(bot, chatId, ['✅ pending team을 active team으로 반영했습니다.', '', buildTeamListMessage({ active_team: applied }, { runtime })].join('\n'));
+          const appliedGuardrails = applied?.__apply_guardrails && typeof applied.__apply_guardrails === 'object'
+            ? applied.__apply_guardrails
+            : transitionGuardrails;
+          await sendLong(bot, chatId, [
+            '✅ pending team을 active team으로 반영했습니다.',
+            appliedGuardrails?.warning_count > 0 ? `- 적용 주의사항 ${Number(appliedGuardrails.warning_count || 0)}개` : '',
+            ...(appliedGuardrails?.warning_count > 0 ? formatTeamTransitionGuardrailLines(appliedGuardrails, { maxWarnings: 4 }) : []),
+            '',
+            buildTeamListMessage({ active_team: applied }, { runtime })
+          ].filter(Boolean).join('\n'));
           return;
         }
 

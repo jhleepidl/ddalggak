@@ -139,6 +139,9 @@ export function normalizeRoutePlan(routePlan, {
     selection_explanations: Array.isArray(parsed.selection_explanations)
       ? parsed.selection_explanations
       : (Array.isArray(parsed.selectionExplanations) ? parsed.selectionExplanations : []),
+    route_contract: parsed.route_contract && typeof parsed.route_contract === "object"
+      ? parsed.route_contract
+      : (parsed.routeContract && typeof parsed.routeContract === "object" ? parsed.routeContract : undefined),
   };
 }
 
@@ -295,6 +298,9 @@ export function sanitizeSupervisorRoutePlan(routePlan, {
     deliverables,
     completed_deliverables: completedDeliverables,
     followup_hint: followupHint || undefined,
+    route_contract: routePlan?.route_contract && typeof routePlan.route_contract === "object"
+      ? routePlan.route_contract
+      : (routePlan?.routeContract && typeof routePlan.routeContract === "object" ? routePlan.routeContract : undefined),
   };
 }
 

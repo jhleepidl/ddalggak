@@ -74,9 +74,18 @@ function recommendRoleBucket({ provider = '', roleId = '' } = {}) {
 
 function sortDocsByPreference(docs = [], preferredDocIds = []) {
   const preferred = new Map(asArray(preferredDocIds).map((entry, index) => [cleanText(entry, { lower: true }), index]));
+  const rankForDoc = (doc = {}) => {
+    const candidates = [doc?.doc_id, doc?.surface_id, doc?.surfaceId, doc?.file_name, doc?.fileName]
+      .map((entry) => cleanText(entry, { lower: true }))
+      .filter(Boolean);
+    for (const key of candidates) {
+      if (preferred.has(key)) return preferred.get(key);
+    }
+    return 999;
+  };
   return [...asArray(docs)].sort((left, right) => {
-    const leftRank = preferred.has(cleanText(left?.doc_id, { lower: true })) ? preferred.get(cleanText(left?.doc_id, { lower: true })) : 999;
-    const rightRank = preferred.has(cleanText(right?.doc_id, { lower: true })) ? preferred.get(cleanText(right?.doc_id, { lower: true })) : 999;
+    const leftRank = rankForDoc(left);
+    const rightRank = rankForDoc(right);
     if (leftRank !== rightRank) return leftRank - rightRank;
     const leftLoad = cleanText(left?.load_policy || left?.loadPolicy || 'on_demand', { lower: true });
     const rightLoad = cleanText(right?.load_policy || right?.loadPolicy || 'on_demand', { lower: true });
@@ -238,6 +247,36 @@ export function recommendKnowledgeAccess({ profile = null, provider = '', roleId
     publish_docs: contract.publish_docs,
     can_write_directly: contract.can_write_directly,
   };
+}
+
+
+export function summarizeRoleMemoryEnforcement({ profile = null, provider = '', roleId = '' } = {}) {
+  const contract = buildRoleMemoryContract({ profile, provider, roleId, maxReadDocs: 8 });
+  const surfaceIds = (docs = []) => dedupeDocs(docs)
+    .map((doc) => cleanText(doc?.surface_id || doc?.surfaceId || doc?.doc_id, { lower: true }))
+    .filter(Boolean);
+  const publishSurfaceIds = surfaceIds(contract.publish_docs);
+  return {
+    role_id: cleanText(roleId, { lower: true }),
+    provider: cleanText(provider, { lower: true }),
+    read_scope_mode: 'role_scoped_local_only',
+    write_scope_mode: 'role_scoped_reroute',
+    publish_scope_mode: 'declared_publish_only',
+    final_publish_rule: 'final_owner_declared_surface_required',
+    artifact_publish_rule: 'declared_artifact_surface_required',
+    read_surface_ids: surfaceIds(contract.read_docs),
+    write_surface_ids: surfaceIds(contract.write_docs),
+    publish_surface_ids: publishSurfaceIds,
+    can_publish_final_answer: publishSurfaceIds.includes('final_answer'),
+    can_publish_artifact_index: publishSurfaceIds.includes('artifact_index'),
+  };
+}
+
+export function canRolePublishSurface({ profile = null, provider = '', roleId = '', surfaceId = '' } = {}) {
+  const target = cleanText(surfaceId, { lower: true }).replace(/\.md$/i, '');
+  if (!target) return false;
+  const summary = summarizeRoleMemoryEnforcement({ profile, provider, roleId });
+  return Array.isArray(summary.publish_surface_ids) && summary.publish_surface_ids.includes(target);
 }
 
 export function renderKnowledgeBaseContractMarkdown(profile = null) {

@@ -37,6 +37,8 @@ import {
   loadArtifactIndex,
   sendLong,
   formatArtifactIndexText,
+  resolveArtifactDeliveryContract,
+  formatArtifactDeliveryContractLines,
 } from "./telegram_runtime_io.js";
 import {
   composeCapabilitiesForRun,
@@ -54,6 +56,8 @@ import {
 } from "./run_authority.js";
 import { summarizeRuntimeTeamSnapshotLines } from "./runtime_snapshot_display.js";
 import { formatSkillLabels, formatRoleOverlayProfile, humanizeModel, resolveAgencyOverlayMeta, roleLabel } from "./team_presentation.js";
+import { summarizeRoleMemoryEnforcement } from "../knowledge_base/runtime.js";
+import { resolveRoutingContractSummary, formatRouteReadiness } from "./route_contract.js";
 
 async function sendTextWithOptionalGocButton(
   bot,
@@ -245,6 +249,50 @@ function summarizeHeartbeat(activity = null, { isRunning = false } = {}) {
   const summary = normalizeTextSummary(activity?.last_activity_summary || '', 120);
   if (!ts) return isRunning ? '활동 기록 없음' : 'idle';
   return `${formatRelativeAge(ts)}${summary ? ` · ${summary}` : ''}`;
+}
+
+function activityAgeSec(activity = null) {
+  const ts = String(activity?.last_activity_ts || '').trim();
+  if (!ts) return null;
+  const ms = Date.now() - Date.parse(ts);
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  return Math.floor(ms / 1000);
+}
+
+function humanizeSessionPhase(session = {}, { isRunning = false } = {}) {
+  const state = String(session?.state || '').trim().toLowerCase();
+  if (session?.interrupt?.requested) return '중단 요청 반영 중';
+  if (session?.pending_approval) return '승인 대기';
+  if (session?.pending_install_proposal) return '설치 제안 대기';
+  if (session?.pending_user_request) return '새 요청 반영 대기';
+  if (isRunning) return '실행 중';
+  if (!state || state === 'idle') return '대기 중';
+  if (['queued', 'pending', 'starting'].includes(state)) return '준비 중';
+  if (['running', 'working', 'executing', 'in_progress'].includes(state)) return '실행 중';
+  if (['awaiting_approval', 'waiting_approval', 'approval_pending'].includes(state)) return '승인 대기';
+  if (['awaiting_user', 'waiting_user', 'blocked'].includes(state)) return '사용자 응답 대기';
+  if (['completed', 'complete', 'done', 'succeeded'].includes(state)) return '완료';
+  if (['failed', 'error'].includes(state)) return '실패';
+  if (['cancelled', 'canceled', 'interrupted', 'aborted'].includes(state)) return '중단됨';
+  return state;
+}
+
+function deriveRunSituation(session = {}, { isRunning = false, activity = null, pendingApproval = null, pendingInstallProposal = null, interrupt = null, pendingUserRequest = null } = {}) {
+  if (interrupt?.requested) return '사용자 요청을 반영하기 위해 현재 실행을 정리하고 있습니다.';
+  if (pendingApproval) return '위험하거나 중요한 작업 승인을 기다리고 있습니다.';
+  if (pendingInstallProposal) return '필요한 도구 또는 자격 증명 준비를 기다리고 있습니다.';
+  if (pendingUserRequest) return '새 사용자 입력을 반영하기 위해 다음 계획을 다시 계산하고 있습니다.';
+  if (isRunning) {
+    const age = activityAgeSec(activity);
+    if (Number.isFinite(age) && age >= 900) return '오래 걸리는 작업을 계속 진행 중입니다.';
+    if (Number.isFinite(age) && age >= 300) return '작업을 계속 진행 중입니다.';
+    return '요청한 작업을 실행 중입니다.';
+  }
+  const state = String(session?.state || '').trim().toLowerCase();
+  if (['completed', 'complete', 'done', 'succeeded'].includes(state)) return '직전 실행이 끝났습니다.';
+  if (['cancelled', 'canceled', 'interrupted', 'aborted'].includes(state)) return '현재 실행은 중단된 상태입니다.';
+  if (['failed', 'error'].includes(state)) return '실패 원인을 확인한 뒤 다음 행동을 기다리고 있습니다.';
+  return '새 요청을 기다리고 있습니다.';
 }
 
 function formatMemoryWriteEvent(row = null) {
@@ -696,7 +744,7 @@ function buildChatStatusKeyboard({ detail = 'compact', artifactCount = 0, showRe
 
 export function buildChatStatusCard(chatId, runtime = null, { detail = "compact" } = {}) {
   const chatKey = String(chatId || "");
-  const session = chatSessionStore.get(chatId);
+  const session = chatSessionStore.get(chatId) || {};
   const activeJobId = activeJobByChat.get(chatKey) || "";
   const currentJobId = String(
     session.jobId
@@ -793,10 +841,22 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
       recentTurns: session?.recent_agent_turns || [],
       currentJobId,
     });
+  const phaseLabel = humanizeSessionPhase(session, { isRunning: !!activeJobId });
+  const routeContractSummary = resolveRoutingContractSummary({ activeTeam, runtimeTeamSnapshot });
+  const routeReadinessLabel = formatRouteReadiness(routeContractSummary, { compact: true });
+  const situationLabel = deriveRunSituation(session, {
+    isRunning: !!activeJobId,
+    activity: runtimeActivity,
+    pendingApproval,
+    pendingInstallProposal,
+    interrupt,
+    pendingUserRequest,
+  });
   if (normalizedDetail === 'prompt') {
     const lines = [
       '🧮 Prompt 상태',
-      `- phase: ${session.state || 'idle'}${activeJobId ? ' · running' : ''}`,
+      `- phase: ${phaseLabel}`,
+      `- situation: ${situationLabel}`,
       `- heartbeat: ${heartbeatLabel}`,
     ];
     if (promptTelemetry.averages) {
@@ -844,6 +904,8 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
       status: {
         chat_id: chatKey,
         state: session.state || 'idle',
+        phase_label: phaseLabel,
+        situation_label: situationLabel,
         job_id: currentJobId || null,
         prompt_rows: promptTelemetry.rows.length,
       },
@@ -852,8 +914,10 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
   if (normalizedDetail === 'recent') {
     const recentLines = [
       '🕒 최근 작업',
-      `- phase: ${session.state || 'idle'}${activeJobId ? ' · running' : ''}`,
+      `- phase: ${phaseLabel}`,
+      `- situation: ${situationLabel}`,
       `- heartbeat: ${heartbeatLabel}`,
+      routeReadinessLabel ? `- route_ready: ${routeReadinessLabel}` : '',
       activeAgentsLabel ? `- active: ${activeAgentsLabel}` : '',
       runtimeActivity.items.length > 0 ? '- recent_work:' : '- recent_work: (none)',
       ...runtimeActivity.items.slice(0, 6).map((row) => `  • ${formatRelativeAge(row.ts)} · ${row.summary}`),
@@ -866,6 +930,8 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
       status: {
         chat_id: chatKey,
         state: session.state || 'idle',
+        phase_label: phaseLabel,
+        situation_label: situationLabel,
         job_id: currentJobId || null,
         active_run_id: session.active_run_id || null,
         running: !!activeJobId,
@@ -877,11 +943,13 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
   if (normalizedDetail !== 'full') {
     const compactLines = [
       '📋 현재 상태',
-      `- phase: ${session.state || 'idle'}${activeJobId ? ' · running' : ''}`,
+      `- phase: ${phaseLabel}`,
+      `- situation: ${situationLabel}`,
       `- team: ${String(activeTeam?.team_name || 'configured_team').trim() || '(none)'}${teamArchetype ? ` · ${teamArchetype}` : ''}`,
       overlayProfileRows.length > 0 ? `- role_profiles: ${overlayProfileRows.join(', ')}` : '',
       iterationLabel ? `- iteration: ${iterationLabel}` : '',
       `- heartbeat: ${heartbeatLabel}`,
+      routeReadinessLabel ? `- route_ready: ${routeReadinessLabel}` : '',
       activeAgentsLabel ? `- active: ${activeAgentsLabel}` : '',
       recentProgress ? `- recent: ${recentProgress}` : '',
       criticSummary ? `- critic: ${criticSummary}` : '',
@@ -895,6 +963,8 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
       status: {
         chat_id: chatKey,
         state: session.state || 'idle',
+        phase_label: phaseLabel,
+        situation_label: situationLabel,
         job_id: currentJobId || null,
         active_run_id: session.active_run_id || null,
         running: !!activeJobId,
@@ -912,6 +982,8 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
   const lines = [
     "📋 현재 상태",
     `- state: ${session.state || "idle"}`,
+    `- phase: ${phaseLabel}`,
+    `- situation: ${situationLabel}`,
     `- job_id: ${currentJobId || "(none)"}`,
     `- active_run_id: ${session.active_run_id || "(none)"}`,
     `- running: ${activeJobId ? "yes" : "no"}`,
@@ -931,6 +1003,7 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
       ? `- last_route: ${String(lastRoute.reason || "(none)")}, actions=${Array.isArray(lastRoute.actions) ? lastRoute.actions.length : 0}`
       : "",
     `- pending_user_messages: ${Array.isArray(session.pending_user_messages) ? session.pending_user_messages.length : 0}`,
+    routeReadinessLabel ? `- route_ready: ${routeReadinessLabel}` : "",
     manualApprovals.length > 0 ? `- pending_manual_approvals: ${manualApprovals.length}` : "",
   ];
   if (manualApprovals.length > 0) {
@@ -957,6 +1030,41 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
       lines.push(`- team_execution_pattern: ${String(interactionSpec.execution_pattern || '(none)')}`);
       lines.push(`- final_answer_owner: ${String(interactionSpec.final_answer_owner || '(none)')}`);
     }
+    if (routeReadinessLabel) {
+      lines.push(`- route_readiness: ${routeReadinessLabel}`);
+      if (routeContractSummary?.summary_line) lines.push(`- route_contract_summary: ${String(routeContractSummary.summary_line)}`);
+      if (Array.isArray(routeContractSummary?.artifact_publishers) && routeContractSummary.artifact_publishers.length > 0) {
+        lines.push(`- route_artifact_publishers: ${routeContractSummary.artifact_publishers.join(', ')}`);
+      }
+    }
+    try {
+      const profile = currentJobId ? tracking.loadProfile(currentJobId) : null;
+      if (profile && Array.isArray(activeTeam.agents) && activeTeam.agents.length > 0) {
+        const enforcementRows = activeTeam.agents.slice(0, 4).map((agent) => {
+          const summary = summarizeRoleMemoryEnforcement({
+            profile,
+            provider: String(agent?.provider || '').trim().toLowerCase(),
+            roleId: String(agent?.role || '').trim().toLowerCase(),
+          });
+          return `${String(agent?.name || agent?.agent_id || agent?.role || 'agent').trim()}: read=${(summary.read_surface_ids || []).join(', ') || '(none)'} · write=${(summary.write_surface_ids || []).join(', ') || '(none)'} · publish=${(summary.publish_surface_ids || []).join(', ') || '(none)'}`;
+        }).filter(Boolean);
+        if (enforcementRows.length > 0) {
+          const enforcement = summarizeRoleMemoryEnforcement({
+            profile,
+            provider: String(activeTeam.agents[0]?.provider || '').trim().toLowerCase(),
+            roleId: String(activeTeam.agents[0]?.role || '').trim().toLowerCase(),
+          });
+          lines.push(`- memory_contract_enforcement: read=hard(role-scoped local) · write=hard(reroute) · publish=declared_only · final=${String(enforcement.final_publish_rule || 'final_owner_declared_surface_required')} · artifact=${String(enforcement.artifact_publish_rule || 'declared_artifact_surface_required')}`);
+          for (const row of enforcementRows) lines.push(`  • ${clip(row, 220)}`);
+          const artifactContract = resolveArtifactDeliveryContract(currentJobId, runtime);
+          const artifactContractLines = formatArtifactDeliveryContractLines(artifactContract);
+          if (artifactContractLines.length > 0) {
+            lines.push(`- artifact_delivery_contract: ${clip(artifactContractLines[0], 220)}`);
+            for (const row of artifactContractLines.slice(1, 3)) lines.push(`  • ${clip(row, 220)}`);
+          }
+        }
+      }
+    } catch {}
   }
   if (runtimeAuthority) {
     lines.push(`- mode: ${runtimeAuthority.mode}`);
@@ -1047,6 +1155,8 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
     status: {
       chat_id: chatKey,
       state: session.state || "idle",
+      phase_label: phaseLabel,
+      situation_label: situationLabel,
       job_id: currentJobId || null,
       active_run_id: session.active_run_id || null,
       running: !!activeJobId,

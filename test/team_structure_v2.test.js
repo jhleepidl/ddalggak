@@ -293,3 +293,32 @@ test('structure_v2 carries knowledge surface, memory policy, and memory plan int
   assert.ok(Array.isArray(team.memory_plan?.surfaces));
   assert.equal(team.knowledge_base_profile.docs.find((doc) => doc.doc_id === 'decisions')?.file_name, 'review_ruling.md');
 });
+
+
+test('team_structure_v2 preserves provider and tool metadata through normalization and derived runtime profile', () => {
+  const structure = normalizeTeamStructureV2({
+    metadata: { team_name: 'Provider Team', composition_mode: 'freeform', proposal_mode: 'create' },
+    intent: { task_brief: 'provider roundtrip' },
+    participants: [
+      {
+        participant_id: 'repo_scout',
+        kind: 'agent',
+        name: 'Repo Scout',
+        role: 'researcher',
+        provider: 'gemini',
+        model: 'gemini-2.5-pro',
+        required_tool_ids: ['workspace_fs'],
+        optional_tool_ids: ['ripgrep'],
+      },
+    ],
+    topology: { pattern: 'single', final_participant_id: 'repo_scout' },
+  });
+  assert.equal(structure.participants[0].provider, 'gemini');
+  assert.deepEqual(structure.participants[0].required_tool_ids, ['workspace_fs']);
+  const derived = deriveTeamConfigFromStructureV2(structure);
+  assert.equal(derived.agents[0].provider, 'gemini');
+  assert.deepEqual(derived.agents[0].required_tool_ids, ['workspace_fs']);
+  const runtimeProfile = buildRuntimeExecutionProfileFromStructureV2(structure, { taskBrief: 'provider roundtrip' });
+  assert.equal(runtimeProfile.runtime_participants[0].provider, 'gemini');
+  assert.equal(runtimeProfile.configured_agents[0].provider, 'gemini');
+});

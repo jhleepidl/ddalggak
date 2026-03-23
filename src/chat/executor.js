@@ -511,6 +511,7 @@ async function executeRunAgentWithRecovery({
     const runResult = await callbacks.runAgent({ action, jobId, detailContext });
     return { runResult, detailContext, recovered: false, failure: null, awaitUserRequest: null };
   } catch (error) {
+    if (isAbortLikeError(error)) throw error;
     const failure = classifyExecutionFailure({
       error,
       action,

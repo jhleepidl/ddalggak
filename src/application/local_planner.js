@@ -124,6 +124,12 @@ export function normalizePlanningRequest(input = {}) {
       : (row.conversationPreferences && typeof row.conversationPreferences === "object"
         ? row.conversationPreferences
         : null),
+    active_team: row.active_team && typeof row.active_team === "object"
+      ? row.active_team
+      : (row.activeTeam && typeof row.activeTeam === "object" ? row.activeTeam : null),
+    runtime_team_snapshot: row.runtime_team_snapshot && typeof row.runtime_team_snapshot === "object"
+      ? row.runtime_team_snapshot
+      : (row.runtimeTeamSnapshot && typeof row.runtimeTeamSnapshot === "object" ? row.runtimeTeamSnapshot : null),
     conversation_hints: normalizeStringList(
       row.conversation_hints ?? row.conversationHints ?? [],
       { lower: false, max: 24 }
@@ -258,6 +264,8 @@ export class LocalPlanner {
       registry: effectiveRequest.registry,
       preferredRoles: effectiveRequest.preferred_roles,
       conversationPreferences: effectiveRequest.conversation_preferences,
+      activeTeam: effectiveRequest.active_team,
+      runtimeTeamSnapshot: effectiveRequest.runtime_team_snapshot,
       conversationHints: effectiveRequest.conversation_hints,
       toolHints: effectiveRequest.tool_hints,
       maxAgents: effectiveRequest.max_agents,

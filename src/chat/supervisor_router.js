@@ -8,6 +8,7 @@ import { canParallelSpawnInRuntime, sanitizeExecutablePlan } from "./route_execu
 import { appendPromptTelemetry } from "../application/prompt_telemetry.js";
 import { runDir, runSharedDir } from "../application/telegram_runtime_state.js";
 import { compactPromptJson } from "../application/prompt_surface_builder.js";
+import { resolveRoutingContractSummary, resolveRouteContractHeuristic, alignPlanActionsToRouteContract, rankAgentsByRouteContract } from "../application/route_contract.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -366,10 +367,22 @@ function normalizePublicSearchQuery(message) {
     .trim();
 }
 
-function fallbackPlan(message, { agents = [], tools = [], jobConfig = {}, parallelSpawnAllowed = true } = {}) {
+function fallbackPlan(message, { agents = [], tools = [], jobConfig = {}, parallelSpawnAllowed = true, activeTeam = null, runtimeTeamSnapshot = null } = {}) {
   const msg = String(message || "").trim();
   const config = asObject(jobConfig);
-  const defaultAgent = pickDefaultAgent(agents);
+  const routeHeuristic = resolveRouteContractHeuristic({
+    message: msg,
+    agents,
+    activeTeam,
+    runtimeTeamSnapshot,
+  });
+  const rankedRouteAgents = rankAgentsByRouteContract({
+    message: msg,
+    agents,
+    activeTeam,
+    runtimeTeamSnapshot,
+  });
+  const defaultAgent = routeHeuristic.preferred_agent_id || rankedRouteAgents.preferred_agent_id || pickDefaultAgent(agents);
   const requestedAgent = parseRequestedAgentId(msg);
   const requestedTool = parseRequestedToolId(msg, { tools, jobConfig: config });
   const requestedExists = (Array.isArray(agents) ? agents : [])
@@ -444,6 +457,22 @@ function fallbackPlan(message, { agents = [], tools = [], jobConfig = {}, parall
         risk: "L0",
       }],
       final_response_style: "concise",
+    };
+  }
+
+  if (routeHeuristic.should_explain_constraints) {
+    const constraintHint = routeHeuristic.blocked_explanation || 'route contract is not ready';
+    return {
+      reason: `route contract fallback (${constraintHint})`,
+      actions: [{
+        type: routeHeuristic.intent?.wants_status ? 'get_status' : 'summarize',
+        detail: routeHeuristic.intent?.wants_status ? 'summary' : undefined,
+        hint: routeHeuristic.intent?.wants_status ? undefined : `현재 팀 제약 설명: ${constraintHint}`,
+        risk: 'L0',
+      }],
+      final_response_style: 'concise',
+      followup_hint: 'final owner 또는 artifact publisher 구성을 먼저 확인해 주세요.',
+      route_contract: routeHeuristic.summary || undefined,
     };
   }
 
@@ -604,6 +633,7 @@ function fallbackPlan(message, { agents = [], tools = [], jobConfig = {}, parall
       reason: "requested agent is disabled in this job; suggest enable_agent",
       actions: [{ type: "enable_agent", agent_id: requestedAgent, risk: "L1" }],
       final_response_style: "concise",
+      route_contract: routeHeuristic.summary || undefined,
     };
   }
 
@@ -612,12 +642,16 @@ function fallbackPlan(message, { agents = [], tools = [], jobConfig = {}, parall
       reason: "no available agents",
       actions: [{ type: "summarize" }],
       final_response_style: "concise",
+      route_contract: routeHeuristic.summary || undefined,
     };
   }
   return {
-    reason: "default run_agent fallback",
+    reason: routeHeuristic.preferred_agent_id && routeHeuristic.preferred_agent_id === defaultAgent
+      ? "default run_agent fallback; route_contract_preferred_agent"
+      : "default run_agent fallback",
     actions: [{ type: "run_agent", agent_id: defaultAgent, goal: msg, risk: "L1" }],
     final_response_style: "concise",
+    route_contract: routeHeuristic.summary || undefined,
   };
 }
 
@@ -721,6 +755,20 @@ function buildRouterPrompt(message, context = {}) {
   const canSatisfyWithoutCreation = teamRecommendation?.can_satisfy_without_creation === true;
   const teamCompositionIntent = teamRecommendation?.team_composition_intent === true;
   const parallelSpawnAllowed = row.parallelSpawnAllowed !== false;
+  const routeContract = resolveRoutingContractSummary({
+    activeTeam: row.activeTeamConfig && typeof row.activeTeamConfig === 'object' ? row.activeTeamConfig : null,
+    runtimeTeamSnapshot: row.runtimeTeamSnapshot && typeof row.runtimeTeamSnapshot === 'object' ? row.runtimeTeamSnapshot : null,
+  });
+  const routeContractText = routeContract?.available
+    ? [
+        `- final_owner=${routeContract.final_owner || '(unset)'}`,
+        `- final_owner_role=${routeContract.final_owner_role || '(unset)'}`,
+        `- final_answer_publish=${routeContract.final_answer_publish_ok === false ? 'blocked' : 'ready'}`,
+        `- artifact_publish=${routeContract.artifact_publish_ok === false ? 'blocked' : 'ready'}`,
+        `- artifact_publishers=${Array.isArray(routeContract.artifact_publishers) && routeContract.artifact_publishers.length > 0 ? routeContract.artifact_publishers.join(', ') : '(none)'}`,
+        `- memory_contract=${routeContract.memory_contract_enforcement?.read_scope || 'hard_role_scoped_local_only'}`,
+      ].join('\n')
+    : '(none)';
 
   const actionSchemaLines = teamLocked
     ? [
@@ -795,6 +843,8 @@ function buildRouterPrompt(message, context = {}) {
     "- agent/tool 제외 요청은 disable_agent/disable_tool을 사용한다.",
     "- agent/tool 재포함 요청은 enable_agent/enable_tool을 사용한다.",
     "- 상태/진행 상황 요청은 get_status를 우선 사용한다.",
+    "- current_active_team_route_contract에 final owner가 있고 publish-ready면, 최종 handoff/final synthesis는 그 owner를 우선 사용하라.",
+    "- current_active_team_route_contract에 final publish 또는 artifact publish가 blocked로 보이면, 잘못된 final handoff 대신 summarize/get_status로 제약을 짧게 설명하라.",
     "- 중단/취소/멈춤 요청은 interrupt를 사용한다.",
     "- 컨텍스트/GoC 링크 요청은 open_context를 사용한다.",
     "- agent를 생성/수정해달라는 요청은 create_agent/update_agent를 사용한다.",
@@ -843,6 +893,9 @@ function buildRouterPrompt(message, context = {}) {
     "",
     "recommended_existing_team:",
     recommendedTeamText,
+    "",
+    "current_active_team_route_contract:",
+    routeContractText,
     "",
     "missing_capabilities:",
     missingCapabilitiesText,
@@ -903,6 +956,7 @@ export async function routeWithSupervisor(message, {
   geminiConcurrencyKey = "",
   geminiModel = "",
   runtimeTeamSnapshot = null,
+  activeTeam = null,
 } = {}) {
   const msg = String(message || "").trim();
   const allowChatGPTPlanner = isExplicitChatGptPlannerRequest(msg);
@@ -910,10 +964,19 @@ export async function routeWithSupervisor(message, {
     runtimeSnapshot: runtimeTeamSnapshot,
     childCount: 2,
   });
-  const fallback = normalizeActionPlan(
-    fallbackPlan(msg, { agents, tools, jobConfig, parallelSpawnAllowed }),
-    { maxActions: 4 }
-  );
+  const routeHeuristic = resolveRouteContractHeuristic({
+    message: msg,
+    agents,
+    activeTeam,
+    runtimeTeamSnapshot,
+  });
+  const fallback = {
+    ...normalizeActionPlan(
+      fallbackPlan(msg, { agents, tools, jobConfig, parallelSpawnAllowed, activeTeam, runtimeTeamSnapshot }),
+      { maxActions: 4 }
+    ),
+    route_contract: routeHeuristic.summary || undefined,
+  };
 
   const prompt = buildRouterPrompt(msg, {
     agents,
@@ -935,6 +998,8 @@ export async function routeWithSupervisor(message, {
     teamLocked,
     teamInteractionSpec,
     parallelSpawnAllowed,
+    activeTeam,
+    runtimeTeamSnapshot,
   });
 
   const cleanJobId = String(currentJobId || '').trim();
@@ -1028,21 +1093,37 @@ export async function routeWithSupervisor(message, {
       }
       return action;
     });
-    const contractSafe = sanitizeExecutablePlan({
+    const routeAligned = alignPlanActionsToRouteContract({
       plan: {
+        ...normalized,
         actions: hardened,
+        route_contract: routeHeuristic.summary || normalized.route_contract || undefined,
       },
+      message: msg,
+      agents,
+      activeTeam,
+      runtimeTeamSnapshot,
+      preserveExplicitAgent: Boolean(parseRequestedAgentId(msg)),
+    });
+    const contractSafe = sanitizeExecutablePlan({
+      plan: routeAligned.plan,
       runtimeSnapshot: runtimeTeamSnapshot,
     });
     return {
-      reason: normalized.reason || "supervisor route",
-      actions: Array.isArray(contractSafe?.plan?.actions) ? contractSafe.plan.actions : hardened,
+      reason: routeAligned.adjusted
+        ? `${normalized.reason || "supervisor route"}; route_contract_ranked_agent=${routeAligned.preferred_agent_id || ''}`
+        : (normalized.reason || "supervisor route"),
+      route_contract: routeAligned.heuristic?.summary || routeHeuristic.summary || undefined,
+      route_contract_adjusted: routeAligned.adjusted === true,
+      route_contract_preferred_agent: routeAligned.preferred_agent_id || undefined,
+      route_contract_adjustment_type: routeAligned.plan?.route_contract_adjustment_type || undefined,
+      actions: Array.isArray(contractSafe?.plan?.actions) ? contractSafe.plan.actions : (Array.isArray(routeAligned?.plan?.actions) ? routeAligned.plan.actions : hardened),
       final_response_style: normalized.final_response_style,
       done: normalized.done === true,
       await_user: normalized.await_user === true,
       deliverables: Array.isArray(normalized.deliverables) ? normalized.deliverables : [],
       completed_deliverables: Array.isArray(normalized.completed_deliverables) ? normalized.completed_deliverables : [],
-      followup_hint: String(normalized.followup_hint || "").trim() || undefined,
+      followup_hint: String(normalized.followup_hint || (routeAligned.adjusted ? `route contract preferred ${routeAligned.preferred_agent_id || 'publisher-capable agent'} for this request` : "")).trim() || undefined,
     };
   } catch (e) {
     if (signal?.aborted) throw e;

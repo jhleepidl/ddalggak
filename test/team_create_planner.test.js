@@ -148,3 +148,47 @@ test('advanced freeform team creation injects builder coverage for web-service b
   assert.ok(builderAgent);
   assert.ok(team.interaction_spec.handoffs.some((handoff) => handoff.from === builderAgent.name || handoff.to === builderAgent.name));
 });
+
+
+test('advanced freeform team creation preserves provider/tool metadata and repairs publish contract for declared final owner', async () => {
+  const team = await createFreeformTeamConfigurationAdvanced({
+    description: '코드베이스를 조사하고 최종 요약을 정리하는 팀을 만들어줘',
+    planner: async () => ({
+      ok: true,
+      planner_metadata: { planner_type: 'codex_cli', planner_model: 'gpt-5.4', planning_source: 'codex_gpt_5_4' },
+      plan: {
+        team_name: 'repo_scout_team',
+        agents: [
+          {
+            name: 'Repo Scout',
+            role: 'researcher',
+            purpose: '코드베이스를 탐색하고 핵심 근거를 정리한다',
+            model: 'gemini-2.5-pro',
+            provider: 'gemini',
+            required_tool_ids: ['workspace_fs'],
+            optional_tool_ids: ['ripgrep'],
+          },
+        ],
+        interaction_spec: {
+          execution_pattern: 'single_specialist',
+          final_answer_owner: 'Repo Scout',
+          handoffs: [],
+        },
+      },
+    }),
+  });
+
+  const participant = team.structure_v2.participants.find((row) => row.participant_id === 'repo_scout');
+  assert.equal(participant?.provider, 'gemini');
+  assert.deepEqual(participant?.required_tool_ids, ['workspace_fs']);
+  assert.deepEqual(participant?.optional_tool_ids, ['ripgrep']);
+  assert.ok(team.interaction_spec.final_answer_owner);
+  const finalOwner = team.agents.find((agent) => agent.name === team.interaction_spec.final_answer_owner);
+  assert.ok(finalOwner);
+  const finalSurface = team.memory_plan.surfaces.find((surface) => String(surface.surface_id || '').toLowerCase() === 'final_answer' || (surface.semantic_slots || []).includes('final_answer'));
+  assert.ok(finalSurface);
+  assert.ok((finalSurface.target_roles || []).includes(finalOwner.role));
+  const artifactSurface = team.memory_plan.surfaces.find((surface) => String(surface.surface_id || '').toLowerCase() === 'artifact_index' || (surface.semantic_slots || []).includes('artifact_index'));
+  assert.ok(artifactSurface);
+  assert.ok((artifactSurface.target_roles || []).some((roleId) => ['builder', 'synthesizer', 'reviewer', 'researcher'].includes(roleId)));
+});

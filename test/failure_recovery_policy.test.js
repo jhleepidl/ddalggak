@@ -34,6 +34,18 @@ test('classifyExecutionFailure detects credential and transient failures', () =>
   assert.equal(transient.recovery_strategy, 'retry_once');
 });
 
+
+test('classifyExecutionFailure treats aborted runs as user interruption instead of unknown failure', () => {
+  const interrupted = classifyExecutionFailure({
+    error: new Error('Codex interrupted\n[aborted]'),
+    action: { type: 'run_agent', agent_id: 'builder', goal: 'patch notebook' },
+    provider: 'codex',
+  });
+  assert.equal(interrupted.category, 'user_interrupted');
+  assert.equal(interrupted.recovery_strategy, 'stop');
+  assert.match(String(interrupted.summary || ''), /중단|재계획/);
+});
+
 test('resolveProviderActionRisk keeps normal codex work at L2 and critical work at L3', () => {
   assert.equal(resolveProviderActionRisk({
     action: { type: 'run_agent', goal: 'implement notebook cleanup' },
@@ -119,4 +131,12 @@ test('executeSupervisorActions uses scout recovery before retrying implementatio
   assert.equal(seen[1].agentId, 'researcher');
   assert.equal(seen[2].agentId, 'builder');
   assert.match(String(seen[2].detailContext || ''), /failure_recovery/);
+});
+
+
+test('publish contract failures are classified as policy_blocked awaiting user action', () => {
+  const failure = classifyExecutionFailure({ error: new Error('publish contract blocked: final synthesis는 final_answer surface가 선언된 agent만 수행할 수 있습니다') });
+  assert.equal(failure.category, 'policy_blocked');
+  assert.equal(failure.recovery_strategy, 'await_user');
+  assert.match(failure.summary, /publish contract/);
 });

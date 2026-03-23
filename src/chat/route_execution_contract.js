@@ -156,6 +156,10 @@ export function mergePreferredRuntimeTeamSnapshot({
       ...(Array.isArray(route?.skill_usage_events) && route.skill_usage_events.length > 0 ? { skill_usage_events: route.skill_usage_events } : {}),
       ...(route?.skill_usage_summary && typeof route.skill_usage_summary === "object" && Object.keys(route.skill_usage_summary).length > 0 ? { skill_usage_summary: route.skill_usage_summary } : {}),
       ...(route?.supervisor_runtime && typeof route.supervisor_runtime === "object" ? { supervisor_runtime: route.supervisor_runtime } : {}),
+      ...(route?.route_contract && typeof route.route_contract === "object" ? { route_contract: route.route_contract } : {}),
+      ...(route?.route_contract_adjusted === true ? { route_contract_adjusted: true } : {}),
+      ...(route?.route_contract_preferred_agent ? { route_contract_preferred_agent: route.route_contract_preferred_agent } : {}),
+      ...(route?.route_contract_adjustment_type ? { route_contract_adjustment_type: route.route_contract_adjustment_type } : {}),
     };
 
   return createRuntimeTeamSnapshot({

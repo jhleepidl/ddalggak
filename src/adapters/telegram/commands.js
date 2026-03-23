@@ -4,6 +4,8 @@ import {
 } from "../../application/route_executor.js";
 import {
   applyPendingTeam,
+  buildTeamTransitionGuardrails,
+  formatTeamTransitionGuardrailLines,
   buildTeamConfigurationTemplate,
   createFreeformTeamConfiguration,
   createFreeformTeamConfigurationAdvanced,
@@ -120,6 +122,8 @@ export function createTelegramCommandHandler(deps = {}) {
   const formatWorkspaceFileListText = fileOps.formatWorkspaceFileListText || deps.formatWorkspaceFileListText;
   const refreshArtifactIndex = fileOps.refreshArtifactIndex || deps.refreshArtifactIndex;
   const formatArtifactIndexText = fileOps.formatArtifactIndexText || deps.formatArtifactIndexText;
+  const resolveArtifactDeliveryContract = fileOps.resolveArtifactDeliveryContract || deps.resolveArtifactDeliveryContract || (() => ({ enabled: false, warnings: [], bundle_allowed: true }));
+  const formatArtifactDeliveryContractLines = fileOps.formatArtifactDeliveryContractLines || deps.formatArtifactDeliveryContractLines || (() => []);
   const sendArtifactBySelection = fileOps.sendArtifactBySelection || deps.sendArtifactBySelection;
   const sendArtifactBundle = fileOps.sendArtifactBundle || deps.sendArtifactBundle;
   const parseArtifactBundleSelection = fileOps.parseArtifactBundleSelection || deps.parseArtifactBundleSelection || (() => null);
@@ -187,9 +191,23 @@ export function createTelegramCommandHandler(deps = {}) {
       stateLines.push(`pattern recovery: ${String(patternRecovery.recovery_mode || patternRecovery.status || 'pending')}`);
     }
     lines.push('', 'Runtime state', ...stateLines);
+    const pendingApplyGuardrails = pendingTeam ? buildTeamTransitionGuardrails(activeTeam, pendingTeam) : null;
+    const confirmationState = session?.pending_team_apply_confirmation && typeof session.pending_team_apply_confirmation === 'object'
+      ? session.pending_team_apply_confirmation
+      : null;
+    if (pendingApplyGuardrails?.warning_count > 0) {
+      lines.push('', 'Apply 전 확인', ...formatTeamTransitionGuardrailLines(pendingApplyGuardrails, { maxWarnings: 5 }));
+      if (confirmationState?.expires_at) {
+        stateLines.push(`apply confirmation: 재확인 필요 · ${String(confirmationState.expires_at)}`);
+      }
+    }
 
     const nextSteps = [];
-    if (pendingTeam) nextSteps.push('- /team apply');
+    if (pendingTeam) {
+      nextSteps.push(pendingApplyGuardrails?.destructive_changes_present
+        ? '- /team apply (한 번 누르면 경고, 다시 누르면 적용)'
+        : '- /team apply');
+    }
     if (pendingInstallProposal) nextSteps.push('- /team proposal', '- /credential pending');
     if (patternConflict?.classification === 'structure_override_required') nextSteps.push('- /team refine <자연어 수정>');
     if (nextSteps.length > 0) lines.push('', '추천 명령', ...nextSteps);
@@ -641,9 +659,20 @@ ${formatWorkspaceFileListText(currentJobId, entries, { scope, limit })}`
       }
       const limit = parseClampedInt(rest[0], 12, { min: 1, max: 24 });
       const artifactIndex = refreshArtifactIndex(currentJobId, { maxFiles: limit });
+      let runtime = null;
+      if (typeof loadSupervisorRuntime === 'function') {
+        try {
+          runtime = await loadSupervisorRuntime(currentJobId, { telegramUserId: userId, includeContext: false, includeGlobal: false });
+        } catch {}
+      }
+      const contract = resolveArtifactDeliveryContract(currentJobId, runtime);
       const prefix = legacyMode ? '📎 artifacts (legacy /outputs alias)' : '📎 artifacts';
-      await sendLong(bot, chatId, `${prefix}
-${formatArtifactIndexText(currentJobId, artifactIndex, { limit })}`);
+      const sections = [`${prefix}
+${formatArtifactIndexText(currentJobId, artifactIndex, { limit })}`];
+      const contractLines = formatArtifactDeliveryContractLines(contract);
+      if (contractLines.length > 0) sections.push(`publish contract
+${contractLines.join('\n')}`);
+      await sendLong(bot, chatId, sections.join('\n\n'));
       return true;
     }
 
@@ -660,12 +689,20 @@ ${formatArtifactIndexText(currentJobId, artifactIndex, { limit })}`);
       }
       try {
         const artifactIndex = refreshArtifactIndex(currentJobId, { maxFiles: 12 });
+        let runtime = null;
+        if (typeof loadSupervisorRuntime === 'function') {
+          try {
+            runtime = await loadSupervisorRuntime(currentJobId, { telegramUserId: userId, includeContext: false, includeGlobal: false });
+          } catch {}
+        }
+        const contract = resolveArtifactDeliveryContract(currentJobId, runtime);
         const bundle = cmd === '/send' ? parseArtifactBundleSelection(selection) : null;
         if (bundle) {
           if (!sendArtifactBundle) throw new Error('bundle send is not available');
           const sentBundle = await sendArtifactBundle(bot, chatId, currentJobId, bundle.items, {
             replyToMessageId: msg.message_id,
             artifactIndex,
+            runtime,
           });
           await bot.sendMessage(
             chatId,
@@ -681,13 +718,17 @@ size=${formatByteSize(sentBundle.size)}`
           replyToMessageId: msg.message_id,
           artifactIndex,
         });
-        await bot.sendMessage(
-          chatId,
-          `✅ 파일 전송 완료
-job_id=${currentJobId}
-path=${sent.rel}
-size=${formatByteSize(sent.size)}`
-        );
+        const messageLines = [
+          '✅ 파일 전송 완료',
+          `job_id=${currentJobId}`,
+          `path=${sent.rel}`,
+          `size=${formatByteSize(sent.size)}`,
+        ];
+        if (Array.isArray(contract?.warnings) && contract.warnings.length > 0) {
+          messageLines.push('publish_contract_warnings:');
+          for (const warning of contract.warnings.slice(0, 2)) messageLines.push(`- ${warning}`);
+        }
+        await bot.sendMessage(chatId, messageLines.join('\n'));
       } catch (e) {
         const prefix = cmd === '/sendfile' ? '/sendfile' : '/send';
         await bot.sendMessage(chatId, `❌ ${prefix} 실패: ${clip(String(e?.message ?? e), 260)}`);

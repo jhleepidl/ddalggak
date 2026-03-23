@@ -202,7 +202,7 @@ test('advanced refine restores builder coverage for web-service refinement even 
 });
 
 
-test('advanced refine rebuilds structure from the refined roster instead of stale blueprint participants', async () => {
+test('advanced refine preserves omitted agents on partial edits and rebuilds structure without stale blueprint corruption', async () => {
   const baseTeam = await createFreeformTeamConfigurationAdvanced({
     description: '새로운 웹 서비스를 개발하기 위한 팀.',
     planner: async () => ({
@@ -244,13 +244,13 @@ test('advanced refine rebuilds structure from the refined roster instead of stal
     }),
   });
 
-  assert.equal(refined.agents.length, 4);
-  assert.equal(refined.agents.some((agent) => agent.name === 'Repo Scout'), false);
+  assert.equal(refined.agents.length, 5);
+  assert.equal(refined.agents.some((agent) => agent.name === 'Repo Scout'), true);
   const synth = refined.agents.find((agent) => agent.name === 'Delivery Synthesizer');
   assert.equal(synth?.provider, 'gemini');
   assert.equal(synth?.model, 'gemini-3-flash-preview');
   const participantIds = (refined.structure_v2?.participants || []).map((row) => row.participant_id);
-  assert.equal(participantIds.includes('repo_scout'), false);
+  assert.equal(participantIds.includes('repo_scout'), true);
   const finalParticipant = refined.structure_v2?.topology?.final_participant_id;
   assert.equal(finalParticipant, 'delivery_synthesizer');
   const finalParticipantRow = (refined.structure_v2?.participants || []).find((row) => row.participant_id === 'delivery_synthesizer');

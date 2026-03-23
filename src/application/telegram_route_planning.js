@@ -86,6 +86,7 @@ import {
 } from "./team_intent.js";
 import { buildExplicitTeamReconfigurationActions } from "./team_config_diff.js";
 import { normalizeAgentLookupKey } from "./logical_agents.js";
+import { resolveRoutingContractSummary, formatRouteReadiness } from "./route_contract.js";
 import {
   verifyConversationMembershipMutation,
   createMembershipConfirmationError,
@@ -726,13 +727,14 @@ function buildQueuedAgentStatusFromActions(actions = []) {
   return buildQueuedAgentStatusFromActionsShared(actions);
 }
 
-function buildRoutedDashboardText({ actions = [], agentStatus = {}, compact = false } = {}) {
+function buildRoutedDashboardText({ actions = [], agentStatus = {}, compact = false, routeReadiness = "" } = {}) {
   const agentIndex = buildTelegramAgentIndex({ actions });
   if (compact) {
     return buildCompactRoutedDashboardTextShared({
       actions,
       agentStatus,
       agentIndex,
+      routeReadiness,
     });
   }
   return buildRoutedDashboardTextShared({
@@ -743,11 +745,12 @@ function buildRoutedDashboardText({ actions = [], agentStatus = {}, compact = fa
   });
 }
 
-function buildCompactRoutedDashboardText({ actions = [], agentStatus = {} } = {}) {
+function buildCompactRoutedDashboardText({ actions = [], agentStatus = {}, routeReadiness = "" } = {}) {
   return buildRoutedDashboardText({
     actions,
     agentStatus,
     compact: true,
+    routeReadiness,
   });
 }
 
@@ -776,11 +779,16 @@ async function sendRouterAckMessage(bot, chatId, { replyToMessageId = null } = {
   return messageId > 0 ? messageId : null;
 }
 
-async function sendPlanPreviewMessage(bot, chatId, { actions = [], replyToMessageId = null } = {}) {
+async function sendPlanPreviewMessage(bot, chatId, { actions = [], replyToMessageId = null, activeTeam = null, runtimeTeamSnapshot = null } = {}) {
   const agentStatus = buildQueuedAgentStatusFromActions(actions);
+  const routeReadiness = formatRouteReadiness(
+    resolveRoutingContractSummary({ activeTeam, runtimeTeamSnapshot }),
+    { compact: true }
+  );
   const text = buildCompactRoutedDashboardText({
     actions,
     agentStatus,
+    routeReadiness,
   });
   const options = {
     reply_markup: {

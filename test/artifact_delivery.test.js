@@ -162,3 +162,45 @@ test('collectWorkspaceFileEntries and artifact index exclude internal support fi
     assert.equal(artifactPaths.some((entry) => entry.startsWith('.codex/')), false);
   });
 });
+
+
+test('sendArtifactBundle blocks bundle delivery when artifact publish contract has no publisher', async () => {
+  await withTempRunsDir(async () => {
+    const job = jobs.createJob({ title: 'artifact bundle blocked by publish contract' });
+    fs.mkdirSync(path.dirname(jobs.ensureWorkspacePath(job.jobId, 'docs/report.md')), { recursive: true });
+    fs.writeFileSync(jobs.ensureWorkspacePath(job.jobId, 'docs/report.md'), 'report-body', 'utf8');
+
+    const artifactIndex = refreshArtifactIndex(job.jobId, { maxFiles: 5 });
+    const bot = {
+      async sendDocument() {
+        throw new Error('bundle should not be sent when contract is blocked');
+      },
+    };
+
+    await assert.rejects(
+      () => sendArtifactBundle(bot, 'chat-1', job.jobId, ['1'], {
+        artifactIndex,
+        runtime: {
+          activeTeamConfig: {
+            interaction_spec: { final_answer_owner: 'Repo Scout' },
+            agents: [
+              { agent_id: 'repo_scout', name: 'Repo Scout', role: 'researcher', provider: 'gemini' },
+            ],
+            structure_v2: {
+              participants: [
+                { participant_id: 'repo_scout', name: 'Repo Scout', role: 'researcher', provider: 'gemini' },
+              ],
+              control_policy: { final_answer_owner_participant_id: 'repo_scout' },
+              memory_plan: {
+                surfaces: [
+                  { surface_id: 'research', write_policy: 'shared', target_roles: ['researcher'] },
+                ],
+              },
+            },
+          },
+        },
+      }),
+      /artifact publish contract blocked/i,
+    );
+  });
+});

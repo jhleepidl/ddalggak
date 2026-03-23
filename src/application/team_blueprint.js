@@ -331,6 +331,10 @@ export function resolveExecutionBlueprintSummary({ team = null, goal = '', taskI
   const executionGraph = asObject(snapshot.execution_graph || snapshotPlan.execution_graph);
   const effectivePattern = cleanId(executionGraph.pattern || topology.execution_pattern || topology.pattern || '');
   const capabilitySummary = summarizeCapabilityContract(blueprint.capability_contract || {});
+  const routeContract = resolveRoutingContractSummary({
+    activeTeam: normalizedTeam,
+    runtimeTeamSnapshot: snapshot,
+  });
   return {
     source,
     blueprint_id: clean(blueprint.blueprint_id || normalizedTeam?.blueprint_id || '') || undefined,
@@ -348,6 +352,13 @@ export function resolveExecutionBlueprintSummary({ team = null, goal = '', taskI
     missing_optional_tool_count: capabilitySummary.missing_optional_tool_count,
     missing_required_tools: capabilitySummary.missing_required_tools,
     missing_optional_tools: capabilitySummary.missing_optional_tools,
+    memory_contract_enforcement: routeContract?.memory_contract_enforcement || undefined,
+    publish_contract_readiness: routeContract ? {
+      final_owner: routeContract.final_owner || undefined,
+      final_answer_publish_ok: routeContract.final_answer_publish_ok !== false,
+      artifact_publish_ok: routeContract.artifact_publish_ok !== false,
+      artifact_publishers: routeContract.artifact_publishers || [],
+    } : undefined,
   };
 }
 

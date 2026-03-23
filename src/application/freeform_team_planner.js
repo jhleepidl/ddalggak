@@ -116,6 +116,9 @@ function buildPlannerPrompt({
     '- if the request is about building or shipping software artifacts such as a web service, web app, frontend, backend, API, repository change, notebook, script, or implementation, include a builder with a concrete delivery purpose',
     '- for implementation/build teams, do not return a research-only roster; include builder coverage unless the user explicitly rejects code-writing agents',
     '- if multiple upstream agents exist, include a synthesizer unless the user explicitly rejects it',
+    '- the declared final_answer_owner must name a real agent that can plausibly deliver the final answer; prefer a synthesizer or reviewer unless the user clearly asks otherwise',
+    '- ensure the team can satisfy publish contract expectations: someone must be able to publish final_answer and at least one participant should be able to publish artifact_index (usually builder, synthesizer, reviewer, or operator)',
+    '- when you emit structure_v2 participants, preserve provider, model, required_tool_ids, optional_tool_ids, recommended_tool_ids, and context_policy so install/apply does not lose execution metadata',
     '- prefer existing executable skill ids from the registry for attached_skill_ids',
     '- do not attach irrelevant domain-specific skills (for example KR equity analysis) unless the request actually targets that domain',
     '- when the registry does not fully cover the task, create generated_skill_briefs as inline non-executable protocols',
@@ -159,7 +162,7 @@ function buildPlannerPrompt({
     '    "kind": "team_structure_v2",',
     '    "version": 2,',
     '    "metadata": {"team_name": "...", "composition_mode": "freeform", "proposal_mode": "create"},',
-    '    "participants": [{"participant_id": "...", "kind": "agent", "name": "...", "role": "researcher"}],',
+    '    "participants": [{"participant_id": "...", "kind": "agent", "name": "...", "role": "researcher", "provider": "gemini|codex|chatgpt", "model": "...", "required_tool_ids": ["..."], "optional_tool_ids": ["..."], "recommended_tool_ids": ["..."], "context_policy": {"reads": {"grants": ["shared_summary"]}, "writes": {"publish_targets": ["handoff_summary"]}}}],',
     '    "topology": {"pattern": "router|supervisor|sequential|parallel|debate|committee|graph|hybrid", "execution_pattern": "...", "edges": [{"from": "...", "to": "...", "payload": "summary_plus_key_evidence"}]},',
     '    "interaction_policy": {"visibility": {"reviewer_visibility": "...", "synthesizer_visibility": "..."}},',
     '    "knowledge_surface": {"profile_id": "...", "display_name": "...", "docs": [{"doc_id": "plan", "file_name": "..."}]},',
@@ -225,6 +228,11 @@ function summarizeTeamForPlanner(team = null) {
       provider_runtime_policy: cleanId(runtimeExecution.provider_runtime_policy || runtimeExecution.providerRuntimePolicy || ''),
       memory_strategy: cleanId(runtimeExecution.memory_strategy || runtimeExecution.memoryStrategy || ''),
     },
+    publish_contract: {
+      final_answer_owner: clean(interactionSpec.final_answer_owner || interactionSpec.finalAnswerOwner || ''),
+      final_answer_publish_roles: asArray(memoryPlan.surfaces).filter((surface) => cleanId(surface?.surface_id || surface?.surfaceId || '') === 'final_answer' || asArray(surface?.semantic_slots || surface?.semanticSlots).map((entry) => cleanId(entry)).includes('final_answer')).flatMap((surface) => asArray(surface?.target_roles || surface?.targetRoles)).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 6),
+      artifact_publish_roles: asArray(memoryPlan.surfaces).filter((surface) => cleanId(surface?.surface_id || surface?.surfaceId || '') === 'artifact_index' || asArray(surface?.semantic_slots || surface?.semanticSlots).map((entry) => cleanId(entry)).includes('artifact_index')).flatMap((surface) => asArray(surface?.target_roles || surface?.targetRoles)).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 6),
+    },
     topology: structure && typeof structure === 'object'
       ? {
           pattern: cleanId(structure?.topology?.pattern || ''),
@@ -267,6 +275,8 @@ function buildRefinementPlannerPrompt({
     '- if the refinement still describes a build/implementation team, do not keep a research-only roster; preserve or add builder coverage unless the user explicitly removes code-writing roles',
     '- consider interaction_spec as first-class: update handoffs, execution_pattern, rebuttal/adjudication shape, reviewer_visibility, synthesizer_visibility, builder_direct_response, and final_answer_owner when the refinement implies a new workflow',
     '- if multiple upstream agents remain, keep or add a synthesizer unless the user rejects it',
+    '- keep publish contract alignment intact: final_answer_owner should remain an actual publish-capable agent, and the resulting team should still have at least one artifact_index publisher',
+    '- when you omit an existing agent, that omission is treated as removal; for minor edits like model/provider/tool changes preserve the rest of the roster and its required/optional tools',
     '- prefer existing executable skill ids from the registry for attached_skill_ids',
     '- do not attach irrelevant domain-specific skills (for example KR equity analysis) unless the refinement actually asks for that domain',
     '- when the registry does not fully cover the task, create generated_skill_briefs as inline non-executable protocols',
@@ -341,6 +351,17 @@ function normalizeGeneratedSkillBriefs(rows = []) {
   return out.slice(0, 3);
 }
 
+function inferPlannerRole(raw = {}) {
+  const item = asObject(raw);
+  const value = [item.role, item.role_id, item.roleId, item.name, item.display_name, item.agent_name, item.purpose, item.goal, item.description, item.model].filter(Boolean).join(' ').toLowerCase();
+  if (/(^|[^a-z])(builder|coder|developer|implementer|frontend|backend|fullstack|engineer)([^a-z]|$)|구현|코더|개발자|빌더/.test(value)) return 'builder';
+  if (/(^|[^a-z])(reviewer|review|critic|verifier|quality|qa)([^a-z]|$)|리뷰어|검토|검수|비평|품질/.test(value)) return 'reviewer';
+  if (/(^|[^a-z])(synthesizer|synth|summarizer|summary|writer|delivery)([^a-z]|$)|요약|정리|합성|전달/.test(value)) return 'synthesizer';
+  if (/(^|[^a-z])(operator|coordinator|orchestrator|router|manager)([^a-z]|$)|운영|조정|오퍼레이터/.test(value)) return 'operator';
+  if (/(^|[^a-z])(researcher|scout|analyst|investigator|planner|research)([^a-z]|$)|조사|연구|분석|스카우트/.test(value)) return 'researcher';
+  return cleanId(item.role || item.role_id || item.roleId || 'researcher') || 'researcher';
+}
+
 function normalizePlannerPlan(raw = {}) {
   const row = asObject(raw);
   const rawStructure = row.structure_v2 || row.structureV2;
@@ -354,7 +375,7 @@ function normalizePlannerPlan(raw = {}) {
       const item = asObject(agent);
       return {
         name: clean(item.name || item.display_name || item.agent_name),
-        role: cleanId(item.role || item.role_id || item.roleId || 'researcher') || 'researcher',
+        role: inferPlannerRole(item),
         purpose: clean(item.purpose || item.goal || item.description),
         model: clean(item.model),
         provider: cleanId(item.provider || ''),

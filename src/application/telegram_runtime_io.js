@@ -123,6 +123,7 @@ import {
   resolveActionAgentId,
   resolveActionAgentNameHint,
 } from "../shared/agent_labels.js";
+import { summarizeRoleMemoryEnforcement } from "../knowledge_base/runtime.js";
 import { normalizeActionPlan } from "../chat/actions.js";
 import { expandDetailContext } from "../chat/unfold.js";
 import { ChatRunManager } from "../chat/run_manager.js";
@@ -138,6 +139,7 @@ const {
   GOC_UI_LINK_MODE,
   TELEGRAM_SEND_MAX_BYTES,
   jobs,
+  tracking,
   chatSessionStore,
   gocFallbackByJob,
   runDir,
@@ -308,8 +310,21 @@ async function sendContextInfo(bot, chatId, target, { userId = null, createIfMis
   return info;
 }
 
-async function loadContextDocs(jobId, docNames, maxCharsPerDoc = 3500) {
-  const local = loadLocalContextDocs(jobId, docNames, maxCharsPerDoc);
+async function loadContextDocs(jobId, docNames, maxCharsPerDoc = 3500, options = {}) {
+  const roleContract = options && typeof options === 'object' ? (options.roleContract || null) : null;
+  const enforceLocalOnly = options && typeof options === 'object' ? options.enforceLocalOnly === true : false;
+  const enforcementNote = String(options?.enforcementNote || '').trim();
+  const local = loadLocalContextDocs(jobId, docNames, maxCharsPerDoc, { roleContract });
+  if (enforceLocalOnly) {
+    return [
+      enforcementNote || `### MEMORY CONTRACT ENFORCEMENT
+
+- role-scoped read contract enforced
+- shared compiled GoC context skipped for this agent run`,
+      '',
+      local,
+    ].filter(Boolean).join('\n\n');
+  }
   if (memoryModeWithFallback() !== "goc") return local;
 
   try {
@@ -627,6 +642,133 @@ function inferArtifactKind(relPath = "") {
   return 'file';
 }
 
+function asArrayLocal(raw) {
+  return Array.isArray(raw) ? raw : [];
+}
+
+function asObjectLocal(raw) {
+  return raw && typeof raw === 'object' ? raw : {};
+}
+
+function cleanLowerId(raw = '') {
+  return String(raw || '').trim().toLowerCase();
+}
+
+function uniqueStrings(rows = []) {
+  const seen = new Set();
+  const out = [];
+  for (const entry of asArrayLocal(rows)) {
+    const value = String(entry || '').trim();
+    const key = value.toLowerCase();
+    if (!value || seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
+
+function resolveArtifactDeliveryContract(jobId, runtime = null) {
+  const cleanJobId = String(jobId || '').trim();
+  const activeTeam = runtime?.activeTeamConfig && typeof runtime.activeTeamConfig === 'object'
+    ? runtime.activeTeamConfig
+    : null;
+  if (!cleanJobId || !activeTeam) {
+    return {
+      enabled: false,
+      warnings: [],
+      artifact_publishers: [],
+      final_owner_label: '',
+      final_owner_can_publish_final_answer: true,
+      bundle_allowed: true,
+      send_allowed: true,
+      required_surface_ids: [],
+    };
+  }
+  let profile = null;
+  try {
+    profile = tracking.loadProfile(cleanJobId);
+  } catch {
+    profile = null;
+  }
+  const structure = activeTeam?.structure_v2 && typeof activeTeam.structure_v2 === 'object' ? activeTeam.structure_v2 : {};
+  const participants = asArrayLocal(structure?.participants);
+  const agents = asArrayLocal(activeTeam?.agents);
+  const finalOwnerId = cleanLowerId(
+    structure?.control_policy?.final_answer_owner_participant_id
+    || structure?.control_policy?.finalAnswerOwnerParticipantId
+    || structure?.topology?.final_participant_id
+    || structure?.topology?.finalParticipantId
+    || ''
+  );
+  const finalOwnerName = String(activeTeam?.interaction_spec?.final_answer_owner || '').trim();
+  const participantById = new Map();
+  const participantByName = new Map();
+  for (const row of participants) {
+    const item = asObjectLocal(row);
+    const pid = cleanLowerId(item.participant_id || item.agent_id || item.id || '');
+    const nameKey = cleanLowerId(item.name || item.label || '');
+    if (pid) participantById.set(pid, item);
+    if (nameKey && !participantByName.has(nameKey)) participantByName.set(nameKey, item);
+  }
+  const agentRecords = [];
+  const seen = new Set();
+  const pushAgent = (row = {}) => {
+    const item = asObjectLocal(row);
+    const agentId = cleanLowerId(item.agent_id || item.participant_id || item.id || '');
+    const name = String(item.name || item.label || item.display_label || item.displayLabel || '').trim();
+    const roleId = cleanLowerId(item.role || item.role_id || item.roleId || participantById.get(agentId)?.role || participantByName.get(cleanLowerId(name))?.role || '');
+    const provider = cleanLowerId(item.provider || participantById.get(agentId)?.provider || participantByName.get(cleanLowerId(name))?.provider || '');
+    const key = `${agentId}|${name.toLowerCase()}|${roleId}`;
+    if (!roleId || seen.has(key)) return;
+    seen.add(key);
+    agentRecords.push({ agent_id: agentId, name, role_id: roleId, provider });
+  };
+  for (const row of agents) pushAgent(row);
+  for (const row of participants) pushAgent(row);
+  const summaries = agentRecords.map((agent) => ({
+    ...agent,
+    summary: summarizeRoleMemoryEnforcement({
+      profile,
+      provider: agent.provider,
+      roleId: agent.role_id,
+    }),
+  }));
+  let finalOwner = null;
+  if (finalOwnerId) finalOwner = summaries.find((row) => cleanLowerId(row.agent_id) === finalOwnerId) || null;
+  if (!finalOwner && finalOwnerName) finalOwner = summaries.find((row) => cleanLowerId(row.name) === cleanLowerId(finalOwnerName)) || null;
+  const artifactPublishers = summaries
+    .filter((row) => row.summary?.can_publish_artifact_index)
+    .map((row) => String(row.name || row.agent_id || row.role_id || '').trim())
+    .filter(Boolean);
+  const warnings = [];
+  if (finalOwnerId || finalOwnerName) {
+    if (!finalOwner) warnings.push(`final answer owner를 현재 team roster에서 찾지 못했습니다. (${finalOwnerName || finalOwnerId})`);
+    else if (finalOwner.summary?.can_publish_final_answer !== true) warnings.push(`final answer owner ${finalOwner.name || finalOwner.agent_id}가 final_answer surface를 publish할 수 없습니다.`);
+  }
+  if (artifactPublishers.length === 0) warnings.push('artifact_index publish 권한을 가진 participant가 없어 /send bundle 을 진행할 수 없습니다.');
+  return {
+    enabled: true,
+    warnings,
+    artifact_publishers: uniqueStrings(artifactPublishers),
+    final_owner_label: String(finalOwner?.name || finalOwnerName || finalOwnerId || '').trim(),
+    final_owner_can_publish_final_answer: finalOwner ? finalOwner.summary?.can_publish_final_answer === true : !(finalOwnerId || finalOwnerName),
+    bundle_allowed: artifactPublishers.length > 0,
+    send_allowed: true,
+    required_surface_ids: ['artifact_index', 'final_answer'],
+  };
+}
+
+function formatArtifactDeliveryContractLines(contract = null) {
+  const row = contract && typeof contract === 'object' ? contract : null;
+  if (!row?.enabled) return [];
+  const lines = [`contract: bundle=${row.bundle_allowed ? 'allowed' : 'blocked'} · final_owner=${row.final_owner_label || '(unset)'}`];
+  if (Array.isArray(row.artifact_publishers) && row.artifact_publishers.length > 0) lines.push(`artifact_publishers: ${row.artifact_publishers.join(', ')}`);
+  if (Array.isArray(row.warnings)) {
+    for (const warning of row.warnings.slice(0, 3)) lines.push(`warning: ${String(warning || '').trim()}`);
+  }
+  return lines;
+}
+
 function collectExecutionArtifactPathCandidates(execution = null) {
   const out = [];
   const seen = new Set();
@@ -888,7 +1030,12 @@ function createArtifactBundle(jobId, selections, { artifactIndex = null } = {}) 
   };
 }
 
-async function sendArtifactBundle(bot, chatId, jobId, selections, { replyToMessageId = null, artifactIndex = null } = {}) {
+async function sendArtifactBundle(bot, chatId, jobId, selections, { replyToMessageId = null, artifactIndex = null, runtime = null } = {}) {
+  const contract = resolveArtifactDeliveryContract(jobId, runtime);
+  if (contract?.enabled && contract.bundle_allowed === false) {
+    const details = Array.isArray(contract.warnings) && contract.warnings.length > 0 ? ` ${contract.warnings[0]}` : '';
+    throw new Error(`artifact publish contract blocked: declared artifact_index publisher is required before bundle delivery.${details}`.trim());
+  }
   const bundle = createArtifactBundle(jobId, selections, { artifactIndex });
   if (bundle.size > TELEGRAM_SEND_MAX_BYTES) {
     throw new Error(`bundle is too large for sendDocument (limit=${formatByteSize(TELEGRAM_SEND_MAX_BYTES)}, size=${formatByteSize(bundle.size)})`);
@@ -946,8 +1093,15 @@ function ensureCommandOk(name, result) {
   if (result?.ok) return;
   const exitCode = Number.isInteger(result?.exitCode) ? result.exitCode : -1;
   const details = clip(String(result?.stderr || result?.stdout || "(no output)"), 1500);
+  const interrupted = exitCode === -1 && /(\[aborted\]|cancelled|canceled|interrupt(?:ed|ion)?|superseded by replan|stopped by user)/i.test(details);
+  if (interrupted) {
+    const error = new Error(`${name} interrupted\n${details}`);
+    error.code = 'ECANCELLED';
+    throw error;
+  }
   throw new Error(`${name} failed (exit=${exitCode})\n${details}`);
 }
+
 
 export {
   buildContextInfo,
@@ -963,6 +1117,8 @@ export {
   loadArtifactIndex,
   refreshArtifactIndex,
   formatArtifactIndexText,
+  resolveArtifactDeliveryContract,
+  formatArtifactDeliveryContractLines,
   sendArtifactBySelection,
   sendArtifactBundle,
   sendWorkspaceFileByRelativePath,

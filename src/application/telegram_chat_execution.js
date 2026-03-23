@@ -152,7 +152,7 @@ import { GocExecutionGraphRecorder } from "../chat/goc_execution_graph.js";
 import { mergePreferredRuntimeTeamSnapshot, sanitizeExecutablePlan } from "../chat/route_execution_contract.js";
 import { updateAgentStatus } from "./agent_status_store.js";
 import { detectPatternConflict, applyTemporaryExecutionOverrideToRuntimeSnapshot, buildPatternRecoveryState, inferCompatibilityFallbackState, summarizePatternConflictLines } from "./pattern_conflict_detector.js";
-import { buildAgentKnowledgeBaseGuidance, buildRoleMemoryContract } from "../knowledge_base/runtime.js";
+import { buildAgentKnowledgeBaseGuidance, buildRoleMemoryContract, summarizeRoleMemoryEnforcement, canRolePublishSurface } from "../knowledge_base/runtime.js";
 import { executeToolProxyAction } from "./tool_proxy_runtime.js";
 import { writeGeminiMemoryFile, writeCodexInstructionFile } from "./cli_workspace_contract.js";
 import { normalizeRuntimeExecutionPolicy } from "./runtime_execution_policy.js";
@@ -593,13 +593,160 @@ function buildRoleAwareContextDocList(jobId, { provider = '', roleId = '', fallb
     const profile = tracking.loadProfile(jobId);
     if (!profile) return fallbackDocIds;
     const contract = buildRoleMemoryContract({ profile, provider, roleId, maxReadDocs: 4 });
-    const docIds = (Array.isArray(contract.primary_docs) ? contract.primary_docs : contract.read_docs)
-      .map((doc) => String(doc?.doc_id || '').trim().toLowerCase())
-      .filter(Boolean);
+    const orderedDocs = [
+      ...(Array.isArray(contract.primary_docs) ? contract.primary_docs : []),
+      ...(Array.isArray(contract.read_docs) ? contract.read_docs : []),
+    ];
+    const seen = new Set();
+    const docIds = orderedDocs
+      .map((doc) => String(doc?.doc_id || doc?.surface_id || '').trim().toLowerCase())
+      .filter(Boolean)
+      .filter((docId) => {
+        if (seen.has(docId)) return false;
+        seen.add(docId);
+        return true;
+      });
     return docIds.length > 0 ? docIds : fallbackDocIds;
   } catch {
     return fallbackDocIds;
   }
+}
+
+function buildRoleAwareContextContract(jobId, { provider = '', roleId = '', maxReadDocs = 4 } = {}) {
+  try {
+    const profile = tracking.loadProfile(jobId);
+    if (!profile) return null;
+    return buildRoleMemoryContract({ profile, provider, roleId, maxReadDocs });
+  } catch {
+    return null;
+  }
+}
+
+function normalizeComparableId(value = '') {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+function normalizeStringListLocal(value) {
+  return Array.isArray(value)
+    ? value.map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean)
+    : [];
+}
+
+function resolveRuntimeSnapshotLike(runtime = null) {
+  return runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === 'object'
+    ? runtime.runtimeTeamSnapshot
+    : (runtime?.runtime_team_snapshot && typeof runtime.runtime_team_snapshot === 'object' ? runtime.runtime_team_snapshot : null);
+}
+
+function resolveRuntimeFinalOwnerContract(runtime = null) {
+  const snapshot = resolveRuntimeSnapshotLike(runtime) || {};
+  const teamPlan = snapshot?.team_plan && typeof snapshot.team_plan === 'object' ? snapshot.team_plan : {};
+  const structure = snapshot?.structure_v2 && typeof snapshot.structure_v2 === 'object' ? snapshot.structure_v2 : {};
+  const activeTeam = runtime?.activeTeamConfig && typeof runtime.activeTeamConfig === 'object' ? runtime.activeTeamConfig : {};
+  const interaction = teamPlan?.interaction_spec && typeof teamPlan.interaction_spec === 'object'
+    ? teamPlan.interaction_spec
+    : (activeTeam?.interaction_spec && typeof activeTeam.interaction_spec === 'object' ? activeTeam.interaction_spec : {});
+  const controlPolicy = structure?.control_policy && typeof structure.control_policy === 'object' ? structure.control_policy : {};
+  const topology = structure?.topology && typeof structure.topology === 'object' ? structure.topology : {};
+  return {
+    owner_label: String(interaction?.final_answer_owner || '').trim(),
+    owner_participant_id: String(controlPolicy?.final_answer_owner_participant_id || topology?.final_participant_id || '').trim().toLowerCase(),
+  };
+}
+
+function summarizeAgentPublishContract(jobId, { runtime = null, agentId = '', agent = null, provider = '', roleId = '', displayLabel = '' } = {}) {
+  const profile = tracking.loadProfile(jobId);
+  const publishSummary = summarizeRoleMemoryEnforcement({ profile, provider, roleId });
+  const runtimeAgent = findAgentConfigInRuntime(agentId, runtime) || (agent && typeof agent === 'object' ? agent : {});
+  const policy = runtimeAgent?.context_policy && typeof runtimeAgent.context_policy === 'object'
+    ? runtimeAgent.context_policy
+    : (runtimeAgent?.contextPolicy && typeof runtimeAgent.contextPolicy === 'object' ? runtimeAgent.contextPolicy : {});
+  const writes = policy?.writes && typeof policy.writes === 'object' ? policy.writes : {};
+  const publishTargets = normalizeStringListLocal(writes.publish_targets || writes.publishTargets || []);
+  const finalOwner = resolveRuntimeFinalOwnerContract(runtime);
+  const identityTokens = [
+    agentId,
+    displayLabel,
+    runtimeAgent?.name,
+    runtimeAgent?.display_label,
+    runtimeAgent?.displayLabel,
+    runtimeAgent?.role,
+    runtimeAgent?.role_id,
+    runtimeAgent?.roleId,
+    runtimeAgent?.template_id,
+    runtimeAgent?.templateId,
+    runtimeAgent?.participant_id,
+    runtimeAgent?.participantId,
+  ].map((entry) => normalizeComparableId(entry)).filter(Boolean);
+  const ownerTokens = [
+    finalOwner.owner_label,
+    finalOwner.owner_participant_id,
+  ].map((entry) => normalizeComparableId(entry)).filter(Boolean);
+  const isFinalOwner = ownerTokens.length === 0
+    ? true
+    : ownerTokens.some((token) => identityTokens.includes(token));
+  return {
+    provider: String(provider || '').trim().toLowerCase(),
+    role_id: String(roleId || '').trim().toLowerCase(),
+    publish_surface_ids: Array.isArray(publishSummary.publish_surface_ids) ? publishSummary.publish_surface_ids : [],
+    publish_targets: publishTargets,
+    can_publish_final_answer: canRolePublishSurface({ profile, provider, roleId, surfaceId: 'final_answer' }),
+    can_publish_artifact_index: canRolePublishSurface({ profile, provider, roleId, surfaceId: 'artifact_index' }),
+    final_owner_required: Boolean(finalOwner.owner_label || finalOwner.owner_participant_id),
+    final_owner_label: finalOwner.owner_label || finalOwner.owner_participant_id || '',
+    is_final_owner: isFinalOwner,
+  };
+}
+
+function enforceAgentPublishContract(jobId, { runtime = null, agentId = '', agent = null, provider = '', roleId = '', displayLabel = '', finalSynthesis = false, requestedSurface = '' } = {}) {
+  const contract = summarizeAgentPublishContract(jobId, { runtime, agentId, agent, provider, roleId, displayLabel });
+  const targetSurface = String(requestedSurface || '').trim().toLowerCase().replace(/\.md$/i, '');
+  const reasons = [];
+  if (targetSurface === 'artifact_index' && !contract.can_publish_artifact_index) {
+    reasons.push('declared artifact publish surface가 없습니다');
+  }
+  if (targetSurface === 'final_answer' && !contract.can_publish_final_answer) {
+    reasons.push('declared final_answer publish surface가 없습니다');
+  }
+  if (finalSynthesis) {
+    if (!contract.can_publish_final_answer) reasons.push('final synthesis는 final_answer surface가 선언된 agent만 수행할 수 있습니다');
+    if (contract.final_owner_required && !contract.is_final_owner) {
+      reasons.push(`현재 final_answer_owner는 ${contract.final_owner_label || '다른 participant'} 입니다`);
+    }
+  }
+  if (reasons.length === 0) {
+    return {
+      allowed: true,
+      summary: '',
+      contract,
+    };
+  }
+  return {
+    allowed: false,
+    summary: `publish contract blocked: ${reasons.join('; ')}`,
+    contract,
+  };
+}
+
+async function loadRoleScopedContextDocs(jobId, { provider = '', roleId = '', fallbackDocIds = ['plan', 'research'], maxCharsPerDoc = 3500 } = {}) {
+  const cleanRoleId = String(roleId || '').trim().toLowerCase();
+  const cleanProvider = String(provider || '').trim().toLowerCase();
+  const docNames = buildRoleAwareContextDocList(jobId, { provider: cleanProvider, roleId: cleanRoleId, fallbackDocIds });
+  const contract = buildRoleAwareContextContract(jobId, { provider: cleanProvider, roleId: cleanRoleId, maxReadDocs: 4 });
+  const enforcement = summarizeRoleMemoryEnforcement({ profile: tracking.loadProfile(jobId), provider: cleanProvider, roleId: cleanRoleId });
+  return loadContextDocs(jobId, docNames, maxCharsPerDoc, {
+    roleContract: contract,
+    enforceLocalOnly: !!contract,
+    enforcementNote: [
+      '### MEMORY CONTRACT ENFORCEMENT',
+      '',
+      '- role-scoped read contract enforced',
+      '- shared compiled GoC context skipped for this agent run',
+      `- readable surfaces: ${(enforcement.read_surface_ids || []).join(', ') || '(none)'}`,
+      `- writable surfaces: ${(enforcement.write_surface_ids || []).join(', ') || '(none)'}`,
+      `- publish surfaces: ${(enforcement.publish_surface_ids || []).join(', ') || '(none)'}`,
+    ].join('\n'),
+  });
 }
 
 function appendRoleAwareTracking(jobId, markdown, { provider = '', roleId = '', purpose = 'worklog', fallbackDoc = 'progress', requestedDoc = '' } = {}) {
@@ -711,8 +858,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const concurrencyKey = String(opts.concurrencyKey || "").trim() || `job:${String(jobId || "").trim()}`;
   const preferredModel = String(opts.model || "").trim();
   const roleMemo = memory.getAgentRole("gemini");
-  const ctxDocNames = buildRoleAwareContextDocList(jobId, { provider: 'gemini', roleId: String(opts.roleId || 'researcher').trim().toLowerCase(), fallbackDocIds: ['plan', 'research', 'progress'] });
-  const ctx = await loadContextDocs(jobId, ctxDocNames, 2600);
+  const ctx = await loadRoleScopedContextDocs(jobId, { provider: 'gemini', roleId: String(opts.roleId || 'researcher').trim().toLowerCase(), fallbackDocIds: ['plan', 'research', 'progress'], maxCharsPerDoc: 2600 });
   const workspacePath = runWorkspaceDir(jobId);
   const providerOptions = opts.providerOptions && typeof opts.providerOptions === 'object'
     ? opts.providerOptions
@@ -826,8 +972,7 @@ async function codexImplement(jobId, instruction, signal = null, opts = {}) {
     });
   const credentialEnv = resolveCredentialEnvForChat(chatSessionStore, opts.chatId || '');
   const roleMemo = memory.getAgentRole("codex");
-  const ctxDocNames = buildRoleAwareContextDocList(jobId, { provider: 'codex', roleId: String(opts.roleId || 'builder').trim().toLowerCase(), fallbackDocIds: ['plan', 'progress', 'research'] });
-  const ctx = await loadContextDocs(jobId, ctxDocNames, 3200);
+  const ctx = await loadRoleScopedContextDocs(jobId, { provider: 'codex', roleId: String(opts.roleId || 'builder').trim().toLowerCase(), fallbackDocIds: ['plan', 'progress', 'research'], maxCharsPerDoc: 3200 });
   const workspacePath = runWorkspaceDir(jobId);
   const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 5 });
   const kbContract = buildAgentKnowledgeBaseBlock(jobId, { provider: "codex", roleId: String(opts.roleId || 'builder').trim().toLowerCase(), agentId: String(opts.agentId || 'codex').trim().toLowerCase() || 'codex', detailLevel: "compact" });
@@ -3385,6 +3530,7 @@ async function runSupervisorChat(
           });
         },
         runtimeTeamSnapshot,
+        activeTeam: runtime?.activeTeamConfig || null,
       });
       routePlan = sanitizeSupervisorRoutePlan(rawRoutePlan, {
         message: lastUserText,
@@ -3505,6 +3651,8 @@ async function runSupervisorChat(
       const planPreviewMessageId = await sendPlanPreviewMessage(bot, chatId, {
         actions: planActions,
         replyToMessageId: currentTurnAckMessageId,
+        activeTeam: runtime?.activeTeamConfig || null,
+        runtimeTeamSnapshot,
       });
       if (Number.isFinite(Number(planPreviewMessageId)) && Number(planPreviewMessageId) > 0) {
         chatSessionStore.upsert(chatId, {
@@ -4338,6 +4486,34 @@ async function executeAgentRun(
     const model = String(agent.model || provider).trim() || provider;
     const rolePrompt = String(agent.prompt || "").trim();
     const roleId = String(act?.inputs?.role_id || act?.inputs?.roleId || agent.role || agent.role_id || agent.roleId || "").trim().toLowerCase();
+    const displayLabel = String(act?.inputs?.display_label || act?.inputs?.displayLabel || act?.inputs?.agent_name || act?.inputs?.agentName || agent?.name || agentId).trim();
+    const publishContractCheck = enforceAgentPublishContract(jobId, {
+      runtime,
+      agentId,
+      agent,
+      provider,
+      roleId,
+      displayLabel,
+      finalSynthesis: act?.inputs?.final_synthesis === true,
+      requestedSurface: act?.inputs?.final_synthesis === true ? 'final_answer' : '',
+    });
+    if (!publishContractCheck.allowed) {
+      tracking.append(jobId, 'decisions', [
+        '## publish contract blocked',
+        `- agent: ${displayLabel || agentId}`,
+        `- provider: ${provider}`,
+        `- role: ${roleId || '(unknown)'}`,
+        `- publish_surfaces: ${(publishContractCheck.contract.publish_surface_ids || []).join(', ') || '(none)'}`,
+        `- publish_targets: ${(publishContractCheck.contract.publish_targets || []).join(', ') || '(none)'}`,
+        `- final_owner_required: ${publishContractCheck.contract.final_owner_required ? 'true' : 'false'}`,
+        publishContractCheck.contract.final_owner_label ? `- final_owner: ${publishContractCheck.contract.final_owner_label}` : '',
+        `- reason: ${publishContractCheck.summary}`,
+      ].filter(Boolean).join('\n'));
+      const error = new Error(publishContractCheck.summary);
+      error.code = 'EPUBLISHCONTRACT';
+      error.publish_contract = publishContractCheck.contract;
+      throw error;
+    }
     const agencyRoleOverlay = resolveAgencyRoleOverlay(
       act?.inputs?.agency_role_overlay,
       act?.inputs?.agencyRoleOverlay,
@@ -4378,7 +4554,7 @@ ${taskBody}`
 
     const runProvider = async (providerPrompt) => {
       if (provider === "chatgpt") {
-        await sendChatGPTPrompt(bot, chatId, jobId, providerPrompt);
+        await routePlanning.sendChatGPTPrompt(bot, chatId, jobId, providerPrompt);
         return `ChatGPT prompt generated by agent=${agentId}\nquestion=${providerPrompt}`;
       }
 
@@ -4799,7 +4975,7 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
 
     if (act.type === "chatgpt_prompt") {
       const q = String(act.question || "현재 상태에서 다음 단계 action plan(JSON)을 제안해줘.").trim();
-      await sendChatGPTPrompt(bot, chatId, jobId, q);
+      await routePlanning.sendChatGPTPrompt(bot, chatId, jobId, q);
       askedChatGPT = true;
       continue;
     }
@@ -5108,7 +5284,7 @@ ${FENCE}`);
     if (act.type === "chatgpt_prompt") {
       const q = String(act.question || act.prompt || "").trim();
       if (!q) continue;
-      await sendChatGPTPrompt(bot, chatId, jobId, q);
+      await routePlanning.sendChatGPTPrompt(bot, chatId, jobId, q);
       continue;
     }
 

@@ -42,7 +42,7 @@ test('chat session store compacts heavy team and route state before persisting',
           knowledge_base_profile: { giant: 'e'.repeat(5000) },
           structure_v2: {
             participants: [
-              { participant_id: 'service_builder', role_id: 'builder', label: 'Service Builder', provider: 'codex', model: 'gpt-5-codex' },
+              { participant_id: 'service_builder', role_id: 'builder', label: 'Service Builder', provider: 'codex', model: 'gpt-5-codex', purpose: '실제 변경안과 실행 계획을 만든다.', recommended_tool_ids: ['workspace_fs', 'shell'], context_policy: { reads: { grants: ['upstream_results'] } } },
             ],
             topology: {
               pattern: 'workflow',
@@ -97,6 +97,11 @@ test('chat session store compacts heavy team and route state before persisting',
     assert.equal(Boolean(session.team_config.pending_team.knowledge_base_profile), false);
     assert.equal(Boolean(session.team_config.pending_team.agents[0].source_agent), false);
     assert.equal(Boolean(session.team_config.pending_team.structure_v2.runtime_state), false);
+    assert.equal(session.team_config.pending_team.structure_v2.participants[0].role, 'builder');
+    assert.equal(session.team_config.pending_team.structure_v2.participants[0].role_id, 'builder');
+    assert.equal(session.team_config.pending_team.structure_v2.participants[0].purpose.includes('실제 변경안과 실행 계획'), true);
+    assert.deepEqual(session.team_config.pending_team.structure_v2.participants[0].recommended_tool_ids, ['workspace_fs', 'shell']);
+    assert.deepEqual(session.team_config.pending_team.structure_v2.participants[0].context_policy, { reads: { grants: ['upstream_results'] } });
     assert.equal(Boolean(session.last_route.runtime_team_snapshot.team_plan), false);
     assert.equal(session.last_route.actions[0].goal.length <= 221, true);
     assert.equal(session.pending_user_request.prompt.length <= 321, true);

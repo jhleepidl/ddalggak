@@ -107,7 +107,7 @@ export function summarizeSelectionInsights({ runtimeTeamSnapshot = null, actions
     const subject = clean(row.subject_id || row.subjectId || 'team_plan');
     const reason = clip(row.reason || row.selection_reason || row.selectionReason, 160);
     if (!reason) continue;
-    if (subject === 'team_plan' || subject === 'interaction_spec' || subject === 'supervisor_runtime') {
+    if (subject === 'team_plan' || subject === 'interaction_spec' || subject === 'supervisor_runtime' || subject === 'route_contract' || subject === 'active_team') {
       const line = `${subject}: ${reason}`;
       if (!selectedSeen.has(line)) {
         selectedSeen.add(line);
@@ -136,6 +136,19 @@ export function summarizeSelectionInsights({ runtimeTeamSnapshot = null, actions
   if (clean(task.review_policy)) plannerFacts.push(`review_policy=${clean(task.review_policy)}`);
   const pattern = clean(snapshot.blueprint_summary?.execution_pattern || snapshot.execution_graph?.pattern || snapshot.team_plan?.interaction_spec?.execution_pattern || '');
   if (pattern) plannerFacts.push(`pattern=${pattern}`);
+  const routeContract = snapshot.route_contract && typeof snapshot.route_contract === 'object' ? snapshot.route_contract : {};
+  const publishReadiness = snapshot.blueprint_summary?.publish_contract_readiness && typeof snapshot.blueprint_summary.publish_contract_readiness === 'object'
+    ? snapshot.blueprint_summary.publish_contract_readiness
+    : {};
+  const memoryContract = snapshot.blueprint_summary?.memory_contract_enforcement && typeof snapshot.blueprint_summary.memory_contract_enforcement === 'object'
+    ? snapshot.blueprint_summary.memory_contract_enforcement
+    : {};
+  if (clean(routeContract.final_owner || publishReadiness.final_owner || '')) plannerFacts.push(`final_owner=${clean(routeContract.final_owner || publishReadiness.final_owner)}`);
+  if (clean(routeContract.final_owner_role || '')) plannerFacts.push(`final_owner_role=${clean(routeContract.final_owner_role)}`);
+  if (typeof routeContract.final_answer_publish_ok === 'boolean' || typeof publishReadiness.final_answer_publish_ok === 'boolean') plannerFacts.push(`final_publish=${(routeContract.final_answer_publish_ok ?? publishReadiness.final_answer_publish_ok) === true ? 'ready' : 'blocked'}`);
+  if (typeof routeContract.artifact_publish_ok === 'boolean' || typeof publishReadiness.artifact_publish_ok === 'boolean') plannerFacts.push(`artifact_publish=${(routeContract.artifact_publish_ok ?? publishReadiness.artifact_publish_ok) === true ? 'ready' : 'blocked'}`);
+  if (clean(memoryContract.read_scope || '')) plannerFacts.push(`memory_contract=${clean(memoryContract.read_scope)}`);
+  for (const fact of uniqueStrings(routeContract.planner_facts || [])) plannerFacts.push(fact);
 
   return {
     selected: selected.slice(0, 8),
