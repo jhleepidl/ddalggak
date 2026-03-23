@@ -29,4 +29,6 @@ test('buildTeamTransitionGuardrails marks destructive participant and role loss'
   assert.equal(out.issues.removed_agents.includes('Repo Scout'), true);
   assert.equal(out.issues.lost_role_coverage.includes('reviewer'), true);
   assert.match(out.warnings.join('\n'), /에이전트 제거:/);
+  assert.equal(out.recommended_action, 'review_and_confirm_apply');
+  assert.match(String(out.summary_line || ''), /재확인/);
 });

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { resolveRoutingContractSummary, resolveRouteContractHeuristic, formatRouteReadiness, alignPlanActionsToRouteContract } from '../src/application/route_contract.js';
+import { resolveRoutingContractSummary, resolveRouteContractHeuristic, formatRouteReadiness, formatRouteReason, alignPlanActionsToRouteContract } from '../src/application/route_contract.js';
 import { summarizeSelectionInsights } from '../src/application/team_execution_insights.js';
 import { normalizeRuntimeTeamSnapshot } from '../src/application/runtime_metadata.js';
 
@@ -161,4 +161,12 @@ test('alignPlanActionsToRouteContract reranks first run_agent toward final publi
   assert.equal(aligned.adjusted, true);
   assert.equal(aligned.plan.actions[0].agent_id, 'synth');
   assert.equal(aligned.plan.route_contract_adjusted, true);
+});
+
+
+test('formatRouteReason explains unset final owner compactly', () => {
+  const summary = resolveRoutingContractSummary({
+    activeTeam: { structure_v2: { ...structure, topology: { pattern: 'pipeline' }, control_policy: {} } },
+  });
+  assert.match(formatRouteReason(summary, { compact: true }), /final owner/);
 });

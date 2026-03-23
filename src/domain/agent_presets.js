@@ -49,6 +49,9 @@ export function normalizeAgentPreset(raw = {}) {
     instructions_ref: normalizeText(row.instructions_ref || row.instructionsRef) || undefined,
     prompt_text: normalizeText(row.prompt_text || row.promptText) || undefined,
     collaboration_defaults: asObject(row.collaboration_defaults ?? row.collaborationDefaults),
+    template_family: normalizeText(row.template_family || row.templateFamily) || undefined,
+    benchmark_source: normalizeText(row.benchmark_source || row.benchmarkSource) || undefined,
+    benchmark_notes: normalizeText(row.benchmark_notes || row.benchmarkNotes, { lower: false }) || undefined,
     source_dir: normalizeText(row.source_dir || row.sourceDir) || undefined,
   };
 }

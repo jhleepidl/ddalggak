@@ -10,3 +10,14 @@ test('ensureCommandOk surfaces aborted provider runs as cancelled instead of gen
     return true;
   });
 });
+
+
+test('ensureCommandOk detects abort markers even when they appear near the tail of long provider output', () => {
+  const longStderr = `${'x'.repeat(2200)}
+[aborted]`;
+  assert.throws(() => ensureCommandOk('Codex', { ok: false, exitCode: -1, stderr: longStderr }), (error) => {
+    assert.equal(error.code, 'ECANCELLED');
+    assert.match(String(error.message || ''), /interrupted/i);
+    return true;
+  });
+});

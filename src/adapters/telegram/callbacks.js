@@ -10,6 +10,35 @@ import { buildChatStatusCard } from '../../application/telegram_runtime_ui.js';
 import { loadArtifactIndex, formatArtifactIndexText, resolveArtifactDeliveryContract, formatArtifactDeliveryContractLines } from '../../application/telegram_runtime_io.js';
 import { buildPreviewAgentIndex, buildQueuedAgentStatusFromActions, buildRoutedDashboardText } from './preview_formatting.js';
 
+
+async function sendChunkedStatusCard(bot, chatId, card = {}, sendLong) {
+  const text = String(card?.text || '').trim() || '(empty)';
+  const replyMarkup = card?.reply_markup && typeof card.reply_markup === 'object' ? card.reply_markup : null;
+  const TELEGRAM_TEXT_LIMIT = 3900;
+  if (!replyMarkup || text.length <= TELEGRAM_TEXT_LIMIT) {
+    if (replyMarkup) {
+      await bot.sendMessage(chatId, text, { reply_markup: replyMarkup });
+    } else {
+      await sendLong(bot, chatId, text);
+    }
+    return;
+  }
+  const parts = [];
+  let remaining = text;
+  while (remaining.length > TELEGRAM_TEXT_LIMIT) {
+    let cut = remaining.lastIndexOf('\n', TELEGRAM_TEXT_LIMIT);
+    if (cut < 1200) cut = TELEGRAM_TEXT_LIMIT;
+    parts.push(remaining.slice(0, cut).trim());
+    remaining = remaining.slice(cut).trim();
+  }
+  if (remaining) parts.push(remaining);
+  for (const part of parts.slice(0, -1)) {
+    await bot.sendMessage(chatId, part);
+  }
+  await bot.sendMessage(chatId, parts[parts.length - 1], { reply_markup: replyMarkup });
+}
+
+
 export function createTelegramCallbackQueryHandler(deps = {}) {
   const telegramUi = deps.telegramUi || {};
   const runtimeOps = deps.runtimeOps || {};
@@ -150,11 +179,7 @@ ${contractLines.join('\n')}`);
           const detail = data === 'chat_status:full' ? 'full' : (data === 'chat_status:recent' ? 'recent' : (data === 'chat_status:prompt' ? 'prompt' : 'compact'));
           const card = buildChatStatusCard(chatId, runtime, { detail });
           await bot.answerCallbackQuery(q.id, { text: detail === 'full' ? 'full status' : (detail === 'recent' ? 'recent activity' : (detail === 'prompt' ? 'prompt status' : 'status')) });
-          if (card.reply_markup) {
-            await bot.sendMessage(chatId, card.text, { reply_markup: card.reply_markup });
-          } else {
-            await sendLong(bot, chatId, card.text);
-          }
+          await sendChunkedStatusCard(bot, chatId, card, sendLong);
           return;
         }
 

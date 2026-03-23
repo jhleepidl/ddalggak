@@ -45,6 +45,18 @@ export function collectRuntimeAvailableToolIds(runtime = null) {
 
 function collectImpliedRuntimeToolIds(runtime = null) {
   if (!runtime || typeof runtime !== 'object') return [];
+  const implied = new Set();
+  const mode = cleanId(runtime?.mode || runtime?.runtime_mode || runtime?.runtimeAuthority?.mode || runtime?.runtime_authority?.mode || '');
+  const hasJobBinding = Boolean(cleanId(runtime?.jobId || runtime?.currentJobId || runtime?.job_id));
+  const hasWorkspaceCatalog = [...asArray(runtime?.tools), ...asArray(runtime?.toolsCatalog), ...asArray(runtime?.tools_catalog)]
+    .some((row) => cleanId(row?.id || row?.tool_id || row?.toolId || row?.name) === 'workspace_fs');
+  if (hasWorkspaceCatalog || hasJobBinding || ['local', 'standalone'].includes(mode)) {
+    implied.add('read_only_fs');
+    implied.add('workspace_fs');
+    implied.add('write_file');
+    implied.add('create_file');
+    implied.add('save_file');
+  }
   const agents = [
     ...asArray(runtime?.agents),
     ...asArray(runtime?.runtime_agents),
@@ -53,7 +65,7 @@ function collectImpliedRuntimeToolIds(runtime = null) {
     ...asArray(runtime?.runtime_team_snapshot?.agents),
   ];
   const hasCodexAgent = agents.some((row) => cleanId(row?.provider) === 'codex');
-  if (!hasCodexAgent) return [];
+  if (!hasCodexAgent) return [...implied];
   const rawPolicy = runtime?.activeTeamConfig?.structure_v2?.control_policy?.runtime_execution
     || runtime?.activeTeamConfig?.runtime_execution
     || runtime?.runtimeTeamSnapshot?.structure_v2?.control_policy?.runtime_execution
@@ -66,8 +78,13 @@ function collectImpliedRuntimeToolIds(runtime = null) {
   const runtimeExecutionPolicy = normalizeRuntimeExecutionPolicy(rawPolicy);
   const codexOptions = resolveProviderRuntimeOptions({ runtimeExecutionPolicy, provider: 'codex' });
   const sandboxMode = cleanId(codexOptions?.sandboxMode || '');
-  if (!['workspace-write', 'danger-full-access'].includes(sandboxMode)) return [];
-  return ['workspace_fs', 'write_file', 'create_file', 'save_file'];
+  if (['workspace-write', 'danger-full-access'].includes(sandboxMode)) {
+    implied.add('workspace_fs');
+    implied.add('write_file');
+    implied.add('create_file');
+    implied.add('save_file');
+  }
+  return [...implied];
 }
 
 export function collectFallbackKnownToolIds(registry = null) {

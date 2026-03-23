@@ -98,6 +98,9 @@ export function hasExplicitSkillDomainMatch({ skill = {}, skillId = '', text = '
   if (resolvedSkillId === 'skill.run_trace_debugging.v1') {
     return /debug|trace|stalled|queued|reroute|run|실행|큐|로그|오류|버그/.test(haystack);
   }
+  if (resolvedSkillId === 'skill.deep_research_workflow.v1') {
+    return /deep research|literature|survey|evidence map|briefing|source cluster|논문|문헌|브리핑|출처 맵/.test(haystack);
+  }
 
   if (!requiresExplicitDomainMatch(skill)) return true;
 

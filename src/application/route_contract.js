@@ -290,6 +290,26 @@ export function alignPlanActionsToRouteContract({
   };
 }
 
+
+export function formatRouteReason(summary = null, { compact = false } = {}) {
+  const row = summary && typeof summary === 'object' ? summary : null;
+  if (!row?.available) return '';
+  const owner = clean(row.final_owner || row.final_owner_id || '');
+  if (row.final_answer_publish_state === 'unset') {
+    return compact ? 'final owner 미설정' : '현재 팀에 final owner가 선언되지 않아 최종 마감 대신 상태 설명을 우선합니다.';
+  }
+  if (row.final_answer_publish_state === 'blocked' && owner) {
+    return compact ? `${owner} 최종 publish 차단` : `${owner}가 final_answer를 publish할 수 없어 제약 설명/구조 수정이 먼저 필요합니다.`;
+  }
+  if (row.artifact_publish_state === 'blocked') {
+    return compact ? 'artifact publish 차단' : 'artifact_index publisher가 없어 번들 전송보다 구조 설명/수정이 먼저 필요합니다.';
+  }
+  if (owner) {
+    return compact ? `최종 마감 ${owner}` : `현재 팀은 ${owner}를 최종 마감 owner로 사용합니다.`;
+  }
+  return compact ? 'route contract 확인' : '현재 팀 route contract를 확인했습니다.';
+}
+
 export function formatRouteReadiness(summary = null, { compact = false } = {}) {
   const row = summary && typeof summary === 'object' ? summary : null;
   if (!row?.available) return compact ? '' : '(route readiness unavailable)';

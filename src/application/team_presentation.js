@@ -66,6 +66,7 @@ const TOOL_LABELS = {
   web_search: { label: '웹 검색' },
   news_scan: { label: '뉴스 스캔' },
   spreadsheet_reasoning: { label: '스프레드시트 추론' },
+  read_only_fs: { label: '워크스페이스 읽기 전용' },
   workspace_fs: { label: '워크스페이스 파일 읽기/쓰기' },
   code_exec: { label: '코드 실행' },
   context_graph: { label: 'GoC context 그래프' },

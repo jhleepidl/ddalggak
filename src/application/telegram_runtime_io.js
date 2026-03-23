@@ -1092,15 +1092,23 @@ async function sendLong(bot, chatId, text) {
 function ensureCommandOk(name, result) {
   if (result?.ok) return;
   const exitCode = Number.isInteger(result?.exitCode) ? result.exitCode : -1;
-  const details = clip(String(result?.stderr || result?.stdout || "(no output)"), 1500);
-  const interrupted = exitCode === -1 && /(\[aborted\]|cancelled|canceled|interrupt(?:ed|ion)?|superseded by replan|stopped by user)/i.test(details);
+  const rawDetails = String(result?.stderr || result?.stdout || "(no output)");
+  const details = rawDetails.length > 1800
+    ? `${clip(rawDetails.slice(0, 1100), 1100)}
+…(truncated)…
+${clip(rawDetails.slice(-500), 500)}`
+    : clip(rawDetails, 1800);
+  const interrupted = exitCode === -1 && /(\[aborted\]|cancelled|canceled|interrupt(?:ed|ion)?|superseded by replan|stopped by user|aborted by user|user requested stop)/i.test(rawDetails);
   if (interrupted) {
-    const error = new Error(`${name} interrupted\n${details}`);
+    const error = new Error(`${name} interrupted
+${details}`);
     error.code = 'ECANCELLED';
     throw error;
   }
-  throw new Error(`${name} failed (exit=${exitCode})\n${details}`);
+  throw new Error(`${name} failed (exit=${exitCode})
+${details}`);
 }
+
 
 
 export {

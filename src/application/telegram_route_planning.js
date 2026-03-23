@@ -86,7 +86,7 @@ import {
 } from "./team_intent.js";
 import { buildExplicitTeamReconfigurationActions } from "./team_config_diff.js";
 import { normalizeAgentLookupKey } from "./logical_agents.js";
-import { resolveRoutingContractSummary, formatRouteReadiness } from "./route_contract.js";
+import { resolveRoutingContractSummary, formatRouteReadiness, formatRouteReason } from "./route_contract.js";
 import {
   verifyConversationMembershipMutation,
   createMembershipConfirmationError,
@@ -727,7 +727,7 @@ function buildQueuedAgentStatusFromActions(actions = []) {
   return buildQueuedAgentStatusFromActionsShared(actions);
 }
 
-function buildRoutedDashboardText({ actions = [], agentStatus = {}, compact = false, routeReadiness = "" } = {}) {
+function buildRoutedDashboardText({ actions = [], agentStatus = {}, compact = false, routeReadiness = "", routeReason = "" } = {}) {
   const agentIndex = buildTelegramAgentIndex({ actions });
   if (compact) {
     return buildCompactRoutedDashboardTextShared({
@@ -735,6 +735,7 @@ function buildRoutedDashboardText({ actions = [], agentStatus = {}, compact = fa
       agentStatus,
       agentIndex,
       routeReadiness,
+      routeReason,
     });
   }
   return buildRoutedDashboardTextShared({
@@ -745,12 +746,13 @@ function buildRoutedDashboardText({ actions = [], agentStatus = {}, compact = fa
   });
 }
 
-function buildCompactRoutedDashboardText({ actions = [], agentStatus = {}, routeReadiness = "" } = {}) {
+function buildCompactRoutedDashboardText({ actions = [], agentStatus = {}, routeReadiness = "", routeReason = "" } = {}) {
   return buildRoutedDashboardText({
     actions,
     agentStatus,
     compact: true,
     routeReadiness,
+    routeReason,
   });
 }
 
@@ -789,6 +791,7 @@ async function sendPlanPreviewMessage(bot, chatId, { actions = [], replyToMessag
     actions,
     agentStatus,
     routeReadiness,
+    routeReason,
   });
   const options = {
     reply_markup: {
@@ -811,6 +814,10 @@ async function sendPlanPreviewMessage(bot, chatId, { actions = [], replyToMessag
     current_turn_plan_message_id: messageId > 0 ? messageId : null,
   });
   return messageId > 0 ? messageId : null;
+}
+
+function isInterruptLikeErrorText(value = "") {
+  return /(\[aborted\]|cancelled|canceled|interrupt(?:ed|ion)?|superseded by replan|stopped by user|user requested stop)/i.test(String(value || ""));
 }
 
 function shouldSendAgentStatusMessage(chatId, agentId, state) {
@@ -844,6 +851,9 @@ function buildAgentTransitionText({ agentId = "", state = "", goal = "", error =
     return `✅ ${agentDisplay} 완료`;
   }
   if (cleanState === "error") {
+    if (isInterruptLikeErrorText(error)) {
+      return `⏹️ ${agentDisplay} 중단됨: ${clip(String(error || "사용자 요청으로 중단됨"), 240)}`;
+    }
     return `❌ ${agentDisplay} 실패: ${clip(String(error || "unknown error"), 240)}`;
   }
   return `ℹ️ ${agentDisplay} 상태: ${cleanState || "queued"}`;

@@ -89,7 +89,32 @@ function summarizePresets(presetRegistry = null) {
     role: cleanId(preset?.role || preset?.role_id || ''),
     default_skill_ids: asArray(preset?.default_skill_ids).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 5),
     tool_hints: asArray(preset?.selection_features?.tool_hints).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 5),
+    template_family: clean(preset?.template_family || ''),
+    benchmark_source: clean(preset?.benchmark_source || ''),
   })).filter((row) => row.preset_id);
+}
+
+function buildCurrentRosterSummaryLines(team = null) {
+  const agents = asArray(asObject(team).agents).map((agent) => ({
+    name: clean(agent?.name),
+    role: cleanId(agent?.role || agent?.role_id || agent?.roleId || 'researcher') || 'researcher',
+    provider: cleanId(agent?.provider || ''),
+    model: clean(agent?.model || ''),
+    purpose: clean(agent?.purpose),
+  })).filter((agent) => agent.name);
+  if (agents.length === 0) return '(none)';
+  return agents.map((agent, index) => `${index + 1}. ${agent.name} | ${agent.role} | ${agent.provider || 'provider?'} | ${agent.model || 'model?'} | ${agent.purpose || 'purpose?'}`).join('\n');
+}
+
+function normalizeDeclaredPlannerRole(raw = '') {
+  const value = cleanId(raw);
+  if (!value) return '';
+  if (value === 'coder') return 'builder';
+  if (value === 'critic_or_reviewer' || value === 'critic' || value === 'verifier') return 'reviewer';
+  if (value === 'planner') return 'researcher';
+  if (value === 'writer' || value === 'summarizer') return 'synthesizer';
+  if (['researcher', 'builder', 'reviewer', 'synthesizer', 'operator'].includes(value)) return value;
+  return '';
 }
 
 function buildPlannerPrompt({
@@ -277,6 +302,8 @@ function buildRefinementPlannerPrompt({
     '- if multiple upstream agents remain, keep or add a synthesizer unless the user rejects it',
     '- keep publish contract alignment intact: final_answer_owner should remain an actual publish-capable agent, and the resulting team should still have at least one artifact_index publisher',
     '- when you omit an existing agent, that omission is treated as removal; for minor edits like model/provider/tool changes preserve the rest of the roster and its required/optional tools',
+    '- if the instruction only changes the model/provider/tools of one existing agent, keep the roster identical: same agent count, same agent names, same roles, same final_answer_owner, same handoff structure unless the instruction explicitly says otherwise',
+    '- do not summarize preserved agents away in refine mode; untouched agents must still be returned in the full agents array',
     '- prefer existing executable skill ids from the registry for attached_skill_ids',
     '- do not attach irrelevant domain-specific skills (for example KR equity analysis) unless the refinement actually asks for that domain',
     '- when the registry does not fully cover the task, create generated_skill_briefs as inline non-executable protocols',
@@ -319,6 +346,9 @@ function buildRefinementPlannerPrompt({
     '}',
     '',
     `Current team: ${compactPromptJson(current, { maxDepth: 4, maxItems: 14, maxStringChars: 140 })}`,
+    `Current roster count: ${asArray(current.agents).length}`,
+    `Current roster (preserve unless explicit removal):
+${buildCurrentRosterSummaryLines(currentTeam)}`,
     `Refinement instruction: ${clean(instruction)}`,
     '',
     `Supported models: ${models.join(', ')}`,
@@ -353,13 +383,17 @@ function normalizeGeneratedSkillBriefs(rows = []) {
 
 function inferPlannerRole(raw = {}) {
   const item = asObject(raw);
-  const value = [item.role, item.role_id, item.roleId, item.name, item.display_name, item.agent_name, item.purpose, item.goal, item.description, item.model].filter(Boolean).join(' ').toLowerCase();
+  for (const candidate of [item.role, item.role_id, item.roleId]) {
+    const explicit = normalizeDeclaredPlannerRole(candidate);
+    if (explicit) return explicit;
+  }
+  const value = [item.name, item.display_name, item.agent_name, item.purpose, item.goal, item.description, item.model].filter(Boolean).join(' ').toLowerCase();
   if (/(^|[^a-z])(builder|coder|developer|implementer|frontend|backend|fullstack|engineer)([^a-z]|$)|구현|코더|개발자|빌더/.test(value)) return 'builder';
   if (/(^|[^a-z])(reviewer|review|critic|verifier|quality|qa)([^a-z]|$)|리뷰어|검토|검수|비평|품질/.test(value)) return 'reviewer';
   if (/(^|[^a-z])(synthesizer|synth|summarizer|summary|writer|delivery)([^a-z]|$)|요약|정리|합성|전달/.test(value)) return 'synthesizer';
   if (/(^|[^a-z])(operator|coordinator|orchestrator|router|manager)([^a-z]|$)|운영|조정|오퍼레이터/.test(value)) return 'operator';
   if (/(^|[^a-z])(researcher|scout|analyst|investigator|planner|research)([^a-z]|$)|조사|연구|분석|스카우트/.test(value)) return 'researcher';
-  return cleanId(item.role || item.role_id || item.roleId || 'researcher') || 'researcher';
+  return normalizeDeclaredPlannerRole(item.role || item.role_id || item.roleId || 'researcher') || 'researcher';
 }
 
 function normalizePlannerPlan(raw = {}) {
@@ -502,6 +536,7 @@ export async function planTeamRefinementWithCodex({
         components: {
           refinement_instruction: clean(instruction),
           current_team: compactPromptJson(summarizeTeamForPlanner(currentTeam), { maxDepth: 4, maxItems: 12, maxStringChars: 140 }),
+          current_roster_lines: buildCurrentRosterSummaryLines(currentTeam),
           runtime_catalog: compactPromptJson(summarizeRuntimeAgents(runtime), { maxDepth: 3, maxItems: 10, maxStringChars: 120 }),
           skill_registry: compactPromptJson(summarizeSkills(skillRegistry), { maxDepth: 3, maxItems: 10, maxStringChars: 120 }),
           preset_registry: compactPromptJson(summarizePresets(presetRegistry), { maxDepth: 3, maxItems: 10, maxStringChars: 120 }),

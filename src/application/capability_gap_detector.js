@@ -157,7 +157,7 @@ export function detectTeamCapabilityGaps({ team = {}, runtime = null, skillRegis
       if (availableTools.has(toolId)) continue;
       push({
         kind: 'missing_tool',
-        severity: /workspace_fs|write_file|create_file|save_file/.test(toolId) ? 'blocking' : 'advisory',
+        severity: 'advisory',
         agent_name: agentName,
         tool_id: toolId,
         detail: `${agentName}에 선호 ${toolId} 도구가 현재 runtime에 연결되어 있지 않습니다.`,

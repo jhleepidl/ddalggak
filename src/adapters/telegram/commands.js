@@ -30,6 +30,7 @@ import { handleTelegramTeamBlueprintSubcommand } from './team_blueprint_commands
 import { handleTelegramCredentialCommand } from './credential_commands.js';
 import { getCredentialBindingState } from '../../application/credential_binding.js';
 import { buildTeamSchemaOptionsText, buildTeamSchemaOptionsSummaryLines } from '../../shared/team_schema_catalog.js';
+import { buildBenchmarkTeamTemplate, buildBenchmarkTemplateCatalogText } from '../../application/benchmark_team_templates.js';
 
 const HELP_TEXT = [
   "Commands:",
@@ -536,12 +537,35 @@ export function createTelegramCommandHandler(deps = {}) {
       // legacy team blueprint subcommand handlers were removed.
       // /team proposal|install-plan|requirements|export|install|import|pull|push are handled only by handleTelegramTeamBlueprintSubcommand.
       if (sub === 'template') {
-        const baseTeam = teamState.pending_team || teamState.active_team;
-        if (!baseTeam) {
-          await bot.sendMessage(chatId, '먼저 /team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 팀을 제안받아 주세요.');
+        const templateArg = String(rawArgs.replace(/^template\s*/i, '') || '').trim();
+        if (!templateArg || templateArg === 'current') {
+          const baseTeam = teamState.pending_team || teamState.active_team;
+          if (!baseTeam) {
+            await bot.sendMessage(chatId, '먼저 /team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 팀을 제안받아 주세요. 또는 /team template catalog 로 benchmark 템플릿을 볼 수 있습니다.');
+            return true;
+          }
+          await sendLong(bot, chatId, buildTeamConfigurationTemplate(baseTeam));
           return true;
         }
-        await sendLong(bot, chatId, buildTeamConfigurationTemplate(baseTeam));
+        if (/^(catalog|benchmarks?)$/i.test(templateArg)) {
+          await sendLong(bot, chatId, buildBenchmarkTemplateCatalogText());
+          return true;
+        }
+        const match = templateArg.match(/^(?:benchmark|bench)\s+([a-z0-9_.-]+)$/i);
+        if (match) {
+          const bench = buildBenchmarkTeamTemplate(match[1], {});
+          if (!bench) {
+            await bot.sendMessage(chatId, `알 수 없는 benchmark template: ${String(match[1] || '')}. /team template catalog 로 목록을 확인하세요.`);
+            return true;
+          }
+          const validated = validateTeamConfiguration({ ...bench, proposal_mode: 'suggest' }, { runtime: runtimeForTeam });
+          storePendingTeam(chatSessionStore, chatId, validated);
+          await sendLong(bot, chatId, `✅ benchmark template을 pending team으로 불러왔습니다.
+
+${formatTeamProposalMessage(validated, { runtime: runtimeForTeam })}`);
+          return true;
+        }
+        await bot.sendMessage(chatId, 'Usage: /team template | /team template catalog | /team template benchmark <id>');
         return true;
       }
       if (sub === 'validate') {

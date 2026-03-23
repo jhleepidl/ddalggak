@@ -70,6 +70,18 @@ function uniqueIds(values = [], { max = 16 } = {}) {
   return out;
 }
 
+function uniqueBy(values = [], keyFn = (value) => value) {
+  const out = [];
+  const seen = new Set();
+  for (const value of asArray(values)) {
+    const key = cleanId(keyFn(value));
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
+
 function tokenize(text = '') {
   return uniqueIds(clean(text).split(/[^a-z0-9가-힣._-]+/g), { max: 64 });
 }
@@ -387,15 +399,50 @@ function resolveAgentExecutionProfile(agent = {}, planning = {}) {
     ...explicitOptionalToolIds,
   ], { max: 6 });
   const capabilities = deriveCapabilityLabels({ role: agent.role, taskText: planning.taskText, purpose: agent.purpose, name: agent.name });
+  const sanitizedTools = sanitizeAgentToolExpectations({
+    roleId,
+    taskText: planning.taskText,
+    purpose: agent.purpose,
+    requiredToolIds: explicitRequiredToolIds,
+    optionalToolIds: explicitOptionalToolIds,
+    recommendedToolIds,
+  });
   return {
     capabilities,
     attached_skill_ids: attachmentIds,
-    required_tool_ids: explicitRequiredToolIds,
-    optional_tool_ids: explicitOptionalToolIds,
-    recommended_tool_ids: recommendedToolIds,
+    required_tool_ids: sanitizedTools.required_tool_ids,
+    optional_tool_ids: sanitizedTools.optional_tool_ids,
+    recommended_tool_ids: sanitizedTools.recommended_tool_ids,
     matched_preset_id: cleanId(preset?.preset_id || ''),
     matched_preset_name: clean(preset?.display_name || ''),
     slot,
+  };
+}
+
+
+function sanitizeAgentToolExpectations({ roleId = '', taskText = '', purpose = '', requiredToolIds = [], optionalToolIds = [], recommendedToolIds = [] } = {}) {
+  const role = normalizeTeamRole(roleId);
+  const codeLikeTask = /ipynb|notebook|jupyter|file|json|python|script|workspace|코드|노트북|파일|repo|repository|codebase|log/.test(`${taskText} ${purpose}`.toLowerCase());
+  const writeTools = new Set(['workspace_fs', 'write_file', 'create_file', 'save_file']);
+  const required = uniqueIds(requiredToolIds, { max: 6 });
+  const optional = uniqueIds(optionalToolIds, { max: 6 });
+  const recommended = uniqueIds(recommendedToolIds, { max: 6 });
+  if (role === 'builder') {
+    const nextRequired = uniqueIds([...required, ...(codeLikeTask ? ['workspace_fs'] : [])], { max: 6 });
+    const nextOptional = uniqueIds([...optional, ...(codeLikeTask ? ['shell'] : [])], { max: 6 }).filter((toolId) => !nextRequired.includes(toolId));
+    return {
+      required_tool_ids: nextRequired,
+      optional_tool_ids: nextOptional,
+      recommended_tool_ids: uniqueIds([...nextRequired, ...nextOptional, ...recommended], { max: 6 }),
+    };
+  }
+  const nextRequired = required.filter((toolId) => !writeTools.has(toolId));
+  const nextOptional = optional.filter((toolId) => !writeTools.has(toolId));
+  if (codeLikeTask) nextRequired.push('read_only_fs');
+  return {
+    required_tool_ids: uniqueIds(nextRequired, { max: 6 }),
+    optional_tool_ids: uniqueIds(nextOptional, { max: 6 }),
+    recommended_tool_ids: uniqueIds([...nextRequired, ...nextOptional, ...recommended.filter((toolId) => !writeTools.has(toolId))], { max: 6 }),
   };
 }
 
@@ -403,6 +450,8 @@ function agentSpecialtyKey(agent = {}, taskText = '') {
   const local = `${clean(agent?.name)} ${clean(agent?.purpose)}`.toLowerCase();
   if (/counter|skeptic|반대\s*의견|반론|devil'?s advocate|adversarial/i.test(local)) return 'counterpoint';
   if (/lead|thesis|핵심\s*주장/i.test(local)) return 'lead_thesis';
+  if (/(repo\s*scout|codebase|workspace\s*map|repository\s*map|코드베이스|리포\s*스카우트|파일\s*탐색)/i.test(local)) return 'repo_scout';
+  if (/(integration|constraint|risk|통합\s*리스크|외부\s*제약|제약\s*조사)/i.test(local)) return 'integration_research';
   const specialty = inferAgentSpecialty({ name: agent?.name, purpose: agent?.purpose, taskText, skills: [...asArray(agent?.skills), ...asArray(agent?.capabilities), ...asArray(agent?.attached_skill_ids)] });
   return specialty || normalizeTeamRole(agent?.role);
 }
@@ -1422,6 +1471,144 @@ function stripBlueprintFieldsForRefinement(raw = {}) {
   return next;
 }
 
+function buildRefinementBaseTeam(raw = {}, { runtime = null } = {}) {
+  const row = asObject(raw);
+  if (asArray(row.agents).length > 0) {
+    return normalizeTeamConfig(stripBlueprintFieldsForRefinement(row), { runtime });
+  }
+  return normalizeTeamConfig(row, { runtime });
+}
+
+function normalizeRefinementProvider(raw = '') {
+  const value = cleanId(raw);
+  if (!value) return '';
+  if (value === 'openai') return 'chatgpt';
+  if (value === 'chatgpt' || value === 'gemini' || value === 'codex') return value;
+  return '';
+}
+
+function extractRequestedSupportedModel(text = '') {
+  const words = clean(text).toLowerCase().replace(/[^a-z0-9.+-]+/g, ' ').split(/\s+/).filter(Boolean);
+  for (let size = Math.min(5, words.length); size >= 1; size -= 1) {
+    for (let start = 0; start + size <= words.length; start += 1) {
+      const phrase = words.slice(start, start + size).join(' ');
+      const resolved = resolveSupportedModel(phrase);
+      if (resolved) return resolved;
+    }
+  }
+  return '';
+}
+
+function extractRequestedProvider(text = '') {
+  const lower = clean(text).toLowerCase();
+  if (/(^|\W)(gemini)(\W|$)/i.test(lower)) return 'gemini';
+  if (/(^|\W)(codex)(\W|$)/i.test(lower)) return 'codex';
+  if (/(^|\W)(chatgpt|openai)(\W|$)/i.test(lower)) return 'chatgpt';
+  return '';
+}
+
+function findInstructionTargetAgents(team = {}, instruction = '') {
+  const agents = asArray(team?.agents);
+  const text = clean(instruction);
+  const lower = text.toLowerCase();
+  const byName = agents.filter((agent) => {
+    const name = clean(agent?.name);
+    return name && lower.includes(name.toLowerCase());
+  });
+  if (byName.length > 0) return byName;
+  const hits = [];
+  const pushRole = (roleId, patterns = []) => {
+    if (!patterns.some((pattern) => pattern.test(text))) return;
+    const matches = agents.filter((agent) => normalizeTeamRole(agent?.role) === normalizeTeamRole(roleId));
+    if (matches.length === 1) hits.push(matches[0]);
+  };
+  pushRole('synthesizer', [/synthesizer/i, /delivery\s+synthesizer/i, /최종\s*정리/i, /합성/i, /요약/i]);
+  pushRole('reviewer', [/reviewer/i, /implementation\s+reviewer/i, /검토/i, /리뷰/i, /검수/i]);
+  pushRole('builder', [/builder/i, /coder/i, /developer/i, /빌더/i, /구현/i, /코더/i]);
+  pushRole('operator', [/operator/i, /오퍼레이터/i, /운영/i]);
+  pushRole('researcher', [/researcher/i, /scout/i, /research/i, /조사/i, /연구/i, /스카우트/i]);
+  return uniqueBy(hits, (agent) => cleanId(agent?.agent_id || agent?.name));
+}
+
+function isMinorAgentSettingsRefinement(team = {}, instruction = '') {
+  const text = clean(instruction);
+  if (!text) return false;
+  if (/(add|include|remove|delete|drop|replace|swap|rebuild|redesign|새\s*팀|team\s*구성|로스터|participant|pattern|workflow|pipeline|parallel|debate|committee|router|supervisor|handoff|final\s*answer\s*owner|추가|제거|삭제|교체|구조|패턴|워크플로|핸드오프|최종\s*답변\s*담당)/i.test(text)) return false;
+  const hasSettingsSignal = !!(
+    extractRequestedSupportedModel(text)
+    || extractRequestedProvider(text)
+    || /(model|모델|provider|프로바이더|tool|툴|사용해|써줘|바꿔줘|변경|switch|set|use)/i.test(text)
+  );
+  if (!hasSettingsSignal) return false;
+  return findInstructionTargetAgents(team, text).length > 0;
+}
+
+function applyMinorAgentSettingsRefinement({ currentTeam = {}, instruction = '', plannerPlan = null, plannerMetadata = null, runtime = null } = {}) {
+  if (!isMinorAgentSettingsRefinement(currentTeam, instruction)) return null;
+  const targets = findInstructionTargetAgents(currentTeam, instruction);
+  if (targets.length === 0) return null;
+  const targetKeys = new Set(targets.map((agent) => cleanId(agent?.agent_id || agent?.name)).filter(Boolean));
+  const explicitModel = extractRequestedSupportedModel(instruction);
+  const explicitProvider = normalizeRefinementProvider(extractRequestedProvider(instruction) || inferProviderForModel(explicitModel || ''));
+  const plannerAgents = asArray(plannerPlan?.agents).map((agent) => asObject(agent));
+  const targetRoles = new Set(targets.map((agent) => normalizeTeamRole(agent?.role)).filter(Boolean));
+  const nextAgents = asArray(currentTeam?.agents).map((agent) => {
+    const key = cleanId(agent?.agent_id || agent?.name);
+    if (!targetKeys.has(key)) return { ...agent };
+    const exactPlanner = plannerAgents.find((row) => cleanId(row?.name) === cleanId(agent?.name));
+    const roleMatches = plannerAgents.filter((row) => normalizeTeamRole(row?.role) === normalizeTeamRole(agent?.role));
+    const matchedPlanner = exactPlanner || (roleMatches.length === 1 && targetRoles.has(normalizeTeamRole(agent?.role)) ? roleMatches[0] : null);
+    const nextModel = explicitModel || resolveSupportedModel(matchedPlanner?.model || '') || clean(agent?.model);
+    const nextProvider = explicitProvider || normalizeRefinementProvider(matchedPlanner?.provider || '') || cleanId(agent?.provider || inferProviderForModel(nextModel || agent?.model || '') || '');
+    return {
+      ...agent,
+      model: nextModel || clean(agent?.model),
+      provider: nextProvider || cleanId(agent?.provider || ''),
+      required_tool_ids: uniqueIds([
+        ...asArray(agent?.required_tool_ids),
+        ...asArray(matchedPlanner?.required_tool_ids || matchedPlanner?.requiredToolIds),
+      ], { max: 6 }),
+      optional_tool_ids: uniqueIds([
+        ...asArray(agent?.optional_tool_ids),
+        ...asArray(matchedPlanner?.optional_tool_ids || matchedPlanner?.optionalToolIds),
+        ...asArray(matchedPlanner?.recommended_tool_ids || matchedPlanner?.recommendedToolIds),
+      ], { max: 6 }),
+      recommended_tool_ids: uniqueIds([
+        ...asArray(agent?.recommended_tool_ids),
+        ...asArray(agent?.required_tool_ids),
+        ...asArray(agent?.optional_tool_ids),
+        ...asArray(matchedPlanner?.required_tool_ids || matchedPlanner?.requiredToolIds),
+        ...asArray(matchedPlanner?.optional_tool_ids || matchedPlanner?.optionalToolIds),
+        ...asArray(matchedPlanner?.recommended_tool_ids || matchedPlanner?.recommendedToolIds),
+      ], { max: 6 }),
+      context_policy: normalizeContextPolicy(matchedPlanner?.context_policy || matchedPlanner?.contextPolicy || agent?.context_policy, {
+        role: agent?.role,
+        taskText: currentTeam?.task_brief || instruction,
+        purpose: agent?.purpose,
+      }),
+    };
+  });
+  const reasoningSummary = [
+    ...asArray(plannerMetadata?.reasoning_summary || plannerMetadata?.reasoningSummary),
+    'minor agent settings edit preserved the full roster',
+  ].map((entry) => clean(entry)).filter(Boolean).slice(0, 5);
+  return normalizeTeamConfig({
+    ...stripBlueprintFieldsForRefinement(currentTeam),
+    team_name: clean(plannerPlan?.team_name || currentTeam?.team_name || 'refined_team'),
+    composition_mode: currentTeam?.composition_mode || 'freeform',
+    proposal_mode: 'refine',
+    agents: nextAgents,
+    interaction_spec: currentTeam?.interaction_spec,
+    shortcut_policy: normalizeShortcutPolicy(plannerPlan?.shortcut_policy || currentTeam?.shortcut_policy),
+    planner_metadata: normalizePlannerMetadata({
+      ...(asObject(plannerMetadata)),
+      reasoning_summary: reasoningSummary,
+    }),
+    status: 'suggested',
+    updated_at: nowIso(),
+  }, { runtime });
+}
+
 function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames = true } = {}) {
   const input = asObject(raw);
   const explicitStructure = input.kind === 'team_structure_v2'
@@ -1506,9 +1693,14 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
       skills: resolvedCapabilities,
       attached_skill_ids: rawAttachedSkillIds,
       generated_skill_briefs: normalizeGeneratedSkillBriefs(entry.generated_skill_briefs || entry.generatedSkillBriefs || []),
-      required_tool_ids: uniqueIds(entry.required_tool_ids || entry.requiredToolIds || []),
-      optional_tool_ids: uniqueIds(entry.optional_tool_ids || entry.optionalToolIds || []),
-      recommended_tool_ids: uniqueIds(entry.recommended_tool_ids || entry.recommendedToolIds || []),
+      ...sanitizeAgentToolExpectations({
+        roleId: role,
+        taskText: taskBrief,
+        purpose,
+        requiredToolIds: uniqueIds(entry.required_tool_ids || entry.requiredToolIds || []),
+        optionalToolIds: uniqueIds(entry.optional_tool_ids || entry.optionalToolIds || []),
+        recommendedToolIds: uniqueIds(entry.recommended_tool_ids || entry.recommendedToolIds || []),
+      }),
       matched_preset_id: cleanId(entry.matched_preset_id || entry.matchedPresetId || '' ) || undefined,
       matched_preset_name: clean(entry.matched_preset_name || entry.matchedPresetName || '' ) || undefined,
       provider: cleanId(entry.provider || runtimeAgent.provider || inferProviderForModel(model) || ''),
@@ -1878,7 +2070,7 @@ function buildPlannerDrivenRefineAgents({ taskText = '', runtime = null, planner
 
 export async function refineTeamConfigurationAdvanced({ team = {}, instruction = '', runtime = null, planner = null, jobId = '' } = {}) {
   const fallbackRuntime = runtime || { agentsCatalog: asArray(team?.agents).map((agent) => ({ id: agent.agent_id, name: agent.name, role: agent.role, model: agent.model, provider: agent.provider, skills: agent.skills })) };
-  const current = normalizeTeamConfig(team, { runtime: fallbackRuntime });
+  const current = buildRefinementBaseTeam(team, { runtime: fallbackRuntime });
   const instructionText = clean(instruction);
   const taskText = [clean(current.task_brief), instructionText].filter(Boolean).join('\nRefinement instruction: ');
   const activePlanner = typeof planner === 'function' ? planner : planTeamRefinementWithCodex;
@@ -1906,6 +2098,15 @@ export async function refineTeamConfigurationAdvanced({ team = {}, instruction =
     });
     return normalizeTeamConfig(heuristic, { runtime: fallbackRuntime });
   }
+  const minorSettingsRepair = applyMinorAgentSettingsRefinement({
+    currentTeam: current,
+    instruction: instructionText,
+    plannerPlan: plannerResult.plan,
+    plannerMetadata: plannerResult.planner_metadata,
+    runtime: fallbackRuntime,
+  });
+  if (minorSettingsRepair) return minorSettingsRepair;
+
   const agents = buildPlannerDrivenRefineAgents({
     taskText,
     runtime: fallbackRuntime,
@@ -2110,10 +2311,21 @@ export function createFreeformTeamConfiguration({ description = '', runtime = nu
 
 export function refineTeamConfiguration(team = {}, instruction = '', { runtime = null } = {}) {
   const fallbackRuntime = runtime || { agentsCatalog: asArray(team?.agents).map((agent) => ({ id: agent.agent_id, name: agent.name, role: agent.role, model: agent.model, provider: agent.provider, skills: agent.skills })) };
-  const current = normalizeTeamConfig(team, { runtime: fallbackRuntime });
+  const current = buildRefinementBaseTeam(team, { runtime: fallbackRuntime });
   const next = { ...stripBlueprintFieldsForRefinement(current), agents: [...current.agents] };
   const text = clean(instruction);
   const lower = text.toLowerCase();
+  const minorSettingsRepair = applyMinorAgentSettingsRefinement({
+    currentTeam: current,
+    instruction: text,
+    plannerPlan: null,
+    plannerMetadata: {
+      planner_type: 'heuristic_rule_based',
+      reasoning_summary: ['minor agent settings edit preserved the full roster'],
+    },
+    runtime: fallbackRuntime,
+  });
+  if (minorSettingsRepair) return minorSettingsRepair;
   if (/builder\s+추가|builder\s+add|coder\s+agent|coder\s+add|코더\s*agent|코더\s*추가|ipython|jupyter|notebook/i.test(text)) {
     const existingIds = new Set(next.agents.map((agent) => cleanId(agent.agent_id)));
     const builderCandidate = runtimeCatalog(runtime).find((agent) => agent.role === 'builder' && !existingIds.has(agent.id));
@@ -2777,9 +2989,42 @@ export function buildTeamTransitionGuardrails(currentTeam = null, nextTeam = nul
   if (candidatePublishIssues.artifact_publish_missing) warnings.push('artifact publish 차단: artifact_index surface를 publish할 participant가 없습니다.');
 
   const destructive_changes_present = Boolean(removed_agents.length || lost_role_coverage.length || role_changes.length || required_tool_drops.length || removed_memory_surfaces.length || candidatePublishIssues.final_owner_publish_blocked || (currentFinal && currentFinal !== candidateFinal) || (currentOwner && currentOwner !== candidateOwner));
+  const risk_level = destructive_changes_present || warnings.length >= 3 ? 'high' : warnings.length > 0 ? 'medium' : 'low';
+  const change_summary = {
+    removed_agent_count: removed_agents.length,
+    lost_role_count: lost_role_coverage.length,
+    role_change_count: role_changes.length,
+    provider_drop_count: provider_drops.length,
+    model_drop_count: model_drops.length,
+    required_tool_drop_count: required_tool_drops.length,
+    optional_tool_drop_count: optional_tool_drops.length,
+    removed_memory_surface_count: removed_memory_surfaces.length,
+    final_participant_changed: Boolean(currentFinal && currentFinal !== candidateFinal),
+    final_owner_changed: Boolean(currentOwner && currentOwner !== candidateOwner),
+    final_owner_publish_blocked: candidatePublishIssues.final_owner_publish_blocked,
+    artifact_publish_missing: candidatePublishIssues.artifact_publish_missing,
+  };
+  let recommended_action = 'safe_to_apply';
+  let summary_line = '위험한 team 변경이 감지되지 않았습니다.';
+  if (candidatePublishIssues.final_owner_publish_blocked) {
+    recommended_action = 'fix_publish_contract';
+    summary_line = `최종 답변 owner publish가 막혀 있습니다${candidatePublishIssues.final_owner_label ? ` (${candidatePublishIssues.final_owner_label})` : ''}. 먼저 publish contract를 고치세요.`;
+  } else if (candidatePublishIssues.artifact_publish_missing) {
+    recommended_action = 'fix_publish_contract';
+    summary_line = 'artifact_index를 publish할 participant가 없어 산출물 전송이 막힐 수 있습니다.';
+  } else if (risk_level === 'high' && destructive_changes_present) {
+    recommended_action = 'review_and_confirm_apply';
+    summary_line = '이 apply는 역할/도구/메모리 구성을 줄일 수 있어 재확인이 필요합니다.';
+  } else if (warnings.length > 0) {
+    recommended_action = 'review_warnings';
+    summary_line = `경고 ${warnings.length}개가 있어 diff 확인을 권장합니다.`;
+  }
   return {
-    risk_level: destructive_changes_present || warnings.length >= 3 ? 'high' : warnings.length > 0 ? 'medium' : 'low',
+    risk_level,
     warning_count: warnings.length,
+    recommended_action,
+    summary_line,
+    change_summary,
     destructive_changes_present,
     warnings,
     issues: {
@@ -2804,11 +3049,25 @@ export function buildTeamTransitionGuardrails(currentTeam = null, nextTeam = nul
 export function formatTeamTransitionGuardrailLines(guardrails = {}, { maxWarnings = 5 } = {}) {
   const row = guardrails && typeof guardrails === 'object' ? guardrails : {};
   const warnings = asArray(row.warnings).map((entry) => clean(entry)).filter(Boolean).slice(0, Math.max(1, Number(maxWarnings) || 5));
+  const summary = row.change_summary && typeof row.change_summary === 'object' ? row.change_summary : {};
+  const summaryBits = [
+    Number(summary.removed_agent_count || 0) > 0 ? `agents -${Number(summary.removed_agent_count || 0)}` : '',
+    Number(summary.lost_role_count || 0) > 0 ? `roles -${Number(summary.lost_role_count || 0)}` : '',
+    Number(summary.required_tool_drop_count || 0) > 0 ? `required tools -${Number(summary.required_tool_drop_count || 0)}` : '',
+    Number(summary.optional_tool_drop_count || 0) > 0 ? `optional tools -${Number(summary.optional_tool_drop_count || 0)}` : '',
+    Number(summary.removed_memory_surface_count || 0) > 0 ? `memory -${Number(summary.removed_memory_surface_count || 0)}` : '',
+    summary.final_owner_changed ? 'owner changed' : '',
+    summary.final_owner_publish_blocked ? 'final publish blocked' : '',
+    summary.artifact_publish_missing ? 'artifact publish missing' : '',
+  ].filter(Boolean);
   return [
     `- risk: ${cleanId(row.risk_level || 'low') || 'low'}`,
     `- destructive: ${row.destructive_changes_present ? 'yes' : 'no'}`,
+    row.summary_line ? `- summary: ${clean(row.summary_line)}` : '',
+    row.recommended_action ? `- next: ${cleanId(row.recommended_action)}` : '',
+    summaryBits.length > 0 ? `- diff: ${summaryBits.join(' · ')}` : '',
     ...warnings.map((entry) => `- ${entry}`),
-  ];
+  ].filter(Boolean);
 }
 
 export function storePendingTeam(sessionStore, chatId, team = {}) {

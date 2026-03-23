@@ -38,6 +38,9 @@ function inferSkillIds(spec = {}) {
   if (source.includes("context")) {
     optional.push("skill.context_selection_policy.v1");
   }
+  if (source.includes("deep research") || source.includes("literature review") || source.includes("evidence map") || source.includes("survey")) {
+    defaults.push("skill.deep_research_workflow.v1");
+  }
   if (source.includes("membership") || source.includes("reconciliation")) {
     optional.push("skill.thread_team_reconciliation.v1");
   }
@@ -94,6 +97,9 @@ export function compilePresetSpec(spec = {}) {
     instructions_ref: row.instructions_ref || row.instructionsRef,
     prompt_text: row.prompt_text || row.promptText,
     collaboration_defaults: selectionFeatures.collaboration_defaults,
+    template_family: row.template_family || row.templateFamily,
+    benchmark_source: row.benchmark_source || row.benchmarkSource,
+    benchmark_notes: row.benchmark_notes || row.benchmarkNotes,
     source_dir: row.source_dir || row.sourceDir,
   });
 }

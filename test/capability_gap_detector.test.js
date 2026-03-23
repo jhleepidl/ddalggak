@@ -128,3 +128,45 @@ test('detectTeamCapabilityGaps distinguishes required and optional tools', () =>
   assert.ok(gaps.some((gap) => gap.tool_id === 'workspace_fs' && gap.severity === 'blocking'));
   assert.ok(gaps.some((gap) => gap.tool_id === 'shell' && gap.severity === 'advisory'));
 });
+
+
+test('detectTeamCapabilityGaps treats local job-bound runtimes as workspace capable', () => {
+  const gaps = detectTeamCapabilityGaps({
+    team: {
+      agents: [
+        {
+          name: 'Builder',
+          role: 'builder',
+          purpose: '코드와 파일을 수정한다',
+          required_tool_ids: ['workspace_fs'],
+        },
+      ],
+    },
+    runtime: {
+      mode: 'local',
+      jobId: 'job-123',
+      availableToolIds: [],
+      toolsCatalog: [],
+    },
+  });
+
+  assert.equal(gaps.some((gap) => gap.tool_id === 'workspace_fs' && gap.kind === 'missing_tool'), false);
+});
+
+test('detectTeamCapabilityGaps keeps optional file tools advisory for non-build agents', () => {
+  const gaps = detectTeamCapabilityGaps({
+    team: {
+      agents: [
+        {
+          name: 'Researcher',
+          role: 'researcher',
+          purpose: '코드베이스를 읽고 구조를 파악한다',
+          optional_tool_ids: ['workspace_fs', 'write_file'],
+        },
+      ],
+    },
+    runtime: { availableToolIds: [] },
+  });
+
+  assert.equal(gaps.every((gap) => gap.severity === 'advisory'), true);
+});
