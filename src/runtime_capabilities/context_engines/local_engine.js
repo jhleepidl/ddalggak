@@ -97,6 +97,16 @@ function formatPinsSection(pins = null) {
   return entries.join("\n");
 }
 
+function normalizePinText(text = "", maxChars = 320) {
+  return clip(String(text || "").replace(/\s+/g, " ").trim(), maxChars);
+}
+
+function isUserDirectiveLike(text = "") {
+  const clean = normalizePinText(text, 420);
+  if (!clean || clean.length < 8) return false;
+  return /(반드시|절대로|하지\s*마|하지마|아니라|기억해|기억해둬|잊지\s*마|잊지마|must|never|do not|don't|instead|rather than|not\s+.*but)/i.test(clean);
+}
+
 function formatTurns(turns = []) {
   return (Array.isArray(turns) ? turns : [])
     .map((row) => {
@@ -163,6 +173,30 @@ export class LocalContextEngine extends ContextEngineBase {
     const raw = readFileIfExists(p);
     return asObject(parseJsonMaybe(raw));
   }
+
+  _upsertPinnedUserDirective(jobId, text = "") {
+    const clean = normalizePinText(text, 320);
+    if (!jobId || !isUserDirectiveLike(clean)) return null;
+    const p = this._memoryPath(jobId, "pins.json");
+    if (!p) return null;
+    const payload = this._loadPins(jobId);
+    const existing = Array.isArray(payload.items)
+      ? payload.items
+      : (Array.isArray(payload.facts) ? payload.facts : []);
+    const normalizedExisting = existing
+      .map((entry) => normalizePinText(entry, 320))
+      .filter(Boolean);
+    const deduped = [clean, ...normalizedExisting.filter((entry) => entry.toLowerCase() !== clean.toLowerCase())]
+      .slice(0, 8);
+    try {
+      fs.writeFileSync(p, `${JSON.stringify({ items: deduped }, null, 2)}
+`, "utf8");
+      return deduped.length;
+    } catch {
+      return null;
+    }
+  }
+
 
   _loadTurnsFromJsonl(jobId, maxTurns = 8) {
     const p = this._memoryPath(jobId, "turns.jsonl");
@@ -447,6 +481,7 @@ export class LocalContextEngine extends ContextEngineBase {
         role: "user",
         text: userText,
       });
+      this._upsertPinnedUserDirective(jobId, userText);
     }
     if (assistantText) {
       this.appendLocalLog(jobId, "turns.jsonl", {
@@ -477,10 +512,12 @@ export class LocalContextEngine extends ContextEngineBase {
 
     const userMessageText = String(row.userMessageText || "").trim();
     if (userMessageText) {
+      const normalizedStepKind = String(row.stepKind || "").trim().toLowerCase();
       this.appendLocalLog(jobId, "turns.jsonl", {
-        role: String(row.stepKind || "").trim().toLowerCase() === "router" ? "user" : "system",
+        role: normalizedStepKind === "router" ? "user" : "system",
         text: clip(userMessageText, 1000),
       });
+      if (normalizedStepKind === "router") this._upsertPinnedUserDirective(jobId, userMessageText);
     }
     return await super.recordMeta(args);
   }

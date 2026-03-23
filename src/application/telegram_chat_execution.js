@@ -572,20 +572,89 @@ function buildAgentKnowledgeBaseBlock(jobId, { provider = "", roleId = "", agent
   }
 }
 
+function escapePromptRegex(text = '') {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractBracketSection(text = '', label = '', { maxChars = 600, tailLines = 0 } = {}) {
+  const cleanLabel = String(label || '').trim();
+  const cleanText = String(text || '');
+  if (!cleanLabel || !cleanText) return '';
+  const re = new RegExp(`\[${escapePromptRegex(cleanLabel)}\]\n([\s\S]*?)(?=\n\[[A-Z][A-Z_ ]*\]\n|$)`, 'i');
+  const match = cleanText.match(re);
+  if (!match) return '';
+  let body = String(match[1] || '').trim();
+  if (!body) return '';
+  if (Number.isFinite(Number(tailLines)) && Number(tailLines) > 0) {
+    const rows = body.split(/\r?\n/).map((line) => String(line || '').trim()).filter(Boolean);
+    body = rows.slice(Math.max(0, rows.length - Math.max(1, Math.floor(Number(tailLines))))).join('\n');
+  }
+  body = clip(body, Math.max(120, Math.floor(Number(maxChars) || 600)));
+  return body ? `[${cleanLabel}]\n${body}` : '';
+}
+
+function extractDirectiveBullets(text = '', { maxItems = 4, maxChars = 720 } = {}) {
+  const src = String(text || '');
+  if (!src) return '';
+  const directiveRe = /(반드시|절대로|하지\s*마|하지마|아니라|기억해|기억해둬|잊지\s*마|잊지마|must|never|do not|don't|instead|rather than|not\s+.*but)/i;
+  const seen = new Set();
+  const bullets = [];
+  for (const rawLine of src.split(/\r?\n/)) {
+    const cleanLine = String(rawLine || '').trim();
+    if (!cleanLine || !directiveRe.test(cleanLine)) continue;
+    const normalized = cleanLine
+      .replace(/^[-*]\s*/, '')
+      .replace(/^(user|system|assistant|researcher|builder|reviewer|critic|synthesizer|operator)\s*:\s*/i, '')
+      .trim();
+    if (!normalized || normalized.length < 8) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    bullets.push(`- ${clip(normalized, 220)}`);
+    if (bullets.length >= Math.max(1, Math.floor(Number(maxItems) || 4))) break;
+  }
+  return clip(bullets.join('\n'), Math.max(180, Math.floor(Number(maxChars) || 720)));
+}
+
 function compactTaskText(value = '', { maxChars = 2400 } = {}) {
   const text = String(value || '').trim();
   const limit = Number.isFinite(Number(maxChars)) ? Math.max(600, Math.floor(Number(maxChars))) : 2400;
   if (!text || text.length <= limit) return text;
-  const head = clip(text, Math.max(400, Math.floor(limit * 0.75)));
-  const tail = text.slice(Math.max(0, text.length - Math.max(240, Math.floor(limit * 0.15)))).trim();
-  return [
-    head,
-    '',
+
+  const head = clip(text, Math.max(420, Math.floor(limit * 0.48)));
+  const tail = clip(text.slice(Math.max(0, text.length - Math.max(180, Math.floor(limit * 0.12)))).trim(), Math.max(180, Math.floor(limit * 0.12)));
+  const preserved = [
+    extractBracketSection(text, 'PINNED FACTS', { maxChars: Math.max(260, Math.floor(limit * 0.2)) }),
+    extractBracketSection(text, 'JOB CONSTRAINTS', { maxChars: Math.max(220, Math.floor(limit * 0.16)) }),
+    extractBracketSection(text, 'RECENT TURNS', { maxChars: Math.max(320, Math.floor(limit * 0.24)), tailLines: 6 }),
+  ].filter(Boolean);
+  const directiveBullets = extractDirectiveBullets(text, {
+    maxItems: 4,
+    maxChars: Math.max(200, Math.floor(limit * 0.2)),
+  });
+  if (directiveBullets) {
+    const hasPinnedFacts = preserved.some((block) => /^\[PINNED FACTS\]/i.test(String(block || '').trim()));
+    preserved.push(hasPinnedFacts ? `[LATEST USER DIRECTIVES]
+${directiveBullets}` : `[PINNED FACTS]
+${directiveBullets}`);
+  }
+
+
+  const noteBlock = [
     '[truncated for prompt efficiency]',
     '- Full request and working details are preserved in the shared memory surfaces.',
     '- Use mission_brief / working_memory as the source of truth for the complete task context.',
     tail ? `- tail excerpt: ${tail}` : '',
   ].filter(Boolean).join('\n');
+
+  const compacted = [
+    head,
+    preserved.length > 0 ? '[PRESERVED CRITICAL CONTEXT]' : '',
+    preserved.join('\n\n'),
+    noteBlock,
+  ].filter(Boolean).join('\n\n');
+
+  return compacted.length <= limit ? compacted : clip(compacted, limit);
 }
 
 
@@ -5412,4 +5481,5 @@ export {
   executeAgentRun,
   executeRoutedPlan,
   executeActions,
+  compactTaskText,
 };
