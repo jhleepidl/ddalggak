@@ -16,7 +16,7 @@ import { interpretTask } from "./task_interpreter.js";
 import { createSupervisorRuntime } from "./supervisor_runtime.js";
 import { buildCollaborationCells } from "./collaboration_policy.js";
 import { buildExecutionCheckpoints } from "./checkpoint_policy.js";
-import { splitToolishIds, readLegacyParticipantToolIds } from "../shared/participant_schema.js";
+import { splitToolishIds } from "../shared/participant_schema.js";
 
 const DEFAULT_ROLE_ORDER = [
   "operator",
@@ -188,7 +188,7 @@ function buildSlotSpec({
     deliverable_type: normalizeText(slot.deliverable_type).toLowerCase() || undefined,
     selection_reason: normalizeText(slot.selection_reason || `candidate:${roleId}`) || `candidate:${roleId}`,
     required_context_types: normalizeStringList(slot.required_context_types || [], { max: 24, lower: true }),
-    ...(() => { const split = splitToolishIds(readLegacyParticipantToolIds(slot, 'required')); return { runtime_capabilities_required: normalizeStringList(split.runtimeCapabilities, { max: 24, lower: true }), external_tool_requirements: normalizeStringList(split.externalTools, { max: 24, lower: true }) }; })(),
+    ...(() => { const split = splitToolishIds(slot.required_tool_ids || []); return { runtime_capabilities_required: normalizeStringList(split.runtimeCapabilities, { max: 24, lower: true }), external_tool_requirements: normalizeStringList(split.externalTools, { max: 24, lower: true }) }; })(),
   };
 }
 

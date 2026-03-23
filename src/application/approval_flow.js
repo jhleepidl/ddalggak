@@ -1,4 +1,4 @@
-import { createScopeContextStore } from "../runtime_capabilities/scope_context_store.js";
+import { createScopeContextStore } from "../runtime_capabilities/context_store.js";
 import { normalizeActionSource, normalizeRuntimeTeamSnapshot } from "./runtime_metadata.js";
 import { markActionsSkipped, wasInterruptedByReplan } from "./run_status_cleanup.js";
 import {

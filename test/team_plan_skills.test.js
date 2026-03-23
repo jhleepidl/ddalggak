@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { normalizeTeamPlan } from "../src/domain/team_plan.js";
 import path from "node:path";
-import { SkillRegistry } from "../src/application/skill_registry.js";
-import { SkillResolver } from "../src/application/skill_resolver.js";
+import { SkillRegistryV2 as SkillRegistry } from "../src/catalog/skill_registry_v2.js";
+import { SkillResolver } from "../src/control_plane/skill_resolver.js";
 
 test("team plan roles preserve attached_skills and role-level metadata", () => {
   const plan = normalizeTeamPlan({

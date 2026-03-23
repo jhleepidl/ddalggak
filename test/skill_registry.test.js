@@ -3,7 +3,7 @@ import os from "node:os";
 import fs from "node:fs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { SkillRegistry } from "../src/application/skill_registry.js";
+import { SkillRegistryV2 as SkillRegistry } from "../src/catalog/skill_registry_v2.js";
 
 test("skill registry loads manifests from skills directory", () => {
   const registry = new SkillRegistry({

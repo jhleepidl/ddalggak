@@ -1,4 +1,4 @@
-import { normalizeInstallRequirementActions, readLegacyToolInstallProposals } from '../shared/install_requirement_actions.js';
+import { normalizeInstallRequirementActions } from '../shared/install_requirement_actions.js';
 import { normalizeParticipantExecutionSchema, normalizeRuntimeCapabilityId } from '../shared/participant_schema.js';
 
 function asArray(value) {
@@ -49,15 +49,6 @@ function addUnique(list = [], value = '') {
   return out;
 }
 
-
-function installRows(actions = {}) {
-  return [
-    ...asArray(actions.capability_enable_proposals || []).map((entry) => ({ ...entry, tool_id: entry.tool_id || entry.capability_id })),
-    ...asArray(actions.external_install_proposals || []).map((entry) => ({ ...entry, tool_id: entry.tool_id || entry.external_tool_id })),
-    ...readLegacyToolInstallProposals(actions),
-  ];
-}
-
 function applyToolExpectation(agent = {}, toolId = '', severity = 'blocking') {
   const cleanToolId = cleanId(toolId);
   const execution = normalizeParticipantExecutionSchema(agent);
@@ -85,7 +76,7 @@ export function applyInstallProposalActionsToTeam(team = {}, proposal = {}) {
   const actions = normalizeInstallRequirementActions(proposal?.actions || {});
   const appliedActions = [];
 
-  for (const entry of installRows(actions)) {
+  for (const entry of actions.tool_install_proposals) {
     for (const index of targetAgentIndexes(nextTeam, entry.required_by)) {
       const agent = nextTeam.agents[index] || {};
       nextTeam.agents[index] = applyToolExpectation(agent, entry.tool_id, entry.severity);
@@ -127,7 +118,7 @@ export function applyInstallProposalActionsToTeam(team = {}, proposal = {}) {
 export function autoInstallRuntimeSupport({ proposal = {}, jobs = null, jobId = '' } = {}) {
   const actions = normalizeInstallRequirementActions(proposal?.actions || {});
   const applied = [];
-  for (const entry of installRows(actions)) {
+  for (const entry of actions.tool_install_proposals) {
     if (entry.strategy === 'enable_workspace_fs' && entry.auto_installable === true && jobs && typeof jobs.ensureWorkspacePath === 'function' && clean(jobId)) {
       jobs.ensureWorkspacePath(jobId, '.', { asDirectory: true });
       applied.push({ kind: 'runtime_tool', tool_id: entry.tool_id, strategy: entry.strategy });

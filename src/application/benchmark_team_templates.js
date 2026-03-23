@@ -85,7 +85,17 @@ export function listBenchmarkTeamTemplates() {
     benchmark_source: row.benchmark_source,
     description: row.description,
     good_for: [...(row.good_for || [])],
+    task_archetype: cleanId(row.seed?.task_archetype || ''),
+    execution_pattern: cleanId(row.seed?.interaction_spec?.execution_pattern || ''),
+    participant_roles: [...new Set((row.seed?.agents || []).map((agent) => cleanId(agent.role)).filter(Boolean))],
   }));
+}
+
+export function getBenchmarkTeamTemplateDescriptor(templateId = '') {
+  const key = cleanId(templateId);
+  const row = BENCHMARK_TEMPLATES[key];
+  if (!row) return null;
+  return listBenchmarkTeamTemplates().find((entry) => entry.template_id === key) || null;
 }
 
 export function buildBenchmarkTeamTemplate(templateId = '', overrides = {}) {

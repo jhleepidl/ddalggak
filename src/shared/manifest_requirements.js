@@ -16,8 +16,6 @@ function cleanId(value = '') {
   return clean(value).toLowerCase();
 }
 
-const legacyGapKind = ['missing', 'tool'].join('_');
-
 function uniqueRows(rows = [], keyFn = (row) => JSON.stringify(row), { max = 24 } = {}) {
   const out = [];
   const seen = new Set();
@@ -180,7 +178,7 @@ export function buildManifestRequirements({ team = {}, capabilityGaps = [] } = {
       pushWarning(gap.detail || gap.reason || '');
       continue;
     }
-    if (kind === 'missing_external_tool' || kind === legacyGapKind) {
+    if (kind === 'missing_external_tool' || kind === 'missing_tool') {
       const classified = classifyToolishId(gap.tool_id || gap.toolId || gap.external_tool_id || gap.externalToolId);
       if (classified.kind === 'capability') {
         merged.capabilities.push(normalizeCapabilityRequirement({
@@ -189,7 +187,7 @@ export function buildManifestRequirements({ team = {}, capabilityGaps = [] } = {
           tool_id: gap.tool_id || classified.legacy_id,
           required_by: gap.agent_name || gap.agentName || gap.agent || gap.label,
           reason: gap.detail || gap.reason || gap.note,
-          source_kind: kind === legacyGapKind ? 'missing_capability' : kind,
+          source_kind: kind === 'missing_tool' ? 'missing_capability' : kind,
         }));
       } else {
         merged.external_tools.push(normalizeExternalToolRequirement({
@@ -198,7 +196,7 @@ export function buildManifestRequirements({ team = {}, capabilityGaps = [] } = {
           tool_id: gap.tool_id || classified.canonical_id,
           required_by: gap.agent_name || gap.agentName || gap.agent || gap.label,
           reason: gap.detail || gap.reason || gap.note,
-          source_kind: kind === legacyGapKind ? 'missing_external_tool' : kind,
+          source_kind: kind === 'missing_tool' ? 'missing_external_tool' : kind,
         }));
       }
       pushWarning(gap.detail || gap.reason || '');

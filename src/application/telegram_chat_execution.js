@@ -3674,6 +3674,7 @@ async function runSupervisorChat(
         replyToMessageId: currentTurnAckMessageId,
         activeTeam: runtime?.activeTeamConfig || null,
         runtimeTeamSnapshot,
+        routeReason: routePlan.reason || "",
       });
       if (Number.isFinite(Number(planPreviewMessageId)) && Number(planPreviewMessageId) > 0) {
         chatSessionStore.upsert(chatId, {

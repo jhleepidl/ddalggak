@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildTeamFromTemplates } from "../src/application/team_builder.js";
+import { buildTeamFromTemplates } from "../src/control_plane/team_builder.js";
 
 const templates = [
   { id: "researcher", role_type: "researcher", provider: "gemini", model: "gemini", prompt: "research" },

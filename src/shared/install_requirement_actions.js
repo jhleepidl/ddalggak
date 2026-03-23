@@ -1,10 +1,5 @@
 import { normalizeRuntimeCapabilityId, toLegacyRuntimeCapabilityId } from './participant_schema.js';
 
-const joinKey = (...parts) => parts.join('');
-const joinSnake = (...parts) => parts.join('_');
-const LEGACY_TOOL_INSTALL_FIELD = joinSnake('tool', 'install', 'proposals');
-const LEGACY_TOOL_INSTALL_FIELD_CAMEL = joinKey('tool', 'Install', 'Proposals');
-
 function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -19,18 +14,6 @@ function clean(value = '') {
 
 function cleanId(value = '') {
   return clean(value).toLowerCase();
-}
-
-
-export function readLegacyToolInstallProposals(raw = {}) {
-  const row = asObject(raw);
-  return asArray(row[LEGACY_TOOL_INSTALL_FIELD] || row[LEGACY_TOOL_INSTALL_FIELD_CAMEL]);
-}
-
-export function applyLegacyToolInstallProposals(target = {}, rows = []) {
-  const out = target && typeof target === 'object' ? target : {};
-  out[LEGACY_TOOL_INSTALL_FIELD] = rows;
-  return out;
 }
 
 function uniqueRows(rows = [], keyFn = (row) => JSON.stringify(row), { max = 24 } = {}) {
@@ -139,14 +122,14 @@ export function normalizeInstallRequirementActions(raw = {}) {
       .filter(Boolean),
     (entry) => [entry.capability_id, entry.required_by, entry.strategy].join('|'),
   );
-  const external_install_proposals = uniqueRows(
-    asArray(row.external_install_proposals || row.externalToolInstallProposals)
+  const external_tool_install_proposals = uniqueRows(
+    asArray(row.external_tool_install_proposals || row.externalToolInstallProposals)
       .map(normalizeExternalToolInstallProposal)
       .filter(Boolean),
     (entry) => [entry.external_tool_id, entry.required_by, entry.strategy].join('|'),
   );
   const legacyToolInstallProposals = uniqueRows(
-    readLegacyToolInstallProposals(row)
+    asArray(row.tool_install_proposals || row.toolInstallProposals)
       .map((entry) => {
         const capabilityId = normalizeRuntimeCapabilityId(entry?.tool_id || entry?.toolId || entry?.id || entry?.tool);
         return capabilityId ? normalizeCapabilityEnableProposal(entry) : normalizeExternalToolInstallProposal(entry);
@@ -155,8 +138,8 @@ export function normalizeInstallRequirementActions(raw = {}) {
     (entry) => [entry.capability_id || entry.external_tool_id, entry.required_by, entry.strategy].join('|'),
   );
   const mergedCapabilityEnableProposals = uniqueRows([...capability_enable_proposals, ...legacyToolInstallProposals.filter((entry) => entry.capability_id)], (entry) => [entry.capability_id, entry.required_by, entry.strategy].join('|'));
-  const mergedExternalToolInstallProposals = uniqueRows([...external_install_proposals, ...legacyToolInstallProposals.filter((entry) => entry.external_tool_id)], (entry) => [entry.external_tool_id, entry.required_by, entry.strategy].join('|'));
-  const legacyInstallRows = uniqueRows([
+  const mergedExternalToolInstallProposals = uniqueRows([...external_tool_install_proposals, ...legacyToolInstallProposals.filter((entry) => entry.external_tool_id)], (entry) => [entry.external_tool_id, entry.required_by, entry.strategy].join('|'));
+  const tool_install_proposals = uniqueRows([
     ...mergedCapabilityEnableProposals.map((entry) => ({ ...entry, kind: 'tool_install_proposal', tool_id: entry.tool_id || toLegacyRuntimeCapabilityId(entry.capability_id) })),
     ...mergedExternalToolInstallProposals.map((entry) => ({ ...entry, kind: 'tool_install_proposal', tool_id: entry.external_tool_id })),
   ], (entry) => [entry.tool_id, entry.required_by, entry.strategy].join('|'));
@@ -168,26 +151,26 @@ export function normalizeInstallRequirementActions(raw = {}) {
     asArray(row.generated_skill_proposals || row.generatedSkillProposals).map(normalizeGeneratedSkillProposal).filter(Boolean),
     (entry) => [entry.skill_id, entry.required_by, entry.strategy].join('|'),
   );
-  return applyLegacyToolInstallProposals({
+  return {
     capability_enable_proposals: mergedCapabilityEnableProposals,
-    external_install_proposals: mergedExternalToolInstallProposals,
-    legacy_install_rows: legacyInstallRows,
+    external_tool_install_proposals: mergedExternalToolInstallProposals,
+    tool_install_proposals,
     credential_requests,
     generated_skill_proposals,
     summary: {
       capability_enable_count: mergedCapabilityEnableProposals.length,
       external_tool_install_count: mergedExternalToolInstallProposals.length,
-      tool_install_count: legacyInstallRows.length,
+      tool_install_count: tool_install_proposals.length,
       credential_request_count: credential_requests.length,
       generated_skill_count: generated_skill_proposals.length,
     },
-  }, legacyInstallRows);
+  };
 }
 
 export function buildInstallRequirementActions(requirements = {}) {
   const row = asObject(requirements);
   const capability_enable_proposals = asArray(row.capabilities).map((entry) => normalizeCapabilityEnableProposal(entry)).filter(Boolean);
-  const external_install_proposals = asArray(row.external_tools).map((entry) => normalizeExternalToolInstallProposal(entry)).filter(Boolean);
+  const external_tool_install_proposals = asArray(row.external_tools).map((entry) => normalizeExternalToolInstallProposal(entry)).filter(Boolean);
   const legacyToolProposals = asArray(row.tools)
     .map((entry) => {
       const capabilityId = normalizeRuntimeCapabilityId(entry?.tool_id || entry?.toolId || entry?.id || entry?.tool);
@@ -203,7 +186,7 @@ export function buildInstallRequirementActions(requirements = {}) {
     .filter(Boolean);
   return normalizeInstallRequirementActions({
     capability_enable_proposals: [...capability_enable_proposals, ...legacyToolProposals.filter((entry) => entry.capability_id)],
-    external_install_proposals: [...external_install_proposals, ...legacyToolProposals.filter((entry) => entry.external_tool_id)],
+    external_tool_install_proposals: [...external_tool_install_proposals, ...legacyToolProposals.filter((entry) => entry.external_tool_id)],
     credential_requests,
     generated_skill_proposals,
   });
@@ -213,7 +196,7 @@ export function formatInstallRequirementActionLines(actions = {}, { maxLines = 8
   const row = normalizeInstallRequirementActions(actions);
   const lines = [
     ...row.capability_enable_proposals.map((entry) => `- capability requirement: ${entry.capability_id} · by ${entry.required_by} · ${entry.strategy}`),
-    ...row.external_install_proposals.map((entry) => `- external tool requirement: ${entry.external_tool_id} · by ${entry.required_by} · ${entry.strategy}`),
+    ...row.external_tool_install_proposals.map((entry) => `- external tool requirement: ${entry.external_tool_id} · by ${entry.required_by} · ${entry.strategy}`),
     ...row.credential_requests.map((entry) => `- credential request: ${entry.credential_key} · by ${entry.required_by}`),
     ...row.generated_skill_proposals.map((entry) => `- generated skill: ${entry.skill_id} · by ${entry.required_by}`),
   ].filter(Boolean);

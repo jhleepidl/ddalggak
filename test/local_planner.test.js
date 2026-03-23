@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 
 import { loadAgents } from "../src/agents.js";
-import { SkillRegistry } from "../src/application/skill_registry.js";
+import { SkillRegistryV2 as SkillRegistry } from "../src/catalog/skill_registry_v2.js";
 import { buildRuntimeOrchestration } from "../src/application/orchestrator.js";
 import {
   LocalPlanner,

@@ -7,6 +7,39 @@ import {
   refineTeamConfigurationAdvanced,
 } from '../src/application/team_configuration.js';
 
+test('advanced refine short-circuits minor model/provider edits without invoking external planner', async () => {
+  const baseTeam = await createFreeformTeamConfigurationAdvanced({
+    description: '웹 서비스를 개발하기 위한 팀.',
+    planner: async () => ({
+      ok: true,
+      planner_metadata: { planner_type: 'codex_cli', planner_model: 'gpt-5.4', planning_source: 'codex_gpt_5_4' },
+      plan: {
+        team_name: 'web_service_team',
+        agents: [
+          { name: 'Product Researcher', role: 'researcher', purpose: '요구사항을 조사한다', model: 'gemini-2.5-pro', provider: 'gemini' },
+          { name: 'Service Builder', role: 'builder', purpose: '구현한다', model: 'gpt-5-codex', provider: 'codex' },
+          { name: 'Quality Reviewer', role: 'reviewer', purpose: '검토한다', model: 'gpt-5.4', provider: 'chatgpt' },
+        ],
+      },
+    }),
+  });
+
+  let plannerCalls = 0;
+  const refined = await refineTeamConfigurationAdvanced({
+    team: baseTeam,
+    instruction: 'Service Builder의 model만 gpt-5-codex로 바꾸고 나머지 팀 구조는 그대로 유지해줘.',
+    planner: async () => {
+      plannerCalls += 1;
+      return { ok: false, reason: 'should_not_be_called' };
+    },
+  });
+
+  assert.equal(plannerCalls, 0);
+  assert.equal(refined.agents.length, baseTeam.agents.length);
+  assert.equal(refined.agents.find((agent) => agent.name === 'Service Builder')?.model, 'gpt-5-codex');
+  assert.equal(refined.planner_metadata?.planning_source, 'minor_settings_fast_path');
+});
+
 test('advanced freeform team creation filters irrelevant domain skills from planner output', async () => {
   const team = await createFreeformTeamConfigurationAdvanced({
     description: 'Context Engineering 수업의 과제 및 프로젝트 생성 및 편집을 위한 team을 구성해줘.',

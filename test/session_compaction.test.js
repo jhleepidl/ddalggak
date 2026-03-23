@@ -31,9 +31,9 @@ test('chat session store compacts heavy team and route state before persisting',
               model: 'gpt-5-codex',
               provider: 'codex',
               purpose: '실제 변경안과 실행 계획을 만든다.' + 'b'.repeat(400),
-              runtime_capabilities_required: ['filesystem_write'],
-              runtime_capabilities_optional: ['shell_exec'],
-              runtime_capabilities_optional: ['filesystem_write', 'shell_exec'],
+              required_tool_ids: ['workspace_fs'],
+              optional_tool_ids: ['shell'],
+              recommended_tool_ids: ['workspace_fs', 'shell'],
               source_agent: { huge: 'c'.repeat(5000) },
             },
           ],
@@ -42,7 +42,7 @@ test('chat session store compacts heavy team and route state before persisting',
           knowledge_base_profile: { giant: 'e'.repeat(5000) },
           structure_v2: {
             participants: [
-              { participant_id: 'service_builder', role_id: 'builder', label: 'Service Builder', provider: 'codex', model: 'gpt-5-codex', purpose: '실제 변경안과 실행 계획을 만든다.', runtime_capabilities_optional: ['filesystem_write', 'shell_exec'], context_policy: { reads: { grants: ['upstream_results'] } } },
+              { participant_id: 'service_builder', role_id: 'builder', label: 'Service Builder', provider: 'codex', model: 'gpt-5-codex', purpose: '실제 변경안과 실행 계획을 만든다.', recommended_tool_ids: ['workspace_fs', 'shell'], context_policy: { reads: { grants: ['upstream_results'] } } },
             ],
             topology: {
               pattern: 'workflow',
@@ -100,7 +100,7 @@ test('chat session store compacts heavy team and route state before persisting',
     assert.equal(session.team_config.pending_team.structure_v2.participants[0].role, 'builder');
     assert.equal(session.team_config.pending_team.structure_v2.participants[0].role_id, 'builder');
     assert.equal(session.team_config.pending_team.structure_v2.participants[0].purpose.includes('실제 변경안과 실행 계획'), true);
-    assert.deepEqual(session.team_config.pending_team.structure_v2.participants[0].runtime_capabilities_optional, ['filesystem_write', 'shell_exec']);
+    assert.deepEqual(session.team_config.pending_team.structure_v2.participants[0].recommended_tool_ids, ['workspace_fs', 'shell']);
     assert.deepEqual(session.team_config.pending_team.structure_v2.participants[0].context_policy, { reads: { grants: ['upstream_results'] } });
     assert.equal(Boolean(session.last_route.runtime_team_snapshot.team_plan), false);
     assert.equal(session.last_route.actions[0].goal.length <= 221, true);

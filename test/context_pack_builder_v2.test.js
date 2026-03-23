@@ -2,7 +2,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { LegacyContextPackBuilder } from "../src/control_plane/legacy_context_pack_builder.js";
-import { SkillRegistry } from "../src/application/skill_registry.js";
+import { SkillRegistryV2 as SkillRegistry } from "../src/catalog/skill_registry_v2.js";
 import { SkillLoader } from "../src/application/skill_loader.js";
 
 test("legacy context pack builder emits slot-specific researcher and reviewer packs with v2 aliases", () => {

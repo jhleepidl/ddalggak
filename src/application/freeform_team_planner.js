@@ -60,39 +60,58 @@ function summarizeRuntimeAgents(runtime = null) {
     seen.add(id);
     out.push({
       id,
-      name: clean(row.name || row.id || row.agent_id || row.agentId),
       role: cleanId(row.role || row.system_key || row.role_id || row.roleId || 'researcher') || 'researcher',
       provider: cleanId(row.provider || ''),
       model: clean(row.model || ''),
-      tools: asArray(row.tools || row.tool_ids || row.toolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 6),
-      skills: asArray(row.skills).map((entry) => cleanId(entry?.id || entry)).filter(Boolean).slice(0, 6),
     });
-    if (out.length >= 18) break;
+    if (out.length >= 8) break;
   }
   return out;
 }
 
 function summarizeSkills(skillRegistry = null) {
   const rows = skillRegistry?.list?.({ includeDisabled: false }) || [];
-  return rows.slice(0, 24).map((skill) => ({
+  return rows.slice(0, 8).map((skill) => ({
     skill_id: cleanId(skill?.id || skill?.skill_id || ''),
     label: clean(skill?.label || skill?.display_name || skill?.title || skill?.id),
-    compatible_roles: asArray(skill?.compatible_roles).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 5),
-    required_tools: asArray(skill?.required_tools).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 5),
+    compatible_roles: asArray(skill?.compatible_roles).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 4),
   })).filter((row) => row.skill_id);
 }
 
-function summarizePresets(presetRegistry = null) {
-  const rows = asArray(presetRegistry?.presets || presetRegistry?.list?.() || []);
-  return rows.slice(0, 18).map((preset) => ({
-    preset_id: cleanId(preset?.preset_id || preset?.id || ''),
-    display_name: clean(preset?.display_name || preset?.label || preset?.name || preset?.preset_id),
-    role: cleanId(preset?.role || preset?.role_id || ''),
-    default_skill_ids: asArray(preset?.default_skill_ids).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 5),
-    tool_hints: asArray(preset?.selection_features?.tool_hints).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 5),
-    template_family: clean(preset?.template_family || ''),
-    benchmark_source: clean(preset?.benchmark_source || ''),
-  })).filter((row) => row.preset_id);
+function summarizeRefinementCurrentTeam(team = null) {
+  const current = summarizeTeamForPlanner(team);
+  const interaction = asObject(current.interaction_spec);
+  const policies = asObject(interaction.policies);
+  return {
+    team_name: clean(current.team_name),
+    task_brief: clean(current.task_brief),
+    agents: asArray(current.agents).slice(0, 8).map((agent) => ({
+      name: clean(agent.name),
+      role: cleanId(agent.role),
+      provider: cleanId(agent.provider),
+      model: clean(agent.model),
+      purpose: clean(agent.purpose),
+      attached_skill_ids: asArray(agent.attached_skill_ids).slice(0, 3),
+      runtime_capabilities_required: asArray(agent.runtime_capabilities_required).slice(0, 3),
+      runtime_capabilities_optional: asArray(agent.runtime_capabilities_optional).slice(0, 2),
+      external_tool_requirements: asArray(agent.external_tool_requirements).slice(0, 3),
+      external_tool_preferences: asArray(agent.external_tool_preferences).slice(0, 2),
+    })),
+    interaction_spec: {
+      execution_pattern: cleanId(interaction.execution_pattern),
+      final_answer_owner: clean(interaction.final_answer_owner),
+      handoffs: asArray(interaction.handoffs).slice(0, 5).map((handoff) => ({
+        from: clean(handoff?.from),
+        to: clean(handoff?.to),
+        payload: cleanId(handoff?.payload),
+      })),
+      policies: {
+        reviewer_visibility: cleanId(policies.reviewer_visibility),
+        synthesizer_visibility: cleanId(policies.synthesizer_visibility),
+        builder_direct_response: policies.builder_direct_response === true,
+      },
+    },
+  };
 }
 
 function buildCurrentRosterSummaryLines(team = null) {
@@ -123,73 +142,55 @@ function buildPlannerPrompt({
   runtime = null,
   availableToolIds = [],
   skillRegistry = null,
-  presetRegistry = null,
+  preferredTaskArchetype = '',
 } = {}) {
   const catalog = summarizeRuntimeAgents(runtime);
   const skills = summarizeSkills(skillRegistry);
-  const presets = summarizePresets(presetRegistry);
   const models = listSupportedModels().map((row) => clean(row.id)).filter(Boolean);
   return [
     'You are designing a multi-agent team for a runtime called ddalggak.',
     'Return JSON only. No markdown. No commentary outside JSON.',
-    'Goal: translate the user\'s natural-language team request into a concrete team configuration that preserves interaction requirements, opposition requirements, and handoff structure.',
+    'Goal: translate the user request into a concrete team configuration.',
     '',
     'Hard constraints:',
     buildPlannerSchemaHintText(),
     '- team must have 1 to 6 agents',
     '- each agent role must be one of: researcher, builder, reviewer, synthesizer, operator',
-    '- if the user asks for opposing views, counterarguments, debate, discussion, devil\'s advocate, or back-and-forth, DO NOT collapse to a single generalist researcher',
-    '- if the request is about building or shipping software artifacts such as a web service, web app, frontend, backend, API, repository change, notebook, script, or implementation, include a builder with a concrete delivery purpose',
-    '- for implementation/build teams, do not return a research-only roster; include builder coverage unless the user explicitly rejects code-writing agents',
+    '- if the request asks for implementation or shipping software artifacts, include a builder unless the user explicitly rejects code-writing roles',
     '- if multiple upstream agents exist, include a synthesizer unless the user explicitly rejects it',
-    '- the declared final_answer_owner must name a real agent that can plausibly deliver the final answer; prefer a synthesizer or reviewer unless the user clearly asks otherwise',
-    '- ensure the team can satisfy publish contract expectations: someone must be able to publish final_answer and at least one participant should be able to publish artifact_index (usually builder, synthesizer, reviewer, or operator)',
-    '- when you emit structure_v2 participants, preserve provider_spec, provider_runtime_config, runtime_capabilities_required, runtime_capabilities_optional, external_tool_requirements, external_tool_preferences, memory_contract, and context_policy so install/apply does not lose execution metadata',
+    '- final_answer_owner must be a real participant who can plausibly deliver the final answer',
+    '- preserve execution metadata in structure_v2 participants: provider_spec, provider_runtime_config, runtime_capabilities_required, runtime_capabilities_optional, external_tool_requirements, external_tool_preferences, memory_contract, context_policy',
     '- prefer existing executable skill ids from the registry for attached_skill_ids',
-    '- do not attach irrelevant domain-specific skills (for example KR equity analysis) unless the request actually targets that domain',
-    '- when the registry does not fully cover the task, create generated_skill_briefs as inline non-executable protocols',
     '- choose models only from the supported model list',
-    '- reviewer and synthesizer should usually prefer gpt-5.4; builder should usually prefer gpt-5-codex; researchers usually prefer gemini-2.5-pro unless the task requires heavier reasoning',
+    '- default model preference: researcher=gemini-2.5-pro, builder=gpt-5-codex, reviewer/synthesizer=gpt-5.4 unless the request strongly suggests otherwise',
     '',
-    'Output schema:',
+    'Preferred output schema (source of truth is structure_v2; duplicate top-level fields are optional):',
     '{',
     '  "team_name": "...",',
-    '  "reasoning_summary": ["..."] ,',
-    '  "agents": [',
-    '    {',
-    '      "name": "...",',
-    '      "role": "researcher|builder|reviewer|synthesizer|operator",',
-    '      "purpose": "...",',
-    '      "model": "...",',
-    '      "provider": "gemini|codex|chatgpt",',
-    '      "capabilities": ["human-readable capability labels"],',
-    '      "attached_skill_ids": ["skill...."],',
-    '      "generated_skill_briefs": [',
-    '        {"label":"...","goal":"...","checklist":["...","..."]}',
-    '      ],',
-    '      "runtime_capabilities_required": ["filesystem_read"],',
-    '      "external_tool_preferences": ["ripgrep"],',
-    '      "context_policy": {',
-    '        "reads": {"grants": ["shared_summary"], "context_types": ["evidence"], "query_template": "..."},',
-    '        "writes": {"private_targets": ["scratch"], "publish_targets": ["handoff_summary"]},',
-    '        "can_request_grants": ["conversation_tail"],',
-    '        "default_budget": {"soft_tokens": 1600, "hard_tokens": 2600}',
-    '      }',
-    '    }',
-    '  ],',
-    '  "interaction_spec": {',
-    '    "execution_pattern": "parallel_research_then_review_then_synthesize|multi_research_adjudication|sequential_pipeline|builder_reviewer_loop|operator_gated_workflow",',
-    '    "final_answer_owner": "agent name",',
-    '    "handoffs": [{"from":"...","to":"...","payload":"summary_plus_key_evidence"}],',
-    '    "policies": {"reviewer_visibility":"...","synthesizer_visibility":"..."}',
-    '  },',
-    '  "shortcut_policy": {"enabled": true, "only_for_followups": true, "disallow_when_pending_approval": true},',
+    '  "reasoning_summary": ["..."],',
     '  "structure_v2": {',
     '    "kind": "team_structure_v2",',
     '    "version": 2,',
     '    "metadata": {"team_name": "...", "composition_mode": "freeform", "proposal_mode": "create"},',
-    '    "participants": [{"participant_id": "...", "kind": "agent", "name": "...", "role": "researcher", "provider_spec": {"provider": "gemini|codex|chatgpt", "model": "..."}, "runtime_capabilities_required": ["filesystem_read|filesystem_write|shell_exec|web_browse"], "runtime_capabilities_optional": ["..."], "external_tool_requirements": ["..."], "external_tool_preferences": ["..."], "memory_contract": {"publish_surface_ids": ["handoff_summary"]}, "context_policy": {"reads": {"grants": ["shared_summary"]}, "writes": {"publish_targets": ["handoff_summary"]}}}],',
-    '    "topology": {"pattern": "router|supervisor|sequential|parallel|debate|committee|graph|hybrid", "execution_pattern": "...", "edges": [{"from": "...", "to": "...", "payload": "summary_plus_key_evidence"}]},',
+    '    "participants": [',
+    '      {',
+    '        "participant_id": "...",',
+    '        "kind": "agent",',
+    '        "name": "...",',
+    '        "role": "researcher|builder|reviewer|synthesizer|operator",',
+    '        "purpose": "...",',
+    '        "provider_spec": {"provider": "gemini|codex|chatgpt", "model": "..."},',
+    '        "runtime_capabilities_required": ["filesystem_read|filesystem_write|shell_exec|web_browse"],',
+    '        "runtime_capabilities_optional": ["..."],',
+    '        "external_tool_requirements": ["..."],',
+    '        "external_tool_preferences": ["..."],',
+    '        "attached_skill_ids": ["skill...."],',
+    '        "generated_skill_briefs": [{"label":"...","goal":"...","checklist":["...","..."]}],',
+    '        "memory_contract": {"publish_surface_ids": ["handoff_summary"]},',
+    '        "context_policy": {"reads": {"grants": ["shared_summary"]}, "writes": {"publish_targets": ["handoff_summary"]}}',
+    '      }',
+    '    ],',
+    '    "topology": {"pattern": "router|supervisor|sequential|parallel|debate|committee|graph|hybrid", "execution_pattern": "...", "edges": [{"from": "...", "to": "...", "payload": "summary_plus_key_evidence"}], "final_participant_id": "..."},',
     '    "interaction_policy": {"visibility": {"reviewer_visibility": "...", "synthesizer_visibility": "..."}},',
     '    "knowledge_surface": {"profile_id": "...", "display_name": "...", "docs": [{"doc_id": "plan", "file_name": "..."}]},',
     '    "memory_policy": {"stable_semantic_slots": ["decisions", "artifacts"], "migration_strategy": "semantic_slot_preserving"},',
@@ -200,12 +201,10 @@ function buildPlannerPrompt({
     `User request: ${clean(taskText)}`,
     '',
     `Supported models: ${models.join(', ')}`,
-    `Available tools: ${asArray(availableToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 24).join(', ') || '(none listed)'}`,
-    '',
-    `Runtime catalog: ${compactPromptJson(catalog, { maxDepth: 3, maxItems: 12, maxStringChars: 120 })}`,
-    `Skill registry sample: ${compactPromptJson(skills, { maxDepth: 3, maxItems: 12, maxStringChars: 120 })}`,
-    `Preset registry sample: ${compactPromptJson(presets, { maxDepth: 3, maxItems: 12, maxStringChars: 120 })}`,
-  ].join('\n');
+    `Available tools: ${asArray(availableToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 10).join(', ') || '(none listed)'}`,
+    catalog.length ? `Runtime catalog (compact): ${compactPromptJson(catalog, { maxDepth: 2, maxItems: 6, maxStringChars: 72 })}` : '',
+    skills.length ? `Skill registry sample (compact): ${compactPromptJson(skills, { maxDepth: 2, maxItems: 6, maxStringChars: 72 })}` : '',
+  ].filter(Boolean).join('\n');
 }
 
 
@@ -280,84 +279,50 @@ function buildRefinementPlannerPrompt({
   runtime = null,
   availableToolIds = [],
   skillRegistry = null,
-  presetRegistry = null,
+  preferredTaskArchetype = '',
 } = {}) {
   const catalog = summarizeRuntimeAgents(runtime);
   const skills = summarizeSkills(skillRegistry);
-  const presets = summarizePresets(presetRegistry);
   const models = listSupportedModels().map((row) => clean(row.id)).filter(Boolean);
-  const current = summarizeTeamForPlanner(currentTeam);
+  const current = summarizeRefinementCurrentTeam(currentTeam);
   return [
     'You are refining an existing ddalggak multi-agent team.',
     'Return JSON only. No markdown. No commentary outside JSON.',
-    'Goal: update the current team in response to the refinement instruction while preserving useful existing agents and revising both agent roster and interaction design when necessary.',
+    'Goal: update the current team in response to the refinement instruction while preserving useful existing agents and revising roster/interaction only when necessary.',
     '',
     'Refinement rules:',
     buildPlannerSchemaHintText(),
     '- return the full next team, not a patch',
     '- preserve existing strong agents unless the instruction clearly asks to remove or replace them',
-    '- if the user asks for coding, notebook work, IPython, Jupyter, implementation, a web service, web app, frontend, backend, API, repository work, or a Coder Agent, include a builder agent with a concrete delivery purpose',
-    '- if the refinement still describes a build/implementation team, do not keep a research-only roster; preserve or add builder coverage unless the user explicitly removes code-writing roles',
-    '- consider interaction_spec as first-class: update handoffs, execution_pattern, rebuttal/adjudication shape, reviewer_visibility, synthesizer_visibility, builder_direct_response, and final_answer_owner when the refinement implies a new workflow',
+    '- if the instruction only changes model/provider/tools for one agent, keep the same roster size, names, roles, final_answer_owner, and handoffs unless the instruction explicitly says otherwise',
+    '- if the team still needs implementation coverage, preserve or add a builder; do not leave a research-only roster for build-heavy work',
     '- if multiple upstream agents remain, keep or add a synthesizer unless the user rejects it',
-    '- keep publish contract alignment intact: final_answer_owner should remain an actual publish-capable agent, and the resulting team should still have at least one artifact_index publisher',
-    '- when you omit an existing agent, that omission is treated as removal; for minor edits like model/provider/tool changes preserve the rest of the roster and its required/optional tools',
-    '- if the instruction only changes the model/provider/tools of one existing agent, keep the roster identical: same agent count, same agent names, same roles, same final_answer_owner, same handoff structure unless the instruction explicitly says otherwise',
-    '- do not summarize preserved agents away in refine mode; untouched agents must still be returned in the full agents array',
-    '- prefer existing executable skill ids from the registry for attached_skill_ids',
-    '- do not attach irrelevant domain-specific skills (for example KR equity analysis) unless the refinement actually asks for that domain',
-    '- when the registry does not fully cover the task, create generated_skill_briefs as inline non-executable protocols',
+    '- preserve execution metadata in structure_v2 participants: provider_spec, provider_runtime_config, runtime_capabilities_required, runtime_capabilities_optional, external_tool_requirements, external_tool_preferences, memory_contract, context_policy',
     '- choose models only from the supported model list',
     '',
-    'Output schema:',
+    'Preferred output schema (source of truth is structure_v2; duplicate top-level fields are optional):',
     '{',
     '  "team_name": "...",',
     '  "reasoning_summary": ["..."],',
-    '  "agents": [',
-    '    {',
-    '      "name": "...",',
-    '      "role": "researcher|builder|reviewer|synthesizer|operator",',
-    '      "purpose": "...",',
-    '      "model": "...",',
-    '      "provider": "gemini|codex|chatgpt",',
-    '      "capabilities": ["human-readable capability labels"],',
-    '      "attached_skill_ids": ["skill...."],',
-    '      "generated_skill_briefs": [{"label":"...","goal":"...","checklist":["...","..."]}],',
-    '      "runtime_capabilities_required": ["filesystem_read"],',
-    '      "external_tool_preferences": ["ripgrep"],',
-    '      "context_policy": {',
-    '        "reads": {"grants": ["shared_summary"], "context_types": ["evidence"], "query_template": "..."},',
-    '        "writes": {"private_targets": ["scratch"], "publish_targets": ["handoff_summary"]},',
-    '        "can_request_grants": ["conversation_tail"],',
-    '        "default_budget": {"soft_tokens": 1600, "hard_tokens": 2600}',
-    '      }',
-    '    }',
-    '  ],',
-    '  "interaction_spec": {',
-    '    "execution_pattern": "parallel_research_then_review_then_synthesize|multi_research_adjudication|sequential_pipeline|builder_reviewer_loop",',
-    '    "final_answer_owner": "agent name",',
-    '    "handoffs": [{"from":"...","to":"...","payload":"summary_plus_key_evidence"}],',
-    '    "policies": {"reviewer_visibility":"...","synthesizer_visibility":"...","builder_direct_response":false}',
-    '  },',
-    '  "shortcut_policy": {"enabled": true, "only_for_followups": true, "disallow_when_pending_approval": true},',
-    '  "knowledge_surface": {"profile_id": "...", "display_name": "...", "docs": [{"doc_id": "plan", "file_name": "..."}]},',
-    '  "memory_policy": {"stable_semantic_slots": ["decisions", "artifacts"], "migration_strategy": "semantic_slot_preserving"},',
-    '  "runtime_execution": {"continuous_improvement": {"enabled": false, "max_turns": 8}}',
+    '  "structure_v2": {',
+    '    "kind": "team_structure_v2",',
+    '    "version": 2,',
+    '    "metadata": {"team_name": "...", "composition_mode": "freeform", "proposal_mode": "refine"},',
+    '    "participants": [{"participant_id":"...","kind":"agent","name":"...","role":"researcher|builder|reviewer|synthesizer|operator","purpose":"...","provider_spec":{"provider":"gemini|codex|chatgpt","model":"..."},"runtime_capabilities_required":["filesystem_read|filesystem_write|shell_exec|web_browse"],"runtime_capabilities_optional":["..."],"external_tool_requirements":["..."],"external_tool_preferences":["..."],"attached_skill_ids":["skill...."],"generated_skill_briefs":[{"label":"...","goal":"...","checklist":["...","..."]}],"memory_contract":{"publish_surface_ids":["handoff_summary"]},"context_policy":{"reads":{"grants":["shared_summary"]},"writes":{"publish_targets":["handoff_summary"]}}}],',
+    '    "topology": {"pattern":"router|supervisor|sequential|parallel|debate|committee|graph|hybrid","execution_pattern":"...","edges":[{"from":"...","to":"...","payload":"summary_plus_key_evidence"}],"final_participant_id":"..."}',
+    '  }',
     '}',
     '',
-    `Current team: ${compactPromptJson(current, { maxDepth: 4, maxItems: 14, maxStringChars: 140 })}`,
-    `Current roster count: ${asArray(current.agents).length}`,
+    `Current team (compact): ${compactPromptJson(current, { maxDepth: 3, maxItems: 10, maxStringChars: 110 })}`,
     `Current roster (preserve unless explicit removal):
 ${buildCurrentRosterSummaryLines(currentTeam)}`,
     `Refinement instruction: ${clean(instruction)}`,
     '',
     `Supported models: ${models.join(', ')}`,
-    `Available tools: ${asArray(availableToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 24).join(', ') || '(none listed)'}`,
-    '',
-    `Runtime catalog: ${compactPromptJson(catalog, { maxDepth: 3, maxItems: 12, maxStringChars: 120 })}`,
-    `Skill registry sample: ${compactPromptJson(skills, { maxDepth: 3, maxItems: 12, maxStringChars: 120 })}`,
-    `Preset registry sample: ${compactPromptJson(presets, { maxDepth: 3, maxItems: 12, maxStringChars: 120 })}`,
-  ].join('\n');
+    `Available tools: ${asArray(availableToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 10).join(', ') || '(none listed)'}`,
+    catalog.length ? `Runtime catalog (compact): ${compactPromptJson(catalog, { maxDepth: 2, maxItems: 6, maxStringChars: 72 })}` : '',
+    skills.length ? `Skill registry sample (compact): ${compactPromptJson(skills, { maxDepth: 2, maxItems: 6, maxStringChars: 72 })}` : '',
+  ].filter(Boolean).join('\n');
 }
 
 function normalizeGeneratedSkillBriefs(rows = []) {
@@ -435,14 +400,14 @@ export async function planFreeformTeamWithCodex({
   runtime = null,
   availableToolIds = [],
   skillRegistry = null,
-  presetRegistry = null,
+  preferredTaskArchetype = '',
   workspaceRoot = process.cwd(),
   jobId = '',
 } = {}) {
   if (!isCodexPlannerEnabled()) {
     return { ok: false, reason: 'planner_disabled_or_codex_unavailable' };
   }
-  const prompt = buildPlannerPrompt({ taskText, runtime, availableToolIds, skillRegistry, presetRegistry });
+  const prompt = buildPlannerPrompt({ taskText, runtime, availableToolIds, skillRegistry, preferredTaskArchetype });
   const cleanJobId = clean(jobId);
   if (cleanJobId) {
     appendPromptTelemetry({
@@ -459,10 +424,9 @@ export async function planFreeformTeamWithCodex({
         prompt_text: prompt,
         components: {
           user_request: clean(taskText),
-          runtime_catalog: compactPromptJson(summarizeRuntimeAgents(runtime), { maxDepth: 3, maxItems: 10, maxStringChars: 120 }),
-          skill_registry: compactPromptJson(summarizeSkills(skillRegistry), { maxDepth: 3, maxItems: 10, maxStringChars: 120 }),
-          preset_registry: compactPromptJson(summarizePresets(presetRegistry), { maxDepth: 3, maxItems: 10, maxStringChars: 120 }),
-          available_tools: asArray(availableToolIds).join(', '),
+          runtime_catalog: compactPromptJson(summarizeRuntimeAgents(runtime), { maxDepth: 2, maxItems: 6, maxStringChars: 72 }),
+          skill_registry: compactPromptJson(summarizeSkills(skillRegistry), { maxDepth: 2, maxItems: 6, maxStringChars: 72 }),
+          available_tools: asArray(availableToolIds).slice(0, 10).join(', '),
         },
       },
     });
@@ -509,14 +473,14 @@ export async function planTeamRefinementWithCodex({
   runtime = null,
   availableToolIds = [],
   skillRegistry = null,
-  presetRegistry = null,
+  preferredTaskArchetype = '',
   workspaceRoot = process.cwd(),
   jobId = '',
 } = {}) {
   if (!isCodexPlannerEnabled()) {
     return { ok: false, reason: 'planner_disabled_or_codex_unavailable' };
   }
-  const prompt = buildRefinementPlannerPrompt({ currentTeam, instruction, runtime, availableToolIds, skillRegistry, presetRegistry });
+  const prompt = buildRefinementPlannerPrompt({ currentTeam, instruction, runtime, availableToolIds, skillRegistry, preferredTaskArchetype });
   const cleanJobId = clean(jobId);
   if (cleanJobId) {
     appendPromptTelemetry({
@@ -533,12 +497,11 @@ export async function planTeamRefinementWithCodex({
         prompt_text: prompt,
         components: {
           refinement_instruction: clean(instruction),
-          current_team: compactPromptJson(summarizeTeamForPlanner(currentTeam), { maxDepth: 4, maxItems: 12, maxStringChars: 140 }),
+          current_team: compactPromptJson(summarizeTeamForPlanner(currentTeam), { maxDepth: 3, maxItems: 10, maxStringChars: 100 }),
           current_roster_lines: buildCurrentRosterSummaryLines(currentTeam),
-          runtime_catalog: compactPromptJson(summarizeRuntimeAgents(runtime), { maxDepth: 3, maxItems: 10, maxStringChars: 120 }),
-          skill_registry: compactPromptJson(summarizeSkills(skillRegistry), { maxDepth: 3, maxItems: 10, maxStringChars: 120 }),
-          preset_registry: compactPromptJson(summarizePresets(presetRegistry), { maxDepth: 3, maxItems: 10, maxStringChars: 120 }),
-          available_tools: asArray(availableToolIds).join(', '),
+          runtime_catalog: compactPromptJson(summarizeRuntimeAgents(runtime), { maxDepth: 2, maxItems: 6, maxStringChars: 72 }),
+          skill_registry: compactPromptJson(summarizeSkills(skillRegistry), { maxDepth: 2, maxItems: 6, maxStringChars: 72 }),
+          available_tools: asArray(availableToolIds).slice(0, 10).join(', '),
         },
       },
     });

@@ -23,11 +23,9 @@ function cleanId(value = '') {
   return clean(value).toLowerCase();
 }
 
-const legacyGapKind = ['missing', 'tool'].join('_');
-
 function normalizeGapKind(kind = '', capabilityId = '', externalToolId = '', toolId = '') {
   const normalized = cleanId(kind || '');
-  if (normalized === legacyGapKind) {
+  if (normalized === 'missing_tool') {
     if (capabilityId || normalizeRuntimeCapabilityId(toolId)) return 'missing_capability';
     if (externalToolId || toolId) return 'missing_external_tool';
   }
@@ -44,7 +42,7 @@ function normalizeCapabilityGap(raw = {}) {
   const externalToolId = cleanId(row.external_tool_id || row.externalToolId || (!capabilityId ? legacyToolId : ''));
   const kind = normalizeGapKind(row.kind, capabilityId, externalToolId, legacyToolId);
   const resolvedToolId = legacyToolId || (kind === 'missing_capability' ? toLegacyRuntimeCapabilityId(capabilityId) : externalToolId);
-  const legacyKind = kind === 'missing_capability' || kind === 'missing_external_tool' ? legacyGapKind : kind;
+  const legacyKind = kind === 'missing_capability' || kind === 'missing_external_tool' ? 'missing_tool' : kind;
   return {
     kind: legacyKind,
     canonical_kind: kind,
@@ -208,7 +206,7 @@ export function detectTeamCapabilityGaps({ team = {}, runtime = null, skillRegis
     }
     for (const skillId of uniqueIds(participant.skill_package.skill_ids || [], { max: 12 })) {
       const skill = skillRegistry?.resolve?.(skillId);
-      const requiredFromSkill = mergeUniqueIds(skill?.required_tools || [], ...(skill?.required_runtime_capabilities || []), ...(skill?.required_external_tools || []));
+      const requiredFromSkill = mergeUniqueIds(skill?.required_tools || [], skill?.required_tool_ids || []);
       for (const toolId of requiredFromSkill) {
         const classified = classifyToolishId(toolId);
         if (classified.kind === 'capability') {
@@ -258,7 +256,7 @@ export function formatCapabilityGapLines(gaps = [], { maxLines = 4 } = {}) {
         const qualifier = String(gap.severity || '').trim().toLowerCase() === 'blocking' ? '필수' : '선호';
         return `- ${gap.agent_name}: ${qualifier} capability ${capability}${legacyTool} 가 부족합니다. ${gap.suggested_action}`;
       }
-      if (canonicalKind === 'missing_external_tool' || gap.legacy_kind === legacyGapKind) {
+      if (canonicalKind === 'missing_external_tool' || gap.legacy_kind === 'missing_tool') {
         const toolId = gap.external_tool_id || gap.tool_id || 'tool';
         const qualifier = String(gap.severity || '').trim().toLowerCase() === 'blocking' ? '필수' : '선호';
         return `- ${gap.agent_name}: ${qualifier} external tool ${toolId} 이 부족합니다. ${gap.suggested_action}`;

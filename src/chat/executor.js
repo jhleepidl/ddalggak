@@ -2060,7 +2060,7 @@ export async function executeSupervisorActions({
           }
         } else {
           const execution = normalizeParticipantExecutionSchema(action?.inputs || {});
-          const requiredTools = getParticipantLegacyRequiredToolIds(execution).filter(Boolean);
+          const requiredTools = execution.required_tool_ids.filter(Boolean);
           outputs.push(attachRouteSignals({
             agentId: 'system',
             provider: 'system',

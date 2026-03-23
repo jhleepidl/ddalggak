@@ -1,5 +1,5 @@
 import path from "node:path";
-import { SkillRegistry } from "../application/skill_registry.js";
+import { SkillRegistryV2 as SkillRegistry } from "../catalog/skill_registry_v2.js";
 
 function normalizeLogger(logger = null) {
   return typeof logger === "function" ? logger : null;

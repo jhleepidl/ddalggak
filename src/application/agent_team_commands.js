@@ -499,7 +499,7 @@ function buildDynamicAgentFromConversationRow(row = {}, runtime = {}) {
     capabilities,
     skills: capabilities,
     attached_skill_ids: attachedSkillIds,
-    external_tool_preferences: uniqIds(overrides.external_tool_preferences || overrides.externalToolPreferences || []),
+    recommended_tool_ids: uniqIds(overrides.recommended_tool_ids || overrides.recommendedToolIds || []),
     context_policy: overrides.context_policy && typeof overrides.context_policy === "object" ? overrides.context_policy : undefined,
     prompt: String(overrides.purpose || "").trim(),
     enabled: row?.enabled !== false,

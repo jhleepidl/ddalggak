@@ -38,7 +38,7 @@ function proposalHasActionableBlockingGap(proposal = null) {
   const row = proposal && typeof proposal === 'object' ? proposal : {};
   if (row.blocking === true) return true;
   const requirements = row.requirements && typeof row.requirements === 'object' ? row.requirements : {};
-  const sections = [requirements.capabilities, requirements.external_tools, requirements.credentials, requirements.skills];
+  const sections = [requirements.tools, requirements.credentials, requirements.skills];
   return sections.some((entries) => Array.isArray(entries) && entries.some((entry) => String(entry?.severity || 'blocking').trim().toLowerCase() === 'blocking'));
 }
 

@@ -1,4 +1,4 @@
-import { buildTeamFromRegistry, rerankResolvedTeamComposition } from "./team_builder.js";
+import { buildTeamFromRegistry, rerankResolvedTeamComposition } from "../control_plane/team_builder.js";
 import { resolveRoutingContractSummary, buildRouteContractSelectionExplanations } from "./route_contract.js";
 import { normalizeRoutePlan } from "../domain/route_plan.js";
 import {
@@ -16,8 +16,8 @@ import {
   summarizeSkillLoadLevels,
   summarizeSelectedSkillIds,
 } from "../domain/skill_attachment.js";
-import { SkillRegistry } from "./skill_registry.js";
-import { SkillResolver } from "./skill_resolver.js";
+import { SkillRegistryV2 as SkillRegistry } from "../catalog/skill_registry_v2.js";
+import { SkillResolver } from "../control_plane/skill_resolver.js";
 import { SkillLoader } from "./skill_loader.js";
 import { ScopePlanner } from "../control_plane/scope_planner.js";
 import { LegacyContextPackBuilder } from "../control_plane/legacy_context_pack_builder.js";

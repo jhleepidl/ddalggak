@@ -3,7 +3,7 @@ import { normalizeInstallProposalState } from "../application/install_proposal_s
 import { normalizeCredentialBindingState } from "../application/credential_binding.js";
 import { normalizePatternConflictState, normalizeTemporaryExecutionOverride, normalizePatternRecoveryState } from "../application/pattern_conflict_detector.js";
 import { compactInputRequest } from "../shared/input_request_schema.js";
-import { normalizeParticipantExecutionSchema, getParticipantLegacyRequiredToolIds, getParticipantLegacyOptionalToolIds, getParticipantLegacyRecommendedToolIds } from "../shared/participant_schema.js";
+import { normalizeParticipantExecutionSchema } from "../shared/participant_schema.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -189,9 +189,9 @@ function compactAgentDescriptor(raw = {}) {
     runtime_capabilities_optional: clipSessionList(execution.runtime_capabilities_optional || [], { max: 8, maxText: 40, lower: true }),
     external_tool_requirements: clipSessionList(execution.external_tool_requirements || [], { max: 8, maxText: 40, lower: true }),
     external_tool_preferences: clipSessionList(execution.external_tool_preferences || [], { max: 8, maxText: 40, lower: true }),
-    runtime_capabilities_required_legacy: clipSessionList(getParticipantLegacyRequiredToolIds(execution), { max: 8, maxText: 40, lower: true }),
-    runtime_capabilities_optional_legacy: clipSessionList(getParticipantLegacyOptionalToolIds(execution), { max: 8, maxText: 40, lower: true }),
-    runtime_capability_preferences_legacy: clipSessionList(getParticipantLegacyRecommendedToolIds(execution), { max: 8, maxText: 40, lower: true }),
+    required_tool_ids: clipSessionList(execution.required_tool_ids || [], { max: 8, maxText: 40, lower: true }),
+    optional_tool_ids: clipSessionList(execution.optional_tool_ids || [], { max: 8, maxText: 40, lower: true }),
+    recommended_tool_ids: clipSessionList(execution.recommended_tool_ids || [], { max: 8, maxText: 40, lower: true }),
     context_policy: row.context_policy && typeof row.context_policy === 'object' ? row.context_policy : undefined,
     agency_overlay_id: String(row.agency_overlay_id || row.agencyOverlayId || '').trim() || undefined,
     agency_overlay: row.agency_overlay && typeof row.agency_overlay === 'object' ? row.agency_overlay : undefined,
@@ -218,9 +218,9 @@ function compactStructureV2ForSession(raw = {}) {
           runtime_capabilities_optional: clipSessionList(normalizeParticipantExecutionSchema(agent).runtime_capabilities_optional || [], { max: 6, maxText: 40, lower: true }),
           external_tool_requirements: clipSessionList(normalizeParticipantExecutionSchema(agent).external_tool_requirements || [], { max: 6, maxText: 40, lower: true }),
           external_tool_preferences: clipSessionList(normalizeParticipantExecutionSchema(agent).external_tool_preferences || [], { max: 6, maxText: 40, lower: true }),
-          runtime_capabilities_required_legacy: clipSessionList(getParticipantLegacyRequiredToolIds(normalizeParticipantExecutionSchema(agent)), { max: 6, maxText: 40, lower: true }),
-          runtime_capabilities_optional_legacy: clipSessionList(getParticipantLegacyOptionalToolIds(normalizeParticipantExecutionSchema(agent)), { max: 6, maxText: 40, lower: true }),
-          runtime_capability_preferences_legacy: clipSessionList(getParticipantLegacyRecommendedToolIds(normalizeParticipantExecutionSchema(agent)), { max: 6, maxText: 40, lower: true }),
+          required_tool_ids: clipSessionList(normalizeParticipantExecutionSchema(agent).required_tool_ids || [], { max: 6, maxText: 40, lower: true }),
+          optional_tool_ids: clipSessionList(normalizeParticipantExecutionSchema(agent).optional_tool_ids || [], { max: 6, maxText: 40, lower: true }),
+          recommended_tool_ids: clipSessionList(normalizeParticipantExecutionSchema(agent).recommended_tool_ids || [], { max: 6, maxText: 40, lower: true }),
           context_policy: agent.context_policy && typeof agent.context_policy === 'object' ? agent.context_policy : undefined,
         }).filter(([, value]) => value !== undefined && !(Array.isArray(value) && value.length === 0)));
       })

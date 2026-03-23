@@ -3,8 +3,8 @@ import { recommendTeamForTask } from './telegram_route_planning.js';
 import { inferProviderForModel, listSupportedModels, resolveSupportedModel } from '../catalog/model_catalog.js';
 import { detectTeamCapabilityGaps, normalizeCapabilityGapList } from './capability_gap_detector.js';
 import { buildManifestRequirements, formatManifestRequirementLines, normalizeManifestRequirements } from '../shared/manifest_requirements.js';
-import { SkillRegistry } from './skill_registry.js';
-import { SkillResolver, scoreSkillForTask } from './skill_resolver.js';
+import { SkillRegistryV2 as SkillRegistry } from '../catalog/skill_registry_v2.js';
+import { SkillResolver, scoreSkillForTask } from '../control_plane/skill_resolver.js';
 import { PresetRegistry } from '../catalog/preset_registry.js';
 import { PresetResolver } from '../control_plane/preset_resolver.js';
 import { interpretTask } from '../control_plane/task_interpreter.js';
@@ -386,7 +386,7 @@ function resolveAgentExecutionProfile(agent = {}, planning = {}) {
   }
   const codeLikeTask = /ipynb|notebook|jupyter|file|json|python|script|workspace|코드|노트북|파일/.test(`${planning.taskText} ${agent.purpose}`.toLowerCase());
   const agentExecution = normalizeParticipantExecutionSchema(agent);
-  const slotToolSplit = splitToolishIds(getParticipantLegacyRequiredToolIds(slot || {}));
+  const slotToolSplit = splitToolishIds(slot?.required_tool_ids || []);
   const skillToolSplit = splitToolishIds(skillRequiredToolIds);
   const explicitRuntimeCapabilitiesRequired = uniqueIds([
     ...agentExecution.runtime_capabilities_required,
@@ -401,8 +401,8 @@ function resolveAgentExecutionProfile(agent = {}, planning = {}) {
   const explicitRuntimeCapabilitiesOptional = uniqueIds([
     ...agentExecution.runtime_capabilities_optional,
     ...splitToolishIds([
-      ...getParticipantLegacyOptionalToolIds(agent || {}),
-      ...getParticipantLegacyRecommendedToolIds(agent || {}),
+      ...asArray(agent?.optional_tool_ids || agent?.optionalToolIds),
+      ...asArray(agent?.recommended_tool_ids || agent?.recommendedToolIds),
       ...asArray(preset?.selection_features?.tool_hints),
       ...(roleId === 'builder' && codeLikeTask ? ['workspace_fs', 'shell'] : []),
     ]).runtimeCapabilities,
@@ -410,8 +410,8 @@ function resolveAgentExecutionProfile(agent = {}, planning = {}) {
   const explicitExternalToolPreferences = uniqueIds([
     ...agentExecution.external_tool_preferences,
     ...splitToolishIds([
-      ...getParticipantLegacyOptionalToolIds(agent || {}),
-      ...getParticipantLegacyRecommendedToolIds(agent || {}),
+      ...asArray(agent?.optional_tool_ids || agent?.optionalToolIds),
+      ...asArray(agent?.recommended_tool_ids || agent?.recommendedToolIds),
       ...asArray(preset?.selection_features?.tool_hints),
     ]).externalTools,
   ], { max: 6 }).filter((toolId) => !explicitExternalToolRequirements.includes(toolId));
@@ -1543,7 +1543,9 @@ function findInstructionTargetAgents(team = {}, instruction = '') {
 function isMinorAgentSettingsRefinement(team = {}, instruction = '') {
   const text = clean(instruction);
   if (!text) return false;
-  if (/(add|include|remove|delete|drop|replace|swap|rebuild|redesign|새\s*팀|team\s*구성|로스터|participant|pattern|workflow|pipeline|parallel|debate|committee|router|supervisor|handoff|final\s*answer\s*owner|추가|제거|삭제|교체|구조|패턴|워크플로|핸드오프|최종\s*답변\s*담당)/i.test(text)) return false;
+  const mentionsStructureChange = /(add|include|remove|delete|drop|replace|swap|rebuild|redesign|새\s*팀|team\s*구성|로스터|participant|pattern|workflow|pipeline|parallel|debate|committee|router|supervisor|handoff|final\s*answer\s*owner|추가|제거|삭제|교체|구조|패턴|워크플로|핸드오프|최종\s*답변\s*담당)/i.test(text);
+  const explicitlyKeepsStructure = /(그대로\s*유지|유지해줘|유지하고|구조\s*유지|roster\s*unchanged|keep\s+the\s+(same|existing)\s+(team|roster|structure)|no\s+roster\s+change|without\s+changing\s+the\s+roster)/i.test(text);
+  if (mentionsStructureChange && !explicitlyKeepsStructure) return false;
   const hasSettingsSignal = !!(
     extractRequestedSupportedModel(text)
     || extractRequestedProvider(text)
@@ -1888,14 +1890,19 @@ function normalizePlannerMetadata(raw = null) {
     auto_refine_from_pattern_conflict: row.auto_refine_from_pattern_conflict === true || row.autoRefineFromPatternConflict === true || undefined,
     refine_trigger: cleanId(row.refine_trigger || row.refineTrigger || '') || undefined,
     refine_instruction: clean(row.refine_instruction || row.refineInstruction || '') || undefined,
+    benchmark_template_id: cleanId(row.benchmark_template_id || row.benchmarkTemplateId || '') || undefined,
+    benchmark_source: clean(row.benchmark_source || row.benchmarkSource || '') || undefined,
   };
 }
 
 function summarizePlannerMetadata(metadata = null) {
   const row = normalizePlannerMetadata(metadata);
   const engine = row.planner_model ? `${clean(row.planner_type || 'planner')} · ${clean(row.planner_model)}` : clean(row.planner_type || 'planner');
-  if (row.reasoning_summary.length === 0) return engine;
-  return `${engine} · ${row.reasoning_summary[0]}`;
+  const parts = [];
+  if (row.benchmark_template_id) parts.push(`benchmark=${row.benchmark_template_id}`);
+  if (row.reasoning_summary.length > 0) parts.push(row.reasoning_summary[0]);
+  if (parts.length === 0) return engine;
+  return `${engine} · ${parts.join(' · ')}`;
 }
 
 function findPlannerAgentMatch(plannerAgents = [], candidate = {}, used = new Set()) {
@@ -1933,27 +1940,22 @@ function overlayPlannerAgentDraft(base = {}, plannerAgent = {}, { taskText = '' 
     capabilities: capabilities.length > 0 ? capabilities : asArray(base.capabilities || base.skills),
     skills: capabilities.length > 0 ? capabilities : asArray(base.capabilities || base.skills),
     attached_skill_ids: attachedSkillIds,
-    runtime_capabilities_required: uniqueIds([
-      ...asArray(plannerAgent.runtime_capabilities_required || plannerAgent.runtimeCapabilitiesRequired),
-      ...asArray(base.runtime_capabilities_required),
+    required_tool_ids: uniqueIds([
+      ...asArray(plannerAgent.required_tool_ids || plannerAgent.requiredToolIds),
+      ...asArray(base.required_tool_ids),
     ], { max: 6 }),
-    runtime_capabilities_optional: uniqueIds([
-      ...asArray(plannerAgent.runtime_capabilities_optional || plannerAgent.runtimeCapabilitiesOptional),
-      ...asArray(base.runtime_capabilities_optional),
+    optional_tool_ids: uniqueIds([
+      ...asArray(plannerAgent.optional_tool_ids || plannerAgent.optionalToolIds),
+      ...asArray(base.optional_tool_ids),
+      ...asArray(plannerAgent.recommended_tool_ids || plannerAgent.recommendedToolIds),
     ], { max: 6 }),
-    external_tool_requirements: uniqueIds([
-      ...asArray(plannerAgent.external_tool_requirements || plannerAgent.externalToolRequirements),
-      ...asArray(base.external_tool_requirements),
-      ...getParticipantLegacyRequiredToolIds(plannerAgent),
-      ...getParticipantLegacyRequiredToolIds(base),
-    ], { max: 6 }),
-    external_tool_preferences: uniqueIds([
-      ...asArray(plannerAgent.external_tool_preferences || plannerAgent.externalToolPreferences),
-      ...asArray(base.external_tool_preferences),
-      ...getParticipantLegacyOptionalToolIds(plannerAgent),
-      ...getParticipantLegacyRecommendedToolIds(plannerAgent),
-      ...getParticipantLegacyOptionalToolIds(base),
-      ...getParticipantLegacyRecommendedToolIds(base),
+    recommended_tool_ids: uniqueIds([
+      ...asArray(plannerAgent.required_tool_ids || plannerAgent.requiredToolIds),
+      ...asArray(plannerAgent.optional_tool_ids || plannerAgent.optionalToolIds),
+      ...asArray(plannerAgent.recommended_tool_ids || plannerAgent.recommendedToolIds),
+      ...asArray(base.required_tool_ids),
+      ...asArray(base.optional_tool_ids),
+      ...asArray(base.recommended_tool_ids),
     ], { max: 6 }),
     generated_skill_briefs: generatedSkillBriefs,
     context_policy: normalizeContextPolicy(plannerAgent.context_policy || plannerAgent.contextPolicy || base.context_policy, { role, taskText, purpose }),
@@ -2072,6 +2074,19 @@ export async function refineTeamConfigurationAdvanced({ team = {}, instruction =
   const current = buildRefinementBaseTeam(team, { runtime: fallbackRuntime });
   const instructionText = clean(instruction);
   const taskText = [clean(current.task_brief), instructionText].filter(Boolean).join('\nRefinement instruction: ');
+  const fastMinorSettingsRepair = applyMinorAgentSettingsRefinement({
+    currentTeam: current,
+    instruction: instructionText,
+    plannerPlan: null,
+    plannerMetadata: {
+      planner_type: 'heuristic_rule_based',
+      planner_model: '',
+      planning_source: 'minor_settings_fast_path',
+      reasoning_summary: ['minor agent settings edit preserved the full roster without invoking the external planner'],
+    },
+    runtime: fallbackRuntime,
+  });
+  if (fastMinorSettingsRepair) return fastMinorSettingsRepair;
   const activePlanner = typeof planner === 'function' ? planner : planTeamRefinementWithCodex;
   let plannerResult = null;
   try {
@@ -2081,7 +2096,7 @@ export async function refineTeamConfigurationAdvanced({ team = {}, instruction =
       runtime: fallbackRuntime,
       availableToolIds: collectAvailableToolIds(fallbackRuntime, loadAgents()),
       skillRegistry: getSkillRegistry(),
-      presetRegistry: getPresetRegistry(),
+      preferredTaskArchetype: current.task_archetype || '',
       jobId,
     });
   } catch (error) {
@@ -2125,7 +2140,12 @@ export async function refineTeamConfigurationAdvanced({ team = {}, instruction =
     agents,
     interaction_spec: interactionSpec,
     shortcut_policy: normalizeShortcutPolicy(plannerResult.plan.shortcut_policy || current.shortcut_policy),
-    planner_metadata: normalizePlannerMetadata(plannerResult.planner_metadata),
+    planner_metadata: normalizePlannerMetadata({
+      ...plannerResult.planner_metadata,
+      reasoning_summary: Array.from(new Set([
+        ...asArray(plannerResult?.planner_metadata?.reasoning_summary || plannerResult?.planner_metadata?.reasoningSummary || []),
+      ].map((entry) => clean(entry)).filter(Boolean))).slice(0, 5),
+    }),
     status: 'suggested',
     updated_at: nowIso(),
   }, { runtime: fallbackRuntime });
@@ -2183,7 +2203,7 @@ export async function createFreeformTeamConfigurationAdvanced({ description = ''
       runtime: effectiveRuntime,
       availableToolIds: collectAvailableToolIds(effectiveRuntime, loadAgents()),
       skillRegistry: getSkillRegistry(),
-      presetRegistry: getPresetRegistry(),
+      preferredTaskArchetype: initialSelection.archetype,
       jobId,
     });
   } catch (error) {
@@ -2197,7 +2217,9 @@ export async function createFreeformTeamConfigurationAdvanced({ description = ''
         planner_model: '',
         planning_source: 'heuristic_fallback',
         reasoning_summary: extendPlannerReasoningSummary({
-          reasoning_summary: [clean(plannerResult?.reason || 'freeform heuristics applied') || 'freeform heuristics applied'],
+          reasoning_summary: [
+            clean(plannerResult?.reason || 'freeform heuristics applied') || 'freeform heuristics applied',
+          ].filter(Boolean),
         }, initialSelection),
       }),
     };
@@ -2227,7 +2249,7 @@ export async function createFreeformTeamConfigurationAdvanced({ description = ''
     ...plannerSeed,
     team_name: teamName,
     mode: 'scoped_context',
-    composition_mode: 'freeform',
+    composition_mode: plannerSeed.composition_mode || 'freeform',
     proposal_mode: 'create',
     lock_after_apply: true,
     agents,
@@ -2239,7 +2261,12 @@ export async function createFreeformTeamConfigurationAdvanced({ description = ''
     task_archetype: plannerSelection.archetype,
     planner_metadata: normalizePlannerMetadata({
       ...plannerResult.planner_metadata,
-      reasoning_summary: extendPlannerReasoningSummary(plannerResult.planner_metadata, plannerSelection),
+      reasoning_summary: extendPlannerReasoningSummary({
+        ...plannerResult.planner_metadata,
+        reasoning_summary: [
+          ...asArray(plannerResult?.planner_metadata?.reasoning_summary || plannerResult?.planner_metadata?.reasoningSummary || []),
+        ].filter(Boolean),
+      }, plannerSelection),
     }),
   }, { runtime: effectiveRuntime });
   return normalized;
@@ -2405,7 +2432,7 @@ export async function syncTeamConfigurationToConversationStore({ runtime = null,
       configured_role: agent.role,
       configured_provider: cleanId(agent.provider || inferProviderForModel(agent.model) || ''),
       capabilities: uniqueIds(agent.capabilities || agent.skills || []),
-      external_tool_preferences: uniqueIds(agent.external_tool_preferences || agent.externalToolPreferences || getParticipantLegacyRecommendedToolIds(agent)),
+      recommended_tool_ids: uniqueIds(agent.recommended_tool_ids || agent.recommendedToolIds || []),
       matched_preset_id: cleanId(agent.matched_preset_id || agent.matchedPresetId || '' ) || undefined,
       matched_preset_name: clean(agent.matched_preset_name || agent.matchedPresetName || '' ) || undefined,
       attached_skills: uniqueIds(agent.attached_skill_ids || agent.attachedSkillIds || agent.skills || [])
@@ -2542,9 +2569,9 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       model: merged.model,
       attached_skill_ids: uniqueIds(merged.attached_skill_ids || merged.attachedSkillIds || merged.skills),
       capability_tags: uniqueIds(merged.capabilities || merged.skills),
-      runtime_capabilities_required: uniqueIds(merged.runtime_capabilities_required || merged.runtimeCapabilitiesRequired || []),
-      runtime_capabilities_optional: uniqueIds(merged.runtime_capabilities_optional || merged.runtimeCapabilitiesOptional || []),
-      external_tool_preferences: uniqueIds(merged.external_tool_preferences || merged.externalToolPreferences || getParticipantLegacyRecommendedToolIds(merged)),
+      required_tool_ids: uniqueIds(merged.required_tool_ids || merged.requiredToolIds || []),
+      optional_tool_ids: uniqueIds(merged.optional_tool_ids || merged.optionalToolIds || []),
+      recommended_tool_ids: uniqueIds(merged.recommended_tool_ids || merged.recommendedToolIds || []),
       assigned_goal: composeAssignedGoalText(configAgent.purpose, merged.generated_skill_briefs),
       interaction_contract: merged.interaction_contract,
       context_policy: merged.context_policy,
@@ -2588,8 +2615,8 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
 
 function buildCompactCapabilityHeadline(team = {}, runtime = null) {
   const contract = buildTeamCapabilityContract({ team, runtime });
-  const required = formatToolLabels(contract.required_tools || getParticipantLegacyRequiredToolIds(contract), { max: 3 }).join(', ');
-  const optionalMissing = formatToolLabels(contract.missing_optional_tools || [], { max: 3 }).join(', ');
+  const required = formatToolLabels(contract.required_tool_ids || getParticipantLegacyRequiredToolIds(contract), { max: 3 }).join(', ');
+  const optionalMissing = formatToolLabels(contract.missing_optional_tool_ids || [], { max: 3 }).join(', ');
   if (contract.status === 'ready') return '실행 준비: 바로 실행 가능';
   if (contract.status === 'degraded') return `실행 준비: 일부 제약 있음${required ? ` · 필수 tool ${required}` : ''}`;
   if (contract.status === 'unbound') return `실행 준비: runtime 연결 정보 부족${optionalMissing ? ` · 없으면 아쉬운 tool ${optionalMissing}` : ''}`;

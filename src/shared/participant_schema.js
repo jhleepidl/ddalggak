@@ -1,8 +1,5 @@
 import { asObject, normalizeProviderName, normalizeStringList } from './normalize.js';
 
-const joinKey = (...parts) => parts.join('');
-const joinSnake = (...parts) => parts.join('_');
-
 function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -34,41 +31,6 @@ export const LEGACY_CAPABILITY_ALIAS_MAP = Object.freeze({
   long_running_process: 'long_running_process',
   network_access: 'network_access',
 });
-
-
-export const LEGACY_PARTICIPANT_TOOL_KEYS = Object.freeze({
-  required_snake: joinSnake('required', 'tool', 'ids'),
-  optional_snake: joinSnake('optional', 'tool', 'ids'),
-  recommended_snake: joinSnake('recommended', 'tool', 'ids'),
-  required_camel: joinKey('required', 'Tool', 'Ids'),
-  optional_camel: joinKey('optional', 'Tool', 'Ids'),
-  recommended_camel: joinKey('recommended', 'Tool', 'Ids'),
-});
-
-export function getLegacyParticipantToolKey(kind = 'required', style = 'snake') {
-  const normalizedKind = cleanId(kind || 'required') || 'required';
-  const normalizedStyle = cleanId(style || 'snake') || 'snake';
-  const key = `${normalizedKind}_${normalizedStyle}`;
-  return LEGACY_PARTICIPANT_TOOL_KEYS[key] || LEGACY_PARTICIPANT_TOOL_KEYS.required_snake;
-}
-
-export function readLegacyParticipantToolIds(raw = {}, kind = 'required') {
-  const row = asObject(raw);
-  const snake = getLegacyParticipantToolKey(kind, 'snake');
-  const camel = getLegacyParticipantToolKey(kind, 'camel');
-  return asArray(row[snake] ?? row[camel]);
-}
-
-export function applyLegacyParticipantToolIds(target = {}, groups = {}) {
-  const row = target && typeof target === 'object' ? target : {};
-  const required = uniqueIds(groups.required || [], { max: 16 });
-  const optional = uniqueIds(groups.optional || [], { max: 16 });
-  const recommended = uniqueIds(groups.recommended || [...required, ...optional], { max: 16 });
-  row[getLegacyParticipantToolKey('required', 'snake')] = required;
-  row[getLegacyParticipantToolKey('optional', 'snake')] = optional;
-  row[getLegacyParticipantToolKey('recommended', 'snake')] = recommended;
-  return row;
-}
 
 const PROVIDER_RUNTIME_KEYS = new Set([
   'sandbox_mode', 'sandboxMode', 'approval_policy', 'approvalPolicy', 'workspace_settings', 'workspaceSettings',
@@ -234,9 +196,9 @@ export function normalizeParticipantExecutionSchema(raw = {}) {
   const skillPackage = normalizeSkillPackage(row);
   const memoryContract = normalizeMemoryContract(row);
 
-  const requiredLegacy = splitToolishIds(readLegacyParticipantToolIds(row, 'required'));
-  const optionalLegacy = splitToolishIds(readLegacyParticipantToolIds(row, 'optional'));
-  const recommendedLegacy = splitToolishIds(readLegacyParticipantToolIds(row, 'recommended'));
+  const requiredLegacy = splitToolishIds(row.required_tool_ids || row.requiredToolIds || []);
+  const optionalLegacy = splitToolishIds(row.optional_tool_ids || row.optionalToolIds || []);
+  const recommendedLegacy = splitToolishIds(row.recommended_tool_ids || row.recommendedToolIds || []);
 
   const runtimeCapabilitiesRequired = collectRuntimeCapabilityIds(
     row.runtime_capabilities_required || row.runtimeCapabilitiesRequired || row.required_runtime_capabilities || row.requiredRuntimeCapabilities,
@@ -258,17 +220,17 @@ export function normalizeParticipantExecutionSchema(raw = {}) {
     ...recommendedLegacy.externalTools,
   ], { max: 16 }).filter((id) => !externalToolRequirements.includes(id));
 
-  const legacyRequiredIds = uniqueIds([
+  const requiredToolIds = uniqueIds([
     ...runtimeCapabilitiesRequired.map((id) => toLegacyRuntimeCapabilityId(id)).filter(Boolean),
     ...externalToolRequirements,
   ], { max: 16 });
-  const legacyOptionalIds = uniqueIds([
+  const optionalToolIds = uniqueIds([
     ...runtimeCapabilitiesOptional.map((id) => toLegacyRuntimeCapabilityId(id)).filter(Boolean),
     ...externalToolPreferences,
-  ], { max: 16 }).filter((id) => !legacyRequiredIds.includes(id));
-  const legacyRecommendedIds = uniqueIds([...legacyRequiredIds, ...legacyOptionalIds], { max: 16 });
+  ], { max: 16 }).filter((id) => !requiredToolIds.includes(id));
+  const recommendedToolIds = uniqueIds([...requiredToolIds, ...optionalToolIds], { max: 16 });
 
-  const normalized = {
+  return {
     role_profile: roleProfile,
     provider_spec: providerSpec,
     provider_runtime_config: providerRuntimeConfig,
@@ -278,12 +240,10 @@ export function normalizeParticipantExecutionSchema(raw = {}) {
     external_tool_requirements: externalToolRequirements,
     external_tool_preferences: externalToolPreferences,
     memory_contract: memoryContract,
+    required_tool_ids: requiredToolIds,
+    optional_tool_ids: optionalToolIds,
+    recommended_tool_ids: recommendedToolIds,
   };
-  return applyLegacyParticipantToolIds(normalized, {
-    required: legacyRequiredIds,
-    optional: legacyOptionalIds,
-    recommended: legacyRecommendedIds,
-  });
 }
 
 
@@ -304,15 +264,15 @@ export function getParticipantExternalToolPreferences(raw = {}) {
 }
 
 export function getParticipantLegacyRequiredToolIds(raw = {}) {
-  return readLegacyParticipantToolIds(normalizeParticipantExecutionSchema(raw), 'required');
+  return normalizeParticipantExecutionSchema(raw).required_tool_ids;
 }
 
 export function getParticipantLegacyOptionalToolIds(raw = {}) {
-  return readLegacyParticipantToolIds(normalizeParticipantExecutionSchema(raw), 'optional');
+  return normalizeParticipantExecutionSchema(raw).optional_tool_ids;
 }
 
 export function getParticipantLegacyRecommendedToolIds(raw = {}) {
-  return readLegacyParticipantToolIds(normalizeParticipantExecutionSchema(raw), 'recommended');
+  return normalizeParticipantExecutionSchema(raw).recommended_tool_ids;
 }
 
 export function applyParticipantExecutionSchema(raw = {}) {

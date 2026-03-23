@@ -2,8 +2,8 @@ import { normalizeStringList } from "../shared/normalize.js";
 import { createRuntimeAgentInstance, normalizeRuntimeAgentInstance } from "../domain/runtime_agent.js";
 import { inferRuntimeDisplayLabel } from "../shared/runtime_agent_naming.js";
 import { getTransportRoleId, normalizeRoleId } from "../compatibility/legacy_roles.js";
-import { adaptLegacyAgentRegistry } from "../compatibility/legacy_agent_registry_adapter.js";
-import { getParticipantLegacyRequiredToolIds } from "../shared/participant_schema.js";
+import { normalizeAgentRegistryToTemplates } from "../domain/agent_templates.js";
+import { normalizeAgentPresetList } from "../domain/agent_presets.js";
 
 function asArray(raw) {
   return Array.isArray(raw) ? raw : [];
@@ -35,6 +35,38 @@ function semanticOverlap(a = "", b = "") {
 
 function normalizeLocaleList(raw = []) {
   return normalizeStringList(raw, { max: 8, lower: false });
+}
+
+function adaptLegacyAgentRegistry(raw = {}) {
+  const templates = normalizeAgentRegistryToTemplates(raw);
+  const presets = normalizeAgentPresetList(
+    templates.templates.map((template) => ({
+      preset_id: `legacy.${template.id}`,
+      display_name: template.name,
+      description: template.description,
+      role_id: normalizeRoleId(template.role_type),
+      default_skill_ids: [],
+      optional_skill_ids: [],
+      personality_profile: {},
+      selection_features: {
+        legacy_template_id: normalizeText(template.id),
+        provider: normalizeText(template.provider),
+        model: normalizeText(template.model),
+      },
+      retrieval_text: [
+        template.name,
+        template.description,
+        ...(Array.isArray(template.capability_tags) ? template.capability_tags : []),
+      ].filter(Boolean).join("\n"),
+      source_dir: normalizeText(template.meta?.source_dir),
+    }))
+  );
+  return {
+    templates: templates.templates,
+    templates_by_id: templates.byId,
+    presets,
+    presets_by_id: new Map(presets.map((preset) => [preset.preset_id, preset])),
+  };
 }
 
 function requiredSkillCoverage(slot = {}, preset = {}) {
@@ -69,14 +101,14 @@ function preferredSkillCoverage(slot = {}, preset = {}) {
 }
 
 function toolAvailabilityOk(slot = {}, preset = {}, availableToolIds = []) {
-  const requiredLegacyTools = new Set(asArray(getParticipantLegacyRequiredToolIds(slot)).map((entry) => normalizeText(entry, { lower: true })).filter(Boolean));
-  if (requiredLegacyTools.size === 0) return true;
+  const requiredToolIds = new Set(asArray(slot.required_tool_ids).map((entry) => normalizeText(entry, { lower: true })).filter(Boolean));
+  if (requiredToolIds.size === 0) return true;
   const available = new Set(normalizeStringList(availableToolIds, { max: 32, lower: true }));
   const hinted = new Set(normalizeStringList(
     preset.selection_features?.tool_hints || preset.tool_hints || [],
     { max: 16, lower: true }
   ));
-  for (const toolId of requiredLegacyTools) {
+  for (const toolId of requiredToolIds) {
     if (!available.has(toolId) && !hinted.has(toolId)) return false;
   }
   return true;

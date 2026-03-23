@@ -3,7 +3,7 @@ import { isKrEquityRequest } from "../shared/skill_relevance.js";
 import { normalizeTaskInterpretation } from "../domain/task_interpretation.js";
 import { normalizeConversationPreferences } from "../domain/conversation_preferences.js";
 import { normalizeRoleId, normalizeRoleList } from "../compatibility/legacy_roles.js";
-import { splitToolishIds, readLegacyParticipantToolIds } from "../shared/participant_schema.js";
+import { splitToolishIds } from "../shared/participant_schema.js";
 
 function asArray(raw) {
   return Array.isArray(raw) ? raw : [];
@@ -189,7 +189,7 @@ function buildCandidateSlots({
       required_skill_ids: normalizeStringList(slot.required_skill_ids || [], { max: 16, lower: true }),
       preferred_skill_ids: normalizeStringList(slot.preferred_skill_ids || [], { max: 16, lower: true }),
       required_context_types: normalizeStringList(slot.required_context_types || [], { max: 16, lower: true }),
-      ...(() => { const split = splitToolishIds(readLegacyParticipantToolIds(slot, 'required')); return { runtime_capabilities_required: normalizeStringList(split.runtimeCapabilities, { max: 16, lower: true }), external_tool_requirements: normalizeStringList(split.externalTools, { max: 16, lower: true }) }; })(),
+      ...(() => { const split = splitToolishIds(slot.required_tool_ids || []); return { runtime_capabilities_required: normalizeStringList(split.runtimeCapabilities, { max: 16, lower: true }), external_tool_requirements: normalizeStringList(split.externalTools, { max: 16, lower: true }) }; })(),
       parallelizable: slot.parallelizable !== false,
       deliverable_type: slot.deliverable_type || undefined,
       selection_reason: slot.selection_reason || undefined,

@@ -165,8 +165,8 @@ test('advanced freeform team creation preserves provider/tool metadata and repai
             purpose: '코드베이스를 탐색하고 핵심 근거를 정리한다',
             model: 'gemini-2.5-pro',
             provider: 'gemini',
-            runtime_capabilities_required: ['filesystem_write'],
-            external_tool_preferences: ['ripgrep'],
+            required_tool_ids: ['workspace_fs'],
+            optional_tool_ids: ['ripgrep'],
           },
         ],
         interaction_spec: {
@@ -180,7 +180,7 @@ test('advanced freeform team creation preserves provider/tool metadata and repai
 
   const participant = team.structure_v2.participants.find((row) => row.participant_id === 'repo_scout');
   assert.equal(participant?.provider, 'gemini');
-  assert.deepEqual(participant?.runtime_capabilities_required, ['filesystem_read', 'filesystem_write']);
+  assert.deepEqual(participant?.runtime_capabilities_required, ['filesystem_read']);
   assert.deepEqual(participant?.external_tool_preferences, ['ripgrep']);
   assert.ok(team.interaction_spec.final_answer_owner);
   const finalOwner = team.agents.find((agent) => agent.name === team.interaction_spec.final_answer_owner);

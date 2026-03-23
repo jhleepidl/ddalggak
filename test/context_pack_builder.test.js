@@ -1,8 +1,8 @@
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { SkillRegistry } from "../src/application/skill_registry.js";
-import { SkillResolver } from "../src/application/skill_resolver.js";
+import { SkillRegistryV2 as SkillRegistry } from "../src/catalog/skill_registry_v2.js";
+import { SkillResolver } from "../src/control_plane/skill_resolver.js";
 import { SkillLoader } from "../src/application/skill_loader.js";
 import { LegacyContextPackBuilder } from "../src/control_plane/legacy_context_pack_builder.js";
 

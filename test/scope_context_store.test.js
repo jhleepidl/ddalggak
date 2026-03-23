@@ -4,7 +4,7 @@ import {
   createScopeContextStore,
   ScopeLocalContextStore,
   ScopeGocContextStore,
-} from "../src/runtime_capabilities/scope_context_store.js";
+} from "../src/runtime_capabilities/context_store.js";
 
 test("createScopeContextStore defaults to the local scope context store", () => {
   const store = createScopeContextStore();

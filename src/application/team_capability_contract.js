@@ -120,6 +120,7 @@ export function buildTeamCapabilityContract({ team = {}, runtime = null } = {}) 
       ...missingOptionalCapabilities.map((id) => toLegacyRuntimeCapabilityId(id)).filter(Boolean),
       ...missingOptionalExternalTools,
     ]),
+    auto_installable_missing_tools: [],
     mismatch_count: missingRequiredCapabilities.length + missingOptionalCapabilities.length + missingRequiredExternalTools.length + missingOptionalExternalTools.length,
     agent_contracts: agentContracts,
   };

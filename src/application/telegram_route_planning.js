@@ -781,7 +781,7 @@ async function sendRouterAckMessage(bot, chatId, { replyToMessageId = null } = {
   return messageId > 0 ? messageId : null;
 }
 
-async function sendPlanPreviewMessage(bot, chatId, { actions = [], replyToMessageId = null, activeTeam = null, runtimeTeamSnapshot = null } = {}) {
+async function sendPlanPreviewMessage(bot, chatId, { actions = [], replyToMessageId = null, activeTeam = null, runtimeTeamSnapshot = null, routeReason = "" } = {}) {
   const agentStatus = buildQueuedAgentStatusFromActions(actions);
   const routeReadiness = formatRouteReadiness(
     resolveRoutingContractSummary({ activeTeam, runtimeTeamSnapshot }),

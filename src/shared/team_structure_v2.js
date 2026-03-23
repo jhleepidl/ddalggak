@@ -1,7 +1,7 @@
 import { EXECUTION_ROLE_OPTIONS, STRUCTURE_PARTICIPANT_KIND_OPTIONS, STRUCTURE_PATTERN_OPTIONS } from './team_schema_catalog.js';
 import { deriveKnowledgeBaseDesign } from '../knowledge_base/profile.js';
 import { normalizeRuntimeExecutionPolicy } from '../application/runtime_execution_policy.js';
-import { normalizeParticipantExecutionSchema, getParticipantLegacyRequiredToolIds, getParticipantLegacyOptionalToolIds, getParticipantLegacyRecommendedToolIds, applyLegacyParticipantToolIds } from './participant_schema.js';
+import { normalizeParticipantExecutionSchema, getParticipantLegacyRequiredToolIds, getParticipantLegacyOptionalToolIds, getParticipantLegacyRecommendedToolIds } from './participant_schema.js';
 
 function asArray(value) { return Array.isArray(value) ? value : []; }
 function asObject(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
@@ -103,11 +103,9 @@ function normalizeParticipant(raw = {}, index = 0) {
     runtime_capabilities_optional: uniqStrings(execution.runtime_capabilities_optional || [], { limit: 8 }),
     external_tool_requirements: uniqStrings(execution.external_tool_requirements || [], { limit: 8 }),
     external_tool_preferences: uniqStrings(execution.external_tool_preferences || [], { limit: 8 }),
-    ...applyLegacyParticipantToolIds({}, {
-      required: uniqStrings(getParticipantLegacyRequiredToolIds(row), { limit: 8 }),
-      optional: uniqStrings(getParticipantLegacyOptionalToolIds(row), { limit: 8 }),
-      recommended: uniqStrings(getParticipantLegacyRecommendedToolIds(row), { limit: 8 }),
-    }),
+    required_tool_ids: uniqStrings(getParticipantLegacyRequiredToolIds(row), { limit: 8 }),
+    optional_tool_ids: uniqStrings(getParticipantLegacyOptionalToolIds(row), { limit: 8 }),
+    recommended_tool_ids: uniqStrings(getParticipantLegacyRecommendedToolIds(row), { limit: 8 }),
     generated_skill_briefs: asArray(row.generated_skill_briefs || row.generatedSkillBriefs || execution.skill_package?.generated_skill_briefs || []).slice(0, 8),
     context_policy: asObject(row.context_policy || row.contextPolicy),
     provider_spec: asObject(execution.provider_spec),
@@ -785,11 +783,9 @@ export function buildRuntimeExecutionProfileFromStructureV2(raw = {}, {
     runtime_capabilities_optional: uniqStrings(entry.runtime_capabilities_optional || [], { limit: 8, lower: true }),
     external_tool_requirements: uniqStrings(entry.external_tool_requirements || [], { limit: 8, lower: true }),
     external_tool_preferences: uniqStrings(entry.external_tool_preferences || [], { limit: 8, lower: true }),
-    ...applyLegacyParticipantToolIds({}, {
-      required: uniqStrings(getParticipantLegacyRequiredToolIds(entry), { limit: 8, lower: true }),
-      optional: uniqStrings(getParticipantLegacyOptionalToolIds(entry), { limit: 8, lower: true }),
-      recommended: uniqStrings(getParticipantLegacyRecommendedToolIds(entry), { limit: 8, lower: true }),
-    }),
+    required_tool_ids: uniqStrings(entry.required_tool_ids || [], { limit: 8, lower: true }),
+    optional_tool_ids: uniqStrings(entry.optional_tool_ids || entry.recommended_tool_ids || [], { limit: 8, lower: true }),
+    recommended_tool_ids: uniqStrings(entry.recommended_tool_ids || [...asArray(entry.required_tool_ids || []), ...asArray(entry.optional_tool_ids || [])], { limit: 8, lower: true }),
     order_index: orderIndexByParticipantId.get(cleanId(entry.participant_id)),
     stage_index: stageIndexByParticipantId.get(cleanId(entry.participant_id)),
     parallel_group_id: parallelGroupByParticipantId.get(cleanId(entry.participant_id)) || undefined,
@@ -813,11 +809,9 @@ export function buildRuntimeExecutionProfileFromStructureV2(raw = {}, {
     runtime_capabilities_optional: uniqStrings(entry.runtime_capabilities_optional || [], { limit: 8, lower: true }),
     external_tool_requirements: uniqStrings(entry.external_tool_requirements || [], { limit: 8, lower: true }),
     external_tool_preferences: uniqStrings(entry.external_tool_preferences || [], { limit: 8, lower: true }),
-    ...applyLegacyParticipantToolIds({}, {
-      required: uniqStrings(getParticipantLegacyRequiredToolIds(entry), { limit: 8, lower: true }),
-      optional: uniqStrings(getParticipantLegacyOptionalToolIds(entry), { limit: 8, lower: true }),
-      recommended: uniqStrings(getParticipantLegacyRecommendedToolIds(entry), { limit: 8, lower: true }),
-    }),
+    required_tool_ids: uniqStrings(entry.required_tool_ids || [], { limit: 8, lower: true }),
+    optional_tool_ids: uniqStrings(entry.optional_tool_ids || entry.recommended_tool_ids || [], { limit: 8, lower: true }),
+    recommended_tool_ids: uniqStrings(entry.recommended_tool_ids || [...asArray(entry.required_tool_ids || []), ...asArray(entry.optional_tool_ids || [])], { limit: 8, lower: true }),
     context_policy: asObject(entry.context_policy),
     metadata: asObject(entry.metadata),
     agency_overlay_id: clean(entry?.metadata?.agency_overlay_id || ''),
@@ -867,11 +861,9 @@ export function deriveTeamConfigFromStructureV2(raw = {}) {
       runtime_capabilities_optional: uniqStrings(entry.runtime_capabilities_optional || [], { limit: 8 }),
       external_tool_requirements: uniqStrings(entry.external_tool_requirements || [], { limit: 8 }),
       external_tool_preferences: uniqStrings(entry.external_tool_preferences || [], { limit: 8 }),
-      ...applyLegacyParticipantToolIds({}, {
-        required: uniqStrings(getParticipantLegacyRequiredToolIds(entry), { limit: 8 }),
-        optional: uniqStrings(getParticipantLegacyOptionalToolIds(entry), { limit: 8 }),
-        recommended: uniqStrings(getParticipantLegacyRecommendedToolIds(entry), { limit: 8 }),
-      }),
+      required_tool_ids: uniqStrings(entry.required_tool_ids || [], { limit: 8 }),
+      optional_tool_ids: uniqStrings(entry.optional_tool_ids || entry.recommended_tool_ids || [], { limit: 8 }),
+      recommended_tool_ids: uniqStrings(entry.recommended_tool_ids || [...asArray(entry.required_tool_ids || []), ...asArray(entry.optional_tool_ids || [])], { limit: 8 }),
       generated_skill_briefs: asArray(entry.generated_skill_briefs || []).slice(0, 8),
       context_policy: asObject(entry.context_policy),
     }));
