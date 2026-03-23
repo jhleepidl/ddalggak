@@ -1,5 +1,10 @@
 import { normalizeRuntimeExecutionPolicy } from './runtime_execution_policy.js';
 import { resolveProviderRuntimeOptions } from './provider_runtime_policy.js';
+import {
+  collectRuntimeCapabilityIds,
+  normalizeRuntimeCapabilityId,
+  toLegacyRuntimeCapabilityId,
+} from '../shared/participant_schema.js';
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -27,11 +32,28 @@ export function hasRuntimeToolSignal(runtime = null) {
   return [
     runtime.availableToolIds, runtime.available_tool_ids, runtime.enabledToolIds, runtime.enabled_tool_ids,
     runtime.toolsCatalog, runtime.tools_catalog, runtime.tools, runtime.toolIds, runtime.tool_ids,
+    runtime.availableCapabilityIds, runtime.available_capability_ids, runtime.enabledCapabilityIds, runtime.enabled_capability_ids,
+    runtime.runtime_capabilities, runtime.runtimeCapabilities,
     runtime.agents, runtime.runtime_agents,
-  ].some((value) => Array.isArray(value) && value.length > 0);
+  ].some((value) => (Array.isArray(value) && value.length > 0) || (value && typeof value === 'object' && Object.keys(value).length > 0));
 }
 
-export function collectRuntimeAvailableToolIds(runtime = null) {
+export function collectRuntimeAvailableCapabilityIds(runtime = null) {
+  const out = [];
+  out.push(...collectRuntimeCapabilityIds(runtime?.availableCapabilityIds || runtime?.available_capability_ids));
+  out.push(...collectRuntimeCapabilityIds(runtime?.enabledCapabilityIds || runtime?.enabled_capability_ids));
+  out.push(...collectRuntimeCapabilityIds(runtime?.runtime_capabilities || runtime?.runtimeCapabilities));
+  out.push(...collectRuntimeCapabilityIds(runtime?.availableToolIds || runtime?.available_tool_ids));
+  out.push(...collectRuntimeCapabilityIds(runtime?.enabledToolIds || runtime?.enabled_tool_ids));
+  out.push(...collectRuntimeCapabilityIds(runtime?.toolIds || runtime?.tool_ids));
+  out.push(...collectRuntimeCapabilityIds(asArray(runtime?.tools).map((row) => row?.id || row?.tool_id || row?.toolId || row?.name)));
+  out.push(...collectRuntimeCapabilityIds(asArray(runtime?.toolsCatalog || runtime?.tools_catalog).map((row) => row?.id || row?.tool_id || row?.toolId || row?.name)));
+  for (const row of asArray(runtime?.agents)) out.push(...collectRuntimeCapabilityIds(row?.tools || row?.tool_ids || row?.toolIds || row?.runtime_capabilities || row?.runtimeCapabilities));
+  for (const row of asArray(runtime?.runtime_agents)) out.push(...collectRuntimeCapabilityIds(row?.tools || row?.tool_ids || row?.toolIds || row?.runtime_capabilities || row?.runtimeCapabilities));
+  return new Set(uniqueIds(out));
+}
+
+export function collectRuntimeAvailableExternalToolIds(runtime = null) {
   const out = [];
   out.push(...asArray(runtime?.availableToolIds || runtime?.available_tool_ids));
   out.push(...asArray(runtime?.enabledToolIds || runtime?.enabled_tool_ids));
@@ -40,10 +62,10 @@ export function collectRuntimeAvailableToolIds(runtime = null) {
   out.push(...asArray(runtime?.toolsCatalog || runtime?.tools_catalog).map((row) => row?.id || row?.tool_id || row?.toolId || row?.name));
   for (const row of asArray(runtime?.agents)) out.push(...asArray(row?.tools || row?.tool_ids || row?.toolIds));
   for (const row of asArray(runtime?.runtime_agents)) out.push(...asArray(row?.tools || row?.tool_ids || row?.toolIds));
-  return new Set(uniqueIds(out));
+  return new Set(uniqueIds(out.filter((entry) => !normalizeRuntimeCapabilityId(entry))));
 }
 
-function collectImpliedRuntimeToolIds(runtime = null) {
+function collectImpliedRuntimeCapabilityIds(runtime = null) {
   if (!runtime || typeof runtime !== 'object') return [];
   const implied = new Set();
   const mode = cleanId(runtime?.mode || runtime?.runtime_mode || runtime?.runtimeAuthority?.mode || runtime?.runtime_authority?.mode || '');
@@ -51,11 +73,8 @@ function collectImpliedRuntimeToolIds(runtime = null) {
   const hasWorkspaceCatalog = [...asArray(runtime?.tools), ...asArray(runtime?.toolsCatalog), ...asArray(runtime?.tools_catalog)]
     .some((row) => cleanId(row?.id || row?.tool_id || row?.toolId || row?.name) === 'workspace_fs');
   if (hasWorkspaceCatalog || hasJobBinding || ['local', 'standalone'].includes(mode)) {
-    implied.add('read_only_fs');
-    implied.add('workspace_fs');
-    implied.add('write_file');
-    implied.add('create_file');
-    implied.add('save_file');
+    implied.add('filesystem_read');
+    implied.add('filesystem_write');
   }
   const agents = [
     ...asArray(runtime?.agents),
@@ -79,10 +98,8 @@ function collectImpliedRuntimeToolIds(runtime = null) {
   const codexOptions = resolveProviderRuntimeOptions({ runtimeExecutionPolicy, provider: 'codex' });
   const sandboxMode = cleanId(codexOptions?.sandboxMode || '');
   if (['workspace-write', 'danger-full-access'].includes(sandboxMode)) {
-    implied.add('workspace_fs');
-    implied.add('write_file');
-    implied.add('create_file');
-    implied.add('save_file');
+    implied.add('filesystem_read');
+    implied.add('filesystem_write');
   }
   return [...implied];
 }
@@ -92,13 +109,26 @@ export function collectFallbackKnownToolIds(registry = null) {
   for (const row of asArray(registry?.agentsCatalog)) out.push(...asArray(row?.tools || row?.tool_ids || row?.toolIds));
   for (const row of asArray(registry?.agents)) out.push(...asArray(row?.tools || row?.tool_ids || row?.toolIds));
   for (const row of asArray(registry?.toolCatalog || registry?.toolsCatalog || registry?.tools || [])) out.push(row?.id || row?.tool_id || row?.toolId || row?.name);
-  return new Set(uniqueIds(out));
+  return new Set(uniqueIds(out.filter((entry) => !normalizeRuntimeCapabilityId(entry))));
+}
+
+export function collectEffectiveAvailableCapabilityIds(runtime = null) {
+  const base = collectRuntimeAvailableCapabilityIds(runtime);
+  for (const capabilityId of collectImpliedRuntimeCapabilityIds(runtime)) base.add(capabilityId);
+  return base;
+}
+
+export function collectEffectiveAvailableExternalToolIds(runtime = null, registry = null) {
+  return hasRuntimeToolSignal(runtime)
+    ? collectRuntimeAvailableExternalToolIds(runtime)
+    : collectFallbackKnownToolIds(registry || runtime);
 }
 
 export function collectEffectiveAvailableToolIds(runtime = null, registry = null) {
-  const base = hasRuntimeToolSignal(runtime)
-    ? collectRuntimeAvailableToolIds(runtime)
-    : collectFallbackKnownToolIds(registry || runtime);
-  for (const toolId of collectImpliedRuntimeToolIds(runtime)) base.add(toolId);
+  const base = collectEffectiveAvailableExternalToolIds(runtime, registry);
+  for (const capabilityId of collectEffectiveAvailableCapabilityIds(runtime)) {
+    const legacyId = toLegacyRuntimeCapabilityId(capabilityId);
+    if (legacyId) base.add(legacyId);
+  }
   return base;
 }

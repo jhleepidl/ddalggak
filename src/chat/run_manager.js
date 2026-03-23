@@ -1,3 +1,5 @@
+import { chooseBusyRunInterruptionStrategy } from "../application/provider_interaction_capabilities.js";
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -30,6 +32,27 @@ function normalizePendingEntry(raw = {}) {
         ? Number(row.userReplyToMessageId)
         : null),
   };
+}
+
+function collectActiveRunsFromSession(session = {}) {
+  const statusMap = session?.agent_status && typeof session.agent_status === 'object'
+    ? session.agent_status
+    : {};
+  return Object.entries(statusMap)
+    .map(([agentId, status]) => {
+      const row = status && typeof status === 'object' ? status : {};
+      if (String(row.state || '').trim().toLowerCase() !== 'running') return null;
+      return {
+        agent_id: String(agentId || '').trim().toLowerCase(),
+        provider: String(row.provider || '').trim().toLowerCase(),
+        model: String(row.model || '').trim(),
+        execution_channel: String(row.execution_channel || row.executionChannel || '').trim().toLowerCase(),
+        interaction_capabilities: row.interaction_capabilities && typeof row.interaction_capabilities === 'object'
+          ? row.interaction_capabilities
+          : undefined,
+      };
+    })
+    .filter(Boolean);
 }
 
 export function mergePendingMessages(list = []) {
@@ -218,8 +241,11 @@ export class ChatRunManager {
       if (!merged.text) continue;
       const runId = `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
       const slot = this._slot(chatId);
+      const sessionBeforeRun = this.sessionStore.get(chatId);
       const inputKind = slot.nextInputKind
-        || (merged.count > 1 ? "interrupt_update" : "chat_message");
+        || ((sessionBeforeRun?.pending_user_request && !sessionBeforeRun?.pending_approval)
+          ? "user_response"
+          : (merged.count > 1 ? "interrupt_update" : "chat_message"));
       const forceMode = normalizeForceMode(slot.nextForceMode || merged.latest?.force_mode || "normal");
       slot.nextInputKind = null;
       slot.nextForceMode = "normal";
@@ -342,18 +368,29 @@ export class ChatRunManager {
 
     if (busy || awaitingApproval) {
       const busyKind = incomingKind === "soft_query" ? "soft_query" : "interrupt_update";
+      const activeRuns = collectActiveRunsFromSession(session);
+      const interruptionStrategy = chooseBusyRunInterruptionStrategy({
+        activeRuns,
+        pendingApproval: session.pending_approval,
+        pendingUserRequest: session.pending_user_request,
+        requestedMode: "replan",
+      });
       if (busyKind === "interrupt_update") {
         this.sessionStore.upsert(chatId, {
           pending_approval: null,
+          pending_user_request: null,
+          pending_interrupt_strategy: interruptionStrategy,
         });
       }
-      slot.nextInputKind = "interrupt_update";
+      slot.nextInputKind = interruptionStrategy.strategy === 'steer_in_place'
+        ? "steer_update"
+        : "interrupt_update";
       slot.nextForceMode = cleanForceMode;
-      this._markInterrupt(chatId, "replan", cleanText);
-      await this._cancelCurrent(chatId, { mode: "replan", reason: cleanText });
-      await this._ack(chatId, "replan", cleanText);
+      this._markInterrupt(chatId, interruptionStrategy.strategy === 'cancel_run' ? "cancel" : "replan", cleanText);
+      await this._cancelCurrent(chatId, { mode: interruptionStrategy.strategy === 'cancel_run' ? "cancel" : "replan", reason: cleanText });
+      await this._ack(chatId, interruptionStrategy.strategy === 'cancel_run' ? "cancel" : "replan", cleanText);
       if (!slot.running) this._startDrain(chatId);
-      return { status: "queued_interrupt" };
+      return { status: interruptionStrategy.strategy === 'steer_in_place' ? "queued_steer" : "queued_interrupt", interruption_strategy: interruptionStrategy };
     }
 
     this._startDrain(chatId);

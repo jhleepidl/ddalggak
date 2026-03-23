@@ -1,4 +1,15 @@
-import { collectEffectiveAvailableToolIds } from './runtime_tool_availability.js';
+import {
+  collectEffectiveAvailableCapabilityIds,
+  collectEffectiveAvailableExternalToolIds,
+} from './runtime_tool_availability.js';
+import {
+  classifyToolishId,
+  mergeUniqueIds,
+  normalizeParticipantExecutionSchema,
+  normalizeRuntimeCapabilityId,
+  toLegacyRuntimeCapabilityId,
+  uniqueIds,
+} from '../shared/participant_schema.js';
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -12,30 +23,37 @@ function cleanId(value = '') {
   return clean(value).toLowerCase();
 }
 
-function uniqueIds(values = [], { max = 64 } = {}) {
-  const out = [];
-  const seen = new Set();
-  for (const raw of asArray(values)) {
-    const value = cleanId(raw);
-    if (!value || seen.has(value)) continue;
-    seen.add(value);
-    out.push(value);
-    if (out.length >= max) break;
-  }
-  return out;
-}
+const legacyGapKind = ['missing', 'tool'].join('_');
 
-function collectAvailableToolIds(runtime = null) {
-  return collectEffectiveAvailableToolIds(runtime, runtime);
+function normalizeGapKind(kind = '', capabilityId = '', externalToolId = '', toolId = '') {
+  const normalized = cleanId(kind || '');
+  if (normalized === legacyGapKind) {
+    if (capabilityId || normalizeRuntimeCapabilityId(toolId)) return 'missing_capability';
+    if (externalToolId || toolId) return 'missing_external_tool';
+  }
+  if (normalized === 'missing_capability' || normalized === 'missing_external_tool' || normalized === 'missing_credential' || normalized === 'missing_skill') {
+    return normalized;
+  }
+  return normalized || 'missing_external_tool';
 }
 
 function normalizeCapabilityGap(raw = {}) {
   const row = raw && typeof raw === 'object' ? raw : {};
+  const legacyToolId = cleanId(row.tool_id || row.toolId || '');
+  const capabilityId = cleanId(row.capability_id || row.capabilityId || normalizeRuntimeCapabilityId(legacyToolId) || '');
+  const externalToolId = cleanId(row.external_tool_id || row.externalToolId || (!capabilityId ? legacyToolId : ''));
+  const kind = normalizeGapKind(row.kind, capabilityId, externalToolId, legacyToolId);
+  const resolvedToolId = legacyToolId || (kind === 'missing_capability' ? toLegacyRuntimeCapabilityId(capabilityId) : externalToolId);
+  const legacyKind = kind === 'missing_capability' || kind === 'missing_external_tool' ? legacyGapKind : kind;
   return {
-    kind: cleanId(row.kind || 'missing_tool') || 'missing_tool',
+    kind: legacyKind,
+    canonical_kind: kind,
+    legacy_kind: legacyKind,
     severity: cleanId(row.severity || 'blocking') || 'blocking',
     agent_name: clean(row.agent_name || row.agentName || row.agent || row.label || 'agent') || 'agent',
-    tool_id: cleanId(row.tool_id || row.toolId || ''),
+    capability_id: capabilityId || undefined,
+    external_tool_id: externalToolId || undefined,
+    tool_id: resolvedToolId || undefined,
     credential_key: clean(row.credential_key || row.credentialKey || ''),
     skill_id: cleanId(row.skill_id || row.skillId || ''),
     detail: clean(row.detail || row.reason || ''),
@@ -48,7 +66,7 @@ export function normalizeCapabilityGapList(rows = []) {
   const seen = new Set();
   for (const raw of asArray(rows)) {
     const gap = normalizeCapabilityGap(raw);
-    const key = [gap.kind, gap.agent_name, gap.tool_id, gap.credential_key, gap.skill_id, gap.detail].join('|').toLowerCase();
+    const key = [gap.kind, gap.agent_name, gap.capability_id, gap.external_tool_id, gap.tool_id, gap.credential_key, gap.skill_id, gap.detail].join('|').toLowerCase();
     if (!key || seen.has(key)) continue;
     seen.add(key);
     out.push(gap);
@@ -56,17 +74,15 @@ export function normalizeCapabilityGapList(rows = []) {
   return out.slice(0, 24);
 }
 
-function inferToolSuggestion(toolId = '') {
-  if (/write_file|create_file|save_file|ipynb|workspace_fs/.test(toolId)) {
-    return 'workspace_fs 도구 또는 파일 생성 helper를 연결한 뒤 다시 실행해 주세요.';
-  }
-  if (/web|browser|search/.test(toolId)) {
-    return 'web/browser 계열 도구를 연결하거나 검색 가능한 에이전트로 재구성해 주세요.';
-  }
-  if (/shell|bash|terminal/.test(toolId)) {
-    return 'shell/terminal 실행 권한이 필요합니다.';
-  }
-  return `${toolId} 도구 정의 또는 연결이 필요합니다.`;
+function inferToolSuggestion(toolId = '', capabilityId = '') {
+  const capability = cleanId(capabilityId || normalizeRuntimeCapabilityId(toolId) || '');
+  const id = cleanId(toolId);
+  if (capability === 'filesystem_write') return 'workspace write 권한 또는 파일 생성 capability를 runtime에 연결해 주세요.';
+  if (capability === 'filesystem_read') return 'filesystem read 권한이 필요합니다.';
+  if (capability === 'shell_exec') return 'shell/terminal 실행 권한이 필요합니다.';
+  if (capability === 'web_browse') return 'web browse capability가 필요합니다.';
+  if (/browser|search/.test(id)) return 'browser/search connector 또는 검색 adapter를 연결해 주세요.';
+  return `${toolId || capability || 'tool'} 정의 또는 연결이 필요합니다.`;
 }
 
 function findExplicitCredentialRequest(raw = '') {
@@ -83,19 +99,19 @@ export function detectCapabilityGapsFromText(text = '', { label = 'agent' } = {}
   const raw = clean(text);
   if (!raw) return [];
   const gaps = [];
-  const push = (gap = {}) => {
-    gaps.push(normalizeCapabilityGap({ agent_name: label, ...gap }));
-  };
+  const push = (gap = {}) => gaps.push(normalizeCapabilityGap({ agent_name: label, ...gap }));
 
   const toolMatch = raw.match(/Tool ['"]?([a-zA-Z0-9_.-]+)['"]? not found/i);
   if (toolMatch) {
-    const toolId = cleanId(toolMatch[1]);
+    const classified = classifyToolishId(toolMatch[1]);
     push({
-      kind: 'missing_tool',
+      kind: classified.kind === 'capability' ? 'missing_capability' : 'missing_external_tool',
       severity: 'blocking',
-      tool_id: toolId,
-      detail: `${toolId} 도구가 없어 작업을 완료하지 못했습니다.`,
-      suggested_action: inferToolSuggestion(toolId),
+      capability_id: classified.kind === 'capability' ? classified.canonical_id : undefined,
+      external_tool_id: classified.kind === 'external_tool' ? classified.canonical_id : undefined,
+      tool_id: classified.raw,
+      detail: `${classified.raw} 실행 조건이 없어 작업을 완료하지 못했습니다.`,
+      suggested_action: inferToolSuggestion(classified.raw, classified.canonical_id),
     });
   }
 
@@ -129,66 +145,98 @@ export function detectCapabilityGapsFromExecution(executionLike = {}) {
 }
 
 export function detectTeamCapabilityGaps({ team = {}, runtime = null, skillRegistry = null } = {}) {
-  const availableTools = collectAvailableToolIds(runtime);
+  const availableCapabilities = collectEffectiveAvailableCapabilityIds(runtime);
+  const availableExternalTools = collectEffectiveAvailableExternalToolIds(runtime, runtime);
   const gaps = [];
   const push = (gap = {}) => gaps.push(normalizeCapabilityGap(gap));
 
   for (const agent of asArray(team?.agents)) {
+    const participant = normalizeParticipantExecutionSchema(agent);
     const agentName = clean(agent?.name || agent?.agent_id || 'agent') || 'agent';
-    const explicitRequired = uniqueIds(agent?.required_tool_ids || agent?.requiredToolIds || []);
-    const explicitOptional = uniqueIds(agent?.optional_tool_ids || agent?.optionalToolIds || []);
-    const legacyRecommended = uniqueIds(agent?.recommended_tool_ids || agent?.recommendedToolIds || []);
-    const requiredTools = explicitRequired;
-    const optionalTools = explicitRequired.length === 0 && explicitOptional.length === 0
-      ? legacyRecommended
-      : uniqueIds([...explicitOptional, ...legacyRecommended.filter((toolId) => !explicitRequired.includes(toolId))]);
-    for (const toolId of requiredTools) {
-      if (availableTools.has(toolId)) continue;
+    const requiredCapabilities = participant.runtime_capabilities_required;
+    const optionalCapabilities = participant.runtime_capabilities_optional;
+    const requiredExternalTools = participant.external_tool_requirements;
+    const optionalExternalTools = participant.external_tool_preferences;
+
+    for (const capabilityId of requiredCapabilities) {
+      if (availableCapabilities.has(capabilityId)) continue;
       push({
-        kind: 'missing_tool',
+        kind: 'missing_capability',
         severity: 'blocking',
         agent_name: agentName,
-        tool_id: toolId,
-        detail: `${agentName}에 필수 ${toolId} 도구가 현재 runtime에 없습니다.`,
-        suggested_action: inferToolSuggestion(toolId),
+        capability_id: capabilityId,
+        tool_id: toLegacyRuntimeCapabilityId(capabilityId),
+        detail: `${agentName}에 필수 capability ${capabilityId} 가 현재 runtime에 없습니다.`,
+        suggested_action: inferToolSuggestion(toLegacyRuntimeCapabilityId(capabilityId), capabilityId),
       });
     }
-    for (const toolId of optionalTools) {
-      if (availableTools.has(toolId)) continue;
+    for (const capabilityId of optionalCapabilities) {
+      if (availableCapabilities.has(capabilityId)) continue;
       push({
-        kind: 'missing_tool',
+        kind: 'missing_capability',
         severity: 'advisory',
         agent_name: agentName,
+        capability_id: capabilityId,
+        tool_id: toLegacyRuntimeCapabilityId(capabilityId),
+        detail: `${agentName}에 선호 capability ${capabilityId} 가 현재 runtime에 없습니다.`,
+        suggested_action: inferToolSuggestion(toLegacyRuntimeCapabilityId(capabilityId), capabilityId),
+      });
+    }
+    for (const toolId of requiredExternalTools) {
+      if (availableExternalTools.has(toolId)) continue;
+      push({
+        kind: 'missing_external_tool',
+        severity: 'blocking',
+        agent_name: agentName,
+        external_tool_id: toolId,
         tool_id: toolId,
-        detail: `${agentName}에 선호 ${toolId} 도구가 현재 runtime에 연결되어 있지 않습니다.`,
+        detail: `${agentName}에 필수 external tool ${toolId} 이 현재 runtime에 없습니다.`,
         suggested_action: inferToolSuggestion(toolId),
       });
     }
-    for (const skillId of uniqueIds(agent?.attached_skill_ids || agent?.attachedSkillIds || [])) {
+    for (const toolId of optionalExternalTools) {
+      if (availableExternalTools.has(toolId)) continue;
+      push({
+        kind: 'missing_external_tool',
+        severity: 'advisory',
+        agent_name: agentName,
+        external_tool_id: toolId,
+        tool_id: toolId,
+        detail: `${agentName}에 선호 external tool ${toolId} 이 현재 runtime에 없습니다.`,
+        suggested_action: inferToolSuggestion(toolId),
+      });
+    }
+    for (const skillId of uniqueIds(participant.skill_package.skill_ids || [], { max: 12 })) {
       const skill = skillRegistry?.resolve?.(skillId);
-      for (const toolId of uniqueIds(skill?.required_tools || [])) {
-        if (availableTools.has(toolId)) continue;
+      const requiredFromSkill = mergeUniqueIds(skill?.required_tools || [], ...(skill?.required_runtime_capabilities || []), ...(skill?.required_external_tools || []));
+      for (const toolId of requiredFromSkill) {
+        const classified = classifyToolishId(toolId);
+        if (classified.kind === 'capability') {
+          if (availableCapabilities.has(classified.canonical_id)) continue;
+          push({
+            kind: 'missing_capability',
+            severity: 'blocking',
+            agent_name: agentName,
+            capability_id: classified.canonical_id,
+            tool_id: classified.legacy_id || classified.raw,
+            skill_id: skillId,
+            detail: `${agentName}의 실행 skill ${skillId} 에 ${classified.canonical_id} capability가 필요합니다.`,
+            suggested_action: inferToolSuggestion(classified.legacy_id || classified.raw, classified.canonical_id),
+          });
+          continue;
+        }
+        if (availableExternalTools.has(classified.canonical_id)) continue;
         push({
-          kind: 'missing_tool',
+          kind: 'missing_external_tool',
           severity: 'blocking',
           agent_name: agentName,
-          tool_id: toolId,
+          external_tool_id: classified.canonical_id,
+          tool_id: classified.canonical_id,
           skill_id: skillId,
-          detail: `${agentName}의 실행 skill ${skillId} 에 ${toolId} 도구가 필요합니다.`,
-          suggested_action: inferToolSuggestion(toolId),
+          detail: `${agentName}의 실행 skill ${skillId} 에 ${classified.canonical_id} external tool이 필요합니다.`,
+          suggested_action: inferToolSuggestion(classified.canonical_id),
         });
       }
-    }
-    const codeLike = /ipynb|notebook|jupyter|file|json|python|script|workspace|코드|노트북|파일/.test(`${clean(agent?.purpose)} ${clean(agent?.name)}`.toLowerCase());
-    if (cleanId(agent?.role) === 'builder' && codeLike && !availableTools.has('workspace_fs')) {
-      push({
-        kind: 'missing_tool',
-        severity: 'blocking',
-        agent_name: agentName,
-        tool_id: 'workspace_fs',
-        detail: `${agentName}는 파일/노트북 산출물을 만들 가능성이 높지만 workspace_fs 가 없습니다.`,
-        suggested_action: inferToolSuggestion('workspace_fs'),
-      });
     }
   }
 
@@ -203,10 +251,17 @@ export function formatCapabilityGapLines(gaps = [], { maxLines = 4 } = {}) {
         const key = gap.credential_key || 'API_KEY';
         return `- ${gap.agent_name}: 외부 자격 증명(${key})이 필요합니다. ${gap.suggested_action}`;
       }
-      if (gap.kind === 'missing_tool') {
-        const toolId = gap.tool_id || 'tool';
+      const canonicalKind = gap.canonical_kind || gap.kind;
+      if (canonicalKind === 'missing_capability') {
+        const capability = gap.capability_id || gap.tool_id || 'capability';
+        const legacyTool = gap.tool_id && gap.tool_id !== capability ? ` (${gap.tool_id})` : '';
         const qualifier = String(gap.severity || '').trim().toLowerCase() === 'blocking' ? '필수' : '선호';
-        return `- ${gap.agent_name}: ${qualifier} ${toolId} 도구가 부족합니다. ${gap.suggested_action}`;
+        return `- ${gap.agent_name}: ${qualifier} capability ${capability}${legacyTool} 가 부족합니다. ${gap.suggested_action}`;
+      }
+      if (canonicalKind === 'missing_external_tool' || gap.legacy_kind === legacyGapKind) {
+        const toolId = gap.external_tool_id || gap.tool_id || 'tool';
+        const qualifier = String(gap.severity || '').trim().toLowerCase() === 'blocking' ? '필수' : '선호';
+        return `- ${gap.agent_name}: ${qualifier} external tool ${toolId} 이 부족합니다. ${gap.suggested_action}`;
       }
       return `- ${gap.agent_name}: ${gap.detail || '필요한 실행 조건이 부족합니다.'}`;
     });

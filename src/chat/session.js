@@ -2,6 +2,8 @@ import { normalizeAnswerCapsules } from "../application/answer_capsules.js";
 import { normalizeInstallProposalState } from "../application/install_proposal_state.js";
 import { normalizeCredentialBindingState } from "../application/credential_binding.js";
 import { normalizePatternConflictState, normalizeTemporaryExecutionOverride, normalizePatternRecoveryState } from "../application/pattern_conflict_detector.js";
+import { compactInputRequest } from "../shared/input_request_schema.js";
+import { normalizeParticipantExecutionSchema, getParticipantLegacyRequiredToolIds, getParticipantLegacyOptionalToolIds, getParticipantLegacyRecommendedToolIds } from "../shared/participant_schema.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -140,6 +142,14 @@ function normalizeAgentStatusMap(raw) {
     out[agentId] = {
       state: normalizedState,
       goal: clipSessionText(status.goal || '', 320),
+      provider: String(status.provider || '').trim().toLowerCase() || undefined,
+      model: String(status.model || '').trim() || undefined,
+      execution_channel: String(status.execution_channel || status.executionChannel || '').trim().toLowerCase() || undefined,
+      interaction_capabilities: status.interaction_capabilities && typeof status.interaction_capabilities === 'object'
+        ? status.interaction_capabilities
+        : (status.interactionCapabilities && typeof status.interactionCapabilities === 'object'
+          ? status.interactionCapabilities
+          : undefined),
       started_at: String(status.started_at || status.startedAt || "").trim() || undefined,
       ended_at: String(status.ended_at || status.endedAt || "").trim() || undefined,
     };
@@ -166,6 +176,7 @@ function clipSessionList(values = [], { max = 8, maxText = 160, lower = false } 
 
 function compactAgentDescriptor(raw = {}) {
   const row = asObject(raw);
+  const execution = normalizeParticipantExecutionSchema(row);
   const out = {
     agent_id: String(row.agent_id || row.agentId || row.id || '').trim() || undefined,
     name: clipSessionText(row.name || row.display_label || row.displayLabel || '', 80) || undefined,
@@ -174,9 +185,13 @@ function compactAgentDescriptor(raw = {}) {
     provider: String(row.provider || '').trim().toLowerCase() || undefined,
     purpose: clipSessionText(row.purpose || row.assigned_goal || row.assignedGoal || '', 160) || undefined,
     attached_skill_ids: clipSessionList(row.attached_skill_ids || row.attachedSkillIds || row.attached_skills || [], { max: 8, maxText: 80, lower: true }),
-    required_tool_ids: clipSessionList(row.required_tool_ids || row.requiredToolIds || [], { max: 8, maxText: 40, lower: true }),
-    optional_tool_ids: clipSessionList(row.optional_tool_ids || row.optionalToolIds || [], { max: 8, maxText: 40, lower: true }),
-    recommended_tool_ids: clipSessionList(row.recommended_tool_ids || row.recommendedToolIds || [], { max: 8, maxText: 40, lower: true }),
+    runtime_capabilities_required: clipSessionList(execution.runtime_capabilities_required || [], { max: 8, maxText: 40, lower: true }),
+    runtime_capabilities_optional: clipSessionList(execution.runtime_capabilities_optional || [], { max: 8, maxText: 40, lower: true }),
+    external_tool_requirements: clipSessionList(execution.external_tool_requirements || [], { max: 8, maxText: 40, lower: true }),
+    external_tool_preferences: clipSessionList(execution.external_tool_preferences || [], { max: 8, maxText: 40, lower: true }),
+    runtime_capabilities_required_legacy: clipSessionList(getParticipantLegacyRequiredToolIds(execution), { max: 8, maxText: 40, lower: true }),
+    runtime_capabilities_optional_legacy: clipSessionList(getParticipantLegacyOptionalToolIds(execution), { max: 8, maxText: 40, lower: true }),
+    runtime_capability_preferences_legacy: clipSessionList(getParticipantLegacyRecommendedToolIds(execution), { max: 8, maxText: 40, lower: true }),
     context_policy: row.context_policy && typeof row.context_policy === 'object' ? row.context_policy : undefined,
     agency_overlay_id: String(row.agency_overlay_id || row.agencyOverlayId || '').trim() || undefined,
     agency_overlay: row.agency_overlay && typeof row.agency_overlay === 'object' ? row.agency_overlay : undefined,
@@ -199,9 +214,13 @@ function compactStructureV2ForSession(raw = {}) {
           provider: String(agent.provider || '').trim().toLowerCase() || undefined,
           model: String(agent.model || '').trim() || undefined,
           purpose: clipSessionText(agent.purpose || agent.goal || '', 160) || undefined,
-          required_tool_ids: clipSessionList(agent.required_tool_ids || agent.requiredToolIds || [], { max: 6, maxText: 40, lower: true }),
-          optional_tool_ids: clipSessionList(agent.optional_tool_ids || agent.optionalToolIds || [], { max: 6, maxText: 40, lower: true }),
-          recommended_tool_ids: clipSessionList(agent.recommended_tool_ids || agent.recommendedToolIds || [], { max: 6, maxText: 40, lower: true }),
+          runtime_capabilities_required: clipSessionList(normalizeParticipantExecutionSchema(agent).runtime_capabilities_required || [], { max: 6, maxText: 40, lower: true }),
+          runtime_capabilities_optional: clipSessionList(normalizeParticipantExecutionSchema(agent).runtime_capabilities_optional || [], { max: 6, maxText: 40, lower: true }),
+          external_tool_requirements: clipSessionList(normalizeParticipantExecutionSchema(agent).external_tool_requirements || [], { max: 6, maxText: 40, lower: true }),
+          external_tool_preferences: clipSessionList(normalizeParticipantExecutionSchema(agent).external_tool_preferences || [], { max: 6, maxText: 40, lower: true }),
+          runtime_capabilities_required_legacy: clipSessionList(getParticipantLegacyRequiredToolIds(normalizeParticipantExecutionSchema(agent)), { max: 6, maxText: 40, lower: true }),
+          runtime_capabilities_optional_legacy: clipSessionList(getParticipantLegacyOptionalToolIds(normalizeParticipantExecutionSchema(agent)), { max: 6, maxText: 40, lower: true }),
+          runtime_capability_preferences_legacy: clipSessionList(getParticipantLegacyRecommendedToolIds(normalizeParticipantExecutionSchema(agent)), { max: 6, maxText: 40, lower: true }),
           context_policy: agent.context_policy && typeof agent.context_policy === 'object' ? agent.context_policy : undefined,
         }).filter(([, value]) => value !== undefined && !(Array.isArray(value) && value.length === 0)));
       })
@@ -209,6 +228,7 @@ function compactStructureV2ForSession(raw = {}) {
   const topology = asObject(row.topology);
   const interactionPolicy = asObject(row.interaction_policy || row.interactionPolicy);
   const controlPolicy = asObject(row.control_policy || row.controlPolicy);
+  const execution = normalizeParticipantExecutionSchema(row);
   const out = {
     metadata: asObject(row.metadata),
     intent: {
@@ -381,12 +401,7 @@ function compactLastRoute(raw = null) {
 function compactPendingUserRequest(raw = null) {
   const row = raw && typeof raw === 'object' ? raw : null;
   if (!row) return null;
-  return Object.fromEntries(Object.entries({
-    type: String(row.type || '').trim().toLowerCase() || undefined,
-    prompt: clipSessionText(row.prompt || row.text || '', 320) || undefined,
-    followup_hint: clipSessionText(row.followup_hint || row.followupHint || '', 160) || undefined,
-    reason: clipSessionText(row.reason || '', 160) || undefined,
-  }).filter(([, value]) => value !== undefined));
+  return compactInputRequest(row);
 }
 
 function normalizeSessionTeamConfig(raw) {
@@ -465,6 +480,9 @@ function normalizeSession(chatId, raw = {}) {
     pending_user_request: compactPendingUserRequest(row.pending_user_request),
     pending_user_messages: pendingUserMessages,
     interrupt,
+    pending_interrupt_strategy: row.pending_interrupt_strategy && typeof row.pending_interrupt_strategy === 'object'
+      ? row.pending_interrupt_strategy
+      : (row.pendingInterruptStrategy && typeof row.pendingInterruptStrategy === 'object' ? row.pendingInterruptStrategy : null),
     dashboard: dashboardMessageId ? { message_id: dashboardMessageId } : null,
     current_turn_ack_message_id: currentTurnAckMessageId,
     current_turn_plan_message_id: currentTurnPlanMessageId,

@@ -1,4 +1,5 @@
 import { getTransportRoleId, normalizeRoleId } from "../compatibility/legacy_roles.js";
+import { normalizeParticipantExecutionSchema } from "../shared/participant_schema.js";
 
 function normalizeText(raw = "", {
   lower = false,
@@ -432,12 +433,10 @@ function buildStructuralNodeAction({
       supervisor_instance_id: normalizeText(supervisorRuntime?.instance_id || supervisorRuntime?.instanceId) || undefined,
       gate_type: actionType === 'gate_wait' ? (gateRole || roleId || 'approval') : undefined,
       approval_required: actionType === 'gate_wait' ? ['approval', 'mutating_confirm'].includes(gateRole || roleId) : (actionType === 'human_checkpoint'),
-      required_tool_ids: actionType === 'tool_proxy_call'
-        ? asArray(participant?.required_tool_ids || participant?.requiredToolIds || participant?.tool_ids).map((toolId) => normalizeText(toolId, { lower: true })).filter(Boolean)
-        : undefined,
-      optional_tool_ids: actionType === 'tool_proxy_call'
-        ? asArray(participant?.optional_tool_ids || participant?.optionalToolIds || participant?.recommended_tool_ids || participant?.recommendedToolIds).map((toolId) => normalizeText(toolId, { lower: true })).filter(Boolean)
-        : undefined,
+      runtime_capabilities_required: actionType === 'tool_proxy_call' ? normalizeParticipantExecutionSchema(participant).runtime_capabilities_required.map((toolId) => normalizeText(toolId, { lower: true })).filter(Boolean) : undefined,
+      runtime_capabilities_optional: actionType === 'tool_proxy_call' ? normalizeParticipantExecutionSchema(participant).runtime_capabilities_optional.map((toolId) => normalizeText(toolId, { lower: true })).filter(Boolean) : undefined,
+      external_tool_requirements: actionType === 'tool_proxy_call' ? normalizeParticipantExecutionSchema(participant).external_tool_requirements.map((toolId) => normalizeText(toolId, { lower: true })).filter(Boolean) : undefined,
+      external_tool_preferences: actionType === 'tool_proxy_call' ? normalizeParticipantExecutionSchema(participant).external_tool_preferences.map((toolId) => normalizeText(toolId, { lower: true })).filter(Boolean) : undefined,
       memory_keys: actionType === 'memory_sync'
         ? asArray(participant?.memory_keys || participant?.bound_memory_keys).map((key) => normalizeText(key)).filter(Boolean)
         : undefined,
@@ -588,7 +587,8 @@ function slotParallelSignature(slot = {}) {
     ...asArray(slot?.required_skill_ids).map((entry) => normalizeText(entry, { lower: true })),
     ...asArray(slot?.preferred_skill_ids).map((entry) => normalizeText(entry, { lower: true })),
     ...asArray(slot?.required_context_types).map((entry) => normalizeText(entry, { lower: true })),
-    ...asArray(slot?.required_tool_ids).map((entry) => normalizeText(entry, { lower: true })),
+    ...asArray(slot?.runtime_capabilities_required).map((entry) => normalizeText(entry, { lower: true })),
+    ...asArray(slot?.external_tool_requirements).map((entry) => normalizeText(entry, { lower: true })),
     normalizeText(slot?.purpose, { lower: true }),
   ].filter(Boolean).join("|");
 }

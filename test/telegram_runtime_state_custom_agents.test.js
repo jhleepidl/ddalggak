@@ -14,7 +14,7 @@ test('findAgentConfigInRuntime resolves custom team agents from conversation/run
           configured_role: 'builder',
           configured_provider: 'codex',
           configured_model: 'gpt-5-codex',
-          recommended_tool_ids: ['workspace_fs'],
+          runtime_capabilities_optional: ['filesystem_write'],
         },
       },
     ],

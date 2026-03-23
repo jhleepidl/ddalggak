@@ -15,7 +15,7 @@ const baseTeam = {
       name: 'Notebook Builder',
       role: 'builder',
       purpose: 'Create a notebook artifact',
-      recommended_tool_ids: ['workspace_fs'],
+      runtime_capabilities_optional: ['filesystem_write'],
     },
   ],
   interaction_spec: {
@@ -31,7 +31,7 @@ test('buildTeamBlueprint attaches requirements and install hints', () => {
   assert.equal(manifest.blueprint.structure.topology.pattern, 'single');
   assert.equal(manifest.team.agents[0].agent_id, 'builder');
   assert.ok(Array.isArray(manifest.blueprint.memory_plan.surfaces));
-  assert.equal(manifest.requirements.tools[0].tool_id, 'workspace_fs');
+  assert.equal(manifest.requirements['tools'][0].tool_id, 'workspace_fs');
   assert.ok(Array.isArray(manifest.requirements.install_hints));
   assert.ok(manifest.requirements.install_hints.some((entry) => entry.includes('/team export')));
 });
@@ -63,7 +63,7 @@ test('buildTeamBlueprint preserves install proposal state when provided', () => 
       source: 'execution_gap',
       gap_count: 1,
       blocking: true,
-      requirements: { tools: [{ tool_id: 'workspace_fs', required_by: 'builder' }] },
+      requirements: { capabilities: [{ capability_id: 'filesystem_write', tool_id: 'workspace_fs', required_by: 'builder' }] },
     },
     applyState: 'active',
     resumeRequest: { message: '다시 실행해줘' },
@@ -141,12 +141,12 @@ test('buildTeamBlueprint preserves required and optional tool expectations', () 
         agent_id: 'builder',
         name: 'Builder',
         role: 'builder',
-        required_tool_ids: ['workspace_fs'],
-        optional_tool_ids: ['shell'],
+        runtime_capabilities_required: ['filesystem_write'],
+        runtime_capabilities_optional: ['shell_exec'],
       },
     ],
   }, { runtime: null, applyState: 'pending' });
 
-  assert.deepEqual(manifest.team.agents[0].required_tool_ids, ['workspace_fs']);
-  assert.deepEqual(manifest.team.agents[0].optional_tool_ids, ['shell']);
+  assert.deepEqual(manifest.team.agents[0].runtime_capabilities_required, ['filesystem_write']);
+  assert.deepEqual(manifest.team.agents[0].runtime_capabilities_optional, ['shell_exec']);
 });

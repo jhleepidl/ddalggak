@@ -605,7 +605,10 @@ function findCriticSummary(session = null) {
 function deriveNextHumanAction({ session = null, pendingApproval = null, pendingInstallProposal = null, pendingUserRequest = null, activeJobId = "", artifactCount = 0 } = {}) {
   if (pendingApproval) return `승인 필요 · ${normalizeTextSummary(pendingApproval.reason || 'approval required', 100)}`;
   if (pendingInstallProposal) return `install 검토 필요 · gaps=${Number(pendingInstallProposal?.proposal?.gap_count || 0)}`;
-  if (pendingUserRequest?.followup_hint) return normalizeTextSummary(pendingUserRequest.followup_hint, 120);
+  if (pendingUserRequest?.followup_hint || pendingUserRequest?.reason || pendingUserRequest?.prompt) {
+    const prefix = pendingUserRequest?.request_kind ? `${pendingUserRequest.request_kind}: ` : '';
+    return normalizeTextSummary(`${prefix}${pendingUserRequest.followup_hint || pendingUserRequest.reason || pendingUserRequest.prompt}`, 120);
+  }
   if (session?.state === 'awaiting_user' || session?.last_route?.await_user === true) {
     return normalizeTextSummary(session?.last_route?.followup_hint || '추가 입력 필요', 120);
   }

@@ -35,6 +35,15 @@ import {
   buildProviderRuntimePolicySummary,
   resolveProviderRuntimeOptions,
 } from "../application/provider_runtime_policy.js";
+import {
+  appendResolutionAttempt,
+  buildDelegateAgentGoal,
+  buildDelegatedDetailContext,
+  buildResolvedActionInputs,
+  parseDelegateResolutionOutput,
+  resolveAwaitUserRequestHandling,
+} from "../application/user_input_resolution.js";
+import { normalizeInputRequest } from "../shared/input_request_schema.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -484,13 +493,187 @@ function buildFailureResultNote(failure = {}, fallbackMessage = '') {
 function buildAwaitUserRequestFromFailure(failure = {}, { label = '', action = {} } = {}) {
   const reason = String(failure?.summary || failure?.message || label || '추가 입력 필요').trim();
   const hint = String(failure?.user_message || '').trim() || '추가 입력이 필요합니다.';
-  return {
+  return normalizeInputRequest({
+    request_id: `ireq_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}` ,
     type: 'await_user',
     category: String(failure?.category || 'unknown_failure').trim() || 'unknown_failure',
     reason,
+    prompt: reason,
     followup_hint: hint,
-    action_label: String(label || '').trim() || String(action?.type || 'action').trim(),
-    action_type: String(action?.type || '').trim().toLowerCase() || undefined,
+    source_agent_id: String(action?.agent_id || action?.agent || '').trim().toLowerCase() || undefined,
+    source_action_label: String(label || '').trim() || String(action?.type || 'action').trim(),
+    source_action_type: String(action?.type || '').trim().toLowerCase() || undefined,
+  });
+}
+
+async function tryResolveAwaitUserRequestByDelegate({
+  awaitUserRequest = null,
+  action = {},
+  callbacks = {},
+  jobId = '',
+  detailContext = '',
+  agents = [],
+  outputs = [],
+  results = [],
+  activeRouteSignals = new Set(),
+} = {}) {
+  const request = awaitUserRequest && typeof awaitUserRequest === 'object'
+    ? normalizeInputRequest(awaitUserRequest, {
+        fallbackSourceAgentId: String(action?.agent_id || action?.agent || '').trim().toLowerCase(),
+        fallbackActionType: action?.type,
+        fallbackActionLabel: action?.label || action?.goal,
+      })
+    : null;
+  if (!request || typeof callbacks.runAgent !== 'function') {
+    return {
+      resolved: false,
+      awaitUserRequest: request,
+      detailContext,
+      runResult: null,
+      delegate: null,
+    };
+  }
+  const handling = resolveAwaitUserRequestHandling({
+    request,
+    action,
+    agents,
+    currentAgentId: String(action?.agent_id || action?.agent || '').trim().toLowerCase(),
+  });
+  if (handling?.resolution !== 'delegate_agent') {
+    return {
+      resolved: false,
+      awaitUserRequest: handling?.request || request,
+      detailContext,
+      runResult: null,
+      delegate: handling || null,
+    };
+  }
+
+  let evolvingRequest = handling.request || request;
+  const candidates = Array.isArray(handling.candidate_delegate_agents) && handling.candidate_delegate_agents.length > 0
+    ? handling.candidate_delegate_agents
+    : (Array.isArray(handling.candidate_resolver_agent_ids)
+      ? handling.candidate_resolver_agent_ids.map((id) => ({ id: String(id || '').trim().toLowerCase(), role: '' })).filter((row) => row.id)
+      : []);
+
+  for (const candidate of candidates) {
+    const delegateAgentId = String(candidate?.id || '').trim().toLowerCase();
+    if (!delegateAgentId) continue;
+    const delegateAgentRole = String(candidate?.role || '').trim().toLowerCase() || undefined;
+    const delegateAction = {
+      type: 'run_agent',
+      agent_id: delegateAgentId,
+      goal: buildDelegateAgentGoal({
+        request: evolvingRequest,
+        action,
+        sourceAgentId: String(action?.agent_id || action?.agent || '').trim().toLowerCase(),
+        delegateAgent: candidate,
+      }),
+      inputs: {
+        input_request: evolvingRequest,
+        input_resolution_task: {
+          request_id: evolvingRequest.request_id,
+          source_agent_id: evolvingRequest.source_agent_id,
+          request_kind: evolvingRequest.request_kind,
+          category: evolvingRequest.category,
+        },
+        await_user_resolution_for_agent_id: String(action?.agent_id || action?.agent || '').trim().toLowerCase() || undefined,
+        await_user_resolution_category: String(evolvingRequest?.category || '').trim().toLowerCase() || undefined,
+      },
+    };
+
+    try {
+      const delegateResult = await callbacks.runAgent({ action: delegateAction, jobId, detailContext });
+      const delegateOutput = String(delegateResult?.output || '').trim();
+      const resolution = parseDelegateResolutionOutput({
+        request: evolvingRequest,
+        delegateOutput,
+        delegateAgentId,
+        delegateAgentRole,
+      });
+      evolvingRequest = appendResolutionAttempt({ request: evolvingRequest, resolution });
+      outputs.push(attachRouteSignals({
+        agentId: delegateAgentId,
+        provider: String(delegateResult?.provider || '').trim().toLowerCase(),
+        mode: 'input_resolution',
+        legacy_mode: 'followup_resolution',
+        output: delegateOutput,
+        jobId: String(jobId || ''),
+        input_request_id: evolvingRequest.request_id || undefined,
+        resolution_type: resolution.resolution_type || undefined,
+        await_user_resolution_for: String(action?.agent_id || action?.agent || '').trim().toLowerCase() || undefined,
+      }, ['input_resolution'], { activeSignals: activeRouteSignals }));
+      results.push({
+        label: `${String(action?.agent_id || action?.agent || 'agent').trim()} input_resolution`,
+        status: resolution.resolution_type === 'agent_resolved' ? 'ok' : 'blocked',
+        note: resolution.resolution_type === 'agent_resolved'
+          ? `resolved by ${delegateAgentId}`
+          : `user decision required after ${delegateAgentId}`,
+      });
+
+      if (resolution.resolution_type === 'user_required') {
+        return {
+          resolved: false,
+          awaitUserRequest: evolvingRequest,
+          detailContext,
+          runResult: null,
+          delegate: handling,
+          delegateResult,
+        };
+      }
+
+      const recoveredDetailContext = buildDelegatedDetailContext({
+        detailContext,
+        request: evolvingRequest,
+        resolution,
+      });
+      const retriedAction = {
+        ...action,
+        inputs: buildResolvedActionInputs({
+          actionInputs: action?.inputs,
+          request: evolvingRequest,
+          resolution,
+        }),
+      };
+      const retried = await callbacks.runAgent({ action: retriedAction, jobId, detailContext: recoveredDetailContext });
+      return {
+        resolved: true,
+        awaitUserRequest: null,
+        detailContext: recoveredDetailContext,
+        runResult: retried,
+        delegate: handling,
+        delegateResult,
+      };
+    } catch (delegateError) {
+      const failureResolution = {
+        resolver_agent_id: delegateAgentId,
+        resolver_agent_role: delegateAgentRole,
+        status: 'failed',
+        resolution_type: 'delegate_failed',
+        answer: String(delegateError?.message || delegateError || 'delegate resolution failed').trim(),
+        rationale: 'delegate resolver failed before producing a usable answer',
+      };
+      evolvingRequest = appendResolutionAttempt({ request: evolvingRequest, resolution: failureResolution });
+      results.push({
+        label: `${String(action?.agent_id || action?.agent || 'agent').trim()} input_resolution`,
+        status: 'error',
+        note: `delegate ${delegateAgentId} failed`,
+      });
+    }
+  }
+
+  const finalAwaitUserRequest = normalizeInputRequest({
+    ...evolvingRequest,
+    resolution_status: 'awaiting_user',
+    human_required: true,
+    followup_hint: String(evolvingRequest?.followup_hint || evolvingRequest?.reason || '추가 입력이 필요합니다.').trim() || '추가 입력이 필요합니다.',
+  });
+  return {
+    resolved: false,
+    awaitUserRequest: finalAwaitUserRequest,
+    detailContext,
+    runResult: null,
+    delegate: handling,
   };
 }
 
@@ -950,15 +1133,31 @@ export async function executeSupervisorActions({
           results,
           activeRouteSignals,
         });
+        let runResult = executionOutcome?.runResult;
         if (executionOutcome?.awaitUserRequest) {
-          awaitUserRequest = executionOutcome.awaitUserRequest;
-          blockedActions += 1;
-          blockedIndex = i;
-          remainingActions = executableActions.slice(i + 1);
-          break;
+          const delegatedRecovery = await tryResolveAwaitUserRequestByDelegate({
+            awaitUserRequest: executionOutcome.awaitUserRequest,
+            action,
+            callbacks,
+            jobId,
+            detailContext,
+            agents,
+            outputs,
+            results,
+            activeRouteSignals,
+          });
+          if (!delegatedRecovery?.resolved) {
+            awaitUserRequest = delegatedRecovery?.awaitUserRequest || executionOutcome.awaitUserRequest;
+            blockedActions += 1;
+            blockedIndex = i;
+            remainingActions = executableActions.slice(i + 1);
+            break;
+          }
+          detailContext = String(delegatedRecovery?.detailContext || executionOutcome?.detailContext || detailContext || '');
+          runResult = delegatedRecovery?.runResult || runResult;
+        } else {
+          detailContext = String(executionOutcome?.detailContext || detailContext || '');
         }
-        detailContext = String(executionOutcome?.detailContext || detailContext || '');
-        const runResult = executionOutcome?.runResult;
         const outputText = String(runResult?.output || "");
         const routeSignals = resolveActionRouteSignals({ action, result: runResult });
         outputs.push(attachRouteSignals({
@@ -1066,15 +1265,31 @@ export async function executeSupervisorActions({
           results,
           activeRouteSignals,
         });
+        let runResult = executionOutcome?.runResult;
         if (executionOutcome?.awaitUserRequest) {
-          awaitUserRequest = executionOutcome.awaitUserRequest;
-          blockedActions += 1;
-          blockedIndex = i;
-          remainingActions = executableActions.slice(i + 1);
-          break;
+          const delegatedRecovery = await tryResolveAwaitUserRequestByDelegate({
+            awaitUserRequest: executionOutcome.awaitUserRequest,
+            action: synthesizedAction,
+            callbacks,
+            jobId,
+            detailContext,
+            agents,
+            outputs,
+            results,
+            activeRouteSignals,
+          });
+          if (!delegatedRecovery?.resolved) {
+            awaitUserRequest = delegatedRecovery?.awaitUserRequest || executionOutcome.awaitUserRequest;
+            blockedActions += 1;
+            blockedIndex = i;
+            remainingActions = executableActions.slice(i + 1);
+            break;
+          }
+          detailContext = String(delegatedRecovery?.detailContext || executionOutcome?.detailContext || detailContext || '');
+          runResult = delegatedRecovery?.runResult || runResult;
+        } else {
+          detailContext = String(executionOutcome?.detailContext || detailContext || '');
         }
-        detailContext = String(executionOutcome?.detailContext || detailContext || '');
-        const runResult = executionOutcome?.runResult;
         const routeSignals = resolveActionRouteSignals({ action, result: runResult });
         outputs.push(attachRouteSignals({
           agentId: String(action?.agent || "").trim().toLowerCase() || "synthesizer",
@@ -1844,7 +2059,8 @@ export async function executeSupervisorActions({
             if (repairLoopResult?.proxyResult) proxyResult = repairLoopResult.proxyResult;
           }
         } else {
-          const requiredTools = (Array.isArray(action?.inputs?.required_tool_ids) ? action.inputs.required_tool_ids : []).filter(Boolean);
+          const execution = normalizeParticipantExecutionSchema(action?.inputs || {});
+          const requiredTools = getParticipantLegacyRequiredToolIds(execution).filter(Boolean);
           outputs.push(attachRouteSignals({
             agentId: 'system',
             provider: 'system',

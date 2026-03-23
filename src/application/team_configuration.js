@@ -38,6 +38,7 @@ import { buildTeamStructureV2, normalizeTeamStructureV2, deriveTeamConfigFromStr
 import { deriveKnowledgeBaseDesign, summarizeKnowledgeBaseProfile, formatKnowledgeBaseMemoryMap, formatMemoryPlanMap } from '../knowledge_base/profile.js';
 import { attachTeamBlueprint, buildTaskArchetypeBlueprintDocument, inferTaskArchetype } from './team_blueprint.js';
 import { buildTeamSeedFromTaskArchetype } from './team_blueprint_templates.js';
+import { normalizeParticipantExecutionSchema, splitToolishIds, getParticipantLegacyRequiredToolIds, getParticipantLegacyOptionalToolIds, getParticipantLegacyRecommendedToolIds } from '../shared/participant_schema.js';
 import { collectEffectiveAvailableToolIds } from './runtime_tool_availability.js';
 import { buildTeamCapabilityContract, formatTeamCapabilityContractLines } from './team_capability_contract.js';
 
@@ -229,7 +230,8 @@ function buildFallbackSelectionSlot(agent = {}, planning = {}) {
     required_skill_ids: [],
     forbidden_skill_ids: [],
     required_context_types: requiredContextTypes,
-    required_tool_ids: [],
+    runtime_capabilities_required: [],
+    external_tool_requirements: [],
     parallelizable: roleId === 'researcher',
     deliverable_type: roleId === 'builder' ? 'code_patch' : (roleId === 'reviewer' ? 'review_findings' : (roleId === 'synthesizer' ? 'report' : 'research_notes')),
     selection_reason: 'team_config_fallback_slot',
@@ -383,36 +385,50 @@ function resolveAgentExecutionProfile(agent = {}, planning = {}) {
     skillRequiredToolIds.push(...asArray(skill?.required_tools));
   }
   const codeLikeTask = /ipynb|notebook|jupyter|file|json|python|script|workspace|코드|노트북|파일/.test(`${planning.taskText} ${agent.purpose}`.toLowerCase());
-  const explicitRequiredToolIds = uniqueIds([
-    ...asArray(agent?.required_tool_ids || agent?.requiredToolIds),
-    ...asArray(slot?.required_tool_ids),
-    ...skillRequiredToolIds,
+  const agentExecution = normalizeParticipantExecutionSchema(agent);
+  const slotToolSplit = splitToolishIds(getParticipantLegacyRequiredToolIds(slot || {}));
+  const skillToolSplit = splitToolishIds(skillRequiredToolIds);
+  const explicitRuntimeCapabilitiesRequired = uniqueIds([
+    ...agentExecution.runtime_capabilities_required,
+    ...slotToolSplit.runtimeCapabilities,
+    ...skillToolSplit.runtimeCapabilities,
   ], { max: 6 });
-  const explicitOptionalToolIds = uniqueIds([
-    ...asArray(agent?.optional_tool_ids || agent?.optionalToolIds),
-    ...asArray(agent?.recommended_tool_ids || agent?.recommendedToolIds),
-    ...asArray(preset?.selection_features?.tool_hints),
-    ...(roleId === 'builder' && codeLikeTask ? ['workspace_fs', 'shell'] : []),
-  ], { max: 6 }).filter((toolId) => !explicitRequiredToolIds.includes(toolId));
-  const recommendedToolIds = uniqueIds([
-    ...explicitRequiredToolIds,
-    ...explicitOptionalToolIds,
+  const explicitExternalToolRequirements = uniqueIds([
+    ...agentExecution.external_tool_requirements,
+    ...slotToolSplit.externalTools,
+    ...skillToolSplit.externalTools,
   ], { max: 6 });
+  const explicitRuntimeCapabilitiesOptional = uniqueIds([
+    ...agentExecution.runtime_capabilities_optional,
+    ...splitToolishIds([
+      ...getParticipantLegacyOptionalToolIds(agent || {}),
+      ...getParticipantLegacyRecommendedToolIds(agent || {}),
+      ...asArray(preset?.selection_features?.tool_hints),
+      ...(roleId === 'builder' && codeLikeTask ? ['workspace_fs', 'shell'] : []),
+    ]).runtimeCapabilities,
+  ], { max: 6 }).filter((toolId) => !explicitRuntimeCapabilitiesRequired.includes(toolId));
+  const explicitExternalToolPreferences = uniqueIds([
+    ...agentExecution.external_tool_preferences,
+    ...splitToolishIds([
+      ...getParticipantLegacyOptionalToolIds(agent || {}),
+      ...getParticipantLegacyRecommendedToolIds(agent || {}),
+      ...asArray(preset?.selection_features?.tool_hints),
+    ]).externalTools,
+  ], { max: 6 }).filter((toolId) => !explicitExternalToolRequirements.includes(toolId));
   const capabilities = deriveCapabilityLabels({ role: agent.role, taskText: planning.taskText, purpose: agent.purpose, name: agent.name });
   const sanitizedTools = sanitizeAgentToolExpectations({
     roleId,
     taskText: planning.taskText,
     purpose: agent.purpose,
-    requiredToolIds: explicitRequiredToolIds,
-    optionalToolIds: explicitOptionalToolIds,
-    recommendedToolIds,
+    runtimeCapabilitiesRequired: explicitRuntimeCapabilitiesRequired,
+    runtimeCapabilitiesOptional: explicitRuntimeCapabilitiesOptional,
+    externalToolRequirements: explicitExternalToolRequirements,
+    externalToolPreferences: explicitExternalToolPreferences,
   });
   return {
     capabilities,
     attached_skill_ids: attachmentIds,
-    required_tool_ids: sanitizedTools.required_tool_ids,
-    optional_tool_ids: sanitizedTools.optional_tool_ids,
-    recommended_tool_ids: sanitizedTools.recommended_tool_ids,
+    ...sanitizedTools,
     matched_preset_id: cleanId(preset?.preset_id || ''),
     matched_preset_name: clean(preset?.display_name || ''),
     slot,
@@ -420,30 +436,23 @@ function resolveAgentExecutionProfile(agent = {}, planning = {}) {
 }
 
 
-function sanitizeAgentToolExpectations({ roleId = '', taskText = '', purpose = '', requiredToolIds = [], optionalToolIds = [], recommendedToolIds = [] } = {}) {
+function sanitizeAgentToolExpectations({ roleId = '', taskText = '', purpose = '', runtimeCapabilitiesRequired = [], runtimeCapabilitiesOptional = [], externalToolRequirements = [], externalToolPreferences = [] } = {}) {
   const role = normalizeTeamRole(roleId);
   const codeLikeTask = /ipynb|notebook|jupyter|file|json|python|script|workspace|코드|노트북|파일|repo|repository|codebase|log/.test(`${taskText} ${purpose}`.toLowerCase());
-  const writeTools = new Set(['workspace_fs', 'write_file', 'create_file', 'save_file']);
-  const required = uniqueIds(requiredToolIds, { max: 6 });
-  const optional = uniqueIds(optionalToolIds, { max: 6 });
-  const recommended = uniqueIds(recommendedToolIds, { max: 6 });
+  const writeCapabilities = new Set(['filesystem_write']);
+  const requiredCaps = uniqueIds(runtimeCapabilitiesRequired, { max: 6 });
+  const optionalCaps = uniqueIds(runtimeCapabilitiesOptional, { max: 6 });
+  const requiredTools = uniqueIds(externalToolRequirements, { max: 6 });
+  const optionalTools = uniqueIds(externalToolPreferences, { max: 6 });
   if (role === 'builder') {
-    const nextRequired = uniqueIds([...required, ...(codeLikeTask ? ['workspace_fs'] : [])], { max: 6 });
-    const nextOptional = uniqueIds([...optional, ...(codeLikeTask ? ['shell'] : [])], { max: 6 }).filter((toolId) => !nextRequired.includes(toolId));
-    return {
-      required_tool_ids: nextRequired,
-      optional_tool_ids: nextOptional,
-      recommended_tool_ids: uniqueIds([...nextRequired, ...nextOptional, ...recommended], { max: 6 }),
-    };
+    const nextRequiredCaps = uniqueIds([...requiredCaps, ...(codeLikeTask ? ['filesystem_write'] : [])], { max: 6 });
+    const nextOptionalCaps = uniqueIds([...optionalCaps, ...(codeLikeTask ? ['shell_exec'] : [])], { max: 6 }).filter((toolId) => !nextRequiredCaps.includes(toolId));
+    return normalizeParticipantExecutionSchema({ runtime_capabilities_required: nextRequiredCaps, runtime_capabilities_optional: nextOptionalCaps, external_tool_requirements: requiredTools, external_tool_preferences: optionalTools });
   }
-  const nextRequired = required.filter((toolId) => !writeTools.has(toolId));
-  const nextOptional = optional.filter((toolId) => !writeTools.has(toolId));
-  if (codeLikeTask) nextRequired.push('read_only_fs');
-  return {
-    required_tool_ids: uniqueIds(nextRequired, { max: 6 }),
-    optional_tool_ids: uniqueIds(nextOptional, { max: 6 }),
-    recommended_tool_ids: uniqueIds([...nextRequired, ...nextOptional, ...recommended.filter((toolId) => !writeTools.has(toolId))], { max: 6 }),
-  };
+  const nextRequiredCaps = requiredCaps.filter((toolId) => !writeCapabilities.has(toolId));
+  const nextOptionalCaps = optionalCaps.filter((toolId) => !writeCapabilities.has(toolId));
+  if (codeLikeTask) nextRequiredCaps.push('filesystem_read');
+  return normalizeParticipantExecutionSchema({ runtime_capabilities_required: uniqueIds(nextRequiredCaps, { max: 6 }), runtime_capabilities_optional: uniqueIds(nextOptionalCaps, { max: 6 }), external_tool_requirements: requiredTools, external_tool_preferences: optionalTools });
 }
 
 function agentSpecialtyKey(agent = {}, taskText = '') {
@@ -497,9 +506,10 @@ function enrichAgentDraft(agent = {}, planning = {}) {
     capabilities: executionProfile.capabilities,
     skills: executionProfile.capabilities,
     attached_skill_ids: executionProfile.attached_skill_ids,
-    required_tool_ids: executionProfile.required_tool_ids,
-    optional_tool_ids: executionProfile.optional_tool_ids,
-    recommended_tool_ids: executionProfile.recommended_tool_ids,
+    runtime_capabilities_required: executionProfile.runtime_capabilities_required,
+    runtime_capabilities_optional: executionProfile.runtime_capabilities_optional,
+    external_tool_requirements: executionProfile.external_tool_requirements,
+    external_tool_preferences: executionProfile.external_tool_preferences,
     matched_preset_id: executionProfile.matched_preset_id || undefined,
     matched_preset_name: executionProfile.matched_preset_name || undefined,
     generated_skill_briefs: inferGeneratedSkillBriefs({ ...agent, attached_skill_ids: executionProfile.attached_skill_ids, capabilities: executionProfile.capabilities }, planning),
@@ -1564,23 +1574,12 @@ function applyMinorAgentSettingsRefinement({ currentTeam = {}, instruction = '',
       ...agent,
       model: nextModel || clean(agent?.model),
       provider: nextProvider || cleanId(agent?.provider || ''),
-      required_tool_ids: uniqueIds([
-        ...asArray(agent?.required_tool_ids),
-        ...asArray(matchedPlanner?.required_tool_ids || matchedPlanner?.requiredToolIds),
-      ], { max: 6 }),
-      optional_tool_ids: uniqueIds([
-        ...asArray(agent?.optional_tool_ids),
-        ...asArray(matchedPlanner?.optional_tool_ids || matchedPlanner?.optionalToolIds),
-        ...asArray(matchedPlanner?.recommended_tool_ids || matchedPlanner?.recommendedToolIds),
-      ], { max: 6 }),
-      recommended_tool_ids: uniqueIds([
-        ...asArray(agent?.recommended_tool_ids),
-        ...asArray(agent?.required_tool_ids),
-        ...asArray(agent?.optional_tool_ids),
-        ...asArray(matchedPlanner?.required_tool_ids || matchedPlanner?.requiredToolIds),
-        ...asArray(matchedPlanner?.optional_tool_ids || matchedPlanner?.optionalToolIds),
-        ...asArray(matchedPlanner?.recommended_tool_ids || matchedPlanner?.recommendedToolIds),
-      ], { max: 6 }),
+      ...normalizeParticipantExecutionSchema({
+        runtime_capabilities_required: uniqueIds([...normalizeParticipantExecutionSchema(agent).runtime_capabilities_required, ...normalizeParticipantExecutionSchema(matchedPlanner || {}).runtime_capabilities_required], { max: 6 }),
+        runtime_capabilities_optional: uniqueIds([...normalizeParticipantExecutionSchema(agent).runtime_capabilities_optional, ...normalizeParticipantExecutionSchema(matchedPlanner || {}).runtime_capabilities_optional], { max: 6 }),
+        external_tool_requirements: uniqueIds([...normalizeParticipantExecutionSchema(agent).external_tool_requirements, ...normalizeParticipantExecutionSchema(matchedPlanner || {}).external_tool_requirements], { max: 6 }),
+        external_tool_preferences: uniqueIds([...normalizeParticipantExecutionSchema(agent).external_tool_preferences, ...normalizeParticipantExecutionSchema(matchedPlanner || {}).external_tool_preferences], { max: 6 }),
+      }),
       context_policy: normalizeContextPolicy(matchedPlanner?.context_policy || matchedPlanner?.contextPolicy || agent?.context_policy, {
         role: agent?.role,
         taskText: currentTeam?.task_brief || instruction,
@@ -1697,9 +1696,10 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
         roleId: role,
         taskText: taskBrief,
         purpose,
-        requiredToolIds: uniqueIds(entry.required_tool_ids || entry.requiredToolIds || []),
-        optionalToolIds: uniqueIds(entry.optional_tool_ids || entry.optionalToolIds || []),
-        recommendedToolIds: uniqueIds(entry.recommended_tool_ids || entry.recommendedToolIds || []),
+        runtimeCapabilitiesRequired: normalizeParticipantExecutionSchema(entry).runtime_capabilities_required,
+        runtimeCapabilitiesOptional: normalizeParticipantExecutionSchema(entry).runtime_capabilities_optional,
+        externalToolRequirements: normalizeParticipantExecutionSchema(entry).external_tool_requirements,
+        externalToolPreferences: normalizeParticipantExecutionSchema(entry).external_tool_preferences,
       }),
       matched_preset_id: cleanId(entry.matched_preset_id || entry.matchedPresetId || '' ) || undefined,
       matched_preset_name: clean(entry.matched_preset_name || entry.matchedPresetName || '' ) || undefined,
@@ -1933,22 +1933,27 @@ function overlayPlannerAgentDraft(base = {}, plannerAgent = {}, { taskText = '' 
     capabilities: capabilities.length > 0 ? capabilities : asArray(base.capabilities || base.skills),
     skills: capabilities.length > 0 ? capabilities : asArray(base.capabilities || base.skills),
     attached_skill_ids: attachedSkillIds,
-    required_tool_ids: uniqueIds([
-      ...asArray(plannerAgent.required_tool_ids || plannerAgent.requiredToolIds),
-      ...asArray(base.required_tool_ids),
+    runtime_capabilities_required: uniqueIds([
+      ...asArray(plannerAgent.runtime_capabilities_required || plannerAgent.runtimeCapabilitiesRequired),
+      ...asArray(base.runtime_capabilities_required),
     ], { max: 6 }),
-    optional_tool_ids: uniqueIds([
-      ...asArray(plannerAgent.optional_tool_ids || plannerAgent.optionalToolIds),
-      ...asArray(base.optional_tool_ids),
-      ...asArray(plannerAgent.recommended_tool_ids || plannerAgent.recommendedToolIds),
+    runtime_capabilities_optional: uniqueIds([
+      ...asArray(plannerAgent.runtime_capabilities_optional || plannerAgent.runtimeCapabilitiesOptional),
+      ...asArray(base.runtime_capabilities_optional),
     ], { max: 6 }),
-    recommended_tool_ids: uniqueIds([
-      ...asArray(plannerAgent.required_tool_ids || plannerAgent.requiredToolIds),
-      ...asArray(plannerAgent.optional_tool_ids || plannerAgent.optionalToolIds),
-      ...asArray(plannerAgent.recommended_tool_ids || plannerAgent.recommendedToolIds),
-      ...asArray(base.required_tool_ids),
-      ...asArray(base.optional_tool_ids),
-      ...asArray(base.recommended_tool_ids),
+    external_tool_requirements: uniqueIds([
+      ...asArray(plannerAgent.external_tool_requirements || plannerAgent.externalToolRequirements),
+      ...asArray(base.external_tool_requirements),
+      ...getParticipantLegacyRequiredToolIds(plannerAgent),
+      ...getParticipantLegacyRequiredToolIds(base),
+    ], { max: 6 }),
+    external_tool_preferences: uniqueIds([
+      ...asArray(plannerAgent.external_tool_preferences || plannerAgent.externalToolPreferences),
+      ...asArray(base.external_tool_preferences),
+      ...getParticipantLegacyOptionalToolIds(plannerAgent),
+      ...getParticipantLegacyRecommendedToolIds(plannerAgent),
+      ...getParticipantLegacyOptionalToolIds(base),
+      ...getParticipantLegacyRecommendedToolIds(base),
     ], { max: 6 }),
     generated_skill_briefs: generatedSkillBriefs,
     context_policy: normalizeContextPolicy(plannerAgent.context_policy || plannerAgent.contextPolicy || base.context_policy, { role, taskText, purpose }),
@@ -1975,9 +1980,7 @@ function buildPlannerDrivenFreeformAgents({ taskText = '', runtime = null, plann
     capabilities: uniqueIds(agent?.capabilities || []),
     attached_skill_ids: uniqueIds(agent?.attached_skill_ids || agent?.attachedSkillIds || []),
     generated_skill_briefs: normalizeGeneratedSkillBriefs(agent?.generated_skill_briefs || agent?.generatedSkillBriefs || []),
-    required_tool_ids: uniqueIds(agent?.required_tool_ids || agent?.requiredToolIds || []),
-    optional_tool_ids: uniqueIds(agent?.optional_tool_ids || agent?.optionalToolIds || []),
-    recommended_tool_ids: uniqueIds(agent?.recommended_tool_ids || agent?.recommendedToolIds || []),
+    ...normalizeParticipantExecutionSchema(agent),
     context_policy: agent?.context_policy || agent?.contextPolicy || null,
   })).filter((agent) => agent.name);
   const blueprints = plannerAgents.map((agent) => ({
@@ -2013,9 +2016,7 @@ function buildPlannerDrivenRefineAgents({ taskText = '', runtime = null, planner
     capabilities: uniqueIds(agent?.capabilities || []),
     attached_skill_ids: uniqueIds(agent?.attached_skill_ids || agent?.attachedSkillIds || []),
     generated_skill_briefs: normalizeGeneratedSkillBriefs(agent?.generated_skill_briefs || agent?.generatedSkillBriefs || []),
-    required_tool_ids: uniqueIds(agent?.required_tool_ids || agent?.requiredToolIds || []),
-    optional_tool_ids: uniqueIds(agent?.optional_tool_ids || agent?.optionalToolIds || []),
-    recommended_tool_ids: uniqueIds(agent?.recommended_tool_ids || agent?.recommendedToolIds || []),
+    ...normalizeParticipantExecutionSchema(agent),
     context_policy: agent?.context_policy || agent?.contextPolicy || null,
   })).filter((agent) => agent.name);
   const currentRows = asArray(currentAgents).map((agent) => ({
@@ -2027,9 +2028,7 @@ function buildPlannerDrivenRefineAgents({ taskText = '', runtime = null, planner
     capabilities: uniqueIds(agent?.capabilities || agent?.skills || []),
     attached_skill_ids: uniqueIds(agent?.attached_skill_ids || agent?.attachedSkillIds || []),
     generated_skill_briefs: normalizeGeneratedSkillBriefs(agent?.generated_skill_briefs || agent?.generatedSkillBriefs || []),
-    required_tool_ids: uniqueIds(agent?.required_tool_ids || agent?.requiredToolIds || []),
-    optional_tool_ids: uniqueIds(agent?.optional_tool_ids || agent?.optionalToolIds || []),
-    recommended_tool_ids: uniqueIds(agent?.recommended_tool_ids || agent?.recommendedToolIds || []),
+    ...normalizeParticipantExecutionSchema(agent),
     context_policy: agent?.context_policy || agent?.contextPolicy || null,
   })).filter((agent) => agent.name);
   const preserveMissing = !/(remove|delete|drop|replace|빼|제거|삭제|교체)/i.test(taskText);
@@ -2406,7 +2405,7 @@ export async function syncTeamConfigurationToConversationStore({ runtime = null,
       configured_role: agent.role,
       configured_provider: cleanId(agent.provider || inferProviderForModel(agent.model) || ''),
       capabilities: uniqueIds(agent.capabilities || agent.skills || []),
-      recommended_tool_ids: uniqueIds(agent.recommended_tool_ids || agent.recommendedToolIds || []),
+      external_tool_preferences: uniqueIds(agent.external_tool_preferences || agent.externalToolPreferences || getParticipantLegacyRecommendedToolIds(agent)),
       matched_preset_id: cleanId(agent.matched_preset_id || agent.matchedPresetId || '' ) || undefined,
       matched_preset_name: clean(agent.matched_preset_name || agent.matchedPresetName || '' ) || undefined,
       attached_skills: uniqueIds(agent.attached_skill_ids || agent.attachedSkillIds || agent.skills || [])
@@ -2518,9 +2517,7 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       skills: asArray(configAgent.capabilities || configAgent.skills).length > 0 ? uniqueIds(configAgent.capabilities || configAgent.skills) : asArray(base.skills),
       attached_skill_ids: uniqueIds(configAgent.attached_skill_ids || configAgent.attachedSkillIds || []),
       generated_skill_briefs: normalizeGeneratedSkillBriefs(configAgent.generated_skill_briefs || configAgent.generatedSkillBriefs || []),
-      required_tool_ids: uniqueIds(configAgent.required_tool_ids || configAgent.requiredToolIds || []),
-      optional_tool_ids: uniqueIds(configAgent.optional_tool_ids || configAgent.optionalToolIds || []),
-      recommended_tool_ids: uniqueIds(configAgent.recommended_tool_ids || configAgent.recommendedToolIds || []),
+      ...normalizeParticipantExecutionSchema(configAgent),
       interaction_contract: configAgent.interaction_contract || buildAgentLocalInteractionContract(executionProfile.interaction_spec, clean(configAgent.name || base.name || configAgent.agent_id)),
       prompt: clean(base.prompt || configAgent.prompt || ''),
       context_policy: normalizeContextPolicy(configAgent.context_policy || configAgent.contextPolicy, {
@@ -2545,9 +2542,9 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       model: merged.model,
       attached_skill_ids: uniqueIds(merged.attached_skill_ids || merged.attachedSkillIds || merged.skills),
       capability_tags: uniqueIds(merged.capabilities || merged.skills),
-      required_tool_ids: uniqueIds(merged.required_tool_ids || merged.requiredToolIds || []),
-      optional_tool_ids: uniqueIds(merged.optional_tool_ids || merged.optionalToolIds || []),
-      recommended_tool_ids: uniqueIds(merged.recommended_tool_ids || merged.recommendedToolIds || []),
+      runtime_capabilities_required: uniqueIds(merged.runtime_capabilities_required || merged.runtimeCapabilitiesRequired || []),
+      runtime_capabilities_optional: uniqueIds(merged.runtime_capabilities_optional || merged.runtimeCapabilitiesOptional || []),
+      external_tool_preferences: uniqueIds(merged.external_tool_preferences || merged.externalToolPreferences || getParticipantLegacyRecommendedToolIds(merged)),
       assigned_goal: composeAssignedGoalText(configAgent.purpose, merged.generated_skill_briefs),
       interaction_contract: merged.interaction_contract,
       context_policy: merged.context_policy,
@@ -2591,8 +2588,8 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
 
 function buildCompactCapabilityHeadline(team = {}, runtime = null) {
   const contract = buildTeamCapabilityContract({ team, runtime });
-  const required = formatToolLabels(contract.required_tool_ids || [], { max: 3 }).join(', ');
-  const optionalMissing = formatToolLabels(contract.missing_optional_tool_ids || [], { max: 3 }).join(', ');
+  const required = formatToolLabels(contract.required_tools || getParticipantLegacyRequiredToolIds(contract), { max: 3 }).join(', ');
+  const optionalMissing = formatToolLabels(contract.missing_optional_tools || [], { max: 3 }).join(', ');
   if (contract.status === 'ready') return '실행 준비: 바로 실행 가능';
   if (contract.status === 'degraded') return `실행 준비: 일부 제약 있음${required ? ` · 필수 tool ${required}` : ''}`;
   if (contract.status === 'unbound') return `실행 준비: runtime 연결 정보 부족${optionalMissing ? ` · 없으면 아쉬운 tool ${optionalMissing}` : ''}`;
@@ -2619,8 +2616,8 @@ function buildCompactInteractionSummaryLines(spec = {}, shortcutPolicy = null) {
 }
 
 function buildCompactAgentPresentationLines(agent = {}, index = 0) {
-  const requiredToolLabels = formatToolLabels(agent.required_tool_ids || [], { max: 3 });
-  const optionalToolLabels = formatToolLabels(agent.optional_tool_ids || agent.recommended_tool_ids || [], { max: 3 });
+  const requiredToolLabels = formatToolLabels(getParticipantLegacyRequiredToolIds(agent), { max: 3 });
+  const optionalToolLabels = formatToolLabels(getParticipantLegacyOptionalToolIds(agent).length > 0 ? getParticipantLegacyOptionalToolIds(agent) : getParticipantLegacyRecommendedToolIds(agent), { max: 3 });
   const capabilityLabels = formatSkillLabels(agent.capabilities || agent.skills, { max: 3 });
   const generatedSkillLabels = normalizeGeneratedSkillBriefs(agent.generated_skill_briefs || agent.generatedSkillBriefs || []).map((entry) => entry.label).slice(0, 2);
   const overlayProfile = formatRoleOverlayProfile(agent.role, agent, { includeBaseLabel: true });
@@ -2955,12 +2952,12 @@ export function buildTeamTransitionGuardrails(currentTeam = null, nextTeam = nul
     if (beforeRole && afterRole && beforeRole !== afterRole) role_changes.push(`${label} (${beforeRole} → ${afterRole})`);
     if (cleanId(before?.provider) && !cleanId(after?.provider)) provider_drops.push(`${label} (${cleanId(before.provider)})`);
     if (clean(before?.model) && !clean(after?.model)) model_drops.push(`${label} (${clean(before.model)})`);
-    const beforeRequired = new Set(uniqueIds(before?.required_tool_ids || before?.requiredToolIds || []));
-    const afterRequired = new Set(uniqueIds(after?.required_tool_ids || after?.requiredToolIds || []));
+    const beforeRequired = new Set(getParticipantLegacyRequiredToolIds(before));
+    const afterRequired = new Set(getParticipantLegacyRequiredToolIds(after));
     const removedRequired = Array.from(beforeRequired).filter((toolId) => !afterRequired.has(toolId));
     if (removedRequired.length > 0) required_tool_drops.push(`${label}: ${removedRequired.join(', ')}`);
-    const beforeOptional = new Set(uniqueIds([...(asArray(before?.optional_tool_ids || before?.optionalToolIds || [])), ...(asArray(before?.recommended_tool_ids || before?.recommendedToolIds || []))]));
-    const afterOptional = new Set(uniqueIds([...(asArray(after?.optional_tool_ids || after?.optionalToolIds || [])), ...(asArray(after?.recommended_tool_ids || after?.recommendedToolIds || []))]));
+    const beforeOptional = new Set(getParticipantLegacyOptionalToolIds(before).concat(getParticipantLegacyRecommendedToolIds(before)));
+    const afterOptional = new Set(getParticipantLegacyOptionalToolIds(after).concat(getParticipantLegacyRecommendedToolIds(after)));
     const removedOptional = Array.from(beforeOptional).filter((toolId) => !afterOptional.has(toolId));
     if (removedOptional.length > 0) optional_tool_drops.push(`${label}: ${removedOptional.join(', ')}`);
   }

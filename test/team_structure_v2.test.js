@@ -307,17 +307,17 @@ test('team_structure_v2 preserves provider and tool metadata through normalizati
         role: 'researcher',
         provider: 'gemini',
         model: 'gemini-2.5-pro',
-        required_tool_ids: ['workspace_fs'],
-        optional_tool_ids: ['ripgrep'],
+        runtime_capabilities_required: ['filesystem_write'],
+        external_tool_preferences: ['ripgrep'],
       },
     ],
     topology: { pattern: 'single', final_participant_id: 'repo_scout' },
   });
   assert.equal(structure.participants[0].provider, 'gemini');
-  assert.deepEqual(structure.participants[0].required_tool_ids, ['workspace_fs']);
+  assert.deepEqual(structure.participants[0].runtime_capabilities_required, ['filesystem_write']);
   const derived = deriveTeamConfigFromStructureV2(structure);
   assert.equal(derived.agents[0].provider, 'gemini');
-  assert.deepEqual(derived.agents[0].required_tool_ids, ['workspace_fs']);
+  assert.deepEqual(derived.agents[0].runtime_capabilities_required, ['filesystem_write']);
   const runtimeProfile = buildRuntimeExecutionProfileFromStructureV2(structure, { taskBrief: 'provider roundtrip' });
   assert.equal(runtimeProfile.runtime_participants[0].provider, 'gemini');
   assert.equal(runtimeProfile.configured_agents[0].provider, 'gemini');

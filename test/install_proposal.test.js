@@ -14,7 +14,7 @@ test('buildTeamInstallProposal summarizes blocking requirements and commands', (
           name: 'Notebook Builder',
           role: 'builder',
           purpose: 'Create notebook outputs',
-          recommended_tool_ids: ['workspace_fs'],
+          runtime_capabilities_optional: ['filesystem_write'],
         },
       ],
     },
@@ -22,8 +22,8 @@ test('buildTeamInstallProposal summarizes blocking requirements and commands', (
   });
 
   assert.equal(proposal.kind, 'capability_install_proposal');
-  assert.equal(proposal.blocking, true);
-  assert.ok(proposal.requirements.tools.some((entry) => entry.tool_id === 'workspace_fs'));
+  assert.equal(proposal.blocking, false);
+  assert.ok(proposal.requirements['tools'].some((entry) => entry.tool_id === 'workspace_fs'));
   assert.ok(proposal.suggested_commands.some((entry) => entry.includes('/team push')));
 });
 
@@ -31,7 +31,7 @@ test('buildTeamBlueprint includes install_proposal', () => {
   const manifest = buildTeamBlueprint({
     team_name: 'Research Team',
     agents: [
-      { agent_id: 'researcher', name: 'Researcher', role: 'researcher', recommended_tool_ids: ['web_search'] },
+      { agent_id: 'researcher', name: 'Researcher', role: 'researcher', external_tool_preferences: ['web_search'] },
     ],
   }, { runtime: { threadId: 'thread-2', availableToolIds: [] } });
 
@@ -50,8 +50,8 @@ test('buildTeamInstallProposal treats optional tools as advisory requirements', 
           name: 'Builder',
           role: 'builder',
           purpose: 'Make code changes',
-          required_tool_ids: ['workspace_fs'],
-          optional_tool_ids: ['shell'],
+          runtime_capabilities_required: ['filesystem_write'],
+          runtime_capabilities_optional: ['shell_exec'],
         },
       ],
     },
@@ -59,5 +59,5 @@ test('buildTeamInstallProposal treats optional tools as advisory requirements', 
   });
 
   assert.equal(proposal.blocking, false);
-  assert.ok(proposal.requirements.tools.some((entry) => entry.tool_id === 'shell' && entry.severity === 'advisory'));
+  assert.ok(proposal.requirements['tools'].some((entry) => entry.tool_id === 'shell' && entry.severity === 'advisory'));
 });

@@ -6,6 +6,7 @@ import { buildTeamStructureV2, normalizeTeamStructureV2, deriveTeamConfigFromStr
 import { deriveKnowledgeBaseDesign, normalizeMemoryPlan } from '../knowledge_base/profile.js';
 import { buildTeamSeedFromTaskArchetype, listTeamBlueprintTemplateSeeds } from './team_blueprint_templates.js';
 import { buildTeamCapabilityContract, summarizeCapabilityContract } from './team_capability_contract.js';
+import { resolveRoutingContractSummary } from './route_contract.js';
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};

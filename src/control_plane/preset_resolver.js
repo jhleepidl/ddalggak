@@ -3,6 +3,7 @@ import { createRuntimeAgentInstance, normalizeRuntimeAgentInstance } from "../do
 import { inferRuntimeDisplayLabel } from "../shared/runtime_agent_naming.js";
 import { getTransportRoleId, normalizeRoleId } from "../compatibility/legacy_roles.js";
 import { adaptLegacyAgentRegistry } from "../compatibility/legacy_agent_registry_adapter.js";
+import { getParticipantLegacyRequiredToolIds } from "../shared/participant_schema.js";
 
 function asArray(raw) {
   return Array.isArray(raw) ? raw : [];
@@ -68,14 +69,14 @@ function preferredSkillCoverage(slot = {}, preset = {}) {
 }
 
 function toolAvailabilityOk(slot = {}, preset = {}, availableToolIds = []) {
-  const requiredToolIds = new Set(asArray(slot.required_tool_ids).map((entry) => normalizeText(entry, { lower: true })).filter(Boolean));
-  if (requiredToolIds.size === 0) return true;
+  const requiredLegacyTools = new Set(asArray(getParticipantLegacyRequiredToolIds(slot)).map((entry) => normalizeText(entry, { lower: true })).filter(Boolean));
+  if (requiredLegacyTools.size === 0) return true;
   const available = new Set(normalizeStringList(availableToolIds, { max: 32, lower: true }));
   const hinted = new Set(normalizeStringList(
     preset.selection_features?.tool_hints || preset.tool_hints || [],
     { max: 16, lower: true }
   ));
-  for (const toolId of requiredToolIds) {
+  for (const toolId of requiredLegacyTools) {
     if (!available.has(toolId) && !hinted.has(toolId)) return false;
   }
   return true;

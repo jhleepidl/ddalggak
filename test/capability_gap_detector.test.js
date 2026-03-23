@@ -16,7 +16,7 @@ test('detectCapabilityGapsFromExecution extracts missing tool and credential req
     ],
   });
 
-  assert.ok(gaps.some((gap) => gap.kind === 'missing_tool' && gap.tool_id === 'write_file'));
+  assert.ok(gaps.some((gap) => gap.canonical_kind === 'missing_capability' && gap.tool_id === 'write_file'));
   assert.ok(gaps.some((gap) => gap.kind === 'missing_credential' && /OPENAI_API_KEY|API_KEY/.test(gap.credential_key)));
 
   const lines = formatCapabilityGapLines(gaps, { maxLines: 4 });
@@ -35,7 +35,7 @@ test('detectTeamCapabilityGaps flags notebook builders without workspace_fs', ()
           name: 'Notebook Builder',
           role: 'builder',
           purpose: 'Jupyter notebook 실습과 과제를 구현한다',
-          recommended_tool_ids: ['workspace_fs'],
+          runtime_capabilities_optional: ['filesystem_write'],
         },
       ],
     },
@@ -43,7 +43,7 @@ test('detectTeamCapabilityGaps flags notebook builders without workspace_fs', ()
     skillRegistry: registry,
   });
 
-  assert.ok(gaps.some((gap) => gap.kind === 'missing_tool' && gap.tool_id === 'workspace_fs'));
+  assert.ok(gaps.some((gap) => gap.canonical_kind === 'missing_capability' && gap.tool_id === 'workspace_fs'));
 });
 
 
@@ -69,7 +69,7 @@ test('detectTeamCapabilityGaps treats codex workspace-write as provider-backed w
           role: 'builder',
           provider: 'codex',
           purpose: 'Jupyter notebook artifacts and code patches',
-          recommended_tool_ids: ['workspace_fs'],
+          runtime_capabilities_optional: ['filesystem_write'],
         },
       ],
       runtime_execution: {
@@ -89,7 +89,7 @@ test('detectTeamCapabilityGaps treats codex workspace-write as provider-backed w
             name: 'Notebook Builder',
             role: 'builder',
             provider: 'codex',
-            recommended_tool_ids: ['workspace_fs'],
+            runtime_capabilities_optional: ['filesystem_write'],
           },
         ],
         runtime_execution: {
@@ -105,7 +105,7 @@ test('detectTeamCapabilityGaps treats codex workspace-write as provider-backed w
     skillRegistry: registry,
   });
 
-  assert.equal(gaps.some((gap) => gap.kind === 'missing_tool' && gap.tool_id === 'workspace_fs'), false);
+  assert.equal(gaps.some((gap) => gap.canonical_kind === 'missing_capability' && gap.tool_id === 'workspace_fs'), false);
 });
 
 
@@ -117,8 +117,8 @@ test('detectTeamCapabilityGaps distinguishes required and optional tools', () =>
           name: 'Builder',
           role: 'builder',
           purpose: '웹 서비스 구현',
-          required_tool_ids: ['workspace_fs'],
-          optional_tool_ids: ['shell'],
+          runtime_capabilities_required: ['filesystem_write'],
+          runtime_capabilities_optional: ['shell_exec'],
         },
       ],
     },
@@ -138,7 +138,7 @@ test('detectTeamCapabilityGaps treats local job-bound runtimes as workspace capa
           name: 'Builder',
           role: 'builder',
           purpose: '코드와 파일을 수정한다',
-          required_tool_ids: ['workspace_fs'],
+          runtime_capabilities_required: ['filesystem_write'],
         },
       ],
     },
@@ -150,7 +150,7 @@ test('detectTeamCapabilityGaps treats local job-bound runtimes as workspace capa
     },
   });
 
-  assert.equal(gaps.some((gap) => gap.tool_id === 'workspace_fs' && gap.kind === 'missing_tool'), false);
+  assert.equal(gaps.some((gap) => gap.tool_id === 'workspace_fs' && gap.canonical_kind === 'missing_capability'), false);
 });
 
 test('detectTeamCapabilityGaps keeps optional file tools advisory for non-build agents', () => {
@@ -161,7 +161,7 @@ test('detectTeamCapabilityGaps keeps optional file tools advisory for non-build 
           name: 'Researcher',
           role: 'researcher',
           purpose: '코드베이스를 읽고 구조를 파악한다',
-          optional_tool_ids: ['workspace_fs', 'write_file'],
+          runtime_capabilities_optional: ['filesystem_write'],
         },
       ],
     },

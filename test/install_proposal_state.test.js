@@ -15,7 +15,7 @@ test('buildInstallProposalStateFromExecution captures resume request and gap sum
     team: {
       team_name: 'Notebook Team',
       agents: [
-        { agent_id: 'builder', name: 'Builder', role: 'builder', recommended_tool_ids: ['workspace_fs'] },
+        { agent_id: 'builder', name: 'Builder', role: 'builder', runtime_capabilities_optional: ['filesystem_write'] },
       ],
     },
     runtime: { threadId: 'thread-1', availableToolIds: [] },
@@ -43,7 +43,7 @@ test('buildInstallProposalStateFromExecution ignores advisory-only team capabili
     team: {
       team_name: 'Notebook Team',
       agents: [
-        { agent_id: 'builder', name: 'Builder', role: 'builder', recommended_tool_ids: ['shell'] },
+        { agent_id: 'builder', name: 'Builder', role: 'builder', runtime_capabilities_optional: ['shell_exec'] },
       ],
     },
     runtime: { threadId: 'thread-1', availableToolIds: ['workspace_fs'] },
@@ -63,7 +63,7 @@ test('session store can archive pending install proposal state', () => {
     team: {
       team_name: 'Research Team',
       agents: [
-        { agent_id: 'researcher', name: 'Researcher', role: 'researcher', recommended_tool_ids: ['web_search'] },
+        { agent_id: 'researcher', name: 'Researcher', role: 'researcher', external_tool_preferences: ['web_search'] },
       ],
     },
     runtime: { threadId: 'thread-2', availableToolIds: [] },

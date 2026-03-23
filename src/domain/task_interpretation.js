@@ -1,5 +1,6 @@
 import { normalizeStringList } from "../shared/normalize.js";
 import { normalizeRoleList } from "../compatibility/legacy_roles.js";
+import { splitToolishIds, readLegacyParticipantToolIds } from "../shared/participant_schema.js";
 
 function asArray(raw) {
   return Array.isArray(raw) ? raw : [];
@@ -41,10 +42,7 @@ function normalizeCandidateCapabilitySlot(raw = {}) {
       row.required_context_types ?? row.requiredContextTypes ?? [],
       { max: 24, lower: true }
     ),
-    required_tool_ids: normalizeStringList(
-      row.required_tool_ids ?? row.requiredToolIds ?? row.required_tools ?? row.requiredTools ?? [],
-      { max: 24, lower: true }
-    ),
+    ...(() => { const split = splitToolishIds([...readLegacyParticipantToolIds(row, 'required'), ...(Array.isArray(row.required_tools) ? row.required_tools : (typeof row.required_tools === 'string' ? [row.required_tools] : [])), ...(Array.isArray(row.requiredTools) ? row.requiredTools : (typeof row.requiredTools === 'string' ? [row.requiredTools] : []))]); return { runtime_capabilities_required: normalizeStringList(split.runtimeCapabilities, { max: 24, lower: true }), external_tool_requirements: normalizeStringList(split.externalTools, { max: 24, lower: true }) }; })(),
     forbidden_skill_ids: normalizeStringList(
       row.forbidden_skill_ids ?? row.forbiddenSkillIds ?? [],
       { max: 24, lower: true }

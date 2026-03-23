@@ -7,8 +7,8 @@ test('buildTeamTransitionGuardrails marks destructive participant and role loss'
   const currentTeam = {
     team_name: 'Current',
     agents: [
-      { agent_id: 'repo_scout', name: 'Repo Scout', role: 'researcher', provider: 'gemini', model: 'gemini-2.5-pro', required_tool_ids: ['workspace_fs'] },
-      { agent_id: 'builder', name: 'Client Companion Builder', role: 'builder', provider: 'codex', model: 'gpt-5.4-codex', required_tool_ids: ['workspace_fs', 'git'] },
+      { agent_id: 'repo_scout', name: 'Repo Scout', role: 'researcher', provider: 'gemini', model: 'gemini-2.5-pro', runtime_capabilities_required: ['filesystem_write'] },
+      { agent_id: 'builder', name: 'Client Companion Builder', role: 'builder', provider: 'codex', model: 'gpt-5.4-codex', runtime_capabilities_required: ['filesystem_write'], external_tool_requirements: ['git'] },
       { agent_id: 'reviewer', name: 'Safety Reviewer', role: 'reviewer', provider: 'openai', model: 'gpt-5.4' },
     ],
     memory_plan: { writable_surface_ids: ['implementation_notes', 'critic_log'] },

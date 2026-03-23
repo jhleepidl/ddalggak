@@ -157,6 +157,7 @@ import { executeToolProxyAction } from "./tool_proxy_runtime.js";
 import { writeGeminiMemoryFile, writeCodexInstructionFile } from "./cli_workspace_contract.js";
 import { normalizeRuntimeExecutionPolicy } from "./runtime_execution_policy.js";
 import { resolveProviderRuntimeOptions } from "./provider_runtime_policy.js";
+import { summarizeProviderInteractionCapabilities } from "./provider_interaction_capabilities.js";
 import { summarizeRuntimeCheckpointRef, writeRuntimeCheckpointBundle } from "./runtime_checkpointing.js";
 import { appendPromptTelemetry, estimateTextTokens as estimatePromptTelemetryTokens } from "./prompt_telemetry.js";
 import { readIterationDelta, readRoleSummary, updateRoleSummary } from "./summary_memory.js";
@@ -655,7 +656,12 @@ function resolveRuntimeFinalOwnerContract(runtime = null) {
 }
 
 function summarizeAgentPublishContract(jobId, { runtime = null, agentId = '', agent = null, provider = '', roleId = '', displayLabel = '' } = {}) {
-  const profile = tracking.loadProfile(jobId);
+  let profile = null;
+  try {
+    profile = tracking.loadProfile(jobId);
+  } catch {
+    profile = null;
+  }
   const publishSummary = summarizeRoleMemoryEnforcement({ profile, provider, roleId });
   const runtimeAgent = findAgentConfigInRuntime(agentId, runtime) || (agent && typeof agent === 'object' ? agent : {});
   const policy = runtimeAgent?.context_policy && typeof runtimeAgent.context_policy === 'object'
@@ -1778,10 +1784,25 @@ function buildSupervisorExecutionCallbacks({
     const cleanAgentId = String(agentId || "").trim().toLowerCase();
     const cleanGoal = String(goal || "").trim();
     const roleKey = String(actionInputs?.role_id || actionInputs?.roleId || cleanAgentId || '').trim().toLowerCase();
+    const activeAgentConfig = cleanAgentId
+      ? (findAgentConfigInRuntime(cleanAgentId, runtime) || findAgentConfig(cleanAgentId) || null)
+      : null;
+    const activeProvider = String(activeAgentConfig?.provider || '').trim().toLowerCase();
+    const activeModel = String(activeAgentConfig?.model || '').trim();
+    const activeExecutionChannel = String(activeAgentConfig?.provider_spec?.execution_channel || activeAgentConfig?.execution_channel || activeAgentConfig?.executionChannel || 'local_cli').trim().toLowerCase() || 'local_cli';
+    const activeInteractionCapabilities = summarizeProviderInteractionCapabilities({
+      provider: activeProvider,
+      model: activeModel,
+      executionChannel: activeExecutionChannel,
+    });
     if (cleanAgentId) {
       updateAgentStatus(chatId, cleanAgentId, {
         state: "running",
         goal: cleanGoal,
+        provider: activeProvider || undefined,
+        model: activeModel || undefined,
+        execution_channel: activeExecutionChannel || undefined,
+        interaction_capabilities: activeInteractionCapabilities,
         started_at: new Date().toISOString(),
         ended_at: undefined,
       });

@@ -115,9 +115,9 @@ const TEMPLATE_DEFS = {
     good_for: ['market/technical research', 'source-grounded briefs', 'evidence-backed recommendations'],
     bad_for: ['large codebase patching', 'wide parallel build pipelines'],
     agents: [
-      { agent_id: 'research_lead', name: 'Research Lead', role: 'researcher', purpose: 'Frame the question, gather evidence, and maintain the evidence ledger.', required_tool_ids: ['web'], optional_tool_ids: ['read_only_fs'] },
-      { agent_id: 'analyst', name: 'Analyst', role: 'synthesizer', purpose: 'Synthesize findings into a concise recommendation memo and gaps list.', optional_tool_ids: ['read_only_fs'] },
-      { agent_id: 'fact_reviewer', name: 'Fact Reviewer', role: 'reviewer', purpose: 'Challenge unsupported claims and verify the final recommendation before delivery.', required_tool_ids: ['web'], optional_tool_ids: ['read_only_fs'] },
+      { agent_id: 'research_lead', name: 'Research Lead', role: 'researcher', purpose: 'Frame the question, gather evidence, and maintain the evidence ledger.', runtime_capabilities_required: ['web_browse'], runtime_capabilities_optional: ['filesystem_read'] },
+      { agent_id: 'analyst', name: 'Analyst', role: 'synthesizer', purpose: 'Synthesize findings into a concise recommendation memo and gaps list.', runtime_capabilities_optional: ['filesystem_read'] },
+      { agent_id: 'fact_reviewer', name: 'Fact Reviewer', role: 'reviewer', purpose: 'Challenge unsupported claims and verify the final recommendation before delivery.', runtime_capabilities_required: ['web_browse'], runtime_capabilities_optional: ['filesystem_read'] },
     ],
     interaction_spec: {
       execution_pattern: 'sequential_pipeline',
@@ -150,9 +150,9 @@ const TEMPLATE_DEFS = {
     good_for: ['repo fixes', 'scoped feature work', 'code review + implementation'],
     bad_for: ['open-ended ideation', 'pure research briefs'],
     agents: [
-      { agent_id: 'repo_scout', name: 'Repo Scout', role: 'researcher', purpose: 'Map the codebase, locate relevant files, and identify likely constraints.', required_tool_ids: ['read_only_fs'], optional_tool_ids: ['web'] },
-      { agent_id: 'builder', name: 'Builder', role: 'builder', purpose: 'Make the scoped implementation changes and keep the changelog precise.', required_tool_ids: ['workspace_fs'], optional_tool_ids: ['shell'] },
-      { agent_id: 'reviewer', name: 'Reviewer', role: 'reviewer', purpose: 'Verify correctness, regressions, and test coverage before final delivery.', required_tool_ids: ['read_only_fs'], optional_tool_ids: ['web'] },
+      { agent_id: 'repo_scout', name: 'Repo Scout', role: 'researcher', purpose: 'Map the codebase, locate relevant files, and identify likely constraints.', runtime_capabilities_required: ['filesystem_read'], runtime_capabilities_optional: ['web_browse'] },
+      { agent_id: 'builder', name: 'Builder', role: 'builder', purpose: 'Make the scoped implementation changes and keep the changelog precise.', runtime_capabilities_required: ['filesystem_write'], runtime_capabilities_optional: ['shell_exec'] },
+      { agent_id: 'reviewer', name: 'Reviewer', role: 'reviewer', purpose: 'Verify correctness, regressions, and test coverage before final delivery.', runtime_capabilities_required: ['filesystem_read'], runtime_capabilities_optional: ['web_browse'] },
       { agent_id: 'delivery_owner', name: 'Delivery Owner', role: 'synthesizer', purpose: 'Summarize the final patch, risks, and next steps for the user.' },
     ],
     interaction_spec: {
@@ -189,10 +189,10 @@ const TEMPLATE_DEFS = {
     good_for: ['continuous code improvement', 'repo tuning with repeated review', 'multi-model propose/build/critique loops'],
     bad_for: ['one-shot simple answers', 'pure static research with no revision cycle'],
     agents: [
-      { agent_id: 'strategy_planner', name: 'Strategy Planner', role: 'operator', purpose: 'Choose the next best improvement target, compare candidate directions, and decide whether another iteration is worth the cost.', required_tool_ids: ['read_only_fs'], optional_tool_ids: ['web'], model: 'gpt-5.4', provider: 'openai' },
-      { agent_id: 'repo_scout', name: 'Repo Scout', role: 'researcher', purpose: 'Inspect the repository, surface constraints, and suggest competing implementation options.', required_tool_ids: ['read_only_fs'], optional_tool_ids: ['web'], model: 'gemini-2.5-pro', provider: 'gemini' },
-      { agent_id: 'builder', name: 'Builder', role: 'builder', purpose: 'Implement the chosen improvement, run bounded checks, and record concrete edits.', required_tool_ids: ['workspace_fs'], optional_tool_ids: ['shell'], model: 'gpt-5-codex', provider: 'codex' },
-      { agent_id: 'critic', name: 'Critic', role: 'reviewer', purpose: 'Challenge the current patch, look for regressions or missed opportunities, and decide whether to loop again.', required_tool_ids: ['read_only_fs'], optional_tool_ids: ['web'], model: 'gpt-5.4', provider: 'openai' },
+      { agent_id: 'strategy_planner', name: 'Strategy Planner', role: 'operator', purpose: 'Choose the next best improvement target, compare candidate directions, and decide whether another iteration is worth the cost.', runtime_capabilities_required: ['filesystem_read'], runtime_capabilities_optional: ['web_browse'], model: 'gpt-5.4', provider: 'openai' },
+      { agent_id: 'repo_scout', name: 'Repo Scout', role: 'researcher', purpose: 'Inspect the repository, surface constraints, and suggest competing implementation options.', runtime_capabilities_required: ['filesystem_read'], runtime_capabilities_optional: ['web_browse'], model: 'gemini-2.5-pro', provider: 'gemini' },
+      { agent_id: 'builder', name: 'Builder', role: 'builder', purpose: 'Implement the chosen improvement, run bounded checks, and record concrete edits.', runtime_capabilities_required: ['filesystem_write'], runtime_capabilities_optional: ['shell_exec'], model: 'gpt-5-codex', provider: 'codex' },
+      { agent_id: 'critic', name: 'Critic', role: 'reviewer', purpose: 'Challenge the current patch, look for regressions or missed opportunities, and decide whether to loop again.', runtime_capabilities_required: ['filesystem_read'], runtime_capabilities_optional: ['web_browse'], model: 'gpt-5.4', provider: 'openai' },
       { agent_id: 'delivery_owner', name: 'Delivery Owner', role: 'synthesizer', purpose: 'Summarize the best achieved state, rejected alternatives, and the next improvement frontier.' , model: 'gpt-5.4', provider: 'openai' },
     ],
     interaction_spec: {
@@ -242,9 +242,9 @@ const TEMPLATE_DEFS = {
     good_for: ['post-failure repair', 'audit + patch follow-up', 'quality-focused regression cleanup'],
     bad_for: ['greenfield implementation', 'broad web research'],
     agents: [
-      { agent_id: 'auditor', name: 'Auditor', role: 'reviewer', purpose: 'Identify the most important defects, regressions, and contract gaps.', required_tool_ids: ['read_only_fs'], optional_tool_ids: ['web'] },
-      { agent_id: 'repair_planner', name: 'Repair Planner', role: 'researcher', purpose: 'Translate review findings into a minimal repair plan and bounded scope.', required_tool_ids: ['read_only_fs'], optional_tool_ids: ['web'] },
-      { agent_id: 'repair_builder', name: 'Repair Builder', role: 'builder', purpose: 'Apply the minimal repair patch and record what changed.', required_tool_ids: ['workspace_fs'], optional_tool_ids: ['shell'] },
+      { agent_id: 'auditor', name: 'Auditor', role: 'reviewer', purpose: 'Identify the most important defects, regressions, and contract gaps.', runtime_capabilities_required: ['filesystem_read'], runtime_capabilities_optional: ['web_browse'] },
+      { agent_id: 'repair_planner', name: 'Repair Planner', role: 'researcher', purpose: 'Translate review findings into a minimal repair plan and bounded scope.', runtime_capabilities_required: ['filesystem_read'], runtime_capabilities_optional: ['web_browse'] },
+      { agent_id: 'repair_builder', name: 'Repair Builder', role: 'builder', purpose: 'Apply the minimal repair patch and record what changed.', runtime_capabilities_required: ['filesystem_write'], runtime_capabilities_optional: ['shell_exec'] },
       { agent_id: 'signoff_owner', name: 'Signoff Owner', role: 'synthesizer', purpose: 'Confirm repaired state and present residual risk clearly to the user.' },
     ],
     interaction_spec: {

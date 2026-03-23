@@ -1,4 +1,5 @@
-import { normalizeInstallRequirementActions } from '../shared/install_requirement_actions.js';
+import { normalizeInstallRequirementActions, readLegacyToolInstallProposals } from '../shared/install_requirement_actions.js';
+import { normalizeParticipantExecutionSchema, normalizeRuntimeCapabilityId } from '../shared/participant_schema.js';
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -48,22 +49,33 @@ function addUnique(list = [], value = '') {
   return out;
 }
 
+
+function installRows(actions = {}) {
+  return [
+    ...asArray(actions.capability_enable_proposals || []).map((entry) => ({ ...entry, tool_id: entry.tool_id || entry.capability_id })),
+    ...asArray(actions.external_install_proposals || []).map((entry) => ({ ...entry, tool_id: entry.tool_id || entry.external_tool_id })),
+    ...readLegacyToolInstallProposals(actions),
+  ];
+}
+
 function applyToolExpectation(agent = {}, toolId = '', severity = 'blocking') {
   const cleanToolId = cleanId(toolId);
-  const optionalBase = asArray(agent.optional_tool_ids || agent.optionalToolIds || []);
-  const recommendedBase = asArray(agent.recommended_tool_ids || agent.recommendedToolIds || agent.tools || []);
+  const execution = normalizeParticipantExecutionSchema(agent);
+  const capabilityId = normalizeRuntimeCapabilityId(cleanToolId);
   if (cleanId(severity || 'blocking') === 'blocking') {
-    agent.required_tool_ids = addUnique(agent.required_tool_ids || agent.requiredToolIds || [], cleanToolId);
-    agent.optional_tool_ids = optionalBase.filter((entry) => cleanId(entry) !== cleanToolId);
+    if (capabilityId) {
+      execution.runtime_capabilities_required = addUnique(execution.runtime_capabilities_required || [], capabilityId);
+      execution.runtime_capabilities_optional = asArray(execution.runtime_capabilities_optional || []).filter((entry) => cleanId(entry) !== capabilityId);
+    } else {
+      execution.external_tool_requirements = addUnique(execution.external_tool_requirements || [], cleanToolId);
+      execution.external_tool_preferences = asArray(execution.external_tool_preferences || []).filter((entry) => cleanId(entry) !== cleanToolId);
+    }
+  } else if (capabilityId) {
+    execution.runtime_capabilities_optional = addUnique(execution.runtime_capabilities_optional || [], capabilityId).filter((entry) => cleanId(entry));
   } else {
-    agent.required_tool_ids = addUnique(agent.required_tool_ids || agent.requiredToolIds || [], '');
-    agent.optional_tool_ids = addUnique(optionalBase, cleanToolId).filter((entry) => cleanId(entry));
+    execution.external_tool_preferences = addUnique(execution.external_tool_preferences || [], cleanToolId).filter((entry) => cleanId(entry));
   }
-  agent.recommended_tool_ids = addUnique([
-    ...asArray(agent.required_tool_ids || []),
-    ...asArray(agent.optional_tool_ids || []),
-    ...recommendedBase,
-  ], cleanToolId);
+  Object.assign(agent, normalizeParticipantExecutionSchema(execution));
   return agent;
 }
 
@@ -73,7 +85,7 @@ export function applyInstallProposalActionsToTeam(team = {}, proposal = {}) {
   const actions = normalizeInstallRequirementActions(proposal?.actions || {});
   const appliedActions = [];
 
-  for (const entry of actions.tool_install_proposals) {
+  for (const entry of installRows(actions)) {
     for (const index of targetAgentIndexes(nextTeam, entry.required_by)) {
       const agent = nextTeam.agents[index] || {};
       nextTeam.agents[index] = applyToolExpectation(agent, entry.tool_id, entry.severity);
@@ -115,7 +127,7 @@ export function applyInstallProposalActionsToTeam(team = {}, proposal = {}) {
 export function autoInstallRuntimeSupport({ proposal = {}, jobs = null, jobId = '' } = {}) {
   const actions = normalizeInstallRequirementActions(proposal?.actions || {});
   const applied = [];
-  for (const entry of actions.tool_install_proposals) {
+  for (const entry of installRows(actions)) {
     if (entry.strategy === 'enable_workspace_fs' && entry.auto_installable === true && jobs && typeof jobs.ensureWorkspacePath === 'function' && clean(jobId)) {
       jobs.ensureWorkspacePath(jobId, '.', { asDirectory: true });
       applied.push({ kind: 'runtime_tool', tool_id: entry.tool_id, strategy: entry.strategy });

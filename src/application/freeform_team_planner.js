@@ -8,6 +8,7 @@ import { buildPlannerSchemaHintText } from '../shared/team_schema_catalog.js';
 import { appendPromptTelemetry } from './prompt_telemetry.js';
 import { runDir, runSharedDir } from './telegram_runtime_state.js';
 import { compactPromptJson } from './prompt_surface_builder.js';
+import { normalizeParticipantExecutionSchema } from '../shared/participant_schema.js';
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -143,7 +144,7 @@ function buildPlannerPrompt({
     '- if multiple upstream agents exist, include a synthesizer unless the user explicitly rejects it',
     '- the declared final_answer_owner must name a real agent that can plausibly deliver the final answer; prefer a synthesizer or reviewer unless the user clearly asks otherwise',
     '- ensure the team can satisfy publish contract expectations: someone must be able to publish final_answer and at least one participant should be able to publish artifact_index (usually builder, synthesizer, reviewer, or operator)',
-    '- when you emit structure_v2 participants, preserve provider, model, required_tool_ids, optional_tool_ids, recommended_tool_ids, and context_policy so install/apply does not lose execution metadata',
+    '- when you emit structure_v2 participants, preserve provider_spec, provider_runtime_config, runtime_capabilities_required, runtime_capabilities_optional, external_tool_requirements, external_tool_preferences, memory_contract, and context_policy so install/apply does not lose execution metadata',
     '- prefer existing executable skill ids from the registry for attached_skill_ids',
     '- do not attach irrelevant domain-specific skills (for example KR equity analysis) unless the request actually targets that domain',
     '- when the registry does not fully cover the task, create generated_skill_briefs as inline non-executable protocols',
@@ -166,8 +167,8 @@ function buildPlannerPrompt({
     '      "generated_skill_briefs": [',
     '        {"label":"...","goal":"...","checklist":["...","..."]}',
     '      ],',
-    '      "required_tool_ids": ["..."],',
-    '      "optional_tool_ids": ["..."],',
+    '      "runtime_capabilities_required": ["filesystem_read"],',
+    '      "external_tool_preferences": ["ripgrep"],',
     '      "context_policy": {',
     '        "reads": {"grants": ["shared_summary"], "context_types": ["evidence"], "query_template": "..."},',
     '        "writes": {"private_targets": ["scratch"], "publish_targets": ["handoff_summary"]},',
@@ -187,7 +188,7 @@ function buildPlannerPrompt({
     '    "kind": "team_structure_v2",',
     '    "version": 2,',
     '    "metadata": {"team_name": "...", "composition_mode": "freeform", "proposal_mode": "create"},',
-    '    "participants": [{"participant_id": "...", "kind": "agent", "name": "...", "role": "researcher", "provider": "gemini|codex|chatgpt", "model": "...", "required_tool_ids": ["..."], "optional_tool_ids": ["..."], "recommended_tool_ids": ["..."], "context_policy": {"reads": {"grants": ["shared_summary"]}, "writes": {"publish_targets": ["handoff_summary"]}}}],',
+    '    "participants": [{"participant_id": "...", "kind": "agent", "name": "...", "role": "researcher", "provider_spec": {"provider": "gemini|codex|chatgpt", "model": "..."}, "runtime_capabilities_required": ["filesystem_read|filesystem_write|shell_exec|web_browse"], "runtime_capabilities_optional": ["..."], "external_tool_requirements": ["..."], "external_tool_preferences": ["..."], "memory_contract": {"publish_surface_ids": ["handoff_summary"]}, "context_policy": {"reads": {"grants": ["shared_summary"]}, "writes": {"publish_targets": ["handoff_summary"]}}}],',
     '    "topology": {"pattern": "router|supervisor|sequential|parallel|debate|committee|graph|hybrid", "execution_pattern": "...", "edges": [{"from": "...", "to": "...", "payload": "summary_plus_key_evidence"}]},',
     '    "interaction_policy": {"visibility": {"reviewer_visibility": "...", "synthesizer_visibility": "..."}},',
     '    "knowledge_surface": {"profile_id": "...", "display_name": "...", "docs": [{"doc_id": "plan", "file_name": "..."}]},',
@@ -226,8 +227,7 @@ function summarizeTeamForPlanner(team = null) {
       provider: cleanId(agent?.provider || ''),
       attached_skill_ids: asArray(agent?.attached_skill_ids || agent?.attachedSkillIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 4),
       generated_skill_labels: asArray(agent?.generated_skill_briefs || agent?.generatedSkillBriefs).map((entry) => clean(entry?.label || entry?.name || entry?.title)).filter(Boolean).slice(0, 2),
-      required_tool_ids: asArray(agent?.required_tool_ids || agent?.requiredToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 4),
-      optional_tool_ids: asArray(agent?.optional_tool_ids || agent?.optionalToolIds || agent?.recommended_tool_ids || agent?.recommendedToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 4),
+      ...(() => { const execution = normalizeParticipantExecutionSchema(agent); return { runtime_capabilities_required: execution.runtime_capabilities_required.slice(0, 4), runtime_capabilities_optional: execution.runtime_capabilities_optional.slice(0, 4), external_tool_requirements: execution.external_tool_requirements.slice(0, 4), external_tool_preferences: execution.external_tool_preferences.slice(0, 4) }; })(),
       context_policy: asObject(agent?.context_policy || agent?.contextPolicy),
     })).filter((agent) => agent.name),
     interaction_spec: {
@@ -323,8 +323,8 @@ function buildRefinementPlannerPrompt({
     '      "capabilities": ["human-readable capability labels"],',
     '      "attached_skill_ids": ["skill...."],',
     '      "generated_skill_briefs": [{"label":"...","goal":"...","checklist":["...","..."]}],',
-    '      "required_tool_ids": ["..."],',
-    '      "optional_tool_ids": ["..."],',
+    '      "runtime_capabilities_required": ["filesystem_read"],',
+    '      "external_tool_preferences": ["ripgrep"],',
     '      "context_policy": {',
     '        "reads": {"grants": ["shared_summary"], "context_types": ["evidence"], "query_template": "..."},',
     '        "writes": {"private_targets": ["scratch"], "publish_targets": ["handoff_summary"]},',
@@ -416,9 +416,7 @@ function normalizePlannerPlan(raw = {}) {
         capabilities: asArray(item.capabilities || item.skill_labels).map((entry) => clean(entry)).filter(Boolean).slice(0, 5),
         attached_skill_ids: asArray(item.attached_skill_ids || item.attachedSkillIds || item.skills).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 6),
         generated_skill_briefs: normalizeGeneratedSkillBriefs(item.generated_skill_briefs || item.generatedSkillBriefs || []),
-        required_tool_ids: asArray(item.required_tool_ids || item.requiredToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 6),
-        optional_tool_ids: asArray(item.optional_tool_ids || item.optionalToolIds || item.recommended_tool_ids || item.recommendedToolIds || item.tools).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 6),
-        recommended_tool_ids: asArray(item.recommended_tool_ids || item.recommendedToolIds || item.tools || [...asArray(item.required_tool_ids || item.requiredToolIds), ...asArray(item.optional_tool_ids || item.optionalToolIds)]).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 6),
+        ...(() => { const execution = normalizeParticipantExecutionSchema(item); return { runtime_capabilities_required: execution.runtime_capabilities_required.slice(0, 6), runtime_capabilities_optional: execution.runtime_capabilities_optional.slice(0, 6), external_tool_requirements: execution.external_tool_requirements.slice(0, 6), external_tool_preferences: execution.external_tool_preferences.slice(0, 6) }; })(),
         context_policy: asObject(item.context_policy || item.contextPolicy),
       };
     }).filter((agent) => agent.name),

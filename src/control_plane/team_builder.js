@@ -16,6 +16,7 @@ import { interpretTask } from "./task_interpreter.js";
 import { createSupervisorRuntime } from "./supervisor_runtime.js";
 import { buildCollaborationCells } from "./collaboration_policy.js";
 import { buildExecutionCheckpoints } from "./checkpoint_policy.js";
+import { splitToolishIds, readLegacyParticipantToolIds } from "../shared/participant_schema.js";
 
 const DEFAULT_ROLE_ORDER = [
   "operator",
@@ -187,7 +188,7 @@ function buildSlotSpec({
     deliverable_type: normalizeText(slot.deliverable_type).toLowerCase() || undefined,
     selection_reason: normalizeText(slot.selection_reason || `candidate:${roleId}`) || `candidate:${roleId}`,
     required_context_types: normalizeStringList(slot.required_context_types || [], { max: 24, lower: true }),
-    required_tool_ids: normalizeStringList(slot.required_tool_ids || [], { max: 24, lower: true }),
+    ...(() => { const split = splitToolishIds(readLegacyParticipantToolIds(slot, 'required')); return { runtime_capabilities_required: normalizeStringList(split.runtimeCapabilities, { max: 24, lower: true }), external_tool_requirements: normalizeStringList(split.externalTools, { max: 24, lower: true }) }; })(),
   };
 }
 
@@ -250,7 +251,8 @@ function deduplicateReviewerSlots(slots = [], taskInterpretation = {}) {
         preferred_skill_ids: mergeStringLists(existing.preferred_skill_ids, reviewer.preferred_skill_ids),
         forbidden_skill_ids: mergeStringLists(existing.forbidden_skill_ids, reviewer.forbidden_skill_ids),
         required_context_types: mergeStringLists(existing.required_context_types, reviewer.required_context_types),
-        required_tool_ids: mergeStringLists(existing.required_tool_ids, reviewer.required_tool_ids),
+        runtime_capabilities_required: mergeStringLists(existing.runtime_capabilities_required, reviewer.runtime_capabilities_required),
+        external_tool_requirements: mergeStringLists(existing.external_tool_requirements, reviewer.external_tool_requirements),
         parallelizable: false,
         selection_reason: normalizeText([existing.selection_reason, reviewer.selection_reason].filter(Boolean).join("; "))
           || existing.selection_reason,
