@@ -244,6 +244,7 @@ const {
   formatRegistryLines,
   chatActionLabel,
   buildQueuedAgentStatusFromActions,
+  buildAgentAssignmentNotice,
   getCurrentTurnReplyMessageId,
   sendRouterAckMessage,
   sendPlanPreviewMessage,
@@ -3803,6 +3804,19 @@ async function runSupervisorChat(
         chatSessionStore.upsert(chatId, {
           current_turn_plan_message_id: Number(planPreviewMessageId),
         });
+      }
+      const assignmentNotice = buildAgentAssignmentNotice(planActions, {
+        routeReason: routePlan.reason || "",
+      });
+      if (assignmentNotice) {
+        await sendLongAdapter(
+          bot,
+          chatId,
+          assignmentNotice,
+          Number.isFinite(Number(currentTurnAckMessageId)) && Number(currentTurnAckMessageId) > 0
+            ? { reply_to_message_id: Number(currentTurnAckMessageId) }
+            : undefined,
+        ).catch(() => null);
       }
 
       if (verbose) {

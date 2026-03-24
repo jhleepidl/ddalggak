@@ -346,15 +346,17 @@ export class GocContextEngine extends ContextEngineBase {
 
   async prepareRouterContext(input = {}) {
     const normalized = this.normalizeInput(input, { stepKind: "router", agentId: "router" });
+    const taskPacketText = this._taskPacketBlock(normalized, { refresh: !!String(normalized.userMessageText || '').trim() });
     const shared = this._resolveSharedRef(normalized);
     if (!this.client || !shared.sharedContextSetId) {
       return {
-        contextText: "",
+        contextText: taskPacketText,
         meta: {
           mode: "goc",
           budgetTokens: normalized.budgetTokens,
-          estimatedTokens: 0,
-          compiledChars: 0,
+          estimatedTokens: this.estimateTokens(taskPacketText),
+          compiledChars: taskPacketText.length,
+          contextFallback: "task_packet_only",
         },
       };
     }
@@ -370,14 +372,14 @@ export class GocContextEngine extends ContextEngineBase {
       || []
     );
     const typeBreakdown = asObject(this.runtime?.sharedActiveTypeBreakdown || compiled.typeBreakdown);
-    const taskPacketText = this._taskPacketBlock(normalized, { refresh: !!String(normalized.userMessageText || '').trim() });
+    const contextText = [taskPacketText, compiled.text].filter(Boolean).join("\n\n");
     return {
-      contextText: [taskPacketText, compiled.text].filter(Boolean).join("\n\n"),
+      contextText,
       meta: {
         mode: "goc",
         budgetTokens: normalized.budgetTokens,
         estimatedTokens: compiled.tokenEstimate,
-        compiledChars: compiled.compiledChars,
+        compiledChars: contextText.length,
         sharedContextSetId: shared.sharedContextSetId,
         lensContextSetId: shared.sharedContextSetId,
         contextVersion,
@@ -393,15 +395,17 @@ export class GocContextEngine extends ContextEngineBase {
 
   async prepareStepContext(input = {}) {
     const normalized = this.normalizeInput(input, { stepKind: "agent" });
+    const taskPacketText = this._taskPacketBlock(normalized, { refresh: false });
     const shared = this._resolveSharedRef(normalized);
     if (!this.client || !shared.sharedContextSetId) {
       return {
-        contextText: "",
+        contextText: taskPacketText,
         meta: {
           mode: "goc",
           budgetTokens: normalized.budgetTokens,
-          estimatedTokens: 0,
-          compiledChars: 0,
+          estimatedTokens: this.estimateTokens(taskPacketText),
+          compiledChars: taskPacketText.length,
+          contextFallback: "task_packet_only",
         },
       };
     }
@@ -470,8 +474,10 @@ export class GocContextEngine extends ContextEngineBase {
     const contextText = lensContextSetId === shared.sharedContextSetId
       ? lensCompiled.text
       : [
-        `[SHARED SUMMARY]\n${clip(sharedCompiled.text || "", 2400)}`,
-        `[LENS CONTEXT]\n${lensCompiled.text || ""}`,
+        `[SHARED SUMMARY]
+${clip(sharedCompiled.text || "", 2400)}`,
+        `[LENS CONTEXT]
+${lensCompiled.text || ""}`,
       ].filter(Boolean).join("\n\n");
 
     const contextVersion = String(
@@ -486,13 +492,15 @@ export class GocContextEngine extends ContextEngineBase {
       typeBreakdown = summarizeTypeBreakdown(activeNodeIds, nodeMap);
     }
 
+    const fullContextText = [taskPacketText, contextText].filter(Boolean).join("\n\n");
+
     return {
-      contextText,
+      contextText: fullContextText,
       meta: {
         mode: "goc",
         budgetTokens: lensSpec.budget_tokens,
         estimatedTokens: lensCompiled.tokenEstimate,
-        compiledChars: contextText.length,
+        compiledChars: fullContextText.length,
         sharedContextSetId: shared.sharedContextSetId,
         lensContextSetId,
         contextVersion,

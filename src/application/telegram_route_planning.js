@@ -727,6 +727,55 @@ function buildQueuedAgentStatusFromActions(actions = []) {
   return buildQueuedAgentStatusFromActionsShared(actions);
 }
 
+function buildAgentAssignmentNotice(actions = [], { routeReason = "", maxItems = 6 } = {}) {
+  const rows = Array.isArray(actions) ? actions : [];
+  const agentIndex = buildTelegramAgentIndex({ actions: rows });
+  const items = [];
+  const seen = new Set();
+
+  const pushItem = (action = {}) => {
+    const type = String(action?.type || '').trim().toLowerCase();
+    if (type !== 'agent_run') return;
+    const agentId = String(resolveActionAgentId(action) || action?.agent || '').trim().toLowerCase();
+    if (!agentId) return;
+    const goal = clip(String(getActionGoal(action) || '').replace(/\s+/g, ' ').trim() || '작업 시작', 120);
+    const key = `${agentId}::${goal}`.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push({
+      agentId,
+      label: formatChatAgentDisplayName(agentId, agentIndex),
+      goal,
+    });
+  };
+
+  for (const action of rows) {
+    const type = String(action?.type || '').trim().toLowerCase();
+    if (type === 'agent_run') {
+      pushItem(action);
+      continue;
+    }
+    if (type !== 'spawn_agents') continue;
+    const children = Array.isArray(action?.agents) ? action.agents : [];
+    for (const child of children) pushItem(child);
+  }
+
+  if (items.length === 0) return '';
+  const capped = items.slice(0, Math.max(1, Math.floor(maxItems) || 6));
+  const more = items.length - capped.length;
+  const lines = ['🧩 작업 배정'];
+  if (String(routeReason || '').trim()) {
+    lines.push(`- route: ${clip(String(routeReason).trim(), 80)}`);
+  }
+  for (const item of capped) {
+    lines.push(`- ${item.label}: ${item.goal}`);
+  }
+  if (more > 0) lines.push(`- 외 ${more}개 agent`);
+  lines.push('');
+  lines.push('세부 상태는 /status recent 또는 /status full');
+  return lines.join('\n');
+}
+
 function buildRoutedDashboardText({ actions = [], agentStatus = {}, compact = false, routeReadiness = "", routeReason = "" } = {}) {
   const agentIndex = buildTelegramAgentIndex({ actions });
   if (compact) {
@@ -1861,6 +1910,7 @@ export {
   getActionGoal,
   buildPlanPreviewLines,
   buildQueuedAgentStatusFromActions,
+  buildAgentAssignmentNotice,
   buildRoutedDashboardText,
   getCurrentTurnReplyMessageId,
   sendRouterAckMessage,
