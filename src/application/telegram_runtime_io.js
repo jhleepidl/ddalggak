@@ -131,6 +131,7 @@ import { GocExecutionGraphRecorder } from "../chat/goc_execution_graph.js";
 
 import * as runtimeState from "./telegram_runtime_state.js";
 import { createJob } from "./telegram_goc_runtime.js";
+import { WORKSPACE_ARTIFACT_PUBLISH_MANIFEST } from "./cli_workspace_contract.js";
 
 const {
   MEMORY_MODE,
@@ -606,7 +607,7 @@ function artifactIndexPath(jobId) {
 
 function loadArtifactIndex(jobId) {
   const cleanJobId = String(jobId || "").trim();
-  if (!cleanJobId) return { job_id: "", updated_at: new Date().toISOString(), artifacts: [] };
+  if (!cleanJobId) return { job_id: "", updated_at: new Date().toISOString(), notes: [], artifacts: [] };
   try {
     const parsed = JSON.parse(fs.readFileSync(artifactIndexPath(cleanJobId), 'utf8'));
     const artifacts = Array.isArray(parsed?.artifacts)
@@ -625,10 +626,11 @@ function loadArtifactIndex(jobId) {
     return {
       job_id: String(parsed?.job_id || cleanJobId).trim() || cleanJobId,
       updated_at: String(parsed?.updated_at || new Date().toISOString()),
+      notes: uniqueStrings(asArrayLocal(parsed?.notes).map((entry) => String(entry || '').trim()).filter(Boolean)),
       artifacts,
     };
   } catch {
-    return { job_id: cleanJobId, updated_at: new Date().toISOString(), artifacts: [] };
+    return { job_id: cleanJobId, updated_at: new Date().toISOString(), notes: [], artifacts: [] };
   }
 }
 
@@ -665,6 +667,61 @@ function uniqueStrings(rows = []) {
     out.push(value);
   }
   return out;
+}
+
+function normalizeWorkspaceArtifactManifest(raw = {}) {
+  const row = asObjectLocal(raw);
+  const artifacts = asArrayLocal(row.artifacts).map((entry) => {
+    const item = asObjectLocal(entry);
+    const rel = String(item.path || item.relative_path || item.relativePath || '').trim().replace(/\\/g, '/').replace(/^workspace\//i, '').replace(/^\.\//, '');
+    if (!rel) return null;
+    return {
+      path: rel,
+      label: String(item.label || '').trim() || path.basename(rel),
+      kind: String(item.kind || '').trim().toLowerCase() || '',
+      final: item.final !== false,
+      note: String(item.note || '').trim(),
+    };
+  }).filter(Boolean);
+  const notes = uniqueStrings(asArrayLocal(row.notes).map((entry) => String(entry || '').trim()).filter(Boolean));
+  return { artifacts, notes };
+}
+
+function loadWorkspaceArtifactManifest(jobId = '') {
+  const cleanJobId = String(jobId || '').trim();
+  if (!cleanJobId) return { artifacts: [], notes: [] };
+  try {
+    const manifestPath = jobs.resolveWorkspacePath(cleanJobId, WORKSPACE_ARTIFACT_PUBLISH_MANIFEST);
+    if (!fs.existsSync(manifestPath)) return { artifacts: [], notes: [] };
+    return normalizeWorkspaceArtifactManifest(JSON.parse(String(fs.readFileSync(manifestPath, 'utf8') || '{}')));
+  } catch {
+    return { artifacts: [], notes: [] };
+  }
+}
+
+function renderArtifactIndexMarkdown(artifactIndex = null) {
+  const row = artifactIndex && typeof artifactIndex === 'object' ? artifactIndex : { artifacts: [] };
+  const artifacts = Array.isArray(row.artifacts) ? row.artifacts : [];
+  const notes = uniqueStrings(asArrayLocal(row.notes));
+  const lines = [
+    '# Artifact Index',
+    '',
+    `- job_id: ${String(row.job_id || '').trim()}`,
+    `- updated_at: ${String(row.updated_at || '').trim()}`,
+    `- count: ${artifacts.length}`,
+  ];
+  if (notes.length > 0) lines.push('', '## Notes', ...notes.map((entry) => `- ${entry}`));
+  lines.push('', '## Artifacts');
+  if (artifacts.length === 0) return `${[...lines, '- (artifacts not detected yet)'].join('\n')}\n`;
+  for (const artifact of artifacts) {
+    const flags = [artifact.kind, artifact.final ? 'final' : '', artifact.sendable === false ? 'too_large' : ''].filter(Boolean);
+    const label = String(artifact.label || '').trim();
+    const display = label && label !== path.basename(String(artifact.path || '').trim())
+      ? `${label} — ${artifact.path}`
+      : artifact.path;
+    lines.push(`- ${display}${flags.length > 0 ? ` (${flags.join(', ')})` : ''}`);
+  }
+  return `${lines.join('\n')}\n`;
 }
 
 function resolveArtifactDeliveryContract(jobId, runtime = null) {
@@ -787,12 +844,13 @@ function buildArtifactIndexEntries(jobId, { execution = null, maxFiles = 12 } = 
   const cleanJobId = String(jobId || '').trim();
   const workspaceRoot = runWorkspaceDir(cleanJobId);
   const executionRefs = collectExecutionArtifactPathCandidates(execution);
+  const workspaceArtifactManifest = loadWorkspaceArtifactManifest(cleanJobId);
   const workspaceFiles = collectWorkspaceFileEntries(cleanJobId, { scope: 'workspace' });
   const fileMetaByRel = new Map(workspaceFiles.map((row) => [row.rel, row]));
   const out = [];
   const seen = new Set();
 
-  const pushEntry = (rel, source = 'workspace_recent', final = false) => {
+  const pushEntry = (rel, source = 'workspace_recent', final = false, overrides = {}) => {
     const cleanRel = String(rel || '').trim().replace(/\\/g, '/').replace(/^workspace\//i, '').replace(/^\.\//, '');
     if (!cleanRel || cleanRel.startsWith('uploads/') || cleanRel.startsWith('outputs/') || isInternalWorkspaceSupportFile(cleanRel)) return;
     if (seen.has(cleanRel)) return;
@@ -820,8 +878,8 @@ function buildArtifactIndexEntries(jobId, { execution = null, maxFiles = 12 } = 
     out.push({
       id: `artifact_${out.length + 1}`,
       path: meta.rel,
-      label: path.basename(meta.rel),
-      kind: inferArtifactKind(meta.rel),
+      label: String(overrides.label || '').trim() || path.basename(meta.rel),
+      kind: String(overrides.kind || '').trim().toLowerCase() || inferArtifactKind(meta.rel),
       source,
       size: Number(meta.size || 0),
       mtime_ms: Number(meta.mtimeMs || 0),
@@ -830,6 +888,7 @@ function buildArtifactIndexEntries(jobId, { execution = null, maxFiles = 12 } = 
     });
   };
 
+  for (const entry of workspaceArtifactManifest.artifacts) pushEntry(entry.path, 'workspace_manifest', entry.final !== false, entry);
   for (const rel of executionRefs) pushEntry(rel, 'execution_ref', true);
   for (const row of workspaceFiles) pushEntry(row.rel, 'workspace_recent', out.length < 3);
 
@@ -839,13 +898,18 @@ function buildArtifactIndexEntries(jobId, { execution = null, maxFiles = 12 } = 
 function refreshArtifactIndex(jobId, { execution = null, maxFiles = 12 } = {}) {
   const cleanJobId = String(jobId || '').trim();
   if (!cleanJobId) return { job_id: '', updated_at: new Date().toISOString(), artifacts: [] };
+  const manifest = loadWorkspaceArtifactManifest(cleanJobId);
   const artifactIndex = {
     job_id: cleanJobId,
     updated_at: new Date().toISOString(),
+    notes: manifest.notes,
     artifacts: buildArtifactIndexEntries(cleanJobId, { execution, maxFiles }),
   };
   try {
     fs.writeFileSync(artifactIndexPath(cleanJobId), `${JSON.stringify(artifactIndex, null, 2)}\n`, 'utf8');
+  } catch {}
+  try {
+    fs.writeFileSync(path.join(runSharedDir(cleanJobId), 'artifact_index.md'), renderArtifactIndexMarkdown(artifactIndex), 'utf8');
   } catch {}
   return artifactIndex;
 }

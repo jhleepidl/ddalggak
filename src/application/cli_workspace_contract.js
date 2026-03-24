@@ -5,6 +5,8 @@ import { loadLatestRuntimeCheckpoint } from "./runtime_checkpointing.js";
 import { buildProviderRuntimePolicySummary } from "./provider_runtime_policy.js";
 import { normalizeRuntimeExecutionPolicy } from "./runtime_execution_policy.js";
 
+export const WORKSPACE_ARTIFACT_PUBLISH_MANIFEST = ".orchestrator/artifact_publish.json";
+
 function clean(value = "") {
   return String(value || "").trim();
 }
@@ -102,9 +104,11 @@ export function writeCodexInstructionFile({ workspaceRoot = process.cwd(), roleM
     "- Modify files only inside CODEX_WORKSPACE_ROOT.",
     "- Use concrete KB filenames when referring to tracking docs.",
     "- Do not invent nonexistent tracking filenames.",
+    `- Do not edit shared KB files such as shared/artifact_index.md directly. Instead, when you create deliverable files, write a publish manifest to ${WORKSPACE_ARTIFACT_PUBLISH_MANIFEST} describing the workspace-relative artifact paths, labels, and kinds. The orchestrator will publish the shared artifact index for you.`,
     allowDirectExecution
       ? "- This task explicitly requires local execution/build output. Run bounded local shell/build commands yourself when needed, and do not claim success if execution or artifact generation was skipped."
       : "- Verification is handled by a separate tool_proxy step unless explicitly asked otherwise.",
+    `- Artifact publish manifest example:\n\n${JSON.stringify({ artifacts: [{ path: 'dist/MyApp.exe', label: 'Windows installer', kind: 'exe', final: true }], notes: ['npm install completed', 'npm run build completed'] }, null, 2)}\n`,
     policyFiles.runtimePolicyMarkdownFile ? `- Read ${path.relative(path.resolve(String(workspaceRoot || process.cwd())), policyFiles.runtimePolicyMarkdownFile) || '.orchestrator/runtime_execution_policy.md'} for sandbox/approval/MCP policy.` : "",
     restore.restoreMarkdownFile ? `- Read ${path.relative(path.resolve(String(workspaceRoot || process.cwd())), restore.restoreMarkdownFile) || '.orchestrator/runtime_restore.md'} before continuing resumed work.` : "",
     "",

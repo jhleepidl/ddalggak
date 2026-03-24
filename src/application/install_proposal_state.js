@@ -1,5 +1,7 @@
 import { buildTeamInstallProposal } from './install_proposal.js';
 import { getCredentialCoverageForProposal } from './credential_binding.js';
+import { normalizeInstallRequirementActions } from '../shared/install_requirement_actions.js';
+import { normalizeManifestRequirements } from '../shared/manifest_requirements.js';
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -52,6 +54,41 @@ export function isActionableInstallProposalState(state = {}) {
   const normalized = normalizeInstallProposalState(state);
   if (!normalized) return false;
   return proposalHasActionableBlockingGap(normalized.proposal);
+}
+
+export function resolveAutomaticInstallProposalAction(state = {}) {
+  const normalized = normalizeInstallProposalState(state);
+  if (!normalized) return null;
+  const proposal = normalized.proposal || {};
+  if (!proposalHasActionableBlockingGap(proposal)) return null;
+  const requirements = normalizeManifestRequirements(proposal.requirements || {});
+  const actions = normalizeInstallRequirementActions(proposal.actions || {});
+  if (requirements.credentials.length > 0 || requirements.external_tools.length > 0 || requirements.skills.length > 0) return null;
+  if (actions.credential_requests.length > 0 || actions.external_tool_install_proposals.length > 0 || actions.generated_skill_proposals.length > 0) return null;
+  const blockingCaps = requirements.capabilities
+    .filter((entry) => String(entry?.severity || 'blocking').trim().toLowerCase() === 'blocking')
+    .map((entry) => String(entry?.capability_id || '').trim().toLowerCase())
+    .filter(Boolean);
+  if (blockingCaps.length === 0) return null;
+  const actionCaps = actions.capability_enable_proposals
+    .filter((entry) => String(entry?.severity || 'blocking').trim().toLowerCase() === 'blocking')
+    .map((entry) => ({
+      capability_id: String(entry?.capability_id || '').trim().toLowerCase(),
+      strategy: String(entry?.strategy || '').trim().toLowerCase(),
+      auto_installable: entry?.auto_installable === true,
+    }))
+    .filter((entry) => entry.capability_id);
+  if (actionCaps.length === 0) return null;
+  const onlyFilesystemRead = blockingCaps.every((entry) => entry === 'filesystem_read')
+    && actionCaps.every((entry) => entry.capability_id === 'filesystem_read' && entry.auto_installable === true && entry.strategy === 'enable_read_only_fs');
+  if (!onlyFilesystemRead) return null;
+  return {
+    kind: 'auto_activate_runtime_capability',
+    capability_ids: ['filesystem_read'],
+    strategy: 'enable_read_only_fs',
+    resume_on_apply: shouldResumeInstallProposal(normalized),
+    message: 'filesystem read 권한을 자동 활성화하고 같은 요청을 재개합니다.',
+  };
 }
 
 export function normalizeInstallProposalState(raw = {}) {

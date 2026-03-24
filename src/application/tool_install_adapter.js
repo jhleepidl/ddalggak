@@ -119,9 +119,14 @@ export function autoInstallRuntimeSupport({ proposal = {}, jobs = null, jobId = 
   const actions = normalizeInstallRequirementActions(proposal?.actions || {});
   const applied = [];
   for (const entry of actions.tool_install_proposals) {
+    if (entry.strategy === 'enable_read_only_fs' && entry.auto_installable === true && jobs && clean(jobId)) {
+      if (typeof jobs.ensureWorkspacePath === 'function') jobs.ensureWorkspacePath(jobId, '.', { asDirectory: true });
+      applied.push({ kind: 'runtime_tool', tool_id: entry.tool_id, capability_id: entry.capability_id || 'filesystem_read', strategy: entry.strategy });
+      continue;
+    }
     if (entry.strategy === 'enable_workspace_fs' && entry.auto_installable === true && jobs && typeof jobs.ensureWorkspacePath === 'function' && clean(jobId)) {
       jobs.ensureWorkspacePath(jobId, '.', { asDirectory: true });
-      applied.push({ kind: 'runtime_tool', tool_id: entry.tool_id, strategy: entry.strategy });
+      applied.push({ kind: 'runtime_tool', tool_id: entry.tool_id, capability_id: entry.capability_id || 'filesystem_write', strategy: entry.strategy });
     }
   }
   return applied;

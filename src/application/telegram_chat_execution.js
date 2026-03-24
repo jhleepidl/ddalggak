@@ -92,12 +92,13 @@ import {
   isExplicitTeamConfigurationIntentMessage,
 } from "./team_intent.js";
 import { buildExplicitTeamReconfigurationActions } from "./team_config_diff.js";
-import { applyTeamConfigurationToRuntime, buildAutoRefineDraftFromStructureConflict, formatTeamProposalMessage, getSessionTeamState, hydrateSessionTeamStateFromConversationStore, storePendingTeam, syncTeamConfigurationToConversationStore, validateTeamConfiguration } from "./team_configuration.js";
+import { applyPendingTeam, applyTeamConfigurationToRuntime, buildAutoRefineDraftFromStructureConflict, formatTeamProposalMessage, getSessionTeamState, hydrateSessionTeamStateFromConversationStore, storePendingTeam, syncTeamConfigurationToConversationStore, validateTeamConfiguration } from "./team_configuration.js";
 import { appendRecentAgentTurn, planAgentFollowupShortcut } from "./agent_followup_shortcuts.js";
 import { buildAnswerCapsules } from "./answer_capsules.js";
 import { detectCapabilityGapsFromExecution } from "./capability_gap_detector.js";
-import { buildInstallProposalPrompt, buildInstallProposalStateFromExecution, setPendingInstallProposal, getPendingInstallProposal, clearPendingInstallProposal } from './install_proposal_state.js';
+import { archivePendingInstallProposal, buildInstallProposalPrompt, buildInstallProposalStateFromExecution, clearPendingInstallProposal, getPendingInstallProposal, resolveAutomaticInstallProposalAction, setPendingInstallProposal } from './install_proposal_state.js';
 import { resolveCredentialEnvForChat } from './credential_binding.js';
+import { applyInstallProposalActionsToTeam, autoInstallRuntimeSupport } from './tool_install_adapter.js';
 import { buildAgentLocalInteractionContract } from "../domain/interaction_spec.js";
 import { buildAgencyRoleOverlayPromptBlock, resolveAgencyRoleOverlay } from "../domain/agency_role_overlays.js";
 import {
@@ -244,7 +245,6 @@ const {
   formatRegistryLines,
   chatActionLabel,
   buildQueuedAgentStatusFromActions,
-  buildAgentAssignmentNotice,
   getCurrentTurnReplyMessageId,
   sendRouterAckMessage,
   sendPlanPreviewMessage,
@@ -3093,6 +3093,7 @@ async function runSupervisorChat(
     userReplyToMessageId = null,
     forceMode = "normal",
     teamConfig = null,
+    installAutoResumeDepth = 0,
   } = {}
 ) {
   const chatKey = String(chatId);
@@ -3805,19 +3806,6 @@ async function runSupervisorChat(
           current_turn_plan_message_id: Number(planPreviewMessageId),
         });
       }
-      const assignmentNotice = buildAgentAssignmentNotice(planActions, {
-        routeReason: routePlan.reason || "",
-      });
-      if (assignmentNotice) {
-        await sendLongAdapter(
-          bot,
-          chatId,
-          assignmentNotice,
-          Number.isFinite(Number(currentTurnAckMessageId)) && Number(currentTurnAckMessageId) > 0
-            ? { reply_to_message_id: Number(currentTurnAckMessageId) }
-            : undefined,
-        ).catch(() => null);
-      }
 
       if (verbose) {
         await bot.sendMessage(chatId, [
@@ -4142,6 +4130,8 @@ async function runSupervisorChat(
     });
 
     let installProposalState = null;
+    let autoInstallResumeRequest = null;
+    let autoInstallResumeTeam = null;
     const existingPendingInstallProposal = getPendingInstallProposal(chatSessionStore, chatId);
     const compatibilityRecovery = inferCompatibilityFallbackState(routePlan);
     if (compatibilityRecovery) {
@@ -4166,10 +4156,67 @@ async function runSupervisorChat(
         source: 'execution_gap',
       });
       if (installProposalState?.proposal?.gap_count > 0) {
-        setPendingInstallProposal(chatSessionStore, chatId, installProposalState);
+        const automaticInstallAction = installAutoResumeDepth < 1
+          ? resolveAutomaticInstallProposalAction(installProposalState)
+          : null;
+        if (automaticInstallAction) {
+          const baseTeam = teamStateForInstall?.pending_team || teamStateForInstall?.active_team || normalizedActiveTeamConfig || teamConfig || null;
+          if (baseTeam) {
+            const patched = applyInstallProposalActionsToTeam(baseTeam, installProposalState.proposal || {}).team;
+            storePendingTeam(chatSessionStore, chatId, patched);
+            autoInstallResumeTeam = await applyPendingTeam({ sessionStore: chatSessionStore, chatId, runtime }).catch(() => patched);
+          }
+          const appliedRuntimeSupport = autoInstallRuntimeSupport({ proposal: installProposalState.proposal || {}, jobs, jobId: currentJobId });
+          if (runtime && typeof runtime === 'object' && Array.isArray(appliedRuntimeSupport) && appliedRuntimeSupport.length > 0) {
+            const capabilityIds = new Set([...(Array.isArray(runtime.availableCapabilityIds) ? runtime.availableCapabilityIds : []), ...(Array.isArray(runtime.available_capability_ids) ? runtime.available_capability_ids : [])]);
+            const toolIds = new Set([...(Array.isArray(runtime.availableToolIds) ? runtime.availableToolIds : []), ...(Array.isArray(runtime.available_tool_ids) ? runtime.available_tool_ids : [])]);
+            for (const entry of appliedRuntimeSupport) {
+              const capabilityId = String(entry?.capability_id || '').trim();
+              const toolId = String(entry?.tool_id || '').trim();
+              if (capabilityId) capabilityIds.add(capabilityId);
+              if (toolId) toolIds.add(toolId);
+            }
+            runtime.availableCapabilityIds = [...capabilityIds];
+            runtime.available_capability_ids = [...capabilityIds];
+            runtime.availableToolIds = [...toolIds];
+            runtime.available_tool_ids = [...toolIds];
+          }
+          archivePendingInstallProposal(chatSessionStore, chatId, 'applied_active', {
+            apply_state: 'active',
+            summary: automaticInstallAction.message,
+          });
+          autoInstallResumeRequest = installProposalState.resume_request && typeof installProposalState.resume_request === 'object'
+            ? installProposalState.resume_request
+            : null;
+          installProposalState = null;
+        } else {
+          setPendingInstallProposal(chatSessionStore, chatId, installProposalState);
+        }
       } else if (existingPendingInstallProposal?.source === 'execution_gap') {
         clearPendingInstallProposal(chatSessionStore, chatId, { preserveLast: true });
       }
+    }
+
+    if (autoInstallResumeRequest?.message) {
+      await bot.sendMessage(
+        chatId,
+        'ℹ️ filesystem read 권한을 자동 활성화하고 같은 요청을 재개합니다.',
+        Number.isFinite(Number(getCurrentTurnReplyMessageId(chatId)))
+          ? { reply_to_message_id: Number(getCurrentTurnReplyMessageId(chatId)) }
+          : undefined,
+      );
+      return runSupervisorChat(bot, chatId, userId, autoInstallResumeRequest.message, {
+        debug,
+        chatInfo: autoInstallResumeRequest.chat_info && typeof autoInstallResumeRequest.chat_info === 'object'
+          ? autoInstallResumeRequest.chat_info
+          : (chatInfo && typeof chatInfo === 'object' ? chatInfo : { chat_id: String(chatId || '') }),
+        inputKind: autoInstallResumeRequest.input_kind || 'install_auto_resume',
+        telegramMessageId: autoInstallResumeRequest.telegram_message_id || telegramMessageId || null,
+        userReplyToMessageId: autoInstallResumeRequest.user_reply_to_message_id || userReplyToMessageId || null,
+        forceMode: normalizeForceMode(autoInstallResumeRequest.force_mode || cleanForceMode),
+        teamConfig: autoInstallResumeTeam || getSessionTeamState(chatSessionStore, chatId)?.active_team || teamConfig,
+        installAutoResumeDepth: installAutoResumeDepth + 1,
+      });
     }
 
     if (forcedAwaitReason && !mergedExecution.pendingApproval) {
