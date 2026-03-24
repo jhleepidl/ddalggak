@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { clip } from "../../textutil.js";
 import { readIterationDelta, readRoleSummary } from "../../application/summary_memory.js";
+import { loadCurrentTaskPacket, renderTaskPacket, updateCurrentTaskPacket } from "../../application/task_packet.js";
 import { ContextEngineBase } from "./base.js";
 
 function asObject(value) {
@@ -90,21 +91,83 @@ function formatPinsSection(pins = null) {
       .filter((row) => row.length > 3)
       .join("\n");
   }
-  const entries = Object.entries(payload)
+  const fallbackEntries = Object.entries(payload)
+    .filter(([key, value]) => {
+      if (key === 'items' && Array.isArray(value) && value.length === 0) return false;
+      if (key === 'facts' && Array.isArray(value) && value.length === 0) return false;
+      if (typeof value === 'string' && !String(value).trim()) return false;
+      return true;
+    })
     .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
     .filter((row) => row.length > 3)
     .slice(0, 20);
-  return entries.join("\n");
+  return fallbackEntries.join("\n");
 }
 
 function normalizePinText(text = "", maxChars = 320) {
   return clip(String(text || "").replace(/\s+/g, " ").trim(), maxChars);
 }
 
-function isUserDirectiveLike(text = "") {
+function normalizeDirectiveEntry(raw = {}, { pinnedFallback = false } = {}) {
+  if (typeof raw === 'string') {
+    const text = normalizePinText(raw, 320);
+    return text ? { text, pinned: pinnedFallback, source: 'explicit', ts: '' } : null;
+  }
+  const row = asObject(raw);
+  const text = normalizePinText(row.text || row.value || row.directive || row.content || '', 320);
+  if (!text) return null;
+  return {
+    text,
+    pinned: row.pinned === true || row.pin === true || pinnedFallback === true,
+    source: String(row.source || row.origin || 'explicit').trim() || 'explicit',
+    ts: String(row.ts || row.created_at || '').trim(),
+    scope: String(row.scope || 'global').trim() || 'global',
+  };
+}
+
+function normalizeDirectiveEntries(raw = [], { pinnedFallback = false } = {}) {
+  const out = [];
+  const seen = new Set();
+  for (const entry of Array.isArray(raw) ? raw : []) {
+    const normalized = normalizeDirectiveEntry(entry, { pinnedFallback });
+    if (!normalized) continue;
+    const key = String(normalized.text || '').trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function formatDirectiveEntries(entries = [], { onlyPinned = false, maxItems = 8 } = {}) {
+  const rows = normalizeDirectiveEntries(entries)
+    .filter((entry) => !onlyPinned || entry.pinned === true)
+    .slice(0, Math.max(1, Math.floor(Number(maxItems) || 8)));
+  return rows.map((entry, idx) => `${idx + 1}. ${entry.text}`).join('\n');
+}
+
+function classifyTurnKind(text = '', role = 'user') {
+  const clean = normalizePinText(text, 420);
+  const normalizedRole = normalizeRole(role);
+  if (!clean) return 'other';
+  if (normalizedRole === 'assistant') return 'assistant';
+  if (/(반드시|절대로|하지\s*마|하지마|must|never|do not|don't|잊지\s*마|잊지마|기억해|기억해둬)/i.test(clean)) return 'directive';
+  if (/(아니라|대신|different|not\s+the\s+same|rather than|instead|혼동하지\s*않도록|혼동하지\s*말|주의해|주의하|구분해|다른\s+모드|다르다|라고\.?$|라고\s)/i.test(clean)) return 'correction';
+  if (/(좋아|그대로|진행해|승인|approve|approved|ok to proceed|continue)/i.test(clean)) return 'approval';
+  if (/(싫어|하지\s*마|중단|취소|stop|cancel|replan)/i.test(clean)) return 'rejection';
+  if (normalizedRole === 'user') return 'request';
+  if (normalizedRole === 'system') return 'handoff';
+  return 'other';
+}
+
+function isPriorityTurnKind(kind = '') {
+  return ['directive', 'correction', 'approval', 'rejection'].includes(String(kind || '').trim().toLowerCase());
+}
+
+function isUserDirectiveLike(text = '') {
   const clean = normalizePinText(text, 420);
   if (!clean || clean.length < 8) return false;
-  return /(반드시|절대로|하지\s*마|하지마|아니라|기억해|기억해둬|잊지\s*마|잊지마|must|never|do not|don't|instead|rather than|not\s+.*but)/i.test(clean);
+  return isPriorityTurnKind(classifyTurnKind(clean, 'user'));
 }
 
 function formatTurns(turns = []) {
@@ -117,6 +180,38 @@ function formatTurns(turns = []) {
     })
     .filter(Boolean)
     .join("\n");
+}
+
+function buildActiveDirectivesText({ turns = [], directiveEntries = [], maxItems = 6 } = {}) {
+  const items = [];
+  const seen = new Set();
+  const pushItem = (value = '') => {
+    const clean = normalizePinText(value, 260);
+    if (!clean) return;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push(clean);
+  };
+
+  for (const entry of normalizeDirectiveEntries(directiveEntries, { pinnedFallback: false })) {
+    pushItem(entry.text);
+  }
+
+  const rows = Array.isArray(turns) ? turns : [];
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const row = rows[i] || {};
+    if (normalizeRole(row.role) !== 'user') continue;
+    const kind = classifyTurnKind(row.text, row.role);
+    if (!isPriorityTurnKind(kind)) continue;
+    pushItem(row.text);
+    if (items.length >= Math.max(1, Math.floor(Number(maxItems) || 6))) break;
+  }
+
+  return items
+    .slice(0, Math.max(1, Math.floor(Number(maxItems) || 6)))
+    .map((row, idx) => `${idx + 1}. ${row}`)
+    .join('\n');
 }
 
 function firstIndexByRole(turns = [], role = "assistant") {
@@ -150,12 +245,16 @@ export class LocalContextEngine extends ContextEngineBase {
   _ensureMemoryFiles(jobId) {
     const summaryPath = this._memoryPath(jobId, "summary.md");
     const pinsPath = this._memoryPath(jobId, "pins.json");
+    const directivesPath = this._memoryPath(jobId, "directives.json");
     const turnsPath = this._memoryPath(jobId, "turns.jsonl");
     if (summaryPath) {
       writeFileIfMissing(summaryPath, "# rolling summary\n\n");
     }
     if (pinsPath) {
       writeFileIfMissing(pinsPath, "{\n  \"items\": []\n}\n");
+    }
+    if (directivesPath) {
+      writeFileIfMissing(directivesPath, "{\n  \"items\": []\n}\n");
     }
     if (turnsPath) {
       writeFileIfMissing(turnsPath, "");
@@ -174,24 +273,47 @@ export class LocalContextEngine extends ContextEngineBase {
     return asObject(parseJsonMaybe(raw));
   }
 
-  _upsertPinnedUserDirective(jobId, text = "") {
-    const clean = normalizePinText(text, 320);
-    if (!jobId || !isUserDirectiveLike(clean)) return null;
-    const p = this._memoryPath(jobId, "pins.json");
-    if (!p) return null;
-    const payload = this._loadPins(jobId);
-    const existing = Array.isArray(payload.items)
-      ? payload.items
-      : (Array.isArray(payload.facts) ? payload.facts : []);
-    const normalizedExisting = existing
-      .map((entry) => normalizePinText(entry, 320))
-      .filter(Boolean);
-    const deduped = [clean, ...normalizedExisting.filter((entry) => entry.toLowerCase() !== clean.toLowerCase())]
-      .slice(0, 8);
+  _jobDir(jobId) {
+    return this.jobs && typeof this.jobs.jobDir === 'function' ? this.jobs.jobDir(jobId) : '';
+  }
+
+  _loadDirectiveEntries(jobId) {
+    const localPath = this._memoryPath(jobId, 'directives.json');
+    const localPayload = asObject(parseJsonMaybe(readFileIfExists(localPath)));
+    const legacyPins = this._loadPins(jobId);
+    const jobDir = this._jobDir(jobId);
+    const externalPaths = [
+      jobDir ? path.join(jobDir, 'shared', 'user_directives.json') : '',
+      jobDir ? path.join(jobDir, 'workspace', '.orchestrator', 'user_directives.json') : '',
+    ].filter(Boolean);
+    const externalEntries = [];
+    for (const filePath of externalPaths) {
+      const payload = asObject(parseJsonMaybe(readFileIfExists(filePath)));
+      externalEntries.push(...normalizeDirectiveEntries(payload.items || payload.directives || [], { pinnedFallback: true }));
+    }
+    return normalizeDirectiveEntries([
+      ...(Array.isArray(localPayload.items) ? localPayload.items : []),
+      ...(Array.isArray(legacyPins.items) ? legacyPins.items : []),
+      ...(Array.isArray(legacyPins.facts) ? legacyPins.facts : []),
+      ...externalEntries,
+    ], { pinnedFallback: false });
+  }
+
+  _recordStickyDirectives(jobId, directives = []) {
+    const cleanJobId = String(jobId || '').trim();
+    if (!cleanJobId) return null;
+    const normalized = normalizeDirectiveEntries(directives, { pinnedFallback: true });
+    if (normalized.length === 0) return null;
+    const filePath = this._memoryPath(cleanJobId, 'directives.json');
+    const existingPayload = asObject(parseJsonMaybe(readFileIfExists(filePath)));
+    const merged = normalizeDirectiveEntries([
+      ...normalized,
+      ...(Array.isArray(existingPayload.items) ? existingPayload.items : []),
+    ], { pinnedFallback: false }).slice(0, 12);
     try {
-      fs.writeFileSync(p, `${JSON.stringify({ items: deduped }, null, 2)}
-`, "utf8");
-      return deduped.length;
+      fs.writeFileSync(filePath, `${JSON.stringify({ items: merged }, null, 2)}
+`, 'utf8');
+      return merged.length;
     } catch {
       return null;
     }
@@ -220,6 +342,88 @@ export class LocalContextEngine extends ContextEngineBase {
     }
     if (rows.length <= maxTurns) return rows;
     return rows.slice(rows.length - maxTurns);
+  }
+
+  _loadAllTurns(jobId) {
+    return this._loadTurnsFromJsonl(jobId, Number.MAX_SAFE_INTEGER);
+  }
+
+  _findLatestPriorityTurnInfo(turns = []) {
+    const rows = Array.isArray(turns) ? turns : [];
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      const row = rows[i] || {};
+      if (normalizeRole(row.role) !== 'user') continue;
+      const kind = classifyTurnKind(row.text, row.role);
+      if (!isPriorityTurnKind(kind)) continue;
+      return { index: i, ts: String(row.ts || '').trim(), kind, text: String(row.text || '').trim() };
+    }
+    return { index: -1, ts: '', kind: '', text: '' };
+  }
+
+  _selectTurnsForContext(jobId, { maxTurns = 8, taskPacket = null } = {}) {
+    const rows = this._loadAllTurns(jobId);
+    if (rows.length === 0) return [];
+    const limit = Math.max(2, Math.floor(Number(maxTurns) || 8));
+    if (rows.length <= limit) return rows;
+
+    const packet = taskPacket && typeof taskPacket === 'object' ? taskPacket : null;
+    const anchorQuotes = packet ? [
+      ...(Array.isArray(packet.phase_user_quotes) ? packet.phase_user_quotes : []),
+      String(packet.latest_user_quote || '').trim(),
+      ...(Array.isArray(packet.carry_forward_quotes) ? packet.carry_forward_quotes.slice(0, 2) : []),
+    ].map((row) => String(row || '').trim()).filter(Boolean) : [];
+    if (anchorQuotes.length > 0) {
+      const selectedIdx = new Set();
+      for (const quote of anchorQuotes) {
+        const key = quote.toLowerCase();
+        for (let i = rows.length - 1; i >= 0; i -= 1) {
+          const text = String(rows[i]?.text || '').trim().toLowerCase();
+          if (!text || text !== key) continue;
+          selectedIdx.add(i);
+          if (i - 1 >= 0) selectedIdx.add(i - 1);
+          if (i + 1 < rows.length) selectedIdx.add(i + 1);
+          break;
+        }
+        if (selectedIdx.size >= limit) break;
+      }
+      if (selectedIdx.size > 0) {
+        const selected = [...selectedIdx].sort((a, b) => a - b).map((idx) => rows[idx]).filter(Boolean);
+        if (selected.length >= limit) return selected.slice(selected.length - limit);
+        const remainder = [];
+        for (let i = rows.length - 1; i >= 0 && (selected.length + remainder.length) < limit; i -= 1) {
+          if (selectedIdx.has(i)) continue;
+          const role = normalizeRole(rows[i]?.role);
+          if (role !== 'user' && role !== 'system') continue;
+          remainder.unshift(rows[i]);
+        }
+        const merged = [...remainder, ...selected];
+        return merged.length > limit ? merged.slice(merged.length - limit) : merged;
+      }
+    }
+
+    const priority = this._findLatestPriorityTurnInfo(rows);
+    if (priority.index >= 0) {
+      let selected = rows.slice(priority.index);
+      if (selected.length > limit) return selected.slice(selected.length - limit);
+      const prefix = [];
+      for (let i = priority.index - 1; i >= 0 && (prefix.length + selected.length) < limit; i -= 1) {
+        const row = rows[i] || {};
+        const role = normalizeRole(row.role);
+        const kind = classifyTurnKind(row.text, row.role);
+        if (role === 'user' || role === 'system' || isPriorityTurnKind(kind)) {
+          prefix.unshift(row);
+        }
+      }
+      selected = [...prefix, ...selected];
+      return selected.length > limit ? selected.slice(selected.length - limit) : selected;
+    }
+
+    return rows.slice(rows.length - limit);
+  }
+
+  _findLatestDirectiveTs(jobId) {
+    const turns = this._loadAllTurns(jobId);
+    return String(this._findLatestPriorityTurnInfo(turns)?.ts || '').trim();
   }
 
   _loadRecentTurns(jobId, maxTurns = 8) {
@@ -259,6 +463,8 @@ export class LocalContextEngine extends ContextEngineBase {
   _renderContext({
     focusHeader = "",
     constraintsText = "",
+    taskPacketText = "",
+    activeDirectivesText = "",
     pinsText = "",
     summaryText = "",
     roleSummaryText = "",
@@ -270,6 +476,8 @@ export class LocalContextEngine extends ContextEngineBase {
     const sections = [];
     if (focusHeader) sections.push(`[FOCUS]\n${focusHeader}`);
     if (constraintsText) sections.push(`[JOB CONSTRAINTS]\n${constraintsText}`);
+    if (taskPacketText) sections.push(taskPacketText);
+    if (activeDirectivesText) sections.push(`[ACTIVE DIRECTIVES]\n${activeDirectivesText}`);
     if (pinsText) sections.push(`[PINNED FACTS]\n${pinsText}`);
     if (roleSummaryText) sections.push(`[ROLE SUMMARY]\n${roleSummaryText}`);
     if (deltaSummaryText) sections.push(`[ITERATION DELTA]\n${deltaSummaryText}`);
@@ -285,6 +493,8 @@ export class LocalContextEngine extends ContextEngineBase {
     budgetTokens = 1200,
     focusHeader = "",
     constraintsText = "",
+    taskPacketText = "",
+    activeDirectivesText = "",
     pinsText = "",
     summaryText = "",
     roleSummaryText = "",
@@ -303,6 +513,8 @@ export class LocalContextEngine extends ContextEngineBase {
     let text = this._renderContext({
       focusHeader,
       constraintsText,
+      taskPacketText,
+      activeDirectivesText,
       pinsText,
       summaryText: workingSummary,
       roleSummaryText: workingRoleSummary,
@@ -335,6 +547,8 @@ export class LocalContextEngine extends ContextEngineBase {
       text = this._renderContext({
         focusHeader,
         constraintsText,
+        taskPacketText,
+        activeDirectivesText,
         pinsText,
         summaryText: workingSummary,
         roleSummaryText: workingRoleSummary,
@@ -384,18 +598,28 @@ export class LocalContextEngine extends ContextEngineBase {
       this.defaultBudgetFor(normalized)
     );
     const pinsPayload = this._loadPins(normalized.jobId);
-    const pinsText = formatPinsSection(pinsPayload);
-    const summaryText = this._loadSummary(normalized.jobId);
-    const recentTurns = this._loadRecentTurns(
-      normalized.jobId,
-      clamp(process.env.LOCAL_RECENT_TURNS, 2, 30, this.defaultRecentTurns)
-    );
+    const directiveEntries = this._loadDirectiveEntries(normalized.jobId);
+    const pinsText = formatDirectiveEntries(directiveEntries, { onlyPinned: true, maxItems: 8 }) || formatPinsSection(pinsPayload);
     const resolvedJobDir = this.jobs && typeof this.jobs.jobDir === "function" ? this.jobs.jobDir(normalized.jobId) : "";
+    const taskPacket = loadCurrentTaskPacket({
+      jobDir: resolvedJobDir,
+      runMeta: normalized.runMeta,
+      currentUserText: normalized.stepKind === 'router' ? normalized.userMessageText : '',
+      refresh: normalized.stepKind === 'router' && !!String(normalized.userMessageText || '').trim(),
+    });
+    const taskPacketText = renderTaskPacket(taskPacket, { roleId: normalized.roleId, maxChars: 1800 });
+    const summaryText = this._loadSummary(normalized.jobId);
+    const latestDirectiveTs = this._findLatestDirectiveTs(normalized.jobId);
+    const recentTurns = this._selectTurnsForContext(
+      normalized.jobId,
+      { maxTurns: clamp(process.env.LOCAL_RECENT_TURNS, 2, 30, this.defaultRecentTurns), taskPacket }
+    );
+    const activeDirectivesText = buildActiveDirectivesText({ turns: recentTurns, directiveEntries, maxItems: 6 });
     const roleSummaryText = normalized.stepKind === "agent"
-      ? readRoleSummary({ jobDir: resolvedJobDir, roleId: normalized.roleId, agentId: normalized.agentId })
+      ? readRoleSummary({ jobDir: resolvedJobDir, roleId: normalized.roleId, agentId: normalized.agentId, sinceTs: latestDirectiveTs })
       : "";
     const deltaSummaryText = normalized.stepKind === "agent"
-      ? readIterationDelta({ jobDir: resolvedJobDir })
+      ? readIterationDelta({ jobDir: resolvedJobDir, sinceTs: latestDirectiveTs })
       : "";
     const toolSnippets = this._loadToolSnippets(normalized.jobId, 4);
     const constraintsText = this._constraintsFromInput(normalized);
@@ -411,6 +635,8 @@ export class LocalContextEngine extends ContextEngineBase {
       budgetTokens,
       focusHeader,
       constraintsText,
+      taskPacketText,
+      activeDirectivesText,
       pinsText,
       summaryText,
       roleSummaryText,
@@ -428,9 +654,12 @@ export class LocalContextEngine extends ContextEngineBase {
         compiledChars: packed.text.length,
         localRecentTurnsCount: packed.recentTurnsCount,
         localSummaryChars: packed.summaryChars,
-        localPinnedCount: Array.isArray(pinsPayload.items)
-          ? pinsPayload.items.length
-          : (Array.isArray(pinsPayload.facts) ? pinsPayload.facts.length : Object.keys(pinsPayload).length),
+        localTaskPacketChars: taskPacketText.length,
+        localActiveDirectivesCount: activeDirectivesText ? activeDirectivesText.split('\n').filter(Boolean).length : 0,
+        localPinnedCount: formatDirectiveEntries(directiveEntries, { onlyPinned: true, maxItems: 99 })
+          ? formatDirectiveEntries(directiveEntries, { onlyPinned: true, maxItems: 99 }).split('\n').filter(Boolean).length
+          : 0,
+        latestDirectiveTs: latestDirectiveTs || undefined,
         roleSummaryChars: roleSummaryText.length,
         deltaSummaryChars: deltaSummaryText.length,
       },
@@ -481,13 +710,16 @@ export class LocalContextEngine extends ContextEngineBase {
         role: "user",
         text: userText,
       });
-      this._upsertPinnedUserDirective(jobId, userText);
     }
     if (assistantText) {
       this.appendLocalLog(jobId, "turns.jsonl", {
         role: "assistant",
         text: assistantText,
       });
+    }
+    const resolvedJobDir = this._jobDir(jobId);
+    if (resolvedJobDir && userText) {
+      updateCurrentTaskPacket({ jobDir: resolvedJobDir, currentUserText: userText, runMeta: row.runMeta || {}, persist: true });
     }
     return {
       ok: true,
@@ -498,6 +730,7 @@ export class LocalContextEngine extends ContextEngineBase {
   async recordMeta(args = {}) {
     const row = asObject(args);
     const jobId = String(row.jobId || "").trim();
+    if (jobId) this._ensureMemoryFiles(jobId);
     const meta = asObject(row.meta);
     const runMeta = asObject(row.runMeta);
     this.appendLocalLog(jobId, "context_meta.jsonl", {
@@ -517,7 +750,18 @@ export class LocalContextEngine extends ContextEngineBase {
         role: normalizedStepKind === "router" ? "user" : "system",
         text: clip(userMessageText, 1000),
       });
-      if (normalizedStepKind === "router") this._upsertPinnedUserDirective(jobId, userMessageText);
+      if (normalizedStepKind === 'router') {
+        const resolvedJobDir = this._jobDir(jobId);
+        if (resolvedJobDir) {
+          updateCurrentTaskPacket({ jobDir: resolvedJobDir, currentUserText: userMessageText, runMeta, persist: true });
+        }
+      }
+    }
+    const stickyDirectives = Array.isArray(row.stickyDirectives || row.sticky_directives)
+      ? (row.stickyDirectives || row.sticky_directives)
+      : (Array.isArray(runMeta.context_directives || runMeta.contextDirectives) ? (runMeta.context_directives || runMeta.contextDirectives) : []);
+    if (stickyDirectives.length > 0) {
+      this._recordStickyDirectives(jobId, stickyDirectives);
     }
     return await super.recordMeta(args);
   }

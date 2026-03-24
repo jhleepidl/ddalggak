@@ -92,6 +92,9 @@ export class ContextEngineBase {
       lensSpec: row.lensSpec && typeof row.lensSpec === "object" ? row.lensSpec : null,
       runMeta: row.runMeta && typeof row.runMeta === "object" ? row.runMeta : {},
       detailContext: String(row.detailContext || "").trim(),
+      stickyDirectives: Array.isArray(row.stickyDirectives || row.sticky_directives)
+        ? (row.stickyDirectives || row.sticky_directives)
+        : [],
     };
   }
 

@@ -85,7 +85,7 @@ export function writeGeminiMemoryFile({ workspaceRoot = process.cwd(), roleMemo 
 `);
 }
 
-export function writeCodexInstructionFile({ workspaceRoot = process.cwd(), roleMemo = "", kbContract = "", instruction = "", goal = "", runtimeExecutionPolicy = {}, providerOptions = {} } = {}) {
+export function writeCodexInstructionFile({ workspaceRoot = process.cwd(), roleMemo = "", kbContract = "", instruction = "", goal = "", runtimeExecutionPolicy = {}, providerOptions = {}, allowDirectExecution = false } = {}) {
   const target = path.join(path.resolve(String(workspaceRoot || process.cwd())), ".codex", "instructions.md");
   const restore = writeRuntimeRestoreFiles({ workspaceRoot });
   const policyFiles = writeRuntimePolicyFiles({ workspaceRoot, runtimeExecutionPolicy, provider: "codex", providerOptions });
@@ -102,7 +102,9 @@ export function writeCodexInstructionFile({ workspaceRoot = process.cwd(), roleM
     "- Modify files only inside CODEX_WORKSPACE_ROOT.",
     "- Use concrete KB filenames when referring to tracking docs.",
     "- Do not invent nonexistent tracking filenames.",
-    "- Verification is handled by a separate tool_proxy step unless explicitly asked otherwise.",
+    allowDirectExecution
+      ? "- This task explicitly requires local execution/build output. Run bounded local shell/build commands yourself when needed, and do not claim success if execution or artifact generation was skipped."
+      : "- Verification is handled by a separate tool_proxy step unless explicitly asked otherwise.",
     policyFiles.runtimePolicyMarkdownFile ? `- Read ${path.relative(path.resolve(String(workspaceRoot || process.cwd())), policyFiles.runtimePolicyMarkdownFile) || '.orchestrator/runtime_execution_policy.md'} for sandbox/approval/MCP policy.` : "",
     restore.restoreMarkdownFile ? `- Read ${path.relative(path.resolve(String(workspaceRoot || process.cwd())), restore.restoreMarkdownFile) || '.orchestrator/runtime_restore.md'} before continuing resumed work.` : "",
     "",

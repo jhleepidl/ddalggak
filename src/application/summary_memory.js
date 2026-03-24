@@ -60,6 +60,58 @@ function normalizeBody(text = '') {
     .join('\n');
 }
 
+function parseIsoTimestamp(value = '') {
+  const clean = safe(value);
+  if (!clean) return 0;
+  const ms = Date.parse(clean);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function parseTimestampedEntries(text = '') {
+  const raw = String(text || '').replace(/^# .*?\n+/, '').trim();
+  if (!raw) return [];
+  const lines = raw.split(/\r?\n/);
+  const entries = [];
+  let current = null;
+  for (const line of lines) {
+    const heading = String(line || '').match(/^##\s+([^·\n]+?)\s+·\s+(.+)$/);
+    if (heading) {
+      if (current) entries.push(current);
+      current = {
+        heading: String(heading[0] || '').trim(),
+        ts: String(heading[1] || '').trim(),
+        actor: String(heading[2] || '').trim(),
+        body: [],
+      };
+      continue;
+    }
+    if (!current) continue;
+    const clean = String(line || '').trim();
+    if (!clean) continue;
+    current.body.push(clean);
+  }
+  if (current) entries.push(current);
+  return entries;
+}
+
+function formatTimestampedEntries(entries = [], { keep = 6, maxChars = 2200 } = {}) {
+  const rows = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const heading = safe(entry?.heading);
+    const body = Array.isArray(entry?.body) ? entry.body.map((line) => String(line || '').trim()).filter(Boolean) : [];
+    const chunk = [heading, ...body].filter(Boolean).join('\n');
+    if (chunk) rows.push(chunk);
+  }
+  return compactBullets(rows, { keep, maxChars });
+}
+
+function filterEntriesSince(entries = [], sinceTs = '') {
+  const threshold = parseIsoTimestamp(sinceTs);
+  if (!threshold) return Array.isArray(entries) ? entries : [];
+  const filtered = (Array.isArray(entries) ? entries : []).filter((entry) => parseIsoTimestamp(entry?.ts) >= threshold);
+  return filtered.length > 0 ? filtered : [];
+}
+
 function compactBullets(lines = [], { keep = 8, maxChars = 1800 } = {}) {
   const deduped = [];
   const seen = new Set();
@@ -87,17 +139,23 @@ function buildEntry({ heading = '', fields = [] } = {}) {
   return parts.join('\n');
 }
 
-export function readRoleSummary({ jobDir = '', roleId = '', agentId = '' } = {}) {
+export function readRoleSummary({ jobDir = '', roleId = '', agentId = '', sinceTs = '' } = {}) {
   const candidates = [roleId, agentId].map((value) => safe(value).toLowerCase()).filter(Boolean);
   for (const key of candidates) {
-    const text = normalizeBody(readText(roleFile(jobDir, key)).replace(/^# .*?\n+/, ''));
+    const entries = parseTimestampedEntries(readText(roleFile(jobDir, key)));
+    if (entries.length === 0) continue;
+    const filtered = filterEntriesSince(entries, sinceTs);
+    const text = formatTimestampedEntries(filtered.length > 0 ? filtered : entries, { keep: 6, maxChars: 2200 });
     if (text) return text;
   }
   return '';
 }
 
-export function readIterationDelta({ jobDir = '' } = {}) {
-  return normalizeBody(readText(deltaFile(jobDir)).replace(/^# .*?\n+/, ''));
+export function readIterationDelta({ jobDir = '', sinceTs = '' } = {}) {
+  const entries = parseTimestampedEntries(readText(deltaFile(jobDir)));
+  if (entries.length === 0) return '';
+  const filtered = filterEntriesSince(entries, sinceTs);
+  return formatTimestampedEntries(filtered.length > 0 ? filtered : entries, { keep: 8, maxChars: 2400 });
 }
 
 export function updateIterationDelta({ jobDir = '', roleId = '', agentId = '', goal = '', output = '' } = {}) {

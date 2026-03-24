@@ -67,3 +67,93 @@ test('local context engine derives builder focus and budget from roleId when age
   assert.match(prepared.contextText, /실행 가능한 코드\/노트북 산출물/);
   assert.equal(prepared.meta?.budgetTokens, 1400);
 });
+
+test('local context engine filters stale iteration delta before the latest correction boundary', async () => {
+  const root = makeJobRoot();
+  const jobs = makeJobs(root);
+  const engine = new LocalContextEngine({ jobs });
+  const jobId = 'job-correction-boundary';
+  const jobDir = jobs.jobDir(jobId);
+
+  updateRoleSummary({
+    jobDir,
+    roleId: 'researcher',
+    agentId: 'mode_systems_researcher',
+    goal: 'old arena framing',
+    output: '리그 오브 레전드 아레나 모드 전적 검색 및 증강 추천 프로그램 개발 제안',
+    provider: 'gemini',
+    model: 'gemini-2.5-pro',
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await engine.recordMeta({
+    jobId,
+    stepKind: 'router',
+    userMessageText: '칼바람 아수라장 모드는 아레나 모드와 다른 모드야. ARAM Mayhem이라고. 혼동하지 않도록 주의해.',
+    meta: {},
+    runMeta: {},
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  updateRoleSummary({
+    jobDir,
+    roleId: 'researcher',
+    agentId: 'mode_systems_researcher',
+    goal: 'correct mayhem framing',
+    output: '칼바람 아수라장(ARAM Mayhem) 전용 보조 프로그램 명세와 리스크 요약',
+    provider: 'gemini',
+    model: 'gemini-2.5-pro',
+  });
+
+  const prepared = await engine.prepareStepContext({
+    jobId,
+    agentId: 'Companion App Builder',
+    roleId: 'builder',
+    goal: '최신 정정에 맞춰 구현 진행',
+  });
+
+  const text = String(prepared.contextText || '');
+  assert.match(text, /ACTIVE DIRECTIVES/);
+  assert.match(text, /ARAM Mayhem/);
+  assert.match(text, /칼바람 아수라장\(ARAM Mayhem\) 전용 보조 프로그램 명세/);
+  assert.doesNotMatch(text, /리그 오브 레전드 아레나 모드 전적 검색 및 증강 추천 프로그램 개발 제안/);
+});
+
+
+test('local context engine places current task packet above stale summaries for builder context', async () => {
+  const root = makeJobRoot();
+  const jobs = makeJobs(root);
+  const engine = new LocalContextEngine({ jobs });
+  const jobId = 'job-task-packet';
+  const jobDir = jobs.jobDir(jobId);
+
+  updateRoleSummary({
+    jobDir,
+    roleId: 'builder',
+    agentId: 'builder',
+    goal: 'old telegram runner framing',
+    output: '텔레그램 봇 형태로 실행한다는 오래된 구현 요약',
+    provider: 'codex',
+    model: 'gpt-5-codex',
+  });
+
+  await engine.recordMeta({
+    jobId,
+    stepKind: 'router',
+    userMessageText: '/chat 텔레그램이 아니라 .exe 오버레이 프로그램으로 만들어줘.',
+    meta: {},
+    runMeta: {},
+  });
+
+  const prepared = await engine.prepareStepContext({
+    jobId,
+    agentId: 'Companion App Builder',
+    roleId: 'builder',
+    goal: '최신 요구에 맞게 companion app 구현',
+  });
+
+  const context = String(prepared.contextText || '');
+  assert.match(context, /CURRENT TASK PACKET/);
+  assert.match(context, /Latest user request: ".*\.exe 오버레이 프로그램/);
+  assert.ok(context.indexOf('[CURRENT TASK PACKET]') < context.indexOf('[ROLE SUMMARY]'));
+});

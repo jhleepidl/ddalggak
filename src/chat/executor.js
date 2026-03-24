@@ -1160,6 +1160,7 @@ export async function executeSupervisorActions({
         }
         const outputText = String(runResult?.output || "");
         const routeSignals = resolveActionRouteSignals({ action, result: runResult });
+        const unmetRequirements = Array.isArray(runResult?.unmet_requirements) ? runResult.unmet_requirements : [];
         outputs.push(attachRouteSignals({
           agentId: String(action.agent_id || "").trim().toLowerCase(),
           provider: String(runResult?.provider || provider || "").trim().toLowerCase(),
@@ -1173,13 +1174,17 @@ export async function executeSupervisorActions({
             category: executionOutcome.failure.category,
             strategy: executionOutcome.failure.recovery_strategy,
           } : undefined,
+          unmet_requirements: unmetRequirements.length > 0 ? unmetRequirements : undefined,
+          delivery_requirements: runResult?.delivery_requirements,
         }, routeSignals, { activeSignals: activeRouteSignals }));
         results.push({
           label,
-          status: "ok",
-          note: executionOutcome?.recovered === true
-            ? `provider=${provider || "unknown"} · recovered=${String(executionOutcome?.failure?.recovery_strategy || 'retry_once')}`
-            : `provider=${provider || "unknown"}`,
+          status: unmetRequirements.length > 0 ? "blocked" : "ok",
+          note: unmetRequirements.length > 0
+            ? `provider=${provider || "unknown"} · unmet=${unmetRequirements.map((row) => String(row?.code || '').trim()).filter(Boolean).join(',') || 'requirements'}`
+            : (executionOutcome?.recovered === true
+              ? `provider=${provider || "unknown"} · recovered=${String(executionOutcome?.failure?.recovery_strategy || 'retry_once')}`
+              : `provider=${provider || "unknown"}`),
         });
         usedActions += 1;
         continue;

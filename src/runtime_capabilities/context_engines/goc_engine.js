@@ -1,4 +1,5 @@
 import { clip } from "../../textutil.js";
+import { loadCurrentTaskPacket, renderTaskPacket, updateCurrentTaskPacket } from "../../application/task_packet.js";
 import {
   normalizeScopeHintCore as normalizeLensSpecDomain,
   defaultScopeHintForAgent as defaultLensSpecForAgentDomain,
@@ -151,6 +152,23 @@ export class GocContextEngine extends ContextEngineBase {
     this.runtime = runtime && typeof runtime === "object" ? runtime : {};
     this.sharedPolicy = normalizePolicy(this.runtime?.jobConfig || {});
     this.excludeKinds = this.sharedPolicy.exclude_resource_kinds || ["job_config", "tracking_append"];
+  }
+
+  _jobDir(jobId = "") {
+    return this.jobs && typeof this.jobs.jobDir === 'function' ? this.jobs.jobDir(jobId) : '';
+  }
+
+  _taskPacketBlock(input = {}, { refresh = false } = {}) {
+    const normalized = input && typeof input === 'object' ? input : {};
+    const jobDir = this._jobDir(normalized.jobId || '');
+    if (!jobDir) return '';
+    const packet = loadCurrentTaskPacket({
+      jobDir,
+      runMeta: normalized.runMeta || {},
+      currentUserText: normalized.stepKind === 'router' ? normalized.userMessageText : '',
+      refresh,
+    });
+    return renderTaskPacket(packet, { roleId: normalized.roleId, maxChars: 1600 });
   }
 
   setRuntime(runtime = null) {
@@ -318,6 +336,11 @@ export class GocContextEngine extends ContextEngineBase {
   }
 
   async onRunEnd(input = {}) {
+    const row = input && typeof input === 'object' ? input : {};
+    const jobDir = this._jobDir(row.jobId || '');
+    if (jobDir && String(row.lastUserText || '').trim()) {
+      updateCurrentTaskPacket({ jobDir, currentUserText: row.lastUserText, runMeta: row.runMeta || {}, persist: true });
+    }
     return await this.rebuildSharedContext(input, { compile: false });
   }
 
@@ -347,8 +370,9 @@ export class GocContextEngine extends ContextEngineBase {
       || []
     );
     const typeBreakdown = asObject(this.runtime?.sharedActiveTypeBreakdown || compiled.typeBreakdown);
+    const taskPacketText = this._taskPacketBlock(normalized, { refresh: !!String(normalized.userMessageText || '').trim() });
     return {
-      contextText: compiled.text,
+      contextText: [taskPacketText, compiled.text].filter(Boolean).join("\n\n"),
       meta: {
         mode: "goc",
         budgetTokens: normalized.budgetTokens,
@@ -503,6 +527,10 @@ export class GocContextEngine extends ContextEngineBase {
       || ""
     ).trim();
     const stepNodeId = String(runMeta.stepNodeId || runMeta.step_node_id || "").trim();
+    if (String(row.stepKind || '').trim().toLowerCase() === 'router' && String(row.userMessageText || '').trim()) {
+      const jobDir = this._jobDir(row.jobId || '');
+      if (jobDir) updateCurrentTaskPacket({ jobDir, currentUserText: row.userMessageText, runMeta, persist: true });
+    }
     const runNodeId = String(runMeta.runNodeId || runMeta.run_node_id || "").trim();
     const runtimeTeamSnapshot = normalizeRuntimeTeamSnapshot(runMeta);
     const runtimeAuthority = normalizeRuntimeAuthority(runMeta);

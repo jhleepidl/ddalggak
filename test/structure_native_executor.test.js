@@ -328,3 +328,45 @@ test("tool_proxy_call leaves failing verification state when repair loop does no
   assert.equal(result.results.some((row) => String(row.note || "").includes("still failing after repair")), true);
   assert.equal(result.outputs.filter((row) => row.mode === "tool_proxy_call").length, 2);
 });
+
+test("run_agent with unmet execution requirements is surfaced as blocked instead of ok", async () => {
+  const result = await executeSupervisorActions({
+    chatId: "chat-8",
+    userId: "user-8",
+    jobId: "job-8",
+    plan: {
+      actions: [
+        {
+          type: "run_agent",
+          agent_id: "builder",
+          goal: "패키징 완료",
+          inputs: { slot_id: "slot_builder" },
+        },
+      ],
+    },
+    callbacks: {
+      async runAgent() {
+        return {
+          output: "이번 턴에서는 빌드/테스트는 실행하지 않았습니다. 실제 .exe 파일은 아직 생성 확인하지 않았습니다.",
+          provider: "codex",
+          mode: "chat",
+          delivery_requirements: {
+            direct_execution_requested: true,
+            artifact_build_requested: true,
+            expected_artifact_kinds: ["exe"],
+          },
+          unmet_requirements: [
+            { code: "direct_execution_not_performed", detail: "직접 실행 요청이 있었지만 shell/build 실행이 수행되지 않았다." },
+            { code: "missing_exe_artifact", detail: "exe 산출물이 artifact index/workspace에서 확인되지 않았다." },
+          ],
+        };
+      },
+    },
+  });
+
+  assert.equal(result.results.some((row) => row.status === "blocked" && String(row.note || "").includes("direct_execution_not_performed")), true);
+  const builderOutput = result.outputs.find((row) => row.agentId === "builder");
+  assert.ok(builderOutput);
+  assert.equal(Array.isArray(builderOutput.unmet_requirements), true);
+  assert.equal(builderOutput.unmet_requirements.some((row) => row.code === "missing_exe_artifact"), true);
+});

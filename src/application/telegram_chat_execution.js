@@ -155,6 +155,12 @@ import { detectPatternConflict, applyTemporaryExecutionOverrideToRuntimeSnapshot
 import { buildAgentKnowledgeBaseGuidance, buildRoleMemoryContract, summarizeRoleMemoryEnforcement, canRolePublishSurface } from "../knowledge_base/runtime.js";
 import { executeToolProxyAction } from "./tool_proxy_runtime.js";
 import { writeGeminiMemoryFile, writeCodexInstructionFile } from "./cli_workspace_contract.js";
+import {
+  detectUnmetExecutionRequirements,
+  extractExecutionRequirements,
+  formatExecutionRequirementsBlock,
+  mergeExecutionRequirements,
+} from "./execution_requirements.js";
 import { normalizeRuntimeExecutionPolicy } from "./runtime_execution_policy.js";
 import { resolveProviderRuntimeOptions } from "./provider_runtime_policy.js";
 import { summarizeProviderInteractionCapabilities } from "./provider_interaction_capabilities.js";
@@ -580,7 +586,7 @@ function extractBracketSection(text = '', label = '', { maxChars = 600, tailLine
   const cleanLabel = String(label || '').trim();
   const cleanText = String(text || '');
   if (!cleanLabel || !cleanText) return '';
-  const re = new RegExp(`\[${escapePromptRegex(cleanLabel)}\]\n([\s\S]*?)(?=\n\[[A-Z][A-Z_ ]*\]\n|$)`, 'i');
+  const re = new RegExp(`\\[${escapePromptRegex(cleanLabel)}\\]\\n([\\s\\S]*?)(?=\\n\\[[A-Z][A-Z_ ]*\\]\\n|$)`, 'i');
   const match = cleanText.match(re);
   if (!match) return '';
   let body = String(match[1] || '').trim();
@@ -596,7 +602,7 @@ function extractBracketSection(text = '', label = '', { maxChars = 600, tailLine
 function extractDirectiveBullets(text = '', { maxItems = 4, maxChars = 720 } = {}) {
   const src = String(text || '');
   if (!src) return '';
-  const directiveRe = /(반드시|절대로|하지\s*마|하지마|아니라|기억해|기억해둬|잊지\s*마|잊지마|must|never|do not|don't|instead|rather than|not\s+.*but)/i;
+  const directiveRe = /(반드시|절대로|하지\s*마|하지마|아니라|대신|다른\s+모드|다르다|혼동하지\s*않도록|혼동하지\s*말|주의해|주의하|기억해|기억해둬|잊지\s*마|잊지마|must|never|do not|don't|instead|rather than|not\s+.*but)/i;
   const seen = new Set();
   const bullets = [];
   for (const rawLine of src.split(/\r?\n/)) {
@@ -624,7 +630,10 @@ function compactTaskText(value = '', { maxChars = 2400 } = {}) {
   const head = clip(text, Math.max(420, Math.floor(limit * 0.48)));
   const tail = clip(text.slice(Math.max(0, text.length - Math.max(180, Math.floor(limit * 0.12)))).trim(), Math.max(180, Math.floor(limit * 0.12)));
   const preserved = [
+    extractBracketSection(text, 'CURRENT TASK PACKET', { maxChars: Math.max(360, Math.floor(limit * 0.28)) }),
+    extractBracketSection(text, 'ACTIVE DIRECTIVES', { maxChars: Math.max(260, Math.floor(limit * 0.2)) }),
     extractBracketSection(text, 'PINNED FACTS', { maxChars: Math.max(260, Math.floor(limit * 0.2)) }),
+    extractBracketSection(text, 'DELIVERY REQUIREMENTS', { maxChars: Math.max(240, Math.floor(limit * 0.18)) }),
     extractBracketSection(text, 'JOB CONSTRAINTS', { maxChars: Math.max(220, Math.floor(limit * 0.16)) }),
     extractBracketSection(text, 'RECENT TURNS', { maxChars: Math.max(320, Math.floor(limit * 0.24)), tailLines: 6 }),
   ].filter(Boolean);
@@ -633,10 +642,16 @@ function compactTaskText(value = '', { maxChars = 2400 } = {}) {
     maxChars: Math.max(200, Math.floor(limit * 0.2)),
   });
   if (directiveBullets) {
+    const hasTaskPacket = preserved.some((block) => /^\[CURRENT TASK PACKET\]/i.test(String(block || '').trim()));
     const hasPinnedFacts = preserved.some((block) => /^\[PINNED FACTS\]/i.test(String(block || '').trim()));
-    preserved.push(hasPinnedFacts ? `[LATEST USER DIRECTIVES]
+    preserved.push(
+      !hasTaskPacket
+        ? `[LATEST USER QUOTES]
+${directiveBullets}`
+        : (hasPinnedFacts ? `[LATEST USER DIRECTIVES]
 ${directiveBullets}` : `[PINNED FACTS]
-${directiveBullets}`);
+${directiveBullets}`)
+    );
   }
 
 
@@ -654,7 +669,10 @@ ${directiveBullets}`);
     noteBlock,
   ].filter(Boolean).join('\n\n');
 
-  return compacted.length <= limit ? compacted : clip(compacted, limit);
+  if (compacted.length <= limit) return compacted;
+  const truncationMarker = '\n…(truncated)…';
+  const hardLimit = Math.max(120, limit - truncationMarker.length);
+  return `${compacted.slice(0, hardLimit)}${truncationMarker}`;
 }
 
 
@@ -842,7 +860,7 @@ function appendRoleAwareTracking(jobId, markdown, { provider = '', roleId = '', 
   }
 }
 
-function ensureCliWorkspaceSupportFiles(jobId, { provider = "", roleMemo = "", kbContract = "", goal = "", instruction = "", runtimeExecutionPolicy = {}, providerOptions = {} } = {}) {
+function ensureCliWorkspaceSupportFiles(jobId, { provider = "", roleMemo = "", kbContract = "", goal = "", instruction = "", runtimeExecutionPolicy = {}, providerOptions = {}, allowDirectExecution = false } = {}) {
   let workspacePath = "";
   try {
     workspacePath = runWorkspaceDir(jobId);
@@ -858,6 +876,7 @@ function ensureCliWorkspaceSupportFiles(jobId, { provider = "", roleMemo = "", k
         goal,
         runtimeExecutionPolicy,
         providerOptions,
+        allowDirectExecution,
       }),
     };
   }
@@ -1051,8 +1070,11 @@ async function codexImplement(jobId, instruction, signal = null, opts = {}) {
   const workspacePath = runWorkspaceDir(jobId);
   const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 5 });
   const kbContract = buildAgentKnowledgeBaseBlock(jobId, { provider: "codex", roleId: String(opts.roleId || 'builder').trim().toLowerCase(), agentId: String(opts.agentId || 'codex').trim().toLowerCase() || 'codex', detailLevel: "compact" });
-  const cliSupport = ensureCliWorkspaceSupportFiles(jobId, { provider: "codex", roleMemo, kbContract, instruction, goal: instruction, runtimeExecutionPolicy, providerOptions });
+  const executionRequirements = mergeExecutionRequirements(extractExecutionRequirements(instruction), extractExecutionRequirements(opts.goal || ''));
+  const allowDirectExecution = executionRequirements.direct_execution_requested || executionRequirements.shell_execution_requested || executionRequirements.artifact_build_requested;
+  const cliSupport = ensureCliWorkspaceSupportFiles(jobId, { provider: "codex", roleMemo, kbContract, instruction, goal: instruction, runtimeExecutionPolicy, providerOptions, allowDirectExecution });
   const compactInstruction = compactTaskText(instruction, { maxChars: 2800 });
+  const executionRequirementsBlock = formatExecutionRequirementsBlock(executionRequirements);
   const prompt = [
     ctx,
     "",
@@ -1065,8 +1087,12 @@ async function codexImplement(jobId, instruction, signal = null, opts = {}) {
     `- 현재 run workspace: ${workspacePath}`,
     "- 필요하면 uploads/ 경로의 파일 내용을 참고해라.",
     workspaceFilesText,
-    "- 테스트/빌드 실행은 별도의 tool_proxy 검증 단계가 담당한다. 수정 내용에 맞는 검증 명령을 염두에 두고 변경하라.",
+    allowDirectExecution
+      ? "- 이번 작업은 실제 실행/빌드 산출이 요구된다. bounded local shell command를 직접 실행해 결과를 확인하라."
+      : "- 테스트/빌드 실행은 별도의 tool_proxy 검증 단계가 담당한다. 수정 내용에 맞는 검증 명령을 염두에 두고 변경하라.",
     "- 변경 요약(파일별 이유) 포함.",
+    executionRequirementsBlock ? `[DELIVERY REQUIREMENTS]
+${executionRequirementsBlock}` : "",
     "",
     "작업:",
     compactInstruction,
@@ -1090,6 +1116,7 @@ async function codexImplement(jobId, instruction, signal = null, opts = {}) {
         instructions_file: '.codex/instructions.md',
         workspace_files: workspaceFilesText,
         task_instruction: compactInstruction,
+        execution_requirements: executionRequirementsBlock,
       },
       metadata: {
         sandbox_mode: providerOptions.sandboxMode || undefined,
@@ -1919,10 +1946,17 @@ function buildSupervisorExecutionCallbacks({
       roleId: roleKey,
       runtimeExecutionPolicy,
     });
+    const executionRequirements = mergeExecutionRequirements(
+      extractExecutionRequirements(cleanGoal),
+      extractExecutionRequirements(detailContext),
+      extractExecutionRequirements(actionInputs?.user_request || actionInputs?.userRequest || ''),
+    );
+    const deliveryRequirementsBlock = formatExecutionRequirementsBlock(executionRequirements);
     const finalPrompt = [
       String(prepared?.final_prompt || "").trim() || cleanGoal,
       promptRoleSummary ? `[ROLE SUMMARY]\n${clip(promptRoleSummary, 900)}` : "",
       promptIterationDelta ? `[ITERATION DELTA]\n${clip(promptIterationDelta, 700)}` : "",
+      deliveryRequirementsBlock ? `[DELIVERY REQUIREMENTS]\n${deliveryRequirementsBlock}` : "",
       outputContractBlock,
     ].filter(Boolean).join("\n\n");
     try {
@@ -1992,6 +2026,7 @@ function buildSupervisorExecutionCallbacks({
             agency_overlay: buildAgencyRoleOverlayPromptBlock(agencyRoleOverlay, { maxBullets: 4 }),
             iteration_delta: promptIterationDelta,
             output_contract: outputContractBlock,
+            delivery_requirements: deliveryRequirementsBlock,
           },
           metadata: {
             runtime_instance_id: runtimeInstanceId || undefined,
@@ -2063,7 +2098,26 @@ function buildSupervisorExecutionCallbacks({
           },
         });
       }
-      return result;
+      const artifactIndex = runtimeIo.loadArtifactIndex ? runtimeIo.loadArtifactIndex(jobId) : null;
+      const artifactPaths = Array.isArray(artifactIndex?.artifacts)
+        ? artifactIndex.artifacts.map((row) => String(row?.relative_path || row?.relativePath || row?.path || '').trim()).filter(Boolean)
+        : [];
+      const unmetExecutionRequirements = detectUnmetExecutionRequirements({
+        requirements: executionRequirements,
+        output: String(result?.output || ''),
+        artifactPaths,
+      });
+      if (unmetExecutionRequirements.length > 0) {
+        return {
+          ...result,
+          unmet_requirements: unmetExecutionRequirements,
+          delivery_requirements: executionRequirements,
+        };
+      }
+      return {
+        ...result,
+        delivery_requirements: executionRequirements,
+      };
     } catch (e) {
       if (cleanAgentId) {
         updateAgentStatus(chatId, cleanAgentId, {
