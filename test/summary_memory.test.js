@@ -30,3 +30,20 @@ test('updateRoleSummary persists role summary and iteration delta in local memor
   assert.ok(fs.existsSync(path.join(dir, 'local_memory', 'role_summaries', 'builder.md')));
   assert.ok(fs.existsSync(path.join(dir, 'local_memory', 'iteration_delta.md')));
 });
+
+
+test('updateRoleSummary avoids underscore-only alias files for non-latin agent ids', () => {
+  const dir = makeTmpDir();
+  updateRoleSummary({
+    jobDir: dir,
+    roleId: 'builder',
+    agentId: '오버레이 빌더',
+    goal: 'Patch the desktop packaging flow',
+    output: 'Updated the Windows launcher packaging notes.',
+    provider: 'codex',
+    model: 'gpt-5-codex',
+  });
+  const files = fs.readdirSync(path.join(dir, 'local_memory', 'role_summaries')).sort();
+  assert.ok(files.includes('builder.md'));
+  assert.equal(files.some((name) => /^_+\.md$/.test(name)), false);
+});

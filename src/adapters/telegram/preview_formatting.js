@@ -476,6 +476,18 @@ export function summarizeSpecialChatOutputs(outputs = []) {
 }
 
 
+function isFinalLikeAgent(row = {}) {
+  const agent = String(row?.agentId || row?.agent || row?.roleId || '').trim().toLowerCase();
+  return /(synth|final|신서사이저|최종)/.test(agent);
+}
+
+function pickPreferredFallbackOutput(rows = []) {
+  const list = asArray(rows).filter((row) => row && typeof row === 'object' && String(row.output || row.text || row.summary || '').trim());
+  if (list.length === 0) return '';
+  const preferred = list.find((row) => isFinalLikeAgent(row)) || list[list.length - 1];
+  return clip(String(preferred.output || preferred.text || preferred.summary || '').trim(), 3800);
+}
+
 function detectCapabilityGapLines(executionLike = {}, { maxLines = 4, runtime = null } = {}) {
   const proposal = buildTeamInstallProposal({ execution: executionLike, runtime });
   return [
@@ -508,6 +520,8 @@ export function buildChatSynthesisFallback(outputs = [], options = {}) {
   if (capabilityGapLines.length > 0) {
     return ['실행 중 필요한 도구/자격 정보가 부족했습니다.', ...capabilityGapLines].join('\n');
   }
+  const preferredOutput = pickPreferredFallbackOutput(rowsSource);
+  if (preferredOutput) return preferredOutput;
   if (rows.length > 0) return ['현재까지 결과 요약:', ...rows].join('\n');
 
   const resultRows = executionLike

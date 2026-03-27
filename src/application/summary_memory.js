@@ -24,9 +24,16 @@ function roleDir(jobDir = '') {
   return base ? ensureDir(path.join(base, 'role_summaries')) : '';
 }
 
+function normalizeRoleKey(roleKey = '') {
+  const clean = safe(roleKey).toLowerCase().replace(/[^a-z0-9._-]+/g, '_');
+  if (!clean) return '';
+  if (/^_+$/.test(clean)) return '';
+  return clean;
+}
+
 function roleFile(jobDir = '', roleKey = '') {
   const dir = roleDir(jobDir);
-  const clean = safe(roleKey).toLowerCase().replace(/[^a-z0-9._-]+/g, '_');
+  const clean = normalizeRoleKey(roleKey);
   if (!dir || !clean) return '';
   return path.join(dir, `${clean}.md`);
 }
@@ -140,7 +147,7 @@ function buildEntry({ heading = '', fields = [] } = {}) {
 }
 
 export function readRoleSummary({ jobDir = '', roleId = '', agentId = '', sinceTs = '' } = {}) {
-  const candidates = [roleId, agentId].map((value) => safe(value).toLowerCase()).filter(Boolean);
+  const candidates = [roleId, agentId].map((value) => normalizeRoleKey(value)).filter(Boolean);
   for (const key of candidates) {
     const entries = parseTimestampedEntries(readText(roleFile(jobDir, key)));
     if (entries.length === 0) continue;
@@ -191,7 +198,10 @@ export function updateRoleSummary({
   const cleanGoal = clip(safe(goal), 240);
   const cleanOutput = clip(safe(output).replace(/\s+/g, ' '), 480);
   if (!cleanJobDir || !cleanOutput) return null;
-  const keys = Array.from(new Set([safe(roleId).toLowerCase(), safe(agentId).toLowerCase()].filter(Boolean)));
+  const keys = Array.from(new Set([
+    normalizeRoleKey(roleId),
+    normalizeRoleKey(agentId),
+  ].filter(Boolean)));
   if (keys.length === 0) return null;
   const ts = new Date().toISOString();
   const heading = `${ts} · ${safe(roleId || agentId || 'agent')}`;

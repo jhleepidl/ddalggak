@@ -119,7 +119,6 @@ test('local context engine filters stale iteration delta before the latest corre
   assert.doesNotMatch(text, /리그 오브 레전드 아레나 모드 전적 검색 및 증강 추천 프로그램 개발 제안/);
 });
 
-
 test('local context engine places current task packet above stale summaries for builder context', async () => {
   const root = makeJobRoot();
   const jobs = makeJobs(root);
@@ -156,4 +155,57 @@ test('local context engine places current task packet above stale summaries for 
   assert.match(context, /CURRENT TASK PACKET/);
   assert.match(context, /Latest user request: ".*\.exe 오버레이 프로그램/);
   assert.ok(context.indexOf('[CURRENT TASK PACKET]') < context.indexOf('[ROLE SUMMARY]'));
+});
+
+test('local context engine recordMeta writes a single compact context log entry', async () => {
+  const root = makeJobRoot();
+  const jobs = makeJobs(root);
+  const engine = new LocalContextEngine({ jobs });
+  const jobId = 'job-context-meta';
+
+  await engine.recordMeta({
+    jobId,
+    stepKind: 'agent',
+    agentId: 'Overlay Builder',
+    roleId: 'builder',
+    goal: 'produce an executable package',
+    meta: { compiledChars: 1234 },
+    runMeta: {
+      runtimeTeamSnapshot: {
+        source: 'team_builder',
+        participants: [{ id: 'researcher' }, { id: 'builder' }, { id: 'reviewer' }],
+      },
+      task_interpretation: {
+        archetype: 'implementation',
+        wants_code: true,
+      },
+    },
+  });
+
+  const logPath = path.join(jobs.jobDir(jobId), 'local_memory', 'context_meta.jsonl');
+  const rows = fs.readFileSync(logPath, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0].run_meta.runtimeTeamSnapshot.participant_ids, ['researcher', 'builder', 'reviewer']);
+  assert.equal(rows[0].run_meta.task_interpretation.archetype, 'implementation');
+});
+
+test('local context engine skips noisy assistant telemetry when updating rolling summary and turns', async () => {
+  const root = makeJobRoot();
+  const jobs = makeJobs(root);
+  const engine = new LocalContextEngine({ jobs });
+  const jobId = 'job-noisy-summary';
+  jobs.jobDir(jobId);
+
+  await engine.onRunEnd({
+    jobId,
+    lastUserText: '실행 가능한 .exe 파일까지 만들어줘.',
+    lastAssistantText: `현재까지 결과 요약:\n- builder: 완료했습니다.`,
+    runMeta: {},
+  });
+
+  const summary = fs.readFileSync(path.join(jobs.jobDir(jobId), 'local_memory', 'summary.md'), 'utf8');
+  const turns = fs.readFileSync(path.join(jobs.jobDir(jobId), 'local_memory', 'turns.jsonl'), 'utf8');
+  assert.doesNotMatch(summary, /현재까지 결과 요약/);
+  assert.doesNotMatch(turns, /현재까지 결과 요약/);
+  assert.match(turns, /실행 가능한 \.exe 파일/);
 });

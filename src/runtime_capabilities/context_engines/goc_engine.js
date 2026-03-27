@@ -11,6 +11,7 @@ import {
   buildRuntimeMetadataPatch,
 } from "../../application/runtime_metadata.js";
 import { ContextEngineBase } from "./base.js";
+import { buildContextEnvelope } from '../context_envelope.js';
 
 function asObject(value) {
   return value && typeof value === "object" ? value : {};
@@ -350,7 +351,7 @@ export class GocContextEngine extends ContextEngineBase {
     const shared = this._resolveSharedRef(normalized);
     if (!this.client || !shared.sharedContextSetId) {
       return {
-        contextText: taskPacketText,
+        contextText: buildContextEnvelope([{ key: 'current_task_packet', raw: taskPacketText }]).text,
         meta: {
           mode: "goc",
           budgetTokens: normalized.budgetTokens,
@@ -372,7 +373,16 @@ export class GocContextEngine extends ContextEngineBase {
       || []
     );
     const typeBreakdown = asObject(this.runtime?.sharedActiveTypeBreakdown || compiled.typeBreakdown);
-    const contextText = [taskPacketText, compiled.text].filter(Boolean).join("\n\n");
+    const contextText = buildContextEnvelope([
+      { key: 'current_task_packet', raw: taskPacketText },
+      { key: 'raw', raw: compiled.text },
+    ]).text;
+    const taskPacket = loadCurrentTaskPacket({
+      jobDir: this._jobDir(normalized.jobId || ''),
+      runMeta: normalized.runMeta || {},
+      currentUserText: normalized.stepKind === 'router' ? normalized.userMessageText : '',
+      refresh: false,
+    });
     return {
       contextText,
       meta: {
@@ -380,6 +390,9 @@ export class GocContextEngine extends ContextEngineBase {
         budgetTokens: normalized.budgetTokens,
         estimatedTokens: compiled.tokenEstimate,
         compiledChars: contextText.length,
+        taskPacketVersion: Number.isFinite(Number(taskPacket?.version)) ? Math.floor(Number(taskPacket.version)) : undefined,
+        taskPacketDeliverablesCount: Array.isArray(taskPacket?.deliverables) ? taskPacket.deliverables.length : 0,
+        taskPacketProhibitionsCount: Array.isArray(taskPacket?.prohibitions) ? taskPacket.prohibitions.length : 0,
         sharedContextSetId: shared.sharedContextSetId,
         lensContextSetId: shared.sharedContextSetId,
         contextVersion,
@@ -399,7 +412,7 @@ export class GocContextEngine extends ContextEngineBase {
     const shared = this._resolveSharedRef(normalized);
     if (!this.client || !shared.sharedContextSetId) {
       return {
-        contextText: taskPacketText,
+        contextText: buildContextEnvelope([{ key: 'current_task_packet', raw: taskPacketText }]).text,
         meta: {
           mode: "goc",
           budgetTokens: normalized.budgetTokens,
@@ -472,13 +485,15 @@ export class GocContextEngine extends ContextEngineBase {
 
     const lensCompiled = await this._compileWithBudget(lensContextSetId, lensSpec.budget_tokens, { includeMeta: true });
     const contextText = lensContextSetId === shared.sharedContextSetId
-      ? lensCompiled.text
-      : [
-        `[SHARED SUMMARY]
-${clip(sharedCompiled.text || "", 2400)}`,
-        `[LENS CONTEXT]
-${lensCompiled.text || ""}`,
-      ].filter(Boolean).join("\n\n");
+      ? buildContextEnvelope([
+        { key: 'current_task_packet', raw: taskPacketText },
+        { key: 'raw', raw: lensCompiled.text },
+      ]).text
+      : buildContextEnvelope([
+        { key: 'current_task_packet', raw: taskPacketText },
+        { key: 'shared_summary', body: clip(sharedCompiled.text || "", 2400) },
+        { key: 'lens_context', body: lensCompiled.text || "" },
+      ]).text;
 
     const contextVersion = String(
       lensCompiled.contextVersion
@@ -492,15 +507,23 @@ ${lensCompiled.text || ""}`,
       typeBreakdown = summarizeTypeBreakdown(activeNodeIds, nodeMap);
     }
 
-    const fullContextText = [taskPacketText, contextText].filter(Boolean).join("\n\n");
+    const taskPacket = loadCurrentTaskPacket({
+      jobDir: this._jobDir(normalized.jobId || ''),
+      runMeta: normalized.runMeta || {},
+      currentUserText: '',
+      refresh: false,
+    });
 
     return {
-      contextText: fullContextText,
+      contextText,
       meta: {
         mode: "goc",
         budgetTokens: lensSpec.budget_tokens,
         estimatedTokens: lensCompiled.tokenEstimate,
-        compiledChars: fullContextText.length,
+        compiledChars: contextText.length,
+        taskPacketVersion: Number.isFinite(Number(taskPacket?.version)) ? Math.floor(Number(taskPacket.version)) : undefined,
+        taskPacketDeliverablesCount: Array.isArray(taskPacket?.deliverables) ? taskPacket.deliverables.length : 0,
+        taskPacketProhibitionsCount: Array.isArray(taskPacket?.prohibitions) ? taskPacket.prohibitions.length : 0,
         sharedContextSetId: shared.sharedContextSetId,
         lensContextSetId,
         contextVersion,

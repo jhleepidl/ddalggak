@@ -9,8 +9,7 @@ test('buildChatSynthesisFallback accepts execution-like objects and summarizes o
       { agentId: 'researcher', output: '핵심 근거를 정리했습니다.' },
     ],
   });
-  assert.match(text, /현재까지 결과 요약/);
-  assert.match(text, /researcher/);
+  assert.match(text, /핵심 근거를 정리했습니다|현재까지 결과 요약/);
 });
 
 test('buildChatSynthesisFallback summarizes execution errors when outputs are missing', () => {
@@ -48,6 +47,18 @@ test('buildChatSynthesisFallback does not treat notebook setup guidance as a cre
       { agentId: 'notebook_builder', output: 'Notebook updated. To test live calls later, set OPENAI_API_KEY in your environment and run the demo cells.' },
     ],
   });
-  assert.match(text, /현재까지 결과 요약/);
+  assert.match(text, /Notebook updated/);
   assert.doesNotMatch(text, /필요한 도구\/자격 정보가 부족/);
+});
+
+
+test('buildChatSynthesisFallback prefers final-like synthesizer output over per-agent recap bullets', () => {
+  const text = buildChatSynthesisFallback('ignored message', {
+    outputs: [
+      { agentId: 'builder', output: '빌드는 완료했습니다.' },
+      { agentId: '최종_설계_신서사이저', output: '최종 전달: Windows PE 런처와 .pyz를 함께 제공합니다.' },
+    ],
+  });
+  assert.match(text, /최종 전달/);
+  assert.doesNotMatch(text, /현재까지 결과 요약/);
 });

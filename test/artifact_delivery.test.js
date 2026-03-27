@@ -81,6 +81,34 @@ test('refreshArtifactIndex prioritizes execution artifact refs and /send selecti
   });
 });
 
+test('refreshArtifactIndex incorporates workspace artifact publish manifest and writes shared artifact_index.md', async () => {
+  await withTempRunsDir(() => {
+    const job = jobs.createJob({ title: 'artifact publish manifest' });
+    fs.mkdirSync(path.dirname(jobs.ensureWorkspacePath(job.jobId, 'dist/MyApp.exe')), { recursive: true });
+    fs.writeFileSync(jobs.ensureWorkspacePath(job.jobId, 'dist/MyApp.exe'), 'binary', 'utf8');
+    fs.mkdirSync(path.dirname(jobs.ensureWorkspacePath(job.jobId, '.orchestrator/artifact_publish.json')), { recursive: true });
+    fs.writeFileSync(
+      jobs.ensureWorkspacePath(job.jobId, '.orchestrator/artifact_publish.json'),
+      JSON.stringify({
+        artifacts: [
+          { path: 'dist/MyApp.exe', label: 'Windows installer', kind: 'exe', final: true },
+        ],
+        notes: ['npm install completed', 'npm run dist completed'],
+      }, null, 2),
+      'utf8',
+    );
+
+    const artifactIndex = refreshArtifactIndex(job.jobId, { maxFiles: 5 });
+    assert.equal(artifactIndex.artifacts[0].path, 'dist/MyApp.exe');
+    assert.equal(artifactIndex.artifacts[0].label, 'Windows installer');
+    assert.equal(artifactIndex.artifacts[0].kind, 'exe');
+    assert.deepEqual(artifactIndex.notes, ['npm install completed', 'npm run dist completed']);
+    const markdown = fs.readFileSync(path.join(jobs.jobDir(job.jobId), 'shared', 'artifact_index.md'), 'utf8');
+    assert.match(markdown, /Windows installer/);
+    assert.match(markdown, /npm install completed/);
+  });
+});
+
 test('maybeSendArtifactSummary announces candidates without auto-sending documents', async () => {
   await withTempRunsDir(async () => {
     const job = jobs.createJob({ title: 'artifact summary' });

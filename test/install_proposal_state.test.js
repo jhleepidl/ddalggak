@@ -5,6 +5,7 @@ import { ChatSessionStore } from '../src/chat/session.js';
 import {
   buildInstallProposalStateFromExecution,
   buildInstallProposalPrompt,
+  resolveAutomaticInstallProposalAction,
   setPendingInstallProposal,
   getPendingInstallProposal,
   archivePendingInstallProposal,
@@ -80,4 +81,44 @@ test('session store can archive pending install proposal state', () => {
   assert.equal(archived.status, 'applied_active');
   assert.equal(store.get('chat-1').pending_install_proposal, null);
   assert.equal(store.get('chat-1').last_install_proposal.status, 'applied_active');
+});
+
+test('resolveAutomaticInstallProposalAction auto-activates blocking filesystem_read only proposals', () => {
+  const state = buildInstallProposalStateFromExecution({
+    team: {
+      team_name: 'Repo Team',
+      agents: [
+        { agent_id: 'repo_scout', name: 'Repo Scout', role: 'researcher', runtime_capabilities_required: ['filesystem_read'] },
+      ],
+    },
+    runtime: { threadId: 'thread-3', availableToolIds: [] },
+    execution: {
+      outputs: [],
+      results: [{ status: 'blocked', note: 'filesystem read capability missing' }],
+    },
+    resumeRequest: { message: 'repo 조사해줘' },
+  });
+
+  const action = resolveAutomaticInstallProposalAction(state);
+  assert.equal(action?.strategy, 'enable_read_only_fs');
+  assert.equal(action?.resume_on_apply, true);
+});
+
+test('resolveAutomaticInstallProposalAction does not auto-activate risky proposals', () => {
+  const state = buildInstallProposalStateFromExecution({
+    team: {
+      team_name: 'Build Team',
+      agents: [
+        { agent_id: 'builder', name: 'Builder', role: 'builder', runtime_capabilities_required: ['shell_exec'] },
+      ],
+    },
+    runtime: { threadId: 'thread-4', availableToolIds: [] },
+    execution: {
+      outputs: [],
+      results: [{ status: 'blocked', note: 'shell execution capability missing' }],
+    },
+    resumeRequest: { message: 'build 해줘' },
+  });
+
+  assert.equal(resolveAutomaticInstallProposalAction(state), null);
 });

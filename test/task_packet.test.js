@@ -35,10 +35,15 @@ test('task packet keeps baseline goal while surfacing the latest user request an
     assert.ok(Array.isArray(packet.phase_user_quotes));
     assert.ok(packet.phase_user_quotes.some((row) => /\.exe 파일/.test(row)));
     assert.ok(packet.carry_forward_quotes.some((row) => /companion app/.test(row)));
+    assert.equal(packet.version, 2);
+    assert.ok(Array.isArray(packet.deliverables) && packet.deliverables.some((row) => /exe|산출물/i.test(row)));
+    assert.ok(Array.isArray(packet.verification_expectations) && packet.verification_expectations.some((row) => /빌드|shell|dependency/i.test(row)));
 
     const rendered = renderTaskPacket(packet, { roleId: 'builder' });
     assert.match(rendered, /CURRENT TASK PACKET/);
     assert.match(rendered, /Latest user request/);
+    assert.match(rendered, /Deliverables/);
+    assert.match(rendered, /Verification expectations/);
     assert.match(rendered, /Carry-forward task context/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -63,6 +68,40 @@ test('task packet loads GoC/operator override file and exposes it in rendered co
     assert.ok(packet.explicit_notes.some((row) => /GoC pin/.test(row)));
     assert.match(rendered, /Operator \/ GoC overrides/);
     assert.match(rendered, /overlay는 게임 창 위에 떠야 한다/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('task packet history only appends when packet meaningfully changes', () => {
+  const { root, jobDir } = makeJobDir();
+  try {
+    appendTurn(jobDir, { role: 'user', text: '/chat companion app 만들어줘', ts: '2026-03-24T00:00:00.000Z' });
+    updateCurrentTaskPacket({ jobDir, currentUserText: '윈도우 오버레이로 만들어줘.', persist: true });
+    updateCurrentTaskPacket({ jobDir, currentUserText: '윈도우 오버레이로 만들어줘.', persist: true });
+    const historyPath = path.join(jobDir, 'local_memory', 'task_packet_history.jsonl');
+    const lines = fs.readFileSync(historyPath, 'utf8').trim().split(/\r?\n/).filter(Boolean);
+    assert.equal(lines.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test('task packet derives prohibitions and superseded assumptions from user corrections', () => {
+  const { root, jobDir } = makeJobDir();
+  try {
+    appendTurn(jobDir, { role: 'user', text: '/chat 아레나 companion app 만들어줘', ts: '2026-03-24T00:00:00.000Z' });
+    const packet = updateCurrentTaskPacket({
+      jobDir,
+      currentUserText: '아레나가 아니라 ARAM Mayhem이고 절대로 아레나 전제로 구현하지 마.',
+      persist: true,
+    });
+    assert.ok(Array.isArray(packet.prohibitions) && packet.prohibitions.some((row) => /아레나/i.test(row)));
+    assert.ok(Array.isArray(packet.superseded_assumptions) && packet.superseded_assumptions.some((row) => /아레나/i.test(row)));
+    const rendered = renderTaskPacket(packet, { roleId: 'builder' });
+    assert.match(rendered, /Do not/);
+    assert.match(rendered, /Superseded assumptions/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

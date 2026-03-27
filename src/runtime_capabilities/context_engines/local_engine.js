@@ -4,6 +4,7 @@ import { clip } from "../../textutil.js";
 import { readIterationDelta, readRoleSummary } from "../../application/summary_memory.js";
 import { loadCurrentTaskPacket, renderTaskPacket, updateCurrentTaskPacket } from "../../application/task_packet.js";
 import { ContextEngineBase } from "./base.js";
+import { buildContextEnvelope } from '../context_envelope.js';
 
 function asObject(value) {
   return value && typeof value === "object" ? value : {};
@@ -51,6 +52,85 @@ function clipTail(text = "", maxChars = 5000) {
   const raw = String(text || "");
   if (raw.length <= maxChars) return raw;
   return raw.slice(raw.length - maxChars);
+}
+
+function isNoisyAssistantTelemetry(text = "") {
+  const clean = String(text || '').trim();
+  if (!clean) return false;
+  return [
+    /^현재까지 결과 요약:/,
+    /^♻️\s*self-refine progress/i,
+    /^📎\s*주요 산출물 후보/,
+  ].some((pattern) => pattern.test(clean));
+}
+
+function summarizeAssistantForRollingSummary(text = "") {
+  const clean = String(text || '').trim();
+  if (!clean || isNoisyAssistantTelemetry(clean)) return '';
+  return clean;
+}
+
+function compactRuntimeTeamSnapshot(snapshot = null) {
+  const row = asObject(snapshot);
+  if (Object.keys(row).length === 0) return undefined;
+  const participants = Array.isArray(row.participants) ? row.participants : [];
+  return {
+    source: String(row.source || '').trim() || undefined,
+    mode: String(row.mode || '').trim() || undefined,
+    team_id: String(row.team_id || row.teamId || '').trim() || undefined,
+    participant_count: participants.length || undefined,
+    participant_ids: participants.map((entry) => String(entry?.id || entry?.agent_id || '').trim()).filter(Boolean).slice(0, 12),
+  };
+}
+
+function compactTaskInterpretation(raw = null) {
+  const row = asObject(raw);
+  if (Object.keys(row).length === 0) return undefined;
+  return {
+    archetype: String(row.archetype || row.task_archetype || '').trim() || undefined,
+    wants_code: row.wants_code === true ? true : undefined,
+    wants_artifact: row.wants_artifact === true ? true : undefined,
+    wants_review: row.wants_review === true ? true : undefined,
+  };
+}
+
+function compactRunMetaForContextLog(runMeta = {}) {
+  const raw = asObject(runMeta);
+  const compact = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (value == null) continue;
+    if (key === 'runtime_team_snapshot' || key === 'runtimeTeamSnapshot') {
+      const reduced = compactRuntimeTeamSnapshot(value);
+      if (reduced) compact[key] = reduced;
+      continue;
+    }
+    if (key === 'task_interpretation' || key === 'taskInterpretation') {
+      const reduced = compactTaskInterpretation(value);
+      if (reduced) compact[key] = reduced;
+      continue;
+    }
+    if (typeof value === 'string') {
+      const clean = String(value || '').trim();
+      if (clean) compact[key] = clip(clean, 240);
+      continue;
+    }
+    if (typeof value === 'boolean' || typeof value === 'number') {
+      compact[key] = value;
+      continue;
+    }
+    if (Array.isArray(value)) {
+      const simplified = value
+        .map((entry) => {
+          if (typeof entry === 'string') return clip(String(entry || '').trim(), 120);
+          if (entry && typeof entry === 'object') return undefined;
+          return entry;
+        })
+        .filter(Boolean)
+        .slice(0, 8);
+      if (simplified.length > 0) compact[key] = simplified;
+    }
+  }
+  return compact;
 }
 
 function focusHeaderFor({ stepKind = "agent", agentId = "", roleId = "", goal = "", lensSpec = null } = {}) {
@@ -655,6 +735,9 @@ export class LocalContextEngine extends ContextEngineBase {
         localRecentTurnsCount: packed.recentTurnsCount,
         localSummaryChars: packed.summaryChars,
         localTaskPacketChars: taskPacketText.length,
+        taskPacketVersion: Number.isFinite(Number(taskPacket?.version)) ? Math.floor(Number(taskPacket.version)) : undefined,
+        taskPacketDeliverablesCount: Array.isArray(taskPacket?.deliverables) ? taskPacket.deliverables.length : 0,
+        taskPacketProhibitionsCount: Array.isArray(taskPacket?.prohibitions) ? taskPacket.prohibitions.length : 0,
         localActiveDirectivesCount: activeDirectivesText ? activeDirectivesText.split('\n').filter(Boolean).length : 0,
         localPinnedCount: formatDirectiveEntries(directiveEntries, { onlyPinned: true, maxItems: 99 })
           ? formatDirectiveEntries(directiveEntries, { onlyPinned: true, maxItems: 99 }).split('\n').filter(Boolean).length
@@ -682,7 +765,9 @@ export class LocalContextEngine extends ContextEngineBase {
 
     const userText = clip(String(row.lastUserText || "").trim(), 1000);
     const assistantText = clip(String(row.lastAssistantText || "").trim(), 1400);
-    if (!userText && !assistantText) return null;
+    const assistantSummaryText = summarizeAssistantForRollingSummary(assistantText);
+    const assistantTurnText = isNoisyAssistantTelemetry(assistantText) ? '' : assistantText;
+    if (!userText && !assistantSummaryText && !assistantTurnText) return null;
 
     const summaryPath = this._memoryPath(jobId, "summary.md");
     const currentSummary = String(readFileIfExists(summaryPath) || "").trim();
@@ -693,7 +778,7 @@ export class LocalContextEngine extends ContextEngineBase {
     const recentSection = [
       "## recent",
       userText ? `- user: ${userText}` : "",
-      assistantText ? `- assistant: ${assistantText}` : "",
+      assistantSummaryText ? `- assistant: ${assistantSummaryText}` : "",
     ].filter(Boolean).join("\n");
 
     const nextBody = clipTail(
@@ -711,10 +796,10 @@ export class LocalContextEngine extends ContextEngineBase {
         text: userText,
       });
     }
-    if (assistantText) {
+    if (assistantTurnText) {
       this.appendLocalLog(jobId, "turns.jsonl", {
         role: "assistant",
-        text: assistantText,
+        text: assistantTurnText,
       });
     }
     const resolvedJobDir = this._jobDir(jobId);
@@ -739,7 +824,7 @@ export class LocalContextEngine extends ContextEngineBase {
       agent_id: String(row.agentId || "").trim().toLowerCase() || undefined,
       role_id: String(row.roleId || row.role_id || "").trim().toLowerCase() || undefined,
       goal: clip(String(row.goal || "").trim(), 320) || undefined,
-      run_meta: runMeta,
+      run_meta: compactRunMetaForContextLog(runMeta),
       context_meta: meta,
     });
 
@@ -763,6 +848,6 @@ export class LocalContextEngine extends ContextEngineBase {
     if (stickyDirectives.length > 0) {
       this._recordStickyDirectives(jobId, stickyDirectives);
     }
-    return await super.recordMeta(args);
+    return true;
   }
 }

@@ -41,5 +41,7 @@ test('writeCodexInstructionFile compacts oversized current task', () => {
   assert.match(content, /truncated goal/);
   assert.match(content, /truncated role memory/);
   assert.match(content, /truncated knowledge base contract/);
+  assert.match(content, /artifact_publish\.json/);
+  assert.match(content, /Do not edit shared KB files/);
   assert.ok(content.length < 15000);
 });

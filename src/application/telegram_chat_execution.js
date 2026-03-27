@@ -3922,7 +3922,12 @@ async function runSupervisorChat(
           });
         } catch {}
       }
-      if (continuousImprovementPolicy.enabled === true && continuousImprovementPolicy.progress_report_each_turn !== false) {
+      const willStopAfterThisTurn = continuousImprovementPolicy.enabled === true
+        && matchedContinuousStopSignals.length > 0
+        && turn >= Number(continuousImprovementPolicy.min_turns || 1);
+      if (continuousImprovementPolicy.enabled === true
+        && continuousImprovementPolicy.progress_report_each_turn !== false
+        && !willStopAfterThisTurn) {
         await bot.sendMessage(
           chatId,
           buildContinuousImprovementProgressMessage({
