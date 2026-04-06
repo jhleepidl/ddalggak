@@ -158,6 +158,57 @@ function normalizeAgentStatusMap(raw) {
 }
 
 
+
+function normalizeForkEvent(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const row = raw;
+  return Object.fromEntries(Object.entries({
+    ts: String(row.ts || nowIso()),
+    status: String(row.status || '').trim().toLowerCase() || undefined,
+    source_agent_id: String(row.source_agent_id || row.sourceAgentId || '').trim().toLowerCase() || undefined,
+    forked_agent_id: String(row.forked_agent_id || row.forkedAgentId || row.agent_id || row.agentId || '').trim().toLowerCase() || undefined,
+    operation_id: String(row.operation_id || row.operationId || '').trim() || undefined,
+    scope_mode: String(row.scope_mode || row.scopeMode || '').trim().toLowerCase() || undefined,
+    reason: clipSessionText(row.reason || '', 200) || undefined,
+    goal: clipSessionText(row.goal || '', 240) || undefined,
+    rejoin_strategy: String(row.rejoin_strategy || row.rejoinStrategy || '').trim().toLowerCase() || undefined,
+    publish_surface_ids: clipSessionList(row.publish_surface_ids || row.publishSurfaceIds || [], { max: 8, maxText: 80, lower: true }),
+  }).filter(([, value]) => value !== undefined));
+}
+
+function normalizeRejoinEvent(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const row = raw;
+  return Object.fromEntries(Object.entries({
+    ts: String(row.ts || nowIso()),
+    status: String(row.status || '').trim().toLowerCase() || undefined,
+    agent_id: String(row.agent_id || row.agentId || row.forked_agent_id || row.forkedAgentId || '').trim().toLowerCase() || undefined,
+    source_agent_id: String(row.source_agent_id || row.sourceAgentId || row.target_agent_id || row.targetAgentId || '').trim().toLowerCase() || undefined,
+    operation_id: String(row.operation_id || row.operationId || '').trim() || undefined,
+    summary: clipSessionText(row.summary || '', 280) || undefined,
+    publish_surface_ids: clipSessionList(row.publish_surface_ids || row.publishSurfaceIds || [], { max: 8, maxText: 80, lower: true }),
+  }).filter(([, value]) => value !== undefined));
+}
+
+function normalizeRecoveryEvent(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const row = { ...raw };
+  return Object.fromEntries(Object.entries({
+    ts: String(row.ts || nowIso()),
+    attempt_no: Number.isFinite(Number(row.attempt_no || row.attemptNo)) ? Math.max(1, Math.floor(Number(row.attempt_no || row.attemptNo))) : 1,
+    stage: String(row.stage || '').trim().toLowerCase() || undefined,
+    status: String(row.status || '').trim().toLowerCase() || undefined,
+    category: String(row.category || '').trim().toLowerCase() || undefined,
+    recovery_strategy: String(row.recovery_strategy || row.recoveryStrategy || '').trim().toLowerCase() || undefined,
+    summary: clipSessionText(row.summary || '', 200) || undefined,
+    message: clipSessionText(row.message || '', 200) || undefined,
+    action_type: String(row.action_type || row.actionType || '').trim().toLowerCase() || undefined,
+    agent_id: String(row.agent_id || row.agentId || '').trim().toLowerCase() || undefined,
+    provider: String(row.provider || '').trim().toLowerCase() || undefined,
+    scout_agent_id: String(row.scout_agent_id || row.scoutAgentId || '').trim().toLowerCase() || undefined,
+  }).filter(([, value]) => value !== undefined));
+}
+
 function clipSessionList(values = [], { max = 8, maxText = 160, lower = false } = {}) {
   const rows = Array.isArray(values) ? values : [];
   const out = [];
@@ -490,6 +541,42 @@ function normalizeSession(chatId, raw = {}) {
     recent_agent_turns: normalizeRecentAgentTurns(row.recent_agent_turns || row.recentAgentTurns),
     answer_capsules: normalizeAnswerCapsules(row.answer_capsules || row.answerCapsules),
     last_route: compactLastRoute(row.last_route),
+    recovery_events: (Array.isArray(row.recovery_events) ? row.recovery_events : []).map(normalizeRecoveryEvent).filter(Boolean).slice(-12),
+    last_recovery_event: normalizeRecoveryEvent(row.last_recovery_event || row.lastRecoveryEvent),
+    recovery_state: row.recovery_state && typeof row.recovery_state === 'object'
+      ? {
+          status: String(row.recovery_state.status || '').trim().toLowerCase() || undefined,
+          category: String(row.recovery_state.category || '').trim().toLowerCase() || undefined,
+          recovery_strategy: String(row.recovery_state.recovery_strategy || row.recovery_state.recoveryStrategy || '').trim().toLowerCase() || undefined,
+          updated_at: String(row.recovery_state.updated_at || row.recovery_state.updatedAt || nowIso()),
+        }
+      : (row.recoveryState && typeof row.recoveryState === 'object'
+        ? {
+            status: String(row.recoveryState.status || '').trim().toLowerCase() || undefined,
+            category: String(row.recoveryState.category || '').trim().toLowerCase() || undefined,
+            recovery_strategy: String(row.recoveryState.recovery_strategy || row.recoveryState.recoveryStrategy || '').trim().toLowerCase() || undefined,
+            updated_at: String(row.recoveryState.updated_at || row.recoveryState.updatedAt || nowIso()),
+          }
+        : null),
+    fork_events: (Array.isArray(row.fork_events) ? row.fork_events : []).map(normalizeForkEvent).filter(Boolean).slice(-12),
+    last_fork_event: normalizeForkEvent(row.last_fork_event || row.lastForkEvent),
+    rejoin_events: (Array.isArray(row.rejoin_events) ? row.rejoin_events : []).map(normalizeRejoinEvent).filter(Boolean).slice(-12),
+    last_rejoin_event: normalizeRejoinEvent(row.last_rejoin_event || row.lastRejoinEvent),
+    fork_state: row.fork_state && typeof row.fork_state === 'object'
+      ? {
+          status: String(row.fork_state.status || '').trim().toLowerCase() || undefined,
+          source_agent_id: String(row.fork_state.source_agent_id || row.fork_state.sourceAgentId || '').trim().toLowerCase() || undefined,
+          forked_agent_id: String(row.fork_state.forked_agent_id || row.fork_state.forkedAgentId || '').trim().toLowerCase() || undefined,
+          updated_at: String(row.fork_state.updated_at || row.fork_state.updatedAt || nowIso()),
+        }
+      : (row.forkState && typeof row.forkState === 'object'
+        ? {
+            status: String(row.forkState.status || '').trim().toLowerCase() || undefined,
+            source_agent_id: String(row.forkState.source_agent_id || row.forkState.sourceAgentId || '').trim().toLowerCase() || undefined,
+            forked_agent_id: String(row.forkState.forked_agent_id || row.forkState.forkedAgentId || '').trim().toLowerCase() || undefined,
+            updated_at: String(row.forkState.updated_at || row.forkState.updatedAt || nowIso()),
+          }
+        : null),
     public_search_cache: normalizePublicSearchCache(row.public_search_cache),
     team_config: normalizeSessionTeamConfig(row.team_config),
     awaiting_install_approval: row.awaiting_install_approval === true,

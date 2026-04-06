@@ -9,6 +9,8 @@ import { appendPromptTelemetry } from './prompt_telemetry.js';
 import { runDir, runSharedDir } from './telegram_runtime_state.js';
 import { compactPromptJson } from './prompt_surface_builder.js';
 import { normalizeParticipantExecutionSchema } from '../shared/participant_schema.js';
+import { inferExecutionRoleFromText } from '../shared/work_intent.js';
+import { buildPlannerCreateConstraintLines, buildPlannerOutputSchemaLines, buildPlannerRefinementRuleLines } from './planner_prompt_fragments.js';
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -154,49 +156,9 @@ function buildPlannerPrompt({
     '',
     'Hard constraints:',
     buildPlannerSchemaHintText(),
-    '- team must have 1 to 6 agents',
-    '- each agent role must be one of: researcher, builder, reviewer, synthesizer, operator',
-    '- if the request asks for implementation or shipping software artifacts, include a builder unless the user explicitly rejects code-writing roles',
-    '- if multiple upstream agents exist, include a synthesizer unless the user explicitly rejects it',
-    '- final_answer_owner must be a real participant who can plausibly deliver the final answer',
-    '- preserve execution metadata in structure_v2 participants: provider_spec, provider_runtime_config, runtime_capabilities_required, runtime_capabilities_optional, external_tool_requirements, external_tool_preferences, memory_contract, context_policy',
-    '- prefer existing executable skill ids from the registry for attached_skill_ids',
-    '- choose models only from the supported model list',
-    '- default model preference: researcher=gemini-2.5-pro, builder=gpt-5-codex, reviewer/synthesizer=gpt-5.4 unless the request strongly suggests otherwise',
+    ...buildPlannerCreateConstraintLines(),
     '',
-    'Preferred output schema (source of truth is structure_v2; duplicate top-level fields are optional):',
-    '{',
-    '  "team_name": "...",',
-    '  "reasoning_summary": ["..."],',
-    '  "structure_v2": {',
-    '    "kind": "team_structure_v2",',
-    '    "version": 2,',
-    '    "metadata": {"team_name": "...", "composition_mode": "freeform", "proposal_mode": "create"},',
-    '    "participants": [',
-    '      {',
-    '        "participant_id": "...",',
-    '        "kind": "agent",',
-    '        "name": "...",',
-    '        "role": "researcher|builder|reviewer|synthesizer|operator",',
-    '        "purpose": "...",',
-    '        "provider_spec": {"provider": "gemini|codex|chatgpt", "model": "..."},',
-    '        "runtime_capabilities_required": ["filesystem_read|filesystem_write|shell_exec|web_browse"],',
-    '        "runtime_capabilities_optional": ["..."],',
-    '        "external_tool_requirements": ["..."],',
-    '        "external_tool_preferences": ["..."],',
-    '        "attached_skill_ids": ["skill...."],',
-    '        "generated_skill_briefs": [{"label":"...","goal":"...","checklist":["...","..."]}],',
-    '        "memory_contract": {"publish_surface_ids": ["handoff_summary"]},',
-    '        "context_policy": {"reads": {"grants": ["shared_summary"]}, "writes": {"publish_targets": ["handoff_summary"]}}',
-    '      }',
-    '    ],',
-    '    "topology": {"pattern": "router|supervisor|sequential|parallel|debate|committee|graph|hybrid", "execution_pattern": "...", "edges": [{"from": "...", "to": "...", "payload": "summary_plus_key_evidence"}], "final_participant_id": "..."},',
-    '    "interaction_policy": {"visibility": {"reviewer_visibility": "...", "synthesizer_visibility": "..."}},',
-    '    "knowledge_surface": {"profile_id": "...", "display_name": "...", "docs": [{"doc_id": "plan", "file_name": "..."}]},',
-    '    "memory_policy": {"stable_semantic_slots": ["decisions", "artifacts"], "migration_strategy": "semantic_slot_preserving"},',
-    '    "control_policy": {"runtime_execution": {"continuous_improvement": {"enabled": false, "max_turns": 8}}}',
-    '  }',
-    '}',
+    ...buildPlannerOutputSchemaLines({ proposalMode: 'create' }),
     '',
     `User request: ${clean(taskText)}`,
     '',
@@ -292,26 +254,9 @@ function buildRefinementPlannerPrompt({
     '',
     'Refinement rules:',
     buildPlannerSchemaHintText(),
-    '- return the full next team, not a patch',
-    '- preserve existing strong agents unless the instruction clearly asks to remove or replace them',
-    '- if the instruction only changes model/provider/tools for one agent, keep the same roster size, names, roles, final_answer_owner, and handoffs unless the instruction explicitly says otherwise',
-    '- if the team still needs implementation coverage, preserve or add a builder; do not leave a research-only roster for build-heavy work',
-    '- if multiple upstream agents remain, keep or add a synthesizer unless the user rejects it',
-    '- preserve execution metadata in structure_v2 participants: provider_spec, provider_runtime_config, runtime_capabilities_required, runtime_capabilities_optional, external_tool_requirements, external_tool_preferences, memory_contract, context_policy',
-    '- choose models only from the supported model list',
+    ...buildPlannerRefinementRuleLines(),
     '',
-    'Preferred output schema (source of truth is structure_v2; duplicate top-level fields are optional):',
-    '{',
-    '  "team_name": "...",',
-    '  "reasoning_summary": ["..."],',
-    '  "structure_v2": {',
-    '    "kind": "team_structure_v2",',
-    '    "version": 2,',
-    '    "metadata": {"team_name": "...", "composition_mode": "freeform", "proposal_mode": "refine"},',
-    '    "participants": [{"participant_id":"...","kind":"agent","name":"...","role":"researcher|builder|reviewer|synthesizer|operator","purpose":"...","provider_spec":{"provider":"gemini|codex|chatgpt","model":"..."},"runtime_capabilities_required":["filesystem_read|filesystem_write|shell_exec|web_browse"],"runtime_capabilities_optional":["..."],"external_tool_requirements":["..."],"external_tool_preferences":["..."],"attached_skill_ids":["skill...."],"generated_skill_briefs":[{"label":"...","goal":"...","checklist":["...","..."]}],"memory_contract":{"publish_surface_ids":["handoff_summary"]},"context_policy":{"reads":{"grants":["shared_summary"]},"writes":{"publish_targets":["handoff_summary"]}}}],',
-    '    "topology": {"pattern":"router|supervisor|sequential|parallel|debate|committee|graph|hybrid","execution_pattern":"...","edges":[{"from":"...","to":"...","payload":"summary_plus_key_evidence"}],"final_participant_id":"..."}',
-    '  }',
-    '}',
+    ...buildPlannerOutputSchemaLines({ proposalMode: 'refine', compactParticipants: true }),
     '',
     `Current team (compact): ${compactPromptJson(current, { maxDepth: 3, maxItems: 10, maxStringChars: 110 })}`,
     `Current roster (preserve unless explicit removal):
@@ -352,13 +297,15 @@ function inferPlannerRole(raw = {}) {
     const explicit = normalizeDeclaredPlannerRole(candidate);
     if (explicit) return explicit;
   }
-  const value = [item.name, item.display_name, item.agent_name, item.purpose, item.goal, item.description, item.model].filter(Boolean).join(' ').toLowerCase();
-  if (/(^|[^a-z])(builder|coder|developer|implementer|frontend|backend|fullstack|engineer)([^a-z]|$)|구현|코더|개발자|빌더/.test(value)) return 'builder';
-  if (/(^|[^a-z])(reviewer|review|critic|verifier|quality|qa)([^a-z]|$)|리뷰어|검토|검수|비평|품질/.test(value)) return 'reviewer';
-  if (/(^|[^a-z])(synthesizer|synth|summarizer|summary|writer|delivery)([^a-z]|$)|요약|정리|합성|전달/.test(value)) return 'synthesizer';
-  if (/(^|[^a-z])(operator|coordinator|orchestrator|router|manager)([^a-z]|$)|운영|조정|오퍼레이터/.test(value)) return 'operator';
-  if (/(^|[^a-z])(researcher|scout|analyst|investigator|planner|research)([^a-z]|$)|조사|연구|분석|스카우트/.test(value)) return 'researcher';
-  return normalizeDeclaredPlannerRole(item.role || item.role_id || item.roleId || 'researcher') || 'researcher';
+  return inferExecutionRoleFromText([
+    item.name,
+    item.display_name,
+    item.agent_name,
+    item.purpose,
+    item.goal,
+    item.description,
+    item.model,
+  ].filter(Boolean).join(' '), { fallback: normalizeDeclaredPlannerRole(item.role || item.role_id || item.roleId || 'researcher') || 'researcher' }) || 'researcher';
 }
 
 function normalizePlannerPlan(raw = {}) {

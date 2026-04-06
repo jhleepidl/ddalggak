@@ -168,3 +168,69 @@ export function formatTeamCapabilityContractLines(contract = {}, { maxMissing = 
   if (missingOptional.length > 0) lines.push(`- missing optional: ${missingOptional.join(', ')}`);
   return lines;
 }
+
+
+export function compileTeamAdmissionDecision(contract = {}) {
+  const row = contract && typeof contract === 'object' ? contract : {};
+  const runtimeBound = row.runtime_bound === true;
+  const missingRequiredTools = uniqueIds(row.missing_required_tools || []);
+  const missingOptionalTools = uniqueIds(row.missing_optional_tools || []);
+  const missingRequiredCapabilities = uniqueIds(row.missing_required_capabilities || []);
+  const missingOptionalCapabilities = uniqueIds(row.missing_optional_capabilities || []);
+  const missingRequiredExternalTools = uniqueIds(row.missing_required_external_tools || []);
+  const missingOptionalExternalTools = uniqueIds(row.missing_optional_external_tools || []);
+  const blockingReasonCodes = [];
+  const degradeReasonCodes = [];
+  if (!runtimeBound) blockingReasonCodes.push('runtime_unbound');
+  if (missingRequiredTools.length > 0) blockingReasonCodes.push('missing_required_tools');
+  if (missingRequiredCapabilities.length > 0) blockingReasonCodes.push('missing_required_capabilities');
+  if (missingRequiredExternalTools.length > 0) blockingReasonCodes.push('missing_required_external_tools');
+  if (missingOptionalTools.length > 0) degradeReasonCodes.push('missing_optional_tools');
+  if (missingOptionalCapabilities.length > 0) degradeReasonCodes.push('missing_optional_capabilities');
+  if (missingOptionalExternalTools.length > 0) degradeReasonCodes.push('missing_optional_external_tools');
+  const blocking = runtimeBound && blockingReasonCodes.some((code) => code !== 'runtime_unbound');
+  const degradeOnly = !blocking && degradeReasonCodes.length > 0;
+  const status = !runtimeBound
+    ? 'unbound'
+    : blocking
+      ? 'blocked'
+      : degradeOnly
+        ? 'degraded'
+        : 'ready';
+  return {
+    version: 'team_admission_decision_v1',
+    runtime_bound: runtimeBound,
+    capability_status: cleanId(row.status || 'unbound') || 'unbound',
+    status,
+    decision: !runtimeBound ? 'defer' : blocking ? 'deny' : 'allow',
+    runtime_ready: runtimeBound && !blocking,
+    blocking,
+    degrade_only: degradeOnly,
+    reason_codes: uniqueIds([...blockingReasonCodes, ...degradeReasonCodes]),
+    blocking_reason_codes: uniqueIds(blockingReasonCodes),
+    degrade_reason_codes: uniqueIds(degradeReasonCodes),
+    required_tool_count: asArray(row.required_tools).length,
+    optional_tool_count: asArray(row.optional_tools).length,
+    missing_required_tool_count: missingRequiredTools.length,
+    missing_optional_tool_count: missingOptionalTools.length,
+    missing_required_tools: missingRequiredTools,
+    missing_optional_tools: missingOptionalTools,
+  };
+}
+
+export function summarizeAdmissionDecision(decision = {}) {
+  const row = decision && typeof decision === 'object' ? decision : {};
+  return {
+    admission_status: cleanId(row.status || 'unbound') || 'unbound',
+    admission_decision: cleanId(row.decision || 'defer') || 'defer',
+    runtime_bound: row.runtime_bound === true,
+    blocking: row.blocking === true,
+    degrade_only: row.degrade_only === true,
+    blocking_reason_codes: uniqueIds(row.blocking_reason_codes || []),
+    degrade_reason_codes: uniqueIds(row.degrade_reason_codes || []),
+    missing_required_tool_count: Number(asArray(row.missing_required_tools).length || row.missing_required_tool_count || 0),
+    missing_optional_tool_count: Number(asArray(row.missing_optional_tools).length || row.missing_optional_tool_count || 0),
+    missing_required_tools: uniqueIds(row.missing_required_tools || []),
+    missing_optional_tools: uniqueIds(row.missing_optional_tools || []),
+  };
+}

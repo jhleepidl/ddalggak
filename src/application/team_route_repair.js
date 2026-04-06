@@ -1,4 +1,5 @@
 import { clip } from '../textutil.js';
+import { hasImplementationLikeIntent } from '../shared/work_intent.js';
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -28,14 +29,14 @@ function isGenericRawGoal(goal = '') {
 }
 
 export function isImplementationLikeRequest(message = '', { taskInterpretation = null, taskArchetype = '' } = {}) {
-  const text = String(message || '').trim().toLowerCase();
+  const text = String(message || '').trim();
   const taskType = cleanId(taskInterpretation?.task_type || taskInterpretation?.taskType || '');
   const deliverableType = cleanId(taskInterpretation?.deliverable_type || taskInterpretation?.deliverableType || '');
   const archetype = cleanId(taskArchetype || '');
   if (taskType === 'code_change' || deliverableType === 'software_delivery') return true;
   if (['implementation', 'iterative_improvement', 'review_repair'].includes(archetype)) return true;
   if (!text) return false;
-  return /(구현|개발|만들어|만들어줘|코드|노트북|ipynb|jupyter|주피터|python|script|스크립트|웹\s*서비스|웹앱|web\s*service|web\s*app|frontend|backend|api|server|client|react|next(?:\.js)?|node|express|fastapi|flask|django|서비스\s*이름|서비스\s*구현|프로그램\s*개발|앱\s*개발)/i.test(text);
+  return hasImplementationLikeIntent(text);
 }
 
 function collectTeamAgents(runtime = {}) {

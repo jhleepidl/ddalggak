@@ -17,6 +17,7 @@ export const TEAM_SETUP_ACTION_TYPES = Object.freeze([
   "create_agent_definition",
   "update_agent",
   "fork_agent",
+  "rejoin_agent",
   "search_public_agents",
   "install_agent_blueprint",
   "publish_agent",

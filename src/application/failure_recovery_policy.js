@@ -298,3 +298,26 @@ export function resolveProviderActionRisk({ action = {}, provider = '', fallback
   const desiredRisk = matchAny(actionText, CRITICAL_CODEX_PATTERNS) ? 'L3' : 'L2';
   return riskScore(currentRisk) > riskScore(desiredRisk) ? desiredRisk : desiredRisk;
 }
+
+
+export function buildRecoveryAttemptEvent({ action = {}, failure = {}, attempt = 1, stage = 'classified', status = '', scoutAgentId = '', note = '' } = {}) {
+  const resolvedStatus = String(status || '').trim().toLowerCase()
+    || (failure?.user_action_required ? 'blocked' : failure?.retryable ? 'retrying' : 'classified');
+  return {
+    ts: new Date().toISOString(),
+    attempt_no: Math.max(1, Number(attempt) || 1),
+    stage: String(stage || 'classified').trim().toLowerCase() || 'classified',
+    status: resolvedStatus,
+    category: String(failure?.category || '').trim() || 'unknown_failure',
+    recovery_strategy: String(failure?.recovery_strategy || '').trim() || 'stop',
+    summary: clip(String(failure?.summary || '').trim(), 220),
+    message: clip(String(failure?.message || '').trim(), 220),
+    retryable: failure?.retryable === true,
+    user_action_required: failure?.user_action_required === true,
+    action_type: String(action?.type || '').trim().toLowerCase() || undefined,
+    agent_id: String(action?.agent_id || action?.agentId || '').trim().toLowerCase() || undefined,
+    provider: String(action?.provider || failure?.provider || '').trim().toLowerCase() || undefined,
+    scout_agent_id: String(scoutAgentId || '').trim().toLowerCase() || undefined,
+    note: clip(String(note || '').trim(), 220) || undefined,
+  };
+}

@@ -2139,21 +2139,46 @@ export class GocClient {
     return parsed;
   }
 
-  async forkAgent(agentId) {
+  async forkAgent(agentId, body = {}) {
     const aid = String(agentId || "").trim().toLowerCase();
     if (!aid) throw new Error("forkAgent requires agentId");
+    const payload = body && typeof body === 'object' ? body : {};
     const data = await this._requestAny({
       method: "POST",
       attempts: [
-        { path: `/api/agents/${encodeURIComponent(aid)}/fork`, body: {} },
-        { path: `/agents/${encodeURIComponent(aid)}/fork`, body: {} },
-        { path: `/v1/agents/${encodeURIComponent(aid)}/fork`, body: {} },
-        { path: "/api/agents/fork", body: { agent_id: aid } },
+        { path: `/api/agents/${encodeURIComponent(aid)}/fork`, body: payload },
+        { path: `/agents/${encodeURIComponent(aid)}/fork`, body: payload },
+        { path: `/v1/agents/${encodeURIComponent(aid)}/fork`, body: payload },
+        { path: "/api/agents/fork", body: { agent_id: aid, ...payload } },
       ],
     });
     const parsed = normalizeCatalogAgent(normalizeEntity(data, ["agent", "data", "result"]));
     if (!parsed.id) throw new Error("forkAgent returned no id");
-    return parsed;
+    const fork = normalizeEntity(data, ["fork", "fork_operation", "operation"]);
+    return { ...parsed, fork, fork_operation_id: String(fork?.id || '').trim() || undefined };
+  }
+
+  async rejoinAgent(agentId, body = {}) {
+    const aid = String(agentId || "").trim().toLowerCase();
+    if (!aid) throw new Error("rejoinAgent requires agentId");
+    const payload = body && typeof body === 'object' ? body : {};
+    const data = await this._requestAny({
+      method: 'POST',
+      attempts: [
+        { path: `/api/agents/${encodeURIComponent(aid)}/rejoin`, body: payload },
+        { path: `/agents/${encodeURIComponent(aid)}/rejoin`, body: payload },
+        { path: `/v1/agents/${encodeURIComponent(aid)}/rejoin`, body: payload },
+      ],
+    });
+    const fork = normalizeEntity(data, ['fork', 'fork_operation', 'operation']);
+    return {
+      ok: parseBooleanLike(pick(asObject(data), ['ok']), true),
+      source_agent_id: String(fork?.source_agent_id || '').trim().toLowerCase() || undefined,
+      fork_operation_id: String(fork?.id || '').trim() || undefined,
+      fork,
+      message: String(pick(asObject(data), ['message']) || '').trim(),
+      raw: data,
+    };
   }
 
   async publishAgent(agentId, published = true) {

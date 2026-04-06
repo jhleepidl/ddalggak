@@ -20,6 +20,7 @@ import {
 import { sanitizeExecutablePlan } from "./route_execution_contract.js";
 import {
   buildFailureRecoveryScoutGoal,
+  buildRecoveryAttemptEvent,
   classifyExecutionFailure,
   findRecoveryScoutAgentId,
 } from "../application/failure_recovery_policy.js";
@@ -55,6 +56,7 @@ const MUTATING_ACTION_TYPES = new Set([
   "create_agent_definition",
   "update_agent",
   "fork_agent",
+  "rejoin_agent",
   "add_agent_to_conversation",
   "remove_agent_from_conversation",
   "enable_agent",
@@ -126,6 +128,7 @@ function approvalReasonCategory(action = {}, fallbackReason = "") {
     "create_agent_definition",
     "update_agent",
     "fork_agent",
+  "rejoin_agent",
     "propose_agent",
     "add_agent_to_conversation",
     "remove_agent_from_conversation",
@@ -490,6 +493,67 @@ function buildFailureResultNote(failure = {}, fallbackMessage = '') {
   return `${String(fallbackMessage || failure?.message || 'failure').trim()}${suffix}`.trim();
 }
 
+
+function appendSessionForkEvent(sessionStore, chatId, event = {}) {
+  if (!sessionStore || typeof sessionStore.upsert !== 'function') return;
+  const cleanChatId = String(chatId || '').trim();
+  if (!cleanChatId) return;
+  sessionStore.upsert(cleanChatId, (session = {}) => {
+    const events = Array.isArray(session?.fork_events) ? session.fork_events.slice(-11) : [];
+    const nextEvents = [...events, event].slice(-12);
+    return {
+      fork_events: nextEvents,
+      last_fork_event: event,
+      fork_state: {
+        status: String(event?.status || '').trim().toLowerCase() || 'forked',
+        source_agent_id: String(event?.source_agent_id || '').trim().toLowerCase() || undefined,
+        forked_agent_id: String(event?.forked_agent_id || event?.agent_id || '').trim().toLowerCase() || undefined,
+        updated_at: String(event?.ts || new Date().toISOString()),
+      },
+    };
+  });
+}
+
+function appendSessionRejoinEvent(sessionStore, chatId, event = {}) {
+  if (!sessionStore || typeof sessionStore.upsert !== 'function') return;
+  const cleanChatId = String(chatId || '').trim();
+  if (!cleanChatId) return;
+  sessionStore.upsert(cleanChatId, (session = {}) => {
+    const events = Array.isArray(session?.rejoin_events) ? session.rejoin_events.slice(-11) : [];
+    const nextEvents = [...events, event].slice(-12);
+    return {
+      rejoin_events: nextEvents,
+      last_rejoin_event: event,
+      fork_state: {
+        status: String(event?.status || '').trim().toLowerCase() || 'rejoined',
+        source_agent_id: String(event?.source_agent_id || '').trim().toLowerCase() || undefined,
+        forked_agent_id: String(event?.agent_id || event?.forked_agent_id || '').trim().toLowerCase() || undefined,
+        updated_at: String(event?.ts || new Date().toISOString()),
+      },
+    };
+  });
+}
+
+function appendSessionRecoveryEvent(sessionStore, chatId, event = {}) {
+  if (!sessionStore || typeof sessionStore.upsert !== 'function') return;
+  const cleanChatId = String(chatId || '').trim();
+  if (!cleanChatId) return;
+  sessionStore.upsert(cleanChatId, (session = {}) => {
+    const events = Array.isArray(session?.recovery_events) ? session.recovery_events.slice(-11) : [];
+    const nextEvents = [...events, event].slice(-12);
+    return {
+      recovery_events: nextEvents,
+      last_recovery_event: event,
+      recovery_state: {
+        status: String(event?.status || '').trim().toLowerCase() || 'classified',
+        category: String(event?.category || '').trim().toLowerCase() || 'unknown_failure',
+        recovery_strategy: String(event?.recovery_strategy || '').trim().toLowerCase() || 'stop',
+        updated_at: String(event?.ts || new Date().toISOString()),
+      },
+    };
+  });
+}
+
 function buildAwaitUserRequestFromFailure(failure = {}, { label = '', action = {} } = {}) {
   const reason = String(failure?.summary || failure?.message || label || '추가 입력 필요').trim();
   const hint = String(failure?.user_message || '').trim() || '추가 입력이 필요합니다.';
@@ -516,6 +580,8 @@ async function tryResolveAwaitUserRequestByDelegate({
   outputs = [],
   results = [],
   activeRouteSignals = new Set(),
+  sessionStore = null,
+  chatId = '',
 } = {}) {
   const request = awaitUserRequest && typeof awaitUserRequest === 'object'
     ? normalizeInputRequest(awaitUserRequest, {
@@ -689,6 +755,8 @@ async function executeRunAgentWithRecovery({
   outputs = [],
   results = [],
   activeRouteSignals = new Set(),
+  sessionStore = null,
+  chatId = '',
 } = {}) {
   try {
     const runResult = await callbacks.runAgent({ action, jobId, detailContext });
@@ -704,6 +772,7 @@ async function executeRunAgentWithRecovery({
     });
 
     if (failure.recovery_strategy === 'await_user' || failure.recovery_strategy === 'await_approval') {
+      appendSessionRecoveryEvent(sessionStore, chatId, buildRecoveryAttemptEvent({ action, failure, attempt: 1, stage: 'classified', status: 'blocked' }));
       results.push({ label, status: 'error', note: buildFailureResultNote(failure, String(error?.message ?? error)) });
       outputs.push(attachRouteSignals({
         agentId: 'system',
@@ -727,14 +796,17 @@ async function executeRunAgentWithRecovery({
     }
 
     if (failure.recovery_strategy === 'retry_once') {
+      appendSessionRecoveryEvent(sessionStore, chatId, buildRecoveryAttemptEvent({ action, failure, attempt: 1, stage: 'retry_scheduled', status: 'retrying' }));
       results.push({ label: `${label} retry`, status: 'ok', note: `auto retry · ${failure.category}` });
       const retried = await callbacks.runAgent({ action, jobId, detailContext });
+      appendSessionRecoveryEvent(sessionStore, chatId, buildRecoveryAttemptEvent({ action, failure, attempt: 1, stage: 'retry_succeeded', status: 'resolved' }));
       return { runResult: retried, detailContext, recovered: true, failure, awaitUserRequest: null };
     }
 
     if (failure.recovery_strategy === 'search_then_retry') {
       const scoutAgentId = findRecoveryScoutAgentId(agents, { excludeAgentId: String(action?.agent_id || '').trim().toLowerCase() });
       if (scoutAgentId) {
+        appendSessionRecoveryEvent(sessionStore, chatId, buildRecoveryAttemptEvent({ action, failure, attempt: 1, stage: 'scout_scheduled', status: 'retrying', scoutAgentId }));
         const scoutAction = {
           type: 'run_agent',
           agent_id: scoutAgentId,
@@ -765,6 +837,7 @@ async function executeRunAgentWithRecovery({
 ${scoutOutput}` : '',
         ].filter(Boolean).join('\n\n');
         const retried = await callbacks.runAgent({ action, jobId, detailContext: recoveredDetailContext });
+        appendSessionRecoveryEvent(sessionStore, chatId, buildRecoveryAttemptEvent({ action, failure, attempt: 1, stage: 'scout_retry_succeeded', status: 'resolved', scoutAgentId }));
         return { runResult: retried, detailContext: recoveredDetailContext, recovered: true, failure, awaitUserRequest: null };
       }
     }
@@ -1132,6 +1205,8 @@ export async function executeSupervisorActions({
           outputs,
           results,
           activeRouteSignals,
+          sessionStore,
+          chatId,
         });
         let runResult = executionOutcome?.runResult;
         if (executionOutcome?.awaitUserRequest) {
@@ -1269,6 +1344,8 @@ export async function executeSupervisorActions({
           outputs,
           results,
           activeRouteSignals,
+          sessionStore,
+          chatId,
         });
         let runResult = executionOutcome?.runResult;
         if (executionOutcome?.awaitUserRequest) {
@@ -1486,6 +1563,19 @@ export async function executeSupervisorActions({
           agentIds: [sourceAgentId, nextId],
           nameHints: { [nextId]: nextAgentName },
         });
+        const forkEvent = {
+          ts: new Date().toISOString(),
+          status: 'forked',
+          source_agent_id: sourceAgentId || undefined,
+          forked_agent_id: nextId || undefined,
+          operation_id: String(forked?.fork_operation_id || forked?.operation_id || '').trim() || undefined,
+          scope_mode: String(forked?.scope_mode || action?.scope?.mode || '').trim().toLowerCase() || undefined,
+          reason: String(forked?.reason || action?.reason || '').trim() || undefined,
+          goal: String(forked?.goal || action?.goal || '').trim() || undefined,
+          rejoin_strategy: String(forked?.rejoin_strategy || action?.rejoin_strategy || '').trim().toLowerCase() || undefined,
+          publish_surface_ids: Array.isArray(forked?.publish_surface_ids) ? forked.publish_surface_ids : (Array.isArray(action?.publish_surface_ids) ? action.publish_surface_ids : []),
+        };
+        appendSessionForkEvent(sessionStore, chatId, forkEvent);
         outputs.push({
           agentId: "system",
           provider: "system",
@@ -1494,9 +1584,44 @@ export async function executeSupervisorActions({
             || (nextAgentLabel ? `agent fork 완료: ${nextAgentLabel}` : "agent fork 완료"),
           agent_id: nextId || undefined,
           source_agent_id: sourceAgentId || undefined,
+          fork_operation_id: forkEvent.operation_id,
+          fork_scope_mode: forkEvent.scope_mode,
+          rejoin_strategy: forkEvent.rejoin_strategy,
+          publish_surface_ids: forkEvent.publish_surface_ids,
           jobId: String(jobId || ""),
         });
         results.push({ label, status: "ok", note: nextAgentLabel || "forked" });
+        usedActions += 1;
+        continue;
+      }
+
+      if (action.type === "rejoin_agent") {
+        if (typeof callbacks.rejoinAgent !== "function") {
+          throw new Error("rejoinAgent callback is missing");
+        }
+        const rejoined = await callbacks.rejoinAgent({ action, jobId, chatId, userId });
+        const rejoinEvent = {
+          ts: new Date().toISOString(),
+          status: String(rejoined?.status || 'rejoined').trim().toLowerCase() || 'rejoined',
+          agent_id: String(action.agent_id || '').trim().toLowerCase() || undefined,
+          source_agent_id: String(rejoined?.source_agent_id || rejoined?.target_agent_id || action.target_agent_id || '').trim().toLowerCase() || undefined,
+          operation_id: String(rejoined?.fork_operation_id || rejoined?.operation_id || '').trim() || undefined,
+          summary: String(rejoined?.summary || action.summary || '').trim() || undefined,
+          publish_surface_ids: Array.isArray(rejoined?.publish_surface_ids) ? rejoined.publish_surface_ids : (Array.isArray(action?.publish_surface_ids) ? action.publish_surface_ids : []),
+        };
+        appendSessionRejoinEvent(sessionStore, chatId, rejoinEvent);
+        outputs.push({
+          agentId: "system",
+          provider: "system",
+          mode: "rejoin_agent",
+          output: String(rejoined?.text || rejoined?.message || '').trim() || `agent rejoin 완료: ${formatChatAgentDisplayName(String(action.agent_id || '').trim().toLowerCase(), agentDisplayIndex)}`,
+          agent_id: rejoinEvent.agent_id,
+          source_agent_id: rejoinEvent.source_agent_id,
+          fork_operation_id: rejoinEvent.operation_id,
+          publish_surface_ids: rejoinEvent.publish_surface_ids,
+          jobId: String(jobId || ''),
+        });
+        results.push({ label, status: 'ok', note: rejoinEvent.source_agent_id || 'rejoined' });
         usedActions += 1;
         continue;
       }
@@ -2188,6 +2313,7 @@ export async function executeSupervisorActions({
         runtimeExecutionPolicy,
         agents,
       });
+      appendSessionRecoveryEvent(sessionStore, chatId, buildRecoveryAttemptEvent({ action, failure, attempt: 1, stage: 'classified', status: failure.user_action_required ? 'blocked' : 'classified' }));
       results.push({ label, status: "error", note: buildFailureResultNote(failure, errorMessage) });
       outputs.push(attachRouteSignals({
         agentId: 'system',

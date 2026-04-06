@@ -391,3 +391,25 @@ export function buildAgentKnowledgeBaseGuidance({
   }
   return lines.filter(Boolean).join('\n');
 }
+
+
+export function buildRoleSurfaceAclSummary({ profile = null, agents = [], participants = [], maxRoles = 8 } = {}) {
+  const normalized = normalizeKnowledgeBaseProfile(profile || {});
+  const candidates = [];
+  for (const agent of asArray(agents)) {
+    candidates.push({ role_id: cleanText(agent?.role, { lower: true }), provider: cleanText(agent?.provider, { lower: true }) });
+  }
+  for (const participant of asArray(participants)) {
+    candidates.push({ role_id: cleanText(participant?.role || participant?.role_id || participant?.roleId, { lower: true }), provider: cleanText(participant?.provider, { lower: true }) });
+  }
+  const out = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const roleId = cleanText(candidate?.role_id, { lower: true });
+    if (!roleId || seen.has(roleId)) continue;
+    seen.add(roleId);
+    out.push(summarizeRoleMemoryEnforcement({ profile: normalized, provider: candidate?.provider || '', roleId }));
+    if (out.length >= Math.max(1, Number(maxRoles) || 8)) break;
+  }
+  return out;
+}

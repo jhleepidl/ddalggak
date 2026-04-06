@@ -4,6 +4,7 @@ import { normalizeTaskInterpretation } from "../domain/task_interpretation.js";
 import { normalizeConversationPreferences } from "../domain/conversation_preferences.js";
 import { normalizeRoleId, normalizeRoleList } from "../compatibility/legacy_roles.js";
 import { splitToolishIds } from "../shared/participant_schema.js";
+import { CODE_ARTIFACT_TERMS, CODE_REQUEST_TERMS, hasSoftwareDeliveryIntent } from "../shared/work_intent.js";
 
 function asArray(raw) {
   return Array.isArray(raw) ? raw : [];
@@ -17,8 +18,6 @@ function normalizeText(raw = "", {
 }
 
 const WORKFLOW_TERMS = ["workflow", "membership", "runtime", "polling", "shutdown", "operator", "thread team", "운영"];
-const CODE_REQUEST_TERMS = ["code", "implement", "fix", "bug", "patch", "refactor", "ipynb", "notebook", "script", "repository", "repo", "workspace", "python", "javascript", "typescript", "sql", "bash", "shell", "commit", "pull request", "web service", "web app", "frontend", "backend", "full stack", "fullstack", "api", "server", "client", "ui", "ux", "react", "next.js", "nextjs", "node", "express", "fastapi", "flask", "django", "spring", "코드", "구현", "리팩터", "패치", "노트북", "스크립트", "파이썬", "자바스크립트", "타입스크립트", "레포", "웹 서비스", "웹앱", "프론트엔드", "백엔드", "서버", "클라이언트", "api", "서비스 개발"];
-const CODE_ARTIFACT_TERMS = ["ipynb", "notebook", "jupyter", "script", "patch", "commit", "workspace", "repo", "repository", "python", "javascript", "typescript", "sql", "bash", "shell", "pr", "pull request", "web service", "web app", "frontend", "backend", "api", "server", "react", "nextjs", "node", "express", "fastapi", "flask", "django", "주피터", "노트북", "스크립트", "패치", "커밋", "파이썬", "자바스크립트", "타입스크립트", "레포", "웹 서비스", "웹앱", "프론트엔드", "백엔드", "서버", "api", "서비스 개발"];
 const FINANCE_RESEARCH_TERMS = ["stock", "equity", "stock market", "market news", "filing", "valuation", "invest", "investment", "주식", "주식시장", "증시", "뉴스", "공시", "투자", "밸류"];
 
 function includesAny(text = "", needles = []) {
@@ -92,7 +91,7 @@ ${routeText}`;
 }
 
 function inferDeliverableType(taskType = "", text = "") {
-  if (taskType === "code_change") return includesAny(text, ["web service", "web app", "api", "frontend", "backend", "웹 서비스", "웹앱", "프론트엔드", "백엔드", "서버"]) ? "software_delivery" : "code_patch";
+  if (taskType === "code_change") return hasSoftwareDeliveryIntent(text) ? "software_delivery" : "code_patch";
   if (taskType === "workflow") return "workflow_update";
   if (taskType === "review") return "review_findings";
   if (includesAny(text, ["telegram", "brief", "요약"])) return "brief";

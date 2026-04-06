@@ -1,0 +1,53 @@
+function normalizeText(value = '') {
+  return String(value || '').trim();
+}
+
+function normalizeLower(value = '') {
+  return normalizeText(value).toLowerCase();
+}
+
+export const CODE_REQUEST_TERMS = [
+  'code', 'implement', 'fix', 'bug', 'patch', 'refactor', 'ipynb', 'notebook', 'script',
+  'repository', 'repo', 'workspace', 'python', 'javascript', 'typescript', 'sql', 'bash',
+  'shell', 'commit', 'pull request', 'web service', 'web app', 'frontend', 'backend',
+  'full stack', 'fullstack', 'api', 'server', 'client', 'ui', 'ux', 'react', 'next.js',
+  'nextjs', 'node', 'express', 'fastapi', 'flask', 'django', 'spring', '코드', '구현',
+  '리팩터', '패치', '노트북', '스크립트', '파이썬', '자바스크립트', '타입스크립트',
+  '레포', '웹 서비스', '웹앱', '프론트엔드', '백엔드', '서버', '클라이언트', '서비스 개발',
+];
+
+export const CODE_ARTIFACT_TERMS = [
+  'ipynb', 'notebook', 'jupyter', 'script', 'patch', 'commit', 'workspace', 'repo',
+  'repository', 'python', 'javascript', 'typescript', 'sql', 'bash', 'shell', 'pr',
+  'pull request', 'web service', 'web app', 'frontend', 'backend', 'api', 'server', 'react',
+  'nextjs', 'node', 'express', 'fastapi', 'flask', 'django', '주피터', '노트북', '스크립트',
+  '패치', '커밋', '파이썬', '자바스크립트', '타입스크립트', '레포', '웹 서비스', '웹앱',
+  '프론트엔드', '백엔드', '서버', 'api', '서비스 개발',
+];
+
+const IMPLEMENTATION_LIKE_RE = /(implement|patch|refactor|code|repo|repository|workspace|script|prototype|web\s*service|web\s*app|frontend|backend|api|server|client|full[- ]?stack|react|next(?:\.js)?|node|express|fastapi|flask|django|spring|서비스\s*이름|서비스\s*구현|프로그램\s*개발|앱\s*개발|구현|개발|코드|노트북|ipynb|jupyter|주피터|python|스크립트|웹\s*서비스|웹앱|프론트엔드|백엔드|서버|클라이언트|서비스\s*개발)/i;
+const SOFTWARE_DELIVERY_RE = /(web\s*service|web\s*app|frontend|backend|api|server|client|full[- ]?stack|react|next(?:\.js)?|node|express|fastapi|flask|django|spring|웹\s*서비스|웹앱|프론트엔드|백엔드|서버|클라이언트|서비스\s*개발)/i;
+const BUILDER_ROLE_RE = /(^|[^a-z])(builder|coder|developer|implementer|frontend|backend|fullstack|engineer)([^a-z]|$)|구현|코더|개발자|빌더/i;
+const REVIEWER_ROLE_RE = /(^|[^a-z])(reviewer|review|critic|verifier|quality|qa)([^a-z]|$)|리뷰어|검토|검수|비평|품질/i;
+const SYNTHESIZER_ROLE_RE = /(^|[^a-z])(synthesizer|synth|summarizer|summary|writer|delivery)([^a-z]|$)|요약|정리|합성|전달/i;
+const OPERATOR_ROLE_RE = /(^|[^a-z])(operator|coordinator|orchestrator|router|manager)([^a-z]|$)|운영|조정|오퍼레이터/i;
+const RESEARCHER_ROLE_RE = /(^|[^a-z])(researcher|scout|analyst|investigator|planner|research)([^a-z]|$)|조사|연구|분석|스카우트/i;
+
+export function hasImplementationLikeIntent(text = '') {
+  return IMPLEMENTATION_LIKE_RE.test(normalizeText(text));
+}
+
+export function hasSoftwareDeliveryIntent(text = '') {
+  return SOFTWARE_DELIVERY_RE.test(normalizeText(text));
+}
+
+export function inferExecutionRoleFromText(text = '', { fallback = '' } = {}) {
+  const value = normalizeLower(text);
+  if (!value) return normalizeLower(fallback);
+  if (BUILDER_ROLE_RE.test(value)) return 'builder';
+  if (REVIEWER_ROLE_RE.test(value)) return 'reviewer';
+  if (SYNTHESIZER_ROLE_RE.test(value)) return 'synthesizer';
+  if (OPERATOR_ROLE_RE.test(value)) return 'operator';
+  if (RESEARCHER_ROLE_RE.test(value)) return 'researcher';
+  return normalizeLower(fallback);
+}

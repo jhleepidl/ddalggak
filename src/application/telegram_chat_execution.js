@@ -2656,12 +2656,24 @@ function buildSupervisorExecutionCallbacks({
           }
           const sourceId = String(action?.agent_id || "").trim().toLowerCase();
           if (!sourceId) throw new Error("fork_agent requires agent_id");
+          const forkBody = {
+            visibility: 'private',
+            reason: String(action?.reason || '').trim() || undefined,
+            purpose: String(action?.goal || '').trim() || undefined,
+            scope: action?.scope && typeof action.scope === 'object' ? action.scope : undefined,
+            scope_node_ids: Array.isArray(action?.scope_node_ids) ? action.scope_node_ids : undefined,
+            source_surface_ids: Array.isArray(action?.source_surface_ids) ? action.source_surface_ids : undefined,
+            publish_surface_ids: Array.isArray(action?.publish_surface_ids) ? action.publish_surface_ids : undefined,
+            source_thread_id: String(action?.source_thread_id || '').trim() || undefined,
+            source_run_id: String(action?.source_run_id || '').trim() || undefined,
+            rejoin_strategy: String(action?.rejoin_strategy || '').trim().toLowerCase() || undefined,
+          };
           const forked = await withBoundGocActor(async () => {
             const client = requireGocClient();
             if (typeof client.forkAgent !== "function") {
               throw new Error("GoC forkAgent API unavailable");
             }
-            return await client.forkAgent(sourceId);
+            return await client.forkAgent(sourceId, forkBody);
           });
           const forkedId = String(forked?.id || "").trim().toLowerCase();
           await refreshAgentRegistry({ includeCompiled: true });
@@ -2671,9 +2683,50 @@ function buildSupervisorExecutionCallbacks({
             id: forkedId,
             agent_id: forkedId,
             source_agent_id: sourceId,
+            fork_operation_id: String(forked?.fork_operation_id || forked?.fork?.id || '').trim() || undefined,
+            scope_mode: String(forked?.fork?.scope_mode || action?.scope?.mode || '').trim().toLowerCase() || undefined,
+            reason: forkBody.reason,
+            goal: forkBody.purpose,
+            rejoin_strategy: forkBody.rejoin_strategy,
+            publish_surface_ids: Array.isArray(forked?.fork?.publish_surface_ids) ? forked.fork.publish_surface_ids : (forkBody.publish_surface_ids || []),
             text: forkedLabel
               ? `✅ agent fork 완료: ${sourceLabel} -> ${forkedLabel}`
               : `✅ agent fork 요청 완료: ${sourceLabel}`,
+          };
+        },
+      });
+    },
+    rejoinAgent: async ({ action }) => {
+      return await runActionWithGraph({
+        action,
+        toolName: "rejoin_agent",
+        work: async () => {
+          if (memoryModeWithFallback() !== "goc") {
+            throw new Error("rejoin_agent requires MEMORY_MODE=goc");
+          }
+          const forkedId = String(action?.agent_id || '').trim().toLowerCase();
+          if (!forkedId) throw new Error('rejoin_agent requires agent_id');
+          const rejoined = await withBoundGocActor(async () => {
+            const client = requireGocClient();
+            if (typeof client.rejoinAgent !== 'function') {
+              throw new Error('GoC rejoinAgent API unavailable');
+            }
+            return await client.rejoinAgent(forkedId, {
+              target_agent_id: String(action?.target_agent_id || '').trim().toLowerCase() || undefined,
+              summary: String(action?.summary || '').trim() || undefined,
+              publish_surface_ids: Array.isArray(action?.publish_surface_ids) ? action.publish_surface_ids : undefined,
+              artifact_ids: Array.isArray(action?.artifact_ids) ? action.artifact_ids : undefined,
+              include_recent_outputs: action?.include_recent_outputs !== false,
+            });
+          });
+          return {
+            agent_id: forkedId,
+            source_agent_id: String(rejoined?.fork?.source_agent_id || rejoined?.source_agent_id || rejoined?.target_agent_id || '').trim().toLowerCase() || undefined,
+            fork_operation_id: String(rejoined?.fork?.id || rejoined?.fork_operation_id || '').trim() || undefined,
+            publish_surface_ids: Array.isArray(rejoined?.fork?.publish_surface_ids) ? rejoined.fork.publish_surface_ids : (Array.isArray(action?.publish_surface_ids) ? action.publish_surface_ids : []),
+            summary: String(action?.summary || '').trim() || undefined,
+            status: 'rejoined',
+            text: String(rejoined?.message || '').trim() || `✅ agent rejoin 완료: ${formatRuntimeAgentDisplay(forkedId)}`,
           };
         },
       });

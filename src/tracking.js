@@ -19,6 +19,7 @@ const SAFE_DOC_RE = /^[a-zA-Z0-9._-]+\.md$/;
 const PROFILE_FILE = "knowledge_base_profile.json";
 const READ_ONLY_SYSTEM_DOCS = new Set([PROFILE_FILE, KNOWLEDGE_BASE_CONTRACT_FILE]);
 const MEMORY_WRITE_EVENTS_FILE = "memory_write_events.jsonl";
+const TEAM_SELECTION_EVENTS_FILE = "team_selection_events.jsonl";
 
 function cleanText(value = "") {
   return String(value || "").trim();
@@ -277,6 +278,44 @@ export class Tracking {
     safeJsonlAppend(this._memoryWriteEventsPath(jobId), { ts: new Date().toISOString(), ...payload });
   }
 
+  _teamSelectionEventsPath(jobId) {
+    try {
+      return path.join(this.jobs.jobDir(jobId), TEAM_SELECTION_EVENTS_FILE);
+    } catch {
+      return "";
+    }
+  }
+
+  recordTeamSelectionEvent(jobId, payload = {}) {
+    safeJsonlAppend(this._teamSelectionEventsPath(jobId), { ts: new Date().toISOString(), ...payload });
+  }
+
+  readTeamSelectionEvents(jobId, limit = null) {
+    try {
+      const filePath = this._teamSelectionEventsPath(jobId);
+      if (!filePath || !fs.existsSync(filePath)) return [];
+      const rows = String(fs.readFileSync(filePath, 'utf8') || '')
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          try { return JSON.parse(line); } catch { return null; }
+        })
+        .filter(Boolean);
+      const cleanLimit = Number(limit);
+      if (Number.isFinite(cleanLimit) && cleanLimit > 0) {
+        return rows.slice(-Math.max(1, Math.floor(cleanLimit)));
+      }
+      return rows;
+    } catch {
+      return [];
+    }
+  }
+
+  readRecentTeamSelectionEvents(jobId, limit = 10) {
+    return this.readTeamSelectionEvents(jobId, limit);
+  }
+
   readRecentWriteEvents(jobId, limit = 10) {
     try {
       const filePath = this._memoryWriteEventsPath(jobId);
@@ -319,7 +358,9 @@ export class Tracking {
         role_id: cleanRoleId || undefined,
         purpose: inferredPurpose,
         requested_doc: cleanRequested || undefined,
+        requested_surface_id: cleanRequested.replace(/\.md$/i, '') || undefined,
         resolved_doc: resolvedName,
+        target_surface_id: resolvedName.replace(/\.md$/i, '') || undefined,
         status: 'allowed',
         reason: 'no_contract_context',
       };
@@ -337,41 +378,58 @@ export class Tracking {
     });
 
     if (decision.status === 'rejected' || !decision.target_doc?.file_name) {
-      this._recordMemoryWriteEvent(jobId, {
-        source,
-        provider: cleanProvider || undefined,
-        role_id: cleanRoleId || undefined,
-        purpose: inferredPurpose,
-        requested_doc: cleanRequested || undefined,
-        resolved_doc: '',
-        status: 'rejected',
-        reason: decision.reason || 'no_writable_surface',
-      });
-      if (strict) throw new Error(`memory write rejected for ${cleanRoleId || cleanProvider || 'writer'}: ${decision.reason || 'no writable surface'}`);
+      const requestedSurfaceId = cleanText(decision.requested_doc?.surface_id || decision.requested_doc?.surfaceId || decision.requested_doc?.doc_id).toLowerCase() || cleanRequested.replace(/\.md$/i, '') || undefined;
+      if (strict) {
+        this._recordMemoryWriteEvent(jobId, {
+          source,
+          provider: cleanProvider || undefined,
+          role_id: cleanRoleId || undefined,
+          purpose: inferredPurpose,
+          requested_doc: cleanRequested || undefined,
+          requested_surface_id: requestedSurfaceId,
+          resolved_doc: '',
+          target_surface_id: '',
+          status: 'rejected',
+          reason: decision.reason || 'no_writable_surface',
+          policy_blocked: true,
+        });
+        throw new Error(`memory write rejected for ${cleanRoleId || cleanProvider || 'writer'}: ${decision.reason || 'no writable surface'}`);
+      }
       this.append(jobId, fallbackDoc, markdown, { timestamp });
-      return {
+      const fallbackResolvedDoc = this.resolveDocName(jobId, fallbackDoc);
+      const event = {
         source,
         provider: cleanProvider || undefined,
         role_id: cleanRoleId || undefined,
         purpose: inferredPurpose,
         requested_doc: cleanRequested || undefined,
-        resolved_doc: this.resolveDocName(jobId, fallbackDoc),
+        requested_surface_id: requestedSurfaceId,
+        resolved_doc: fallbackResolvedDoc,
+        target_surface_id: fallbackResolvedDoc.replace(/\.md$/i, ''),
         status: 'rerouted',
         reason: decision.reason || 'rejected_with_fallback',
+        fallback_used: true,
+        policy_blocked: true,
       };
+      this._recordMemoryWriteEvent(jobId, event);
+      return event;
     }
 
     this.append(jobId, decision.target_doc.file_name, markdown, { timestamp });
+    const resolvedDocName = this.resolveDocName(jobId, decision.target_doc.file_name);
     const event = {
       source,
       provider: cleanProvider || undefined,
       role_id: cleanRoleId || undefined,
       purpose: inferredPurpose,
       requested_doc: cleanRequested || undefined,
-      resolved_doc: this.resolveDocName(jobId, decision.target_doc.file_name),
+      requested_surface_id: cleanText(decision.requested_doc?.surface_id || decision.requested_doc?.surfaceId || decision.requested_doc?.doc_id).toLowerCase() || cleanRequested.replace(/\.md$/i, '') || undefined,
+      resolved_doc: resolvedDocName,
+      target_surface_id: cleanText(decision.target_doc?.surface_id || decision.target_doc?.surfaceId || decision.target_doc?.doc_id).toLowerCase() || resolvedDocName.replace(/\.md$/i, ''),
       status: decision.status || 'allowed',
       reason: decision.reason || 'requested_surface_allowed',
       fallback_used: decision.fallback_used === true,
+      policy_blocked: decision.status === 'rerouted',
     };
     this._recordMemoryWriteEvent(jobId, event);
     return event;

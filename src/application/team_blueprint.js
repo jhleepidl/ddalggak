@@ -4,8 +4,9 @@ import { normalizeInstallProposalState } from './install_proposal_state.js';
 import { normalizeCredentialBindingState } from './credential_binding.js';
 import { buildTeamStructureV2, normalizeTeamStructureV2, deriveTeamConfigFromStructureV2 } from '../shared/team_structure_v2.js';
 import { deriveKnowledgeBaseDesign, normalizeMemoryPlan } from '../knowledge_base/profile.js';
+import { buildRoleSurfaceAclSummary } from '../knowledge_base/runtime.js';
 import { buildTeamSeedFromTaskArchetype, listTeamBlueprintTemplateSeeds } from './team_blueprint_templates.js';
-import { buildTeamCapabilityContract, summarizeCapabilityContract } from './team_capability_contract.js';
+import { buildTeamCapabilityContract, compileTeamAdmissionDecision, summarizeAdmissionDecision, summarizeCapabilityContract } from './team_capability_contract.js';
 import { resolveRoutingContractSummary } from './route_contract.js';
 
 function asObject(value) {
@@ -108,6 +109,40 @@ function summarizeMemoryMap(memoryPlan = {}) {
   }));
 }
 
+export function summarizeExecutableTeamDefinition({ blueprint = {}, memoryAclSummary = [] } = {}) {
+  const row = asObject(blueprint);
+  const topology = asObject(row.topology);
+  const participants = asArray(topology.participants || row.structure?.participants);
+  const roleContracts = asArray(row.role_contracts);
+  const admission = asObject(row.admission_decision);
+  const capability = asObject(row.capability_contract);
+  const memoryMap = asArray(row.memory_map || summarizeMemoryMap(row.memory_plan));
+  return {
+    member_count: roleContracts.length || participants.length,
+    participant_count: participants.length,
+    role_ids: uniqStrings(roleContracts.map((entry) => cleanId(entry.role || entry.role_id || 'agent')), { limit: 12 }),
+    topology_contract: {
+      pattern: clean(topology.pattern || 'hybrid') || 'hybrid',
+      execution_pattern: clean(topology.execution_pattern || ''),
+      edge_count: asArray(topology.edges).length,
+      final_participant_id: clean(topology.final_participant_id || ''),
+    },
+    memory_contract: {
+      surface_count: memoryMap.length,
+      writable_surface_count: memoryMap.filter((surface) => !['read_only', 'readonly', 'none'].includes(cleanId(surface.write_policy || 'shared'))).length,
+      final_answer_surface_ready: memoryMap.some((surface) => cleanId(surface.surface_id) === 'final_answer' || asArray(surface.semantic_slots).map((entry) => cleanId(entry)).includes('decisions')),
+      acl_role_count: asArray(memoryAclSummary).length,
+    },
+    capability_contract: {
+      required_tool_count: asArray(capability.required_tools).length,
+      optional_tool_count: asArray(capability.optional_tools).length,
+      missing_required_tool_count: asArray(admission.missing_required_tools).length,
+      missing_optional_tool_count: asArray(admission.missing_optional_tools).length,
+    },
+    executable_ready: admission.runtime_ready === true || cleanId(admission.status) === 'ready',
+  };
+}
+
 function buildCatalogMetadata(team = {}, structure = {}, memoryPlan = {}) {
   const pattern = clean(structure?.topology?.pattern || 'hybrid') || 'hybrid';
   const archetype = inferTaskArchetype({ team, structure, memoryPlan });
@@ -176,6 +211,12 @@ export function attachTeamBlueprint(team = {}, { runtime = null, applyState = 'p
   const roleContracts = buildRoleContracts(team, structure, memoryPlan);
   const artifactContract = buildArtifactContract(team, structure);
   const capabilityContract = buildTeamCapabilityContract({ team: { ...team, requirements }, runtime });
+  const admissionDecision = compileTeamAdmissionDecision(capabilityContract);
+  const memoryAclSummary = buildRoleSurfaceAclSummary({ profile: knowledgeDesign.profile, agents: asArray(team.agents), participants: asArray(structure.participants) });
+  const executableDefinition = summarizeExecutableTeamDefinition({
+    blueprint: { topology: structure.topology, structure, role_contracts: roleContracts, capability_contract: capabilityContract, admission_decision: admissionDecision, memory_map: summarizeMemoryMap(memoryPlan), memory_plan: memoryPlan },
+    memoryAclSummary,
+  });
   const teamSeed = {
     ...deriveTeamConfigFromStructureV2(structure),
     ...team,
@@ -205,7 +246,9 @@ export function attachTeamBlueprint(team = {}, { runtime = null, applyState = 'p
     role_contracts: roleContracts,
     artifact_contract: artifactContract,
     capability_contract: capabilityContract,
+    admission_decision: admissionDecision,
     runtime_policy: { runtime_execution: asObject(structure.control_policy?.runtime_execution) },
+    executable_definition: executableDefinition,
     team_seed: teamSeed,
     catalog,
   };
@@ -216,6 +259,9 @@ export function attachTeamBlueprint(team = {}, { runtime = null, applyState = 'p
     catalog_tags: catalog.tags,
     good_for: catalog.good_for,
     bad_for: catalog.bad_for,
+    admission_decision: admissionDecision,
+    memory_acl_summary: memoryAclSummary,
+    executable_definition: executableDefinition,
     install_proposal: installProposal,
     install_proposal_state: normalizedInstallProposalState,
     credential_binding_state: normalizedCredentialBindingState,
@@ -228,6 +274,7 @@ export function buildTeamBlueprintDocument(team = {}, { runtime = null, applySta
   const installHints = buildManifestInstallHints(requirements, { hasGocThreadTarget: !!clean(runtime?.map?.threadId || runtime?.threadId || '') });
   const cleanApplyState = cleanState(applyState);
   const capabilitySummary = summarizeCapabilityContract(normalizedTeam.team_blueprint?.capability_contract || {});
+  const admissionSummary = summarizeAdmissionDecision(normalizedTeam.admission_decision || normalizedTeam.team_blueprint?.admission_decision || {});
   return {
     kind: 'ddalggak_team_blueprint',
     version: 1,
@@ -244,9 +291,16 @@ export function buildTeamBlueprintDocument(team = {}, { runtime = null, applySta
       memory_surface_count: asArray(normalizedTeam.memory_plan?.surfaces).length,
       task_archetype: normalizedTeam.team_blueprint?.task_archetype || 'general',
       capability_status: capabilitySummary.capability_status,
+      runtime_bound: admissionSummary.runtime_bound,
+      admission_status: admissionSummary.admission_status,
+      admission_decision: admissionSummary.admission_decision,
+      blocking_reason_codes: admissionSummary.blocking_reason_codes,
+      degrade_reason_codes: admissionSummary.degrade_reason_codes,
       missing_required_tool_count: capabilitySummary.missing_required_tool_count,
       tool_requirements: requirements.summary?.tool_count || 0,
       credential_requirements: requirements.summary?.credential_count || 0,
+      memory_acl_summary: asArray(normalizedTeam.memory_acl_summary).slice(0, 8),
+      executable_definition: asObject(normalizedTeam.executable_definition || normalizedTeam.team_blueprint?.executable_definition),
     },
     requirements: { ...requirements, install_hints: installHints },
     blueprint: normalizedTeam.team_blueprint,
@@ -332,6 +386,7 @@ export function resolveExecutionBlueprintSummary({ team = null, goal = '', taskI
   const executionGraph = asObject(snapshot.execution_graph || snapshotPlan.execution_graph);
   const effectivePattern = cleanId(executionGraph.pattern || topology.execution_pattern || topology.pattern || '');
   const capabilitySummary = summarizeCapabilityContract(blueprint.capability_contract || {});
+  const admissionSummary = summarizeAdmissionDecision(normalizedTeam?.admission_decision || blueprint.admission_decision || {});
   const routeContract = resolveRoutingContractSummary({
     activeTeam: normalizedTeam,
     runtimeTeamSnapshot: snapshot,
@@ -347,6 +402,11 @@ export function resolveExecutionBlueprintSummary({ team = null, goal = '', taskI
     memory_surface_count: memoryMap.length,
     memory_map: memoryMap.slice(0, 8),
     capability_status: capabilitySummary.capability_status,
+    runtime_bound: admissionSummary.runtime_bound,
+    admission_status: admissionSummary.admission_status,
+    admission_decision: admissionSummary.admission_decision,
+    blocking_reason_codes: admissionSummary.blocking_reason_codes,
+    degrade_reason_codes: admissionSummary.degrade_reason_codes,
     required_tool_count: capabilitySummary.required_tool_count,
     optional_tool_count: capabilitySummary.optional_tool_count,
     missing_required_tool_count: capabilitySummary.missing_required_tool_count,
@@ -354,6 +414,7 @@ export function resolveExecutionBlueprintSummary({ team = null, goal = '', taskI
     missing_required_tools: capabilitySummary.missing_required_tools,
     missing_optional_tools: capabilitySummary.missing_optional_tools,
     memory_contract_enforcement: routeContract?.memory_contract_enforcement || undefined,
+    memory_acl_summary: asArray(normalizedTeam?.memory_acl_summary).slice(0, 8),
     publish_contract_readiness: routeContract ? {
       final_owner: routeContract.final_owner || undefined,
       final_answer_publish_ok: routeContract.final_answer_publish_ok !== false,
@@ -373,8 +434,15 @@ export function formatExecutionBlueprintSummaryLines(summary = null, { maxSurfac
   if (clean(row.execution_pattern || row.topology_pattern || '')) lines.push(`- runtime pattern: ${clean(row.execution_pattern || row.topology_pattern)}`);
   if (clean(row.source || '')) lines.push(`- source: ${clean(row.source)}`);
   if (clean(row.capability_status || '')) lines.push(`- capability status: ${clean(row.capability_status)}`);
+  if (clean(row.admission_status || '')) lines.push(`- admission: ${clean(row.admission_status)}${clean(row.admission_decision || '') ? ` · ${clean(row.admission_decision)}` : ''}`);
   if (asArray(row.missing_required_tools).length > 0) lines.push(`- missing required tools: ${asArray(row.missing_required_tools).join(', ')}`);
   if (asArray(row.missing_optional_tools).length > 0) lines.push(`- missing optional tools: ${asArray(row.missing_optional_tools).join(', ')}`);
+  if (asArray(row.memory_acl_summary).length > 0) {
+    lines.push('- memory acl:');
+    for (const acl of asArray(row.memory_acl_summary).slice(0, 4)) {
+      lines.push(`  • ${clean(acl.role_id || 'role')} · read=${asArray(acl.read_surface_ids).length} · write=${asArray(acl.write_surface_ids).length} · publish=${asArray(acl.publish_surface_ids).length}`);
+    }
+  }
   const surfaces = asArray(row.memory_map).slice(0, Math.max(1, maxSurfaces));
   if (surfaces.length > 0) {
     lines.push('- memory map:');

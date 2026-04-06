@@ -41,6 +41,7 @@ import { buildTeamSeedFromTaskArchetype } from './team_blueprint_templates.js';
 import { normalizeParticipantExecutionSchema, splitToolishIds, getParticipantLegacyRequiredToolIds, getParticipantLegacyOptionalToolIds, getParticipantLegacyRecommendedToolIds } from '../shared/participant_schema.js';
 import { collectEffectiveAvailableToolIds } from './runtime_tool_availability.js';
 import { buildTeamCapabilityContract, formatTeamCapabilityContractLines } from './team_capability_contract.js';
+import { hasImplementationLikeIntent, hasSoftwareDeliveryIntent, inferExecutionRoleFromText } from '../shared/work_intent.js';
 
 function asArray(v){return Array.isArray(v)?v:[]}
 function asObject(v){return v&&typeof v==='object'?v:{}}
@@ -180,7 +181,7 @@ function selectTaskArchetypeTemplate({ taskText = '', currentTeam = null, planne
   const currentArchetype = cleanId(currentTeam?.task_archetype || currentTeam?.taskArchetype || currentTeam?.team_blueprint?.task_archetype || currentTeam?.teamBlueprint?.task_archetype || '');
   const repairSignals = hints.review && /(repair|regression|incident|postmortem|bug|failure|stalled|audit|triage|root cause|fixup|회귀|장애|오류|감사|원인|수습|복구|수정)/i.test(text);
   const improvementSignals = (hints.build || hints.review) && /(iterate|iterative|iteration|improve|improvement|optimi[sz]e|refine repeatedly|keep improving|계속 개선|반복 개선|지속 개선|계속 발전|여러 모델|multi-model|자동 개선|반복적으로)/i.test(text);
-  const implementationSignals = hints.build || ['code_change', 'implementation', 'workspace_change'].includes(taskType) || /(implement|patch|refactor|code|repo|repository|workspace|script|prototype|web\s*service|web\s*app|frontend|backend|api|server|client|full[- ]?stack|react|next(?:\.js)?|node|express|fastapi|flask|django|spring|구현|패치|리팩터|코드|레포|저장소|웹\s*서비스|웹앱|프론트엔드|백엔드|서버|클라이언트|서비스\s*개발)/i.test(text);
+  const implementationSignals = hints.build || ['code_change', 'implementation', 'workspace_change'].includes(taskType) || hasImplementationLikeIntent(text);
   const researchSignals = hints.compare || hints.debate || hints.discussion || hints.news || hints.filings || /(research|analysis|analy|brief|memo|investigate|market|survey|source-grounded|조사|분석|브리프|리서치|시장)/i.test(text);
   if (repairSignals) return { archetype: 'review_repair', reason: 'repair_or_audit_signals' };
   if (implementationSignals && hints.review && /(repair|regression|bug|fixup|회귀|장애|오류|복구|수습)/i.test(text)) return { archetype: 'review_repair', reason: 'review_then_repair' };
@@ -587,14 +588,9 @@ function buildFreeformAgentDrafts({ taskText = '', runtime = null, blueprints = 
 }
 
 function inferTeamRoleFromText(raw = '') {
-  const value = clean(raw).toLowerCase();
+  const value = clean(raw);
   if (!value) return '';
-  if (/(^|[^a-z])(builder|coder|developer|implementer|frontend|backend|fullstack|engineer)([^a-z]|$)|구현|코더|개발자|빌더/.test(value)) return 'builder';
-  if (/(^|[^a-z])(reviewer|review|critic|verifier|quality|qa)([^a-z]|$)|리뷰어|검토|검수|비평|품질/.test(value)) return 'reviewer';
-  if (/(^|[^a-z])(synthesizer|synth|summarizer|summary|writer|delivery)([^a-z]|$)|요약|정리|합성|전달/.test(value)) return 'synthesizer';
-  if (/(^|[^a-z])(operator|coordinator|orchestrator|router|manager)([^a-z]|$)|운영|조정|오퍼레이터/.test(value)) return 'operator';
-  if (/(^|[^a-z])(researcher|scout|analyst|investigator|planner|research)([^a-z]|$)|조사|연구|분석|스카우트/.test(value)) return 'researcher';
-  return '';
+  return inferExecutionRoleFromText(value, { fallback: '' }) || '';
 }
 
 function normalizeTeamRole(raw = '') {
@@ -987,7 +983,7 @@ function ensureFreeformBlueprintCoverage(blueprints = [], taskText = '', structu
     pushRole('Reviewer', 'reviewer', '결과를 검토하고 리스크를 정리한다', 'gpt-5.4');
   }
   if (hints.build && !hasRole('builder')) {
-    pushRole('Builder', 'builder', /web\s*service|web\s*app|frontend|backend|api|server|client|react|next(?:\.js)?|node|express|fastapi|flask|django|spring|웹\s*서비스|웹앱|프론트엔드|백엔드|서버|클라이언트|서비스\s*개발/i.test(taskText)
+    pushRole('Builder', 'builder', hasSoftwareDeliveryIntent(taskText)
       ? '웹 서비스/애플리케이션 구현과 코드 산출물을 만든다'
       : '구현 또는 코드 수정 초안을 만든다', 'gpt-5-codex');
   }
@@ -1340,7 +1336,7 @@ function inferFreeformAgentBlueprints(description = '') {
   if (/비관|bear|pessimis/i.test(text)) pushIfMissing('Bear Analyst', 'researcher', '비관적 시나리오와 리스크 근거를 수집한다');
   if (/뉴스|news/i.test(text)) pushIfMissing('News Researcher', 'researcher', '최근 뉴스와 이벤트를 수집한다');
   if (/공시|filing|dart|financial/i.test(text)) pushIfMissing('Filings Analyst', 'researcher', '공시와 수치 근거를 확인한다');
-  if (/코드|구현|build|builder|refactor|리팩토|web\s*service|web\s*app|frontend|backend|api|server|client|react|next(?:\.js)?|node|express|fastapi|flask|django|spring|웹\s*서비스|웹앱|프론트엔드|백엔드|서버|클라이언트|서비스\s*개발/i.test(text)) pushIfMissing('Builder', 'builder', '구현과 수정 초안을 만든다');
+  if (hasImplementationLikeIntent(text)) pushIfMissing('Builder', 'builder', '구현과 수정 초안을 만든다');
   if (/red[ -]?team|반박|adversarial|critic/i.test(text)) pushIfMissing('Red-Team Reviewer', 'reviewer', '약한 주장과 반례를 지적한다');
   if (/review|검토|reviewer|검수|adjudicat|judge|조정/i.test(text)) pushIfMissing('Reviewer', 'reviewer', '결과를 검토하고 모순을 정리한다');
   if (/요약|정리|synth|summary|memo|보고서|final/i.test(text)) pushIfMissing('Synthesizer', 'synthesizer', '최종 답변과 요약을 작성한다');

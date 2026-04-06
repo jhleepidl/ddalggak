@@ -233,10 +233,41 @@ function normalizeForkAgent(raw) {
   const row = asObject(raw);
   const agentId = String(row.agent_id || row.agentId || row.agent || row.id || "").trim().toLowerCase();
   if (!agentId) return null;
+  const scope = row.scope && typeof row.scope === 'object' ? row.scope : null;
+  const scopeNodeIds = normalizeStringArray(row.scope_node_ids || row.scopeNodeIds || row.node_ids || row.nodeIds || [], { max: 24 });
+  const sourceSurfaceIds = normalizeStringArray(row.source_surface_ids || row.sourceSurfaceIds || row.surface_ids || row.surfaceIds || [], { max: 16 });
+  const publishSurfaceIds = normalizeStringArray(row.publish_surface_ids || row.publishSurfaceIds || [], { max: 16 });
   return {
     type: "fork_agent",
     agent_id: agentId,
+    scope,
+    scope_node_ids: scopeNodeIds,
+    source_surface_ids: sourceSurfaceIds,
+    publish_surface_ids: publishSurfaceIds,
+    source_thread_id: String(row.source_thread_id || row.sourceThreadId || '').trim() || undefined,
+    source_run_id: String(row.source_run_id || row.sourceRunId || '').trim() || undefined,
+    reason: String(row.reason || row.label || '').trim() || undefined,
+    goal: String(row.goal || row.prompt || row.summary || '').trim() || undefined,
+    rejoin_strategy: String(row.rejoin_strategy || row.rejoinStrategy || '').trim().toLowerCase() || undefined,
+    auto_rejoin: row.auto_rejoin === true || row.autoRejoin === true,
     risk: normalizeRisk(row.risk, "L2"),
+  };
+}
+
+function normalizeRejoinAgent(raw) {
+  const row = asObject(raw);
+  const agentId = String(row.agent_id || row.agentId || row.agent || row.id || "").trim().toLowerCase();
+  if (!agentId) return null;
+  const publishSurfaceIds = normalizeStringArray(row.publish_surface_ids || row.publishSurfaceIds || row.surface_ids || row.surfaceIds || [], { max: 16 });
+  return {
+    type: "rejoin_agent",
+    agent_id: agentId,
+    target_agent_id: String(row.target_agent_id || row.targetAgentId || row.target || '').trim().toLowerCase() || undefined,
+    summary: String(row.summary || row.reason || row.prompt || '').trim() || undefined,
+    publish_surface_ids: publishSurfaceIds,
+    artifact_ids: normalizeStringArray(row.artifact_ids || row.artifactIds || [], { max: 16 }),
+    include_recent_outputs: row.include_recent_outputs !== false && row.includeRecentOutputs !== false,
+    risk: normalizeRisk(row.risk, "L1"),
   };
 }
 
@@ -396,6 +427,7 @@ export function normalizeAction(raw) {
   if (type === "remove_agent_from_conversation" || type === "remove_agent") return normalizeRemoveAgentFromConversation(row);
   if (type === "create_agent_definition") return normalizeCreateAgentDefinition(row);
   if (type === "fork_agent") return normalizeForkAgent(row);
+  if (type === "rejoin_agent") return normalizeRejoinAgent(row);
   if (type === "disable_agent") return normalizeToggleAgent(row, false);
   if (type === "enable_agent") return normalizeToggleAgent(row, true);
   if (type === "disable_tool") return normalizeToggleTool(row, false);

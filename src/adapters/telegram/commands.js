@@ -175,6 +175,9 @@ export function createTelegramCommandHandler(deps = {}) {
     const patternConflict = session?.pattern_conflict && typeof session.pattern_conflict === 'object' ? session.pattern_conflict : null;
     const temporaryOverride = session?.temporary_execution_override && typeof session.temporary_execution_override === 'object' ? session.temporary_execution_override : null;
     const patternRecovery = session?.pattern_recovery && typeof session.pattern_recovery === 'object' ? session.pattern_recovery : null;
+    const lastRecovery = session?.last_recovery_event && typeof session.last_recovery_event === 'object' ? session.last_recovery_event : null;
+    const lastFork = session?.last_fork_event && typeof session.last_fork_event === 'object' ? session.last_fork_event : null;
+    const lastRejoin = session?.last_rejoin_event && typeof session.last_rejoin_event === 'object' ? session.last_rejoin_event : null;
 
     const stateLines = [
       `active team: ${activeTeam ? String(activeTeam.team_name || 'configured').trim() : 'none'}`,
@@ -190,6 +193,15 @@ export function createTelegramCommandHandler(deps = {}) {
     }
     if (patternRecovery?.recovery_mode || patternRecovery?.status) {
       stateLines.push(`pattern recovery: ${String(patternRecovery.recovery_mode || patternRecovery.status || 'pending')}`);
+    }
+    if (lastRecovery?.category || lastRecovery?.status) {
+      stateLines.push(`latest recovery: ${String(lastRecovery.status || 'classified')} · ${String(lastRecovery.category || 'unknown_failure')}${lastRecovery?.recovery_strategy ? ` · ${String(lastRecovery.recovery_strategy)}` : ''}`);
+    }
+    if (lastFork?.forked_agent_id || lastFork?.source_agent_id) {
+      stateLines.push(`latest fork: ${String(lastFork.source_agent_id || 'source')} -> ${String(lastFork.forked_agent_id || 'forked')}${lastFork?.scope_mode ? ` · scope=${String(lastFork.scope_mode)}` : ''}`);
+    }
+    if (lastRejoin?.agent_id || lastRejoin?.source_agent_id) {
+      stateLines.push(`latest rejoin: ${String(lastRejoin.agent_id || 'forked')} -> ${String(lastRejoin.source_agent_id || 'source')}${lastRejoin?.summary ? ` · ${String(lastRejoin.summary)}` : ''}`);
     }
     lines.push('', 'Runtime state', ...stateLines);
     const pendingApplyGuardrails = pendingTeam ? buildTeamTransitionGuardrails(activeTeam, pendingTeam) : null;

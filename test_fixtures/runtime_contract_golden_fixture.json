@@ -1,0 +1,2870 @@
+{
+  "version": 1,
+  "generated_at": "2026-03-20T00:00:00.000Z",
+  "scenarios": [
+    {
+      "name": "goc_supervised_multiskill",
+      "run_id": "run_contract_goc",
+      "action_source": "generated_team_actions",
+      "authority": {
+        "mode": "goc",
+        "plan_source": "goc",
+        "context_source": "goc",
+        "agent_catalog_source": "goc",
+        "conversation_team_source": "goc",
+        "skill_catalog_source": "mixed",
+        "degraded_mode": false,
+        "fallback_reason": null
+      },
+      "run_payload": {
+        "runtime_team_snapshot": {
+          "task_interpretation": {
+            "goal": "",
+            "objective": "",
+            "operating_mode": "run",
+            "mode": "run",
+            "requested_deliverables": [],
+            "constraints": [],
+            "preferred_role_ids": [],
+            "preferred_roles": [],
+            "source": "control_plane",
+            "notes": [],
+            "task_type": "analysis",
+            "task_summary": "validate runtime contract",
+            "deliverable_type": "report",
+            "risk_level": "medium",
+            "domain_hints": [],
+            "candidate_capability_slots": [],
+            "control_mode": "direct",
+            "review_policy": "optional",
+            "parallelism_preference": "hybrid",
+            "pinned_preset_ids": [],
+            "banned_preset_ids": [],
+            "preferred_domains": [],
+            "preferred_locales": [],
+            "suppressed_role_ids": [],
+            "suppressed_skill_ids": []
+          },
+          "team_plan": {
+            "team_plan_id": "team_plan",
+            "task_interpretation": {
+              "goal": "",
+              "objective": "",
+              "operating_mode": "balanced",
+              "mode": "balanced",
+              "requested_deliverables": [],
+              "constraints": [],
+              "preferred_role_ids": [],
+              "preferred_roles": [],
+              "source": "control_plane",
+              "notes": [],
+              "task_type": "analysis_report",
+              "task_summary": "",
+              "deliverable_type": "report",
+              "risk_level": "medium",
+              "domain_hints": [],
+              "candidate_capability_slots": [],
+              "control_mode": "direct",
+              "review_policy": "optional",
+              "parallelism_preference": "hybrid",
+              "pinned_preset_ids": [],
+              "banned_preset_ids": [],
+              "preferred_domains": [],
+              "preferred_locales": [],
+              "suppressed_role_ids": [],
+              "suppressed_skill_ids": []
+            },
+            "supervisor_runtime": {
+              "enabled": true,
+              "runtime_id": "local_control_plane",
+              "instance_id": "supervisor_runtime",
+              "coordination_mode": "balanced",
+              "interaction_mode": "checkpointed_supervised",
+              "planner_requested": false,
+              "max_parallel_workers": 3,
+              "authority_profile_id": "supervisor_controlled",
+              "user_visible": false,
+              "control_actions": [
+                "launch_children",
+                "receive_reports",
+                "request_human_approval",
+                "pause_children",
+                "cancel_child",
+                "reroute_child",
+                "emit_intermediate_summaries"
+              ],
+              "selection_reason": "team plan"
+            },
+            "slots": [
+              {
+                "slot_id": "slot_research_1",
+                "purpose": "collect evidence",
+                "role_id": "researcher",
+                "required_skill_ids": [],
+                "preferred_skill_ids": [],
+                "forbidden_skill_ids": [],
+                "authority_profile_id": "worker_readonly_research",
+                "parallelizable": true,
+                "reviewer_required": false,
+                "selection_reason": "slot:researcher",
+                "attached_skills": [],
+                "capability_tags": [],
+                "context_policy": {},
+                "status": "ready"
+              },
+              {
+                "slot_id": "slot_review_1",
+                "purpose": "audit evidence",
+                "role_id": "reviewer",
+                "required_skill_ids": [],
+                "preferred_skill_ids": [],
+                "forbidden_skill_ids": [],
+                "authority_profile_id": "worker_publish_guarded",
+                "parallelizable": false,
+                "reviewer_required": false,
+                "selection_reason": "slot:reviewer",
+                "attached_skills": [],
+                "capability_tags": [],
+                "context_policy": {},
+                "status": "ready"
+              }
+            ],
+            "runtime_agents": [
+              {
+                "instance_id": "inst_research_1",
+                "slot_id": "slot_research_1",
+                "role_id": "researcher",
+                "display_label": "Evidence Researcher",
+                "preset_id": "researcher",
+                "synthesized": false,
+                "attached_skill_ids": [
+                  "skill.claim_evidence_audit.v1"
+                ],
+                "attached_skills": [
+                  {
+                    "skill_id": "skill.claim_evidence_audit.v1",
+                    "selected_by": "skill_resolver",
+                    "load_level": "instructions",
+                    "status": "selected"
+                  }
+                ],
+                "context_pack_id": "cp_research_1",
+                "authority_profile_id": "worker_readonly_research",
+                "template_id": "researcher",
+                "role_label": "evidence researcher",
+                "capability_tags": [],
+                "status": "ready",
+                "ephemeral": false,
+                "fallback": false
+              },
+              {
+                "instance_id": "inst_review_1",
+                "slot_id": "slot_review_1",
+                "role_id": "reviewer",
+                "display_label": "Skeptical Reviewer",
+                "preset_id": "reviewer",
+                "synthesized": false,
+                "attached_skill_ids": [
+                  "skill.thread_team_reconciliation.v1"
+                ],
+                "attached_skills": [
+                  {
+                    "skill_id": "skill.thread_team_reconciliation.v1",
+                    "selected_by": "skill_resolver",
+                    "load_level": "resources",
+                    "status": "selected"
+                  }
+                ],
+                "context_pack_id": "cp_review_1",
+                "authority_profile_id": "worker_publish_guarded",
+                "template_id": "reviewer",
+                "role_label": "skeptical reviewer",
+                "capability_tags": [],
+                "status": "ready",
+                "ephemeral": false,
+                "fallback": false
+              }
+            ],
+            "collaboration_cells": [
+              {
+                "cell_id": "cell_review",
+                "pattern": "manager_as_tool",
+                "member_instance_ids": [
+                  "inst_research_1",
+                  "inst_review_1"
+                ],
+                "topology": "hub",
+                "max_rounds": 1,
+                "termination": {
+                  "condition": "handoff_complete"
+                },
+                "report_back_to_instance_id": "supervisor_runtime",
+                "target_instance_ids": [],
+                "status": "planned"
+              }
+            ],
+            "authority_graph": [
+              {
+                "slot_id": "slot_research_1",
+                "authority_profile_id": "worker_readonly_research",
+                "instance_id": "inst_research_1",
+                "role_id": "researcher",
+                "allowed_actions": [
+                  "read",
+                  "search",
+                  "analyze",
+                  "summarize",
+                  "cite"
+                ],
+                "denied_actions": [
+                  "publish",
+                  "commit",
+                  "merge",
+                  "destructive_write"
+                ],
+                "approval_required_for": [
+                  "network_write",
+                  "workspace_write",
+                  "tool_execute"
+                ],
+                "tool_allowlist": [
+                  "web",
+                  "read_only_fs"
+                ],
+                "max_parallel_children": 0
+              },
+              {
+                "slot_id": "slot_review_1",
+                "authority_profile_id": "worker_publish_guarded",
+                "instance_id": "inst_review_1",
+                "role_id": "reviewer",
+                "allowed_actions": [
+                  "read",
+                  "search",
+                  "write",
+                  "execute",
+                  "draft",
+                  "summarize"
+                ],
+                "denied_actions": [
+                  "merge",
+                  "destructive_write"
+                ],
+                "approval_required_for": [
+                  "publish",
+                  "commit",
+                  "network_write",
+                  "destructive_write"
+                ],
+                "tool_allowlist": [
+                  "web",
+                  "workspace_fs",
+                  "shell"
+                ],
+                "max_parallel_children": 1
+              },
+              {
+                "authority_profile_id": "supervisor_controlled",
+                "instance_id": "supervisor_runtime",
+                "role_id": "supervisor_runtime",
+                "allowed_actions": [
+                  "read",
+                  "search",
+                  "coordinate",
+                  "assign",
+                  "draft"
+                ],
+                "denied_actions": [
+                  "publish",
+                  "commit",
+                  "merge",
+                  "destructive_write"
+                ],
+                "approval_required_for": [
+                  "spawn_worker",
+                  "workspace_write",
+                  "tool_execute",
+                  "network_write"
+                ],
+                "tool_allowlist": [
+                  "web",
+                  "read_only_fs",
+                  "control_plane"
+                ],
+                "max_parallel_children": 5
+              }
+            ],
+            "execution_graph": {
+              "nodes": [
+                {
+                  "slot_id": "slot_research_1",
+                  "role_id": "researcher",
+                  "parallelizable": true
+                },
+                {
+                  "slot_id": "slot_review_1",
+                  "role_id": "reviewer",
+                  "parallelizable": false
+                }
+              ],
+              "edges": [
+                {
+                  "from_slot_id": "slot_research_1",
+                  "to_slot_id": "slot_review_1",
+                  "from": "researcher",
+                  "to": "reviewer",
+                  "relation": "precedes"
+                }
+              ],
+              "order": [
+                "slot_research_1",
+                "slot_review_1"
+              ],
+              "role_order": [
+                "researcher",
+                "reviewer"
+              ],
+              "parallel_groups": [],
+              "supervisor_edges": [
+                {
+                  "supervisor_instance_id": "supervisor_runtime",
+                  "target_slot_ids": [
+                    "slot_research_1",
+                    "slot_review_1"
+                  ],
+                  "relation": "manages",
+                  "report_back": true
+                }
+              ],
+              "collaboration_cells": [
+                {
+                  "cell_id": "cell_review",
+                  "pattern": "manager_as_tool",
+                  "member_instance_ids": [
+                    "inst_research_1",
+                    "inst_review_1"
+                  ],
+                  "topology": "hub",
+                  "max_rounds": 1,
+                  "termination": {
+                    "condition": "handoff_complete"
+                  },
+                  "report_back_to_instance_id": "supervisor_runtime",
+                  "target_instance_ids": [],
+                  "status": "planned"
+                }
+              ],
+              "checkpoints": [
+                {
+                  "checkpoint_id": "checkpoint_after_research",
+                  "label": "checkpoint_after_research",
+                  "kind": "quality_gate",
+                  "target_slot_ids": [],
+                  "trigger_after_instances": [
+                    "inst_research_1"
+                  ],
+                  "human_interrupt_allowed": true,
+                  "approval_required": false,
+                  "completion_signal": {
+                    "when": "manual_ack"
+                  },
+                  "status": "pending"
+                }
+              ],
+              "interrupt_ready": true
+            },
+            "checkpoints": [
+              {
+                "checkpoint_id": "checkpoint_after_research",
+                "label": "checkpoint_after_research",
+                "kind": "quality_gate",
+                "target_slot_ids": [],
+                "trigger_after_instances": [
+                  "inst_research_1"
+                ],
+                "human_interrupt_allowed": true,
+                "approval_required": false,
+                "completion_signal": {
+                  "when": "manual_ack"
+                },
+                "status": "pending"
+              }
+            ],
+            "scope_specs": [],
+            "materialized_scopes": [],
+            "visibility_graph": [],
+            "scope_grants": [],
+            "context_runtime_mode": "shared_memory",
+            "selection_explanations": [
+              {
+                "subject_id": "slot_research_1",
+                "reason": "Need evidence collection"
+              },
+              {
+                "subject_id": "slot_review_1",
+                "reason": "Need adversarial review"
+              }
+            ],
+            "mode": "balanced",
+            "roles": [
+              {
+                "id": "researcher",
+                "role_id": "researcher",
+                "role_type": "researcher",
+                "role_label": "researcher",
+                "assigned_goal": "collect evidence",
+                "capability_tags": [],
+                "template_id": "researcher",
+                "attached_skills": [
+                  {
+                    "skill_id": "skill.claim_evidence_audit.v1",
+                    "selected_by": "skill_resolver",
+                    "load_level": "instructions",
+                    "status": "selected"
+                  }
+                ],
+                "attached_skill_ids": [
+                  "skill.claim_evidence_audit.v1"
+                ],
+                "depends_on": [],
+                "context_policy": {},
+                "ephemeral": false,
+                "fallback": false,
+                "status": "ready",
+                "required": true,
+                "optional": false,
+                "slot_id": "slot_research_1",
+                "authority_profile_id": "worker_readonly_research",
+                "selection_reason": "slot:researcher"
+              },
+              {
+                "id": "reviewer",
+                "role_id": "reviewer",
+                "role_type": "reviewer",
+                "role_label": "reviewer",
+                "assigned_goal": "audit evidence",
+                "capability_tags": [],
+                "template_id": "reviewer",
+                "attached_skills": [
+                  {
+                    "skill_id": "skill.thread_team_reconciliation.v1",
+                    "selected_by": "skill_resolver",
+                    "load_level": "resources",
+                    "status": "selected"
+                  }
+                ],
+                "attached_skill_ids": [
+                  "skill.thread_team_reconciliation.v1"
+                ],
+                "depends_on": [],
+                "context_policy": {},
+                "ephemeral": false,
+                "fallback": false,
+                "status": "ready",
+                "required": true,
+                "optional": false,
+                "slot_id": "slot_review_1",
+                "authority_profile_id": "worker_publish_guarded",
+                "selection_reason": "slot:reviewer"
+              }
+            ],
+            "dependencies": [],
+            "execution_order": [
+              "researcher",
+              "reviewer"
+            ],
+            "reason": "team plan",
+            "budget": {
+              "preferred_provider_mix": []
+            }
+          },
+          "runtime_agents": [
+            {
+              "instance_id": "inst_research_1",
+              "slot_id": "slot_research_1",
+              "role_id": "researcher",
+              "display_label": "Evidence Researcher",
+              "preset_id": "researcher",
+              "synthesized": false,
+              "attached_skill_ids": [
+                "skill.claim_evidence_audit.v1"
+              ],
+              "attached_skills": [
+                {
+                  "skill_id": "skill.claim_evidence_audit.v1",
+                  "selected_by": "skill_resolver",
+                  "load_level": "instructions",
+                  "status": "selected"
+                }
+              ],
+              "context_pack_id": "cp_research_1",
+              "authority_profile_id": "worker_readonly_research",
+              "template_id": "researcher",
+              "role_label": "evidence researcher",
+              "capability_tags": [],
+              "status": "ready",
+              "ephemeral": false,
+              "fallback": false
+            },
+            {
+              "instance_id": "inst_review_1",
+              "slot_id": "slot_review_1",
+              "role_id": "reviewer",
+              "display_label": "Skeptical Reviewer",
+              "preset_id": "reviewer",
+              "synthesized": false,
+              "attached_skill_ids": [
+                "skill.thread_team_reconciliation.v1"
+              ],
+              "attached_skills": [
+                {
+                  "skill_id": "skill.thread_team_reconciliation.v1",
+                  "selected_by": "skill_resolver",
+                  "load_level": "resources",
+                  "status": "selected"
+                }
+              ],
+              "context_pack_id": "cp_review_1",
+              "authority_profile_id": "worker_publish_guarded",
+              "template_id": "reviewer",
+              "role_label": "skeptical reviewer",
+              "capability_tags": [],
+              "status": "ready",
+              "ephemeral": false,
+              "fallback": false
+            }
+          ],
+          "context_packs": [
+            {
+              "context_pack_id": "cp_research_1",
+              "id": "cp_research_1",
+              "run_id": "run_contract_goc",
+              "scope": "role",
+              "target_instance_id": "inst_research_1",
+              "target_runtime_agent_instance_id": "inst_research_1",
+              "context_types": [],
+              "evidence_node_ids": [],
+              "budget_tokens": 2000,
+              "load_level": "instructions",
+              "shared_items": [],
+              "role_specific_items": [],
+              "skill_items": [
+                {
+                  "skill_id": "skill.claim_evidence_audit.v1",
+                  "load_level": "instructions",
+                  "selected_by": "skill_resolver",
+                  "status": "selected"
+                }
+              ],
+              "excluded_items": [],
+              "missing_items": [],
+              "conflicts": [],
+              "token_budget": {
+                "soft_limit": 1200,
+                "hard_limit": 2000
+              }
+            },
+            {
+              "context_pack_id": "cp_review_1",
+              "id": "cp_review_1",
+              "run_id": "run_contract_goc",
+              "scope": "role",
+              "target_instance_id": "inst_review_1",
+              "target_runtime_agent_instance_id": "inst_review_1",
+              "context_types": [],
+              "evidence_node_ids": [],
+              "budget_tokens": 1400,
+              "load_level": "resources",
+              "shared_items": [],
+              "role_specific_items": [],
+              "skill_items": [
+                {
+                  "skill_id": "skill.thread_team_reconciliation.v1",
+                  "load_level": "resources",
+                  "selected_by": "skill_resolver",
+                  "status": "selected"
+                }
+              ],
+              "excluded_items": [],
+              "missing_items": [],
+              "conflicts": [],
+              "token_budget": {
+                "soft_limit": 800,
+                "hard_limit": 1400
+              }
+            }
+          ],
+          "scope_specs": [],
+          "materialized_scopes": [],
+          "visibility_graph": [],
+          "scope_grants": [],
+          "context_runtime_mode": "shared_memory",
+          "legacy_context_pack_count": 2,
+          "legacy_context_packs_enabled": true,
+          "legacy_context_strategy": "primary",
+          "collaboration_cells": [
+            {
+              "cell_id": "cell_review",
+              "pattern": "manager_as_tool",
+              "member_instance_ids": [
+                "inst_research_1",
+                "inst_review_1"
+              ],
+              "topology": "hub",
+              "max_rounds": 1,
+              "termination": {
+                "condition": "handoff_complete"
+              },
+              "report_back_to_instance_id": "supervisor_runtime",
+              "target_instance_ids": [],
+              "status": "planned"
+            }
+          ],
+          "authority_graph": [
+            {
+              "slot_id": "slot_research_1",
+              "instance_id": "inst_research_1",
+              "role_id": "researcher",
+              "authority_profile_id": "worker_readonly_research",
+              "allowed_actions": [
+                "read",
+                "search",
+                "analyze",
+                "summarize",
+                "cite"
+              ],
+              "denied_actions": [
+                "publish",
+                "commit",
+                "merge",
+                "destructive_write"
+              ],
+              "approval_required_for": [
+                "network_write",
+                "workspace_write",
+                "tool_execute"
+              ],
+              "tool_allowlist": [
+                "web",
+                "read_only_fs"
+              ],
+              "max_parallel_children": 0
+            },
+            {
+              "slot_id": "slot_review_1",
+              "instance_id": "inst_review_1",
+              "role_id": "reviewer",
+              "authority_profile_id": "worker_publish_guarded",
+              "allowed_actions": [
+                "read",
+                "search",
+                "write",
+                "execute",
+                "draft",
+                "summarize"
+              ],
+              "denied_actions": [
+                "merge",
+                "destructive_write"
+              ],
+              "approval_required_for": [
+                "publish",
+                "commit",
+                "network_write",
+                "destructive_write"
+              ],
+              "tool_allowlist": [
+                "web",
+                "workspace_fs",
+                "shell"
+              ],
+              "max_parallel_children": 1
+            },
+            {
+              "instance_id": "supervisor_runtime",
+              "role_id": "supervisor_runtime",
+              "authority_profile_id": "supervisor_controlled",
+              "allowed_actions": [
+                "read",
+                "search",
+                "coordinate",
+                "assign",
+                "draft"
+              ],
+              "denied_actions": [
+                "publish",
+                "commit",
+                "merge",
+                "destructive_write"
+              ],
+              "approval_required_for": [
+                "spawn_worker",
+                "workspace_write",
+                "tool_execute",
+                "network_write"
+              ],
+              "tool_allowlist": [
+                "web",
+                "read_only_fs",
+                "control_plane"
+              ],
+              "max_parallel_children": 5
+            }
+          ],
+          "checkpoints": [
+            {
+              "checkpoint_id": "checkpoint_after_research",
+              "label": "checkpoint_after_research",
+              "kind": "quality_gate",
+              "target_slot_ids": [],
+              "trigger_after_instances": [
+                "inst_research_1"
+              ],
+              "human_interrupt_allowed": true,
+              "approval_required": false,
+              "completion_signal": {
+                "when": "manual_ack"
+              },
+              "status": "pending"
+            }
+          ],
+          "execution_graph": {
+            "nodes": [
+              {
+                "slot_id": "slot_research_1",
+                "role_id": "researcher",
+                "parallelizable": true
+              },
+              {
+                "slot_id": "slot_review_1",
+                "role_id": "reviewer",
+                "parallelizable": false
+              }
+            ],
+            "edges": [
+              {
+                "from_slot_id": "slot_research_1",
+                "to_slot_id": "slot_review_1",
+                "from": "researcher",
+                "to": "reviewer",
+                "relation": "precedes"
+              }
+            ],
+            "order": [
+              "slot_research_1",
+              "slot_review_1"
+            ],
+            "role_order": [
+              "researcher",
+              "reviewer"
+            ],
+            "parallel_groups": [],
+            "supervisor_edges": [
+              {
+                "supervisor_instance_id": "supervisor_runtime",
+                "target_slot_ids": [
+                  "slot_research_1",
+                  "slot_review_1"
+                ],
+                "relation": "manages",
+                "report_back": true
+              }
+            ],
+            "collaboration_cells": [
+              {
+                "cell_id": "cell_review",
+                "pattern": "manager_as_tool",
+                "member_instance_ids": [
+                  "inst_research_1",
+                  "inst_review_1"
+                ],
+                "topology": "hub",
+                "max_rounds": 1,
+                "termination": {
+                  "condition": "handoff_complete"
+                },
+                "report_back_to_instance_id": "supervisor_runtime",
+                "target_instance_ids": [],
+                "status": "planned"
+              }
+            ],
+            "checkpoints": [
+              {
+                "checkpoint_id": "checkpoint_after_research",
+                "label": "checkpoint_after_research",
+                "kind": "quality_gate",
+                "target_slot_ids": [],
+                "trigger_after_instances": [
+                  "inst_research_1"
+                ],
+                "human_interrupt_allowed": true,
+                "approval_required": false,
+                "completion_signal": {
+                  "when": "manual_ack"
+                },
+                "status": "pending"
+              }
+            ],
+            "interrupt_ready": true
+          },
+          "selection_explanations": [
+            {
+              "subject_id": "slot_research_1",
+              "reason": "Need evidence collection"
+            },
+            {
+              "subject_id": "slot_review_1",
+              "reason": "Need adversarial review"
+            }
+          ],
+          "selected_skill_ids": [
+            "skill.claim_evidence_audit.v1",
+            "skill.thread_team_reconciliation.v1"
+          ],
+          "skill_load_levels": {
+            "inst_research_1": {
+              "skill.claim_evidence_audit.v1": "instructions"
+            },
+            "inst_review_1": {
+              "skill.thread_team_reconciliation.v1": "resources"
+            }
+          },
+          "selection_reason_summary": {
+            "researcher": "claim audit",
+            "reviewer": "reconciliation audit"
+          },
+          "skill_usage_events": [
+            {
+              "run_id": "run_contract_goc",
+              "runtime_agent_instance_id": "inst_research_1",
+              "skill_id": "skill.claim_evidence_audit.v1",
+              "event_type": "used",
+              "payload": {
+                "summary": "claim audit executed"
+              },
+              "created_at": "2026-03-14T00:00:01.000Z"
+            },
+            {
+              "run_id": "run_contract_goc",
+              "runtime_agent_instance_id": "inst_review_1",
+              "skill_id": "skill.thread_team_reconciliation.v1",
+              "event_type": "selected",
+              "payload": {
+                "summary": "reconciliation selected"
+              },
+              "created_at": "2026-03-14T00:00:02.000Z"
+            }
+          ],
+          "skill_usage_summary": {
+            "total": 2,
+            "by_skill_id": {
+              "skill.claim_evidence_audit.v1": 1,
+              "skill.thread_team_reconciliation.v1": 1
+            },
+            "by_event_type": {
+              "used": 1,
+              "selected": 1
+            }
+          },
+          "supervisor_runtime": {
+            "enabled": true,
+            "instance_id": "supervisor_runtime",
+            "interaction_mode": "checkpointed_supervised",
+            "authority_profile_id": "supervisor_controlled"
+          },
+          "runtime_authority": {
+            "mode": "goc",
+            "plan_source": "goc",
+            "context_source": "goc",
+            "agent_catalog_source": "goc",
+            "conversation_team_source": "goc",
+            "skill_catalog_source": "mixed",
+            "degraded_mode": false,
+            "fallback_reason": null
+          },
+          "runtime_participants": [],
+          "non_executable_participants": [],
+          "generated_at": "2026-03-14T00:00:00.000Z",
+          "source": "control_plane"
+        },
+        "runtime_authority": {
+          "mode": "goc",
+          "plan_source": "goc",
+          "context_source": "goc",
+          "agent_catalog_source": "goc",
+          "conversation_team_source": "goc",
+          "skill_catalog_source": "mixed",
+          "degraded_mode": false,
+          "fallback_reason": null
+        },
+        "action_source": "generated_team_actions",
+        "task_interpretation": {
+          "goal": "",
+          "objective": "",
+          "operating_mode": "run",
+          "mode": "run",
+          "requested_deliverables": [],
+          "constraints": [],
+          "preferred_role_ids": [],
+          "preferred_roles": [],
+          "source": "control_plane",
+          "notes": [],
+          "task_type": "analysis",
+          "task_summary": "validate runtime contract",
+          "deliverable_type": "report",
+          "risk_level": "medium",
+          "domain_hints": [],
+          "candidate_capability_slots": [],
+          "control_mode": "direct",
+          "review_policy": "optional",
+          "parallelism_preference": "hybrid",
+          "pinned_preset_ids": [],
+          "banned_preset_ids": [],
+          "preferred_domains": [],
+          "preferred_locales": [],
+          "suppressed_role_ids": [],
+          "suppressed_skill_ids": []
+        },
+        "team_plan": {
+          "team_plan_id": "team_plan",
+          "task_interpretation": {
+            "goal": "",
+            "objective": "",
+            "operating_mode": "balanced",
+            "mode": "balanced",
+            "requested_deliverables": [],
+            "constraints": [],
+            "preferred_role_ids": [],
+            "preferred_roles": [],
+            "source": "control_plane",
+            "notes": [],
+            "task_type": "analysis_report",
+            "task_summary": "",
+            "deliverable_type": "report",
+            "risk_level": "medium",
+            "domain_hints": [],
+            "candidate_capability_slots": [],
+            "control_mode": "direct",
+            "review_policy": "optional",
+            "parallelism_preference": "hybrid",
+            "pinned_preset_ids": [],
+            "banned_preset_ids": [],
+            "preferred_domains": [],
+            "preferred_locales": [],
+            "suppressed_role_ids": [],
+            "suppressed_skill_ids": []
+          },
+          "supervisor_runtime": {
+            "enabled": true,
+            "runtime_id": "local_control_plane",
+            "instance_id": "supervisor_runtime",
+            "coordination_mode": "balanced",
+            "interaction_mode": "checkpointed_supervised",
+            "planner_requested": false,
+            "max_parallel_workers": 3,
+            "authority_profile_id": "supervisor_controlled",
+            "user_visible": false,
+            "control_actions": [
+              "launch_children",
+              "receive_reports",
+              "request_human_approval",
+              "pause_children",
+              "cancel_child",
+              "reroute_child",
+              "emit_intermediate_summaries"
+            ],
+            "selection_reason": "team plan"
+          },
+          "slots": [
+            {
+              "slot_id": "slot_research_1",
+              "purpose": "collect evidence",
+              "role_id": "researcher",
+              "required_skill_ids": [],
+              "preferred_skill_ids": [],
+              "forbidden_skill_ids": [],
+              "authority_profile_id": "worker_readonly_research",
+              "parallelizable": true,
+              "reviewer_required": false,
+              "selection_reason": "slot:researcher",
+              "attached_skills": [],
+              "capability_tags": [],
+              "context_policy": {},
+              "status": "ready"
+            },
+            {
+              "slot_id": "slot_review_1",
+              "purpose": "audit evidence",
+              "role_id": "reviewer",
+              "required_skill_ids": [],
+              "preferred_skill_ids": [],
+              "forbidden_skill_ids": [],
+              "authority_profile_id": "worker_publish_guarded",
+              "parallelizable": false,
+              "reviewer_required": false,
+              "selection_reason": "slot:reviewer",
+              "attached_skills": [],
+              "capability_tags": [],
+              "context_policy": {},
+              "status": "ready"
+            }
+          ],
+          "runtime_agents": [
+            {
+              "instance_id": "inst_research_1",
+              "slot_id": "slot_research_1",
+              "role_id": "researcher",
+              "display_label": "Evidence Researcher",
+              "preset_id": "researcher",
+              "synthesized": false,
+              "attached_skill_ids": [
+                "skill.claim_evidence_audit.v1"
+              ],
+              "attached_skills": [
+                {
+                  "skill_id": "skill.claim_evidence_audit.v1",
+                  "selected_by": "skill_resolver",
+                  "load_level": "instructions",
+                  "status": "selected"
+                }
+              ],
+              "context_pack_id": "cp_research_1",
+              "authority_profile_id": "worker_readonly_research",
+              "template_id": "researcher",
+              "role_label": "evidence researcher",
+              "capability_tags": [],
+              "status": "ready",
+              "ephemeral": false,
+              "fallback": false
+            },
+            {
+              "instance_id": "inst_review_1",
+              "slot_id": "slot_review_1",
+              "role_id": "reviewer",
+              "display_label": "Skeptical Reviewer",
+              "preset_id": "reviewer",
+              "synthesized": false,
+              "attached_skill_ids": [
+                "skill.thread_team_reconciliation.v1"
+              ],
+              "attached_skills": [
+                {
+                  "skill_id": "skill.thread_team_reconciliation.v1",
+                  "selected_by": "skill_resolver",
+                  "load_level": "resources",
+                  "status": "selected"
+                }
+              ],
+              "context_pack_id": "cp_review_1",
+              "authority_profile_id": "worker_publish_guarded",
+              "template_id": "reviewer",
+              "role_label": "skeptical reviewer",
+              "capability_tags": [],
+              "status": "ready",
+              "ephemeral": false,
+              "fallback": false
+            }
+          ],
+          "collaboration_cells": [
+            {
+              "cell_id": "cell_review",
+              "pattern": "manager_as_tool",
+              "member_instance_ids": [
+                "inst_research_1",
+                "inst_review_1"
+              ],
+              "topology": "hub",
+              "max_rounds": 1,
+              "termination": {
+                "condition": "handoff_complete"
+              },
+              "report_back_to_instance_id": "supervisor_runtime",
+              "target_instance_ids": [],
+              "status": "planned"
+            }
+          ],
+          "authority_graph": [
+            {
+              "slot_id": "slot_research_1",
+              "authority_profile_id": "worker_readonly_research",
+              "instance_id": "inst_research_1",
+              "role_id": "researcher",
+              "allowed_actions": [
+                "read",
+                "search",
+                "analyze",
+                "summarize",
+                "cite"
+              ],
+              "denied_actions": [
+                "publish",
+                "commit",
+                "merge",
+                "destructive_write"
+              ],
+              "approval_required_for": [
+                "network_write",
+                "workspace_write",
+                "tool_execute"
+              ],
+              "tool_allowlist": [
+                "web",
+                "read_only_fs"
+              ],
+              "max_parallel_children": 0
+            },
+            {
+              "slot_id": "slot_review_1",
+              "authority_profile_id": "worker_publish_guarded",
+              "instance_id": "inst_review_1",
+              "role_id": "reviewer",
+              "allowed_actions": [
+                "read",
+                "search",
+                "write",
+                "execute",
+                "draft",
+                "summarize"
+              ],
+              "denied_actions": [
+                "merge",
+                "destructive_write"
+              ],
+              "approval_required_for": [
+                "publish",
+                "commit",
+                "network_write",
+                "destructive_write"
+              ],
+              "tool_allowlist": [
+                "web",
+                "workspace_fs",
+                "shell"
+              ],
+              "max_parallel_children": 1
+            },
+            {
+              "authority_profile_id": "supervisor_controlled",
+              "instance_id": "supervisor_runtime",
+              "role_id": "supervisor_runtime",
+              "allowed_actions": [
+                "read",
+                "search",
+                "coordinate",
+                "assign",
+                "draft"
+              ],
+              "denied_actions": [
+                "publish",
+                "commit",
+                "merge",
+                "destructive_write"
+              ],
+              "approval_required_for": [
+                "spawn_worker",
+                "workspace_write",
+                "tool_execute",
+                "network_write"
+              ],
+              "tool_allowlist": [
+                "web",
+                "read_only_fs",
+                "control_plane"
+              ],
+              "max_parallel_children": 5
+            }
+          ],
+          "execution_graph": {
+            "nodes": [
+              {
+                "slot_id": "slot_research_1",
+                "role_id": "researcher",
+                "parallelizable": true
+              },
+              {
+                "slot_id": "slot_review_1",
+                "role_id": "reviewer",
+                "parallelizable": false
+              }
+            ],
+            "edges": [
+              {
+                "from_slot_id": "slot_research_1",
+                "to_slot_id": "slot_review_1",
+                "from": "researcher",
+                "to": "reviewer",
+                "relation": "precedes"
+              }
+            ],
+            "order": [
+              "slot_research_1",
+              "slot_review_1"
+            ],
+            "role_order": [
+              "researcher",
+              "reviewer"
+            ],
+            "parallel_groups": [],
+            "supervisor_edges": [
+              {
+                "supervisor_instance_id": "supervisor_runtime",
+                "target_slot_ids": [
+                  "slot_research_1",
+                  "slot_review_1"
+                ],
+                "relation": "manages",
+                "report_back": true
+              }
+            ],
+            "collaboration_cells": [
+              {
+                "cell_id": "cell_review",
+                "pattern": "manager_as_tool",
+                "member_instance_ids": [
+                  "inst_research_1",
+                  "inst_review_1"
+                ],
+                "topology": "hub",
+                "max_rounds": 1,
+                "termination": {
+                  "condition": "handoff_complete"
+                },
+                "report_back_to_instance_id": "supervisor_runtime",
+                "target_instance_ids": [],
+                "status": "planned"
+              }
+            ],
+            "checkpoints": [
+              {
+                "checkpoint_id": "checkpoint_after_research",
+                "label": "checkpoint_after_research",
+                "kind": "quality_gate",
+                "target_slot_ids": [],
+                "trigger_after_instances": [
+                  "inst_research_1"
+                ],
+                "human_interrupt_allowed": true,
+                "approval_required": false,
+                "completion_signal": {
+                  "when": "manual_ack"
+                },
+                "status": "pending"
+              }
+            ],
+            "interrupt_ready": true
+          },
+          "checkpoints": [
+            {
+              "checkpoint_id": "checkpoint_after_research",
+              "label": "checkpoint_after_research",
+              "kind": "quality_gate",
+              "target_slot_ids": [],
+              "trigger_after_instances": [
+                "inst_research_1"
+              ],
+              "human_interrupt_allowed": true,
+              "approval_required": false,
+              "completion_signal": {
+                "when": "manual_ack"
+              },
+              "status": "pending"
+            }
+          ],
+          "scope_specs": [],
+          "materialized_scopes": [],
+          "visibility_graph": [],
+          "scope_grants": [],
+          "context_runtime_mode": "shared_memory",
+          "selection_explanations": [
+            {
+              "subject_id": "slot_research_1",
+              "reason": "Need evidence collection"
+            },
+            {
+              "subject_id": "slot_review_1",
+              "reason": "Need adversarial review"
+            }
+          ],
+          "mode": "balanced",
+          "roles": [
+            {
+              "id": "researcher",
+              "role_id": "researcher",
+              "role_type": "researcher",
+              "role_label": "researcher",
+              "assigned_goal": "collect evidence",
+              "capability_tags": [],
+              "template_id": "researcher",
+              "attached_skills": [
+                {
+                  "skill_id": "skill.claim_evidence_audit.v1",
+                  "selected_by": "skill_resolver",
+                  "load_level": "instructions",
+                  "status": "selected"
+                }
+              ],
+              "attached_skill_ids": [
+                "skill.claim_evidence_audit.v1"
+              ],
+              "depends_on": [],
+              "context_policy": {},
+              "ephemeral": false,
+              "fallback": false,
+              "status": "ready",
+              "required": true,
+              "optional": false,
+              "slot_id": "slot_research_1",
+              "authority_profile_id": "worker_readonly_research",
+              "selection_reason": "slot:researcher"
+            },
+            {
+              "id": "reviewer",
+              "role_id": "reviewer",
+              "role_type": "reviewer",
+              "role_label": "reviewer",
+              "assigned_goal": "audit evidence",
+              "capability_tags": [],
+              "template_id": "reviewer",
+              "attached_skills": [
+                {
+                  "skill_id": "skill.thread_team_reconciliation.v1",
+                  "selected_by": "skill_resolver",
+                  "load_level": "resources",
+                  "status": "selected"
+                }
+              ],
+              "attached_skill_ids": [
+                "skill.thread_team_reconciliation.v1"
+              ],
+              "depends_on": [],
+              "context_policy": {},
+              "ephemeral": false,
+              "fallback": false,
+              "status": "ready",
+              "required": true,
+              "optional": false,
+              "slot_id": "slot_review_1",
+              "authority_profile_id": "worker_publish_guarded",
+              "selection_reason": "slot:reviewer"
+            }
+          ],
+          "dependencies": [],
+          "execution_order": [
+            "researcher",
+            "reviewer"
+          ],
+          "reason": "team plan",
+          "budget": {
+            "preferred_provider_mix": []
+          }
+        },
+        "runtime_agents": [
+          {
+            "instance_id": "inst_research_1",
+            "slot_id": "slot_research_1",
+            "role_id": "researcher",
+            "display_label": "Evidence Researcher",
+            "preset_id": "researcher",
+            "synthesized": false,
+            "attached_skill_ids": [
+              "skill.claim_evidence_audit.v1"
+            ],
+            "attached_skills": [
+              {
+                "skill_id": "skill.claim_evidence_audit.v1",
+                "selected_by": "skill_resolver",
+                "load_level": "instructions",
+                "status": "selected"
+              }
+            ],
+            "context_pack_id": "cp_research_1",
+            "authority_profile_id": "worker_readonly_research",
+            "template_id": "researcher",
+            "role_label": "evidence researcher",
+            "capability_tags": [],
+            "status": "ready",
+            "ephemeral": false,
+            "fallback": false
+          },
+          {
+            "instance_id": "inst_review_1",
+            "slot_id": "slot_review_1",
+            "role_id": "reviewer",
+            "display_label": "Skeptical Reviewer",
+            "preset_id": "reviewer",
+            "synthesized": false,
+            "attached_skill_ids": [
+              "skill.thread_team_reconciliation.v1"
+            ],
+            "attached_skills": [
+              {
+                "skill_id": "skill.thread_team_reconciliation.v1",
+                "selected_by": "skill_resolver",
+                "load_level": "resources",
+                "status": "selected"
+              }
+            ],
+            "context_pack_id": "cp_review_1",
+            "authority_profile_id": "worker_publish_guarded",
+            "template_id": "reviewer",
+            "role_label": "skeptical reviewer",
+            "capability_tags": [],
+            "status": "ready",
+            "ephemeral": false,
+            "fallback": false
+          }
+        ],
+        "context_packs": [
+          {
+            "context_pack_id": "cp_research_1",
+            "id": "cp_research_1",
+            "run_id": "run_contract_goc",
+            "scope": "role",
+            "target_instance_id": "inst_research_1",
+            "target_runtime_agent_instance_id": "inst_research_1",
+            "context_types": [],
+            "evidence_node_ids": [],
+            "budget_tokens": 2000,
+            "load_level": "instructions",
+            "shared_items": [],
+            "role_specific_items": [],
+            "skill_items": [
+              {
+                "skill_id": "skill.claim_evidence_audit.v1",
+                "load_level": "instructions",
+                "selected_by": "skill_resolver",
+                "status": "selected"
+              }
+            ],
+            "excluded_items": [],
+            "missing_items": [],
+            "conflicts": [],
+            "token_budget": {
+              "soft_limit": 1200,
+              "hard_limit": 2000
+            }
+          },
+          {
+            "context_pack_id": "cp_review_1",
+            "id": "cp_review_1",
+            "run_id": "run_contract_goc",
+            "scope": "role",
+            "target_instance_id": "inst_review_1",
+            "target_runtime_agent_instance_id": "inst_review_1",
+            "context_types": [],
+            "evidence_node_ids": [],
+            "budget_tokens": 1400,
+            "load_level": "resources",
+            "shared_items": [],
+            "role_specific_items": [],
+            "skill_items": [
+              {
+                "skill_id": "skill.thread_team_reconciliation.v1",
+                "load_level": "resources",
+                "selected_by": "skill_resolver",
+                "status": "selected"
+              }
+            ],
+            "excluded_items": [],
+            "missing_items": [],
+            "conflicts": [],
+            "token_budget": {
+              "soft_limit": 800,
+              "hard_limit": 1400
+            }
+          }
+        ],
+        "context_runtime_mode": "shared_memory",
+        "legacy_context_pack_count": 2,
+        "legacy_context_packs_enabled": true,
+        "legacy_context_strategy": "primary",
+        "collaboration_cells": [
+          {
+            "cell_id": "cell_review",
+            "pattern": "manager_as_tool",
+            "member_instance_ids": [
+              "inst_research_1",
+              "inst_review_1"
+            ],
+            "topology": "hub",
+            "max_rounds": 1,
+            "termination": {
+              "condition": "handoff_complete"
+            },
+            "report_back_to_instance_id": "supervisor_runtime",
+            "target_instance_ids": [],
+            "status": "planned"
+          }
+        ],
+        "authority_graph": [
+          {
+            "slot_id": "slot_research_1",
+            "instance_id": "inst_research_1",
+            "role_id": "researcher",
+            "authority_profile_id": "worker_readonly_research",
+            "allowed_actions": [
+              "read",
+              "search",
+              "analyze",
+              "summarize",
+              "cite"
+            ],
+            "denied_actions": [
+              "publish",
+              "commit",
+              "merge",
+              "destructive_write"
+            ],
+            "approval_required_for": [
+              "network_write",
+              "workspace_write",
+              "tool_execute"
+            ],
+            "tool_allowlist": [
+              "web",
+              "read_only_fs"
+            ],
+            "max_parallel_children": 0
+          },
+          {
+            "slot_id": "slot_review_1",
+            "instance_id": "inst_review_1",
+            "role_id": "reviewer",
+            "authority_profile_id": "worker_publish_guarded",
+            "allowed_actions": [
+              "read",
+              "search",
+              "write",
+              "execute",
+              "draft",
+              "summarize"
+            ],
+            "denied_actions": [
+              "merge",
+              "destructive_write"
+            ],
+            "approval_required_for": [
+              "publish",
+              "commit",
+              "network_write",
+              "destructive_write"
+            ],
+            "tool_allowlist": [
+              "web",
+              "workspace_fs",
+              "shell"
+            ],
+            "max_parallel_children": 1
+          },
+          {
+            "instance_id": "supervisor_runtime",
+            "role_id": "supervisor_runtime",
+            "authority_profile_id": "supervisor_controlled",
+            "allowed_actions": [
+              "read",
+              "search",
+              "coordinate",
+              "assign",
+              "draft"
+            ],
+            "denied_actions": [
+              "publish",
+              "commit",
+              "merge",
+              "destructive_write"
+            ],
+            "approval_required_for": [
+              "spawn_worker",
+              "workspace_write",
+              "tool_execute",
+              "network_write"
+            ],
+            "tool_allowlist": [
+              "web",
+              "read_only_fs",
+              "control_plane"
+            ],
+            "max_parallel_children": 5
+          }
+        ],
+        "checkpoints": [
+          {
+            "checkpoint_id": "checkpoint_after_research",
+            "label": "checkpoint_after_research",
+            "kind": "quality_gate",
+            "target_slot_ids": [],
+            "trigger_after_instances": [
+              "inst_research_1"
+            ],
+            "human_interrupt_allowed": true,
+            "approval_required": false,
+            "completion_signal": {
+              "when": "manual_ack"
+            },
+            "status": "pending"
+          }
+        ],
+        "execution_graph": {
+          "nodes": [
+            {
+              "slot_id": "slot_research_1",
+              "role_id": "researcher",
+              "parallelizable": true
+            },
+            {
+              "slot_id": "slot_review_1",
+              "role_id": "reviewer",
+              "parallelizable": false
+            }
+          ],
+          "edges": [
+            {
+              "from_slot_id": "slot_research_1",
+              "to_slot_id": "slot_review_1",
+              "from": "researcher",
+              "to": "reviewer",
+              "relation": "precedes"
+            }
+          ],
+          "order": [
+            "slot_research_1",
+            "slot_review_1"
+          ],
+          "role_order": [
+            "researcher",
+            "reviewer"
+          ],
+          "parallel_groups": [],
+          "supervisor_edges": [
+            {
+              "supervisor_instance_id": "supervisor_runtime",
+              "target_slot_ids": [
+                "slot_research_1",
+                "slot_review_1"
+              ],
+              "relation": "manages",
+              "report_back": true
+            }
+          ],
+          "collaboration_cells": [
+            {
+              "cell_id": "cell_review",
+              "pattern": "manager_as_tool",
+              "member_instance_ids": [
+                "inst_research_1",
+                "inst_review_1"
+              ],
+              "topology": "hub",
+              "max_rounds": 1,
+              "termination": {
+                "condition": "handoff_complete"
+              },
+              "report_back_to_instance_id": "supervisor_runtime",
+              "target_instance_ids": [],
+              "status": "planned"
+            }
+          ],
+          "checkpoints": [
+            {
+              "checkpoint_id": "checkpoint_after_research",
+              "label": "checkpoint_after_research",
+              "kind": "quality_gate",
+              "target_slot_ids": [],
+              "trigger_after_instances": [
+                "inst_research_1"
+              ],
+              "human_interrupt_allowed": true,
+              "approval_required": false,
+              "completion_signal": {
+                "when": "manual_ack"
+              },
+              "status": "pending"
+            }
+          ],
+          "interrupt_ready": true
+        },
+        "selection_explanations": [
+          {
+            "subject_id": "slot_research_1",
+            "reason": "Need evidence collection"
+          },
+          {
+            "subject_id": "slot_review_1",
+            "reason": "Need adversarial review"
+          }
+        ],
+        "selected_skill_ids": [
+          "skill.claim_evidence_audit.v1",
+          "skill.thread_team_reconciliation.v1"
+        ],
+        "skill_load_levels": {
+          "inst_research_1": {
+            "skill.claim_evidence_audit.v1": "instructions"
+          },
+          "inst_review_1": {
+            "skill.thread_team_reconciliation.v1": "resources"
+          }
+        },
+        "selection_reason_summary": {
+          "researcher": "claim audit",
+          "reviewer": "reconciliation audit"
+        },
+        "skill_usage_events": [
+          {
+            "run_id": "run_contract_goc",
+            "runtime_agent_instance_id": "inst_research_1",
+            "skill_id": "skill.claim_evidence_audit.v1",
+            "event_type": "used",
+            "payload": {
+              "summary": "claim audit executed"
+            },
+            "created_at": "2026-03-14T00:00:01.000Z"
+          },
+          {
+            "run_id": "run_contract_goc",
+            "runtime_agent_instance_id": "inst_review_1",
+            "skill_id": "skill.thread_team_reconciliation.v1",
+            "event_type": "selected",
+            "payload": {
+              "summary": "reconciliation selected"
+            },
+            "created_at": "2026-03-14T00:00:02.000Z"
+          }
+        ],
+        "skill_usage_summary": {
+          "total": 2,
+          "by_skill_id": {
+            "skill.claim_evidence_audit.v1": 1,
+            "skill.thread_team_reconciliation.v1": 1
+          },
+          "by_event_type": {
+            "used": 1,
+            "selected": 1
+          }
+        },
+        "supervisor_runtime": {
+          "enabled": true,
+          "instance_id": "supervisor_runtime",
+          "interaction_mode": "checkpointed_supervised",
+          "authority_profile_id": "supervisor_controlled"
+        },
+        "generated_at": "2026-03-14T00:00:00.000Z",
+        "source": "control_plane",
+        "mode": "goc",
+        "plan_source": "goc",
+        "context_source": "goc",
+        "agent_catalog_source": "goc",
+        "conversation_team_source": "goc",
+        "skill_catalog_source": "mixed",
+        "degraded_mode": false,
+        "fallback_reason": null,
+        "status": "running"
+      },
+      "step_payload": {
+        "run_id": "run_contract_goc",
+        "status": "running",
+        "agent_id": "inst_research_1",
+        "runtime_instance_id": "inst_research_1"
+      },
+      "expected": {
+        "counts": {
+          "runtime_agents": 2,
+          "attached_skills": 2,
+          "context_packs": 2,
+          "skill_usage": 2,
+          "collaboration": 1,
+          "checkpoints": 1
+        },
+        "runtime_agent_instance_ids": [
+          "inst_research_1",
+          "inst_review_1"
+        ],
+        "context_pack_ids": [
+          "cp_research_1",
+          "cp_review_1"
+        ],
+        "attached_skill_ids": [
+          "skill.claim_evidence_audit.v1",
+          "skill.thread_team_reconciliation.v1"
+        ],
+        "skill_usage_ids": [
+          "skill.claim_evidence_audit.v1",
+          "skill.thread_team_reconciliation.v1"
+        ],
+        "collaboration_patterns": [
+          "manager_as_tool"
+        ],
+        "supervisor_runtime_instance_id": "supervisor_runtime",
+        "interrupt_ready": true,
+        "degraded_mode": false,
+        "plan_source": "goc"
+      }
+    },
+    {
+      "name": "standalone_local_fallback",
+      "run_id": "run_contract_fallback",
+      "action_source": "default_fallback_route",
+      "authority": {
+        "mode": "standalone",
+        "plan_source": "local_fallback",
+        "context_source": "local",
+        "agent_catalog_source": "local",
+        "conversation_team_source": "local",
+        "skill_catalog_source": "local",
+        "degraded_mode": true,
+        "fallback_reason": "planner service unavailable"
+      },
+      "run_payload": {
+        "runtime_team_snapshot": {
+          "task_interpretation": {
+            "goal": "",
+            "objective": "",
+            "operating_mode": "run",
+            "mode": "run",
+            "requested_deliverables": [],
+            "constraints": [],
+            "preferred_role_ids": [],
+            "preferred_roles": [],
+            "source": "control_plane",
+            "notes": [],
+            "task_type": "analysis_report",
+            "task_summary": "recover local fallback run",
+            "deliverable_type": "report",
+            "risk_level": "medium",
+            "domain_hints": [],
+            "candidate_capability_slots": [],
+            "control_mode": "direct",
+            "review_policy": "optional",
+            "parallelism_preference": "hybrid",
+            "pinned_preset_ids": [],
+            "banned_preset_ids": [],
+            "preferred_domains": [],
+            "preferred_locales": [],
+            "suppressed_role_ids": [],
+            "suppressed_skill_ids": []
+          },
+          "team_plan": {
+            "team_plan_id": "team_plan",
+            "task_interpretation": {
+              "goal": "",
+              "objective": "",
+              "operating_mode": "balanced",
+              "mode": "balanced",
+              "requested_deliverables": [],
+              "constraints": [],
+              "preferred_role_ids": [],
+              "preferred_roles": [],
+              "source": "control_plane",
+              "notes": [],
+              "task_type": "analysis_report",
+              "task_summary": "",
+              "deliverable_type": "report",
+              "risk_level": "medium",
+              "domain_hints": [],
+              "candidate_capability_slots": [],
+              "control_mode": "direct",
+              "review_policy": "optional",
+              "parallelism_preference": "hybrid",
+              "pinned_preset_ids": [],
+              "banned_preset_ids": [],
+              "preferred_domains": [],
+              "preferred_locales": [],
+              "suppressed_role_ids": [],
+              "suppressed_skill_ids": []
+            },
+            "supervisor_runtime": {
+              "enabled": true,
+              "runtime_id": "local_control_plane",
+              "instance_id": "supervisor_runtime",
+              "coordination_mode": "balanced",
+              "interaction_mode": "passive_observer",
+              "planner_requested": false,
+              "max_parallel_workers": 3,
+              "authority_profile_id": "supervisor_controlled",
+              "user_visible": false,
+              "control_actions": [
+                "launch_children",
+                "receive_reports",
+                "request_human_approval",
+                "pause_children",
+                "cancel_child",
+                "reroute_child",
+                "emit_intermediate_summaries"
+              ],
+              "selection_reason": "team plan"
+            },
+            "slots": [
+              {
+                "slot_id": "slot_fallback_1",
+                "purpose": "repair failed run",
+                "role_id": "builder",
+                "required_skill_ids": [],
+                "preferred_skill_ids": [],
+                "forbidden_skill_ids": [],
+                "authority_profile_id": "worker_publish_guarded",
+                "parallelizable": true,
+                "reviewer_required": false,
+                "selection_reason": "slot:builder",
+                "attached_skills": [],
+                "capability_tags": [],
+                "context_policy": {},
+                "status": "ready"
+              }
+            ],
+            "runtime_agents": [
+              {
+                "instance_id": "inst_fallback_1",
+                "slot_id": "slot_fallback_1",
+                "role_id": "builder",
+                "display_label": "Fallback Builder",
+                "preset_id": "coder",
+                "synthesized": false,
+                "attached_skill_ids": [
+                  "skill.run_trace_debugging.v1"
+                ],
+                "attached_skills": [
+                  {
+                    "skill_id": "skill.run_trace_debugging.v1",
+                    "selected_by": "runtime",
+                    "load_level": "instructions",
+                    "status": "selected"
+                  }
+                ],
+                "context_pack_id": "cp_fallback_1",
+                "authority_profile_id": "worker_publish_guarded",
+                "template_id": "coder",
+                "role_label": "fallback builder",
+                "capability_tags": [],
+                "status": "ready",
+                "ephemeral": false,
+                "fallback": false
+              }
+            ],
+            "collaboration_cells": [],
+            "authority_graph": [
+              {
+                "slot_id": "slot_fallback_1",
+                "authority_profile_id": "worker_publish_guarded",
+                "instance_id": "inst_fallback_1",
+                "role_id": "builder",
+                "allowed_actions": [
+                  "read",
+                  "search",
+                  "write",
+                  "execute",
+                  "draft",
+                  "summarize"
+                ],
+                "denied_actions": [
+                  "merge",
+                  "destructive_write"
+                ],
+                "approval_required_for": [
+                  "publish",
+                  "commit",
+                  "network_write",
+                  "destructive_write"
+                ],
+                "tool_allowlist": [
+                  "web",
+                  "workspace_fs",
+                  "shell"
+                ],
+                "max_parallel_children": 1
+              },
+              {
+                "authority_profile_id": "supervisor_controlled",
+                "instance_id": "supervisor_runtime",
+                "role_id": "supervisor_runtime",
+                "allowed_actions": [
+                  "read",
+                  "search",
+                  "coordinate",
+                  "assign",
+                  "draft"
+                ],
+                "denied_actions": [
+                  "publish",
+                  "commit",
+                  "merge",
+                  "destructive_write"
+                ],
+                "approval_required_for": [
+                  "spawn_worker",
+                  "workspace_write",
+                  "tool_execute",
+                  "network_write"
+                ],
+                "tool_allowlist": [
+                  "web",
+                  "read_only_fs",
+                  "control_plane"
+                ],
+                "max_parallel_children": 5
+              }
+            ],
+            "execution_graph": {
+              "nodes": [
+                {
+                  "slot_id": "slot_fallback_1",
+                  "role_id": "builder",
+                  "parallelizable": true
+                }
+              ],
+              "edges": [],
+              "order": [
+                "slot_fallback_1"
+              ],
+              "role_order": [
+                "builder"
+              ],
+              "parallel_groups": [],
+              "supervisor_edges": [
+                {
+                  "supervisor_instance_id": "supervisor_runtime",
+                  "target_slot_ids": [
+                    "slot_fallback_1"
+                  ],
+                  "relation": "manages",
+                  "report_back": true
+                }
+              ],
+              "collaboration_cells": [],
+              "checkpoints": [],
+              "interrupt_ready": false
+            },
+            "checkpoints": [],
+            "scope_specs": [],
+            "materialized_scopes": [],
+            "visibility_graph": [],
+            "scope_grants": [],
+            "context_runtime_mode": "shared_memory",
+            "selection_explanations": [
+              {
+                "subject_id": "slot_fallback_1",
+                "reason": "Fallback recovery path"
+              }
+            ],
+            "mode": "balanced",
+            "roles": [
+              {
+                "id": "builder",
+                "role_id": "builder",
+                "role_type": "builder",
+                "role_label": "builder",
+                "assigned_goal": "repair failed run",
+                "capability_tags": [],
+                "template_id": "coder",
+                "attached_skills": [
+                  {
+                    "skill_id": "skill.run_trace_debugging.v1",
+                    "selected_by": "runtime",
+                    "load_level": "instructions",
+                    "status": "selected"
+                  }
+                ],
+                "attached_skill_ids": [
+                  "skill.run_trace_debugging.v1"
+                ],
+                "depends_on": [],
+                "context_policy": {},
+                "ephemeral": false,
+                "fallback": false,
+                "status": "ready",
+                "required": true,
+                "optional": false,
+                "slot_id": "slot_fallback_1",
+                "authority_profile_id": "worker_publish_guarded",
+                "selection_reason": "slot:builder"
+              }
+            ],
+            "dependencies": [],
+            "execution_order": [
+              "builder"
+            ],
+            "reason": "team plan",
+            "budget": {
+              "preferred_provider_mix": []
+            }
+          },
+          "runtime_agents": [
+            {
+              "instance_id": "inst_fallback_1",
+              "slot_id": "slot_fallback_1",
+              "role_id": "builder",
+              "display_label": "Fallback Builder",
+              "preset_id": "coder",
+              "synthesized": false,
+              "attached_skill_ids": [
+                "skill.run_trace_debugging.v1"
+              ],
+              "attached_skills": [
+                {
+                  "skill_id": "skill.run_trace_debugging.v1",
+                  "selected_by": "runtime",
+                  "load_level": "instructions",
+                  "status": "selected"
+                }
+              ],
+              "context_pack_id": "cp_fallback_1",
+              "authority_profile_id": "worker_publish_guarded",
+              "template_id": "coder",
+              "role_label": "fallback builder",
+              "capability_tags": [],
+              "status": "ready",
+              "ephemeral": false,
+              "fallback": false
+            }
+          ],
+          "context_packs": [
+            {
+              "context_pack_id": "cp_fallback_1",
+              "id": "cp_fallback_1",
+              "run_id": "run_contract_fallback",
+              "scope": "role",
+              "target_instance_id": "inst_fallback_1",
+              "target_runtime_agent_instance_id": "inst_fallback_1",
+              "context_types": [],
+              "evidence_node_ids": [],
+              "budget_tokens": 1000,
+              "load_level": "instructions",
+              "shared_items": [],
+              "role_specific_items": [],
+              "skill_items": [
+                {
+                  "skill_id": "skill.run_trace_debugging.v1",
+                  "load_level": "instructions",
+                  "selected_by": "skill_resolver",
+                  "status": "selected"
+                }
+              ],
+              "excluded_items": [],
+              "missing_items": [],
+              "conflicts": [],
+              "token_budget": {
+                "soft_limit": 600,
+                "hard_limit": 1000
+              }
+            }
+          ],
+          "scope_specs": [],
+          "materialized_scopes": [],
+          "visibility_graph": [],
+          "scope_grants": [],
+          "context_runtime_mode": "shared_memory",
+          "legacy_context_pack_count": 1,
+          "legacy_context_packs_enabled": true,
+          "legacy_context_strategy": "primary",
+          "collaboration_cells": [],
+          "authority_graph": [
+            {
+              "slot_id": "slot_fallback_1",
+              "instance_id": "inst_fallback_1",
+              "role_id": "builder",
+              "authority_profile_id": "worker_publish_guarded",
+              "allowed_actions": [
+                "read",
+                "search",
+                "write",
+                "execute",
+                "draft",
+                "summarize"
+              ],
+              "denied_actions": [
+                "merge",
+                "destructive_write"
+              ],
+              "approval_required_for": [
+                "publish",
+                "commit",
+                "network_write",
+                "destructive_write"
+              ],
+              "tool_allowlist": [
+                "web",
+                "workspace_fs",
+                "shell"
+              ],
+              "max_parallel_children": 1
+            },
+            {
+              "instance_id": "supervisor_runtime",
+              "role_id": "supervisor_runtime",
+              "authority_profile_id": "supervisor_controlled",
+              "allowed_actions": [
+                "read",
+                "search",
+                "coordinate",
+                "assign",
+                "draft"
+              ],
+              "denied_actions": [
+                "publish",
+                "commit",
+                "merge",
+                "destructive_write"
+              ],
+              "approval_required_for": [
+                "spawn_worker",
+                "workspace_write",
+                "tool_execute",
+                "network_write"
+              ],
+              "tool_allowlist": [
+                "web",
+                "read_only_fs",
+                "control_plane"
+              ],
+              "max_parallel_children": 5
+            }
+          ],
+          "checkpoints": [],
+          "execution_graph": {
+            "nodes": [
+              {
+                "slot_id": "slot_fallback_1",
+                "role_id": "builder",
+                "parallelizable": true
+              }
+            ],
+            "edges": [],
+            "order": [
+              "slot_fallback_1"
+            ],
+            "role_order": [
+              "builder"
+            ],
+            "parallel_groups": [],
+            "supervisor_edges": [
+              {
+                "supervisor_instance_id": "supervisor_runtime",
+                "target_slot_ids": [
+                  "slot_fallback_1"
+                ],
+                "relation": "manages",
+                "report_back": true
+              }
+            ],
+            "collaboration_cells": [],
+            "checkpoints": [],
+            "interrupt_ready": false
+          },
+          "selection_explanations": [
+            {
+              "subject_id": "slot_fallback_1",
+              "reason": "Fallback recovery path"
+            }
+          ],
+          "selected_skill_ids": [
+            "skill.run_trace_debugging.v1"
+          ],
+          "skill_load_levels": {
+            "inst_fallback_1": {
+              "skill.run_trace_debugging.v1": "instructions"
+            }
+          },
+          "selection_reason_summary": {
+            "builder": "fallback recovery"
+          },
+          "skill_usage_events": [
+            {
+              "run_id": "run_contract_fallback",
+              "runtime_agent_instance_id": "inst_fallback_1",
+              "skill_id": "skill.run_trace_debugging.v1",
+              "event_type": "used",
+              "payload": {
+                "summary": "fallback recovery executed"
+              },
+              "created_at": "2026-03-14T01:00:01.000Z"
+            }
+          ],
+          "skill_usage_summary": {
+            "total": 1,
+            "by_skill_id": {
+              "skill.run_trace_debugging.v1": 1
+            },
+            "by_event_type": {
+              "used": 1
+            }
+          },
+          "supervisor_runtime": {
+            "enabled": true,
+            "runtime_id": "local_control_plane",
+            "instance_id": "supervisor_runtime",
+            "coordination_mode": "balanced",
+            "interaction_mode": "passive_observer",
+            "planner_requested": false,
+            "max_parallel_workers": 3,
+            "authority_profile_id": "supervisor_controlled",
+            "user_visible": false,
+            "control_actions": [
+              "launch_children",
+              "receive_reports",
+              "request_human_approval",
+              "pause_children",
+              "cancel_child",
+              "reroute_child",
+              "emit_intermediate_summaries"
+            ],
+            "selection_reason": "team plan"
+          },
+          "runtime_authority": {
+            "mode": "standalone",
+            "plan_source": "local_fallback",
+            "context_source": "local",
+            "agent_catalog_source": "local",
+            "conversation_team_source": "local",
+            "skill_catalog_source": "local",
+            "degraded_mode": true,
+            "fallback_reason": "planner service unavailable"
+          },
+          "runtime_participants": [],
+          "non_executable_participants": [],
+          "generated_at": "2026-03-14T01:00:00.000Z",
+          "source": "team_builder"
+        },
+        "runtime_authority": {
+          "mode": "standalone",
+          "plan_source": "local_fallback",
+          "context_source": "local",
+          "agent_catalog_source": "local",
+          "conversation_team_source": "local",
+          "skill_catalog_source": "local",
+          "degraded_mode": true,
+          "fallback_reason": "planner service unavailable"
+        },
+        "action_source": "default_fallback_route",
+        "task_interpretation": {
+          "goal": "",
+          "objective": "",
+          "operating_mode": "run",
+          "mode": "run",
+          "requested_deliverables": [],
+          "constraints": [],
+          "preferred_role_ids": [],
+          "preferred_roles": [],
+          "source": "control_plane",
+          "notes": [],
+          "task_type": "analysis_report",
+          "task_summary": "recover local fallback run",
+          "deliverable_type": "report",
+          "risk_level": "medium",
+          "domain_hints": [],
+          "candidate_capability_slots": [],
+          "control_mode": "direct",
+          "review_policy": "optional",
+          "parallelism_preference": "hybrid",
+          "pinned_preset_ids": [],
+          "banned_preset_ids": [],
+          "preferred_domains": [],
+          "preferred_locales": [],
+          "suppressed_role_ids": [],
+          "suppressed_skill_ids": []
+        },
+        "team_plan": {
+          "team_plan_id": "team_plan",
+          "task_interpretation": {
+            "goal": "",
+            "objective": "",
+            "operating_mode": "balanced",
+            "mode": "balanced",
+            "requested_deliverables": [],
+            "constraints": [],
+            "preferred_role_ids": [],
+            "preferred_roles": [],
+            "source": "control_plane",
+            "notes": [],
+            "task_type": "analysis_report",
+            "task_summary": "",
+            "deliverable_type": "report",
+            "risk_level": "medium",
+            "domain_hints": [],
+            "candidate_capability_slots": [],
+            "control_mode": "direct",
+            "review_policy": "optional",
+            "parallelism_preference": "hybrid",
+            "pinned_preset_ids": [],
+            "banned_preset_ids": [],
+            "preferred_domains": [],
+            "preferred_locales": [],
+            "suppressed_role_ids": [],
+            "suppressed_skill_ids": []
+          },
+          "supervisor_runtime": {
+            "enabled": true,
+            "runtime_id": "local_control_plane",
+            "instance_id": "supervisor_runtime",
+            "coordination_mode": "balanced",
+            "interaction_mode": "passive_observer",
+            "planner_requested": false,
+            "max_parallel_workers": 3,
+            "authority_profile_id": "supervisor_controlled",
+            "user_visible": false,
+            "control_actions": [
+              "launch_children",
+              "receive_reports",
+              "request_human_approval",
+              "pause_children",
+              "cancel_child",
+              "reroute_child",
+              "emit_intermediate_summaries"
+            ],
+            "selection_reason": "team plan"
+          },
+          "slots": [
+            {
+              "slot_id": "slot_fallback_1",
+              "purpose": "repair failed run",
+              "role_id": "builder",
+              "required_skill_ids": [],
+              "preferred_skill_ids": [],
+              "forbidden_skill_ids": [],
+              "authority_profile_id": "worker_publish_guarded",
+              "parallelizable": true,
+              "reviewer_required": false,
+              "selection_reason": "slot:builder",
+              "attached_skills": [],
+              "capability_tags": [],
+              "context_policy": {},
+              "status": "ready"
+            }
+          ],
+          "runtime_agents": [
+            {
+              "instance_id": "inst_fallback_1",
+              "slot_id": "slot_fallback_1",
+              "role_id": "builder",
+              "display_label": "Fallback Builder",
+              "preset_id": "coder",
+              "synthesized": false,
+              "attached_skill_ids": [
+                "skill.run_trace_debugging.v1"
+              ],
+              "attached_skills": [
+                {
+                  "skill_id": "skill.run_trace_debugging.v1",
+                  "selected_by": "runtime",
+                  "load_level": "instructions",
+                  "status": "selected"
+                }
+              ],
+              "context_pack_id": "cp_fallback_1",
+              "authority_profile_id": "worker_publish_guarded",
+              "template_id": "coder",
+              "role_label": "fallback builder",
+              "capability_tags": [],
+              "status": "ready",
+              "ephemeral": false,
+              "fallback": false
+            }
+          ],
+          "collaboration_cells": [],
+          "authority_graph": [
+            {
+              "slot_id": "slot_fallback_1",
+              "authority_profile_id": "worker_publish_guarded",
+              "instance_id": "inst_fallback_1",
+              "role_id": "builder",
+              "allowed_actions": [
+                "read",
+                "search",
+                "write",
+                "execute",
+                "draft",
+                "summarize"
+              ],
+              "denied_actions": [
+                "merge",
+                "destructive_write"
+              ],
+              "approval_required_for": [
+                "publish",
+                "commit",
+                "network_write",
+                "destructive_write"
+              ],
+              "tool_allowlist": [
+                "web",
+                "workspace_fs",
+                "shell"
+              ],
+              "max_parallel_children": 1
+            },
+            {
+              "authority_profile_id": "supervisor_controlled",
+              "instance_id": "supervisor_runtime",
+              "role_id": "supervisor_runtime",
+              "allowed_actions": [
+                "read",
+                "search",
+                "coordinate",
+                "assign",
+                "draft"
+              ],
+              "denied_actions": [
+                "publish",
+                "commit",
+                "merge",
+                "destructive_write"
+              ],
+              "approval_required_for": [
+                "spawn_worker",
+                "workspace_write",
+                "tool_execute",
+                "network_write"
+              ],
+              "tool_allowlist": [
+                "web",
+                "read_only_fs",
+                "control_plane"
+              ],
+              "max_parallel_children": 5
+            }
+          ],
+          "execution_graph": {
+            "nodes": [
+              {
+                "slot_id": "slot_fallback_1",
+                "role_id": "builder",
+                "parallelizable": true
+              }
+            ],
+            "edges": [],
+            "order": [
+              "slot_fallback_1"
+            ],
+            "role_order": [
+              "builder"
+            ],
+            "parallel_groups": [],
+            "supervisor_edges": [
+              {
+                "supervisor_instance_id": "supervisor_runtime",
+                "target_slot_ids": [
+                  "slot_fallback_1"
+                ],
+                "relation": "manages",
+                "report_back": true
+              }
+            ],
+            "collaboration_cells": [],
+            "checkpoints": [],
+            "interrupt_ready": false
+          },
+          "checkpoints": [],
+          "scope_specs": [],
+          "materialized_scopes": [],
+          "visibility_graph": [],
+          "scope_grants": [],
+          "context_runtime_mode": "shared_memory",
+          "selection_explanations": [
+            {
+              "subject_id": "slot_fallback_1",
+              "reason": "Fallback recovery path"
+            }
+          ],
+          "mode": "balanced",
+          "roles": [
+            {
+              "id": "builder",
+              "role_id": "builder",
+              "role_type": "builder",
+              "role_label": "builder",
+              "assigned_goal": "repair failed run",
+              "capability_tags": [],
+              "template_id": "coder",
+              "attached_skills": [
+                {
+                  "skill_id": "skill.run_trace_debugging.v1",
+                  "selected_by": "runtime",
+                  "load_level": "instructions",
+                  "status": "selected"
+                }
+              ],
+              "attached_skill_ids": [
+                "skill.run_trace_debugging.v1"
+              ],
+              "depends_on": [],
+              "context_policy": {},
+              "ephemeral": false,
+              "fallback": false,
+              "status": "ready",
+              "required": true,
+              "optional": false,
+              "slot_id": "slot_fallback_1",
+              "authority_profile_id": "worker_publish_guarded",
+              "selection_reason": "slot:builder"
+            }
+          ],
+          "dependencies": [],
+          "execution_order": [
+            "builder"
+          ],
+          "reason": "team plan",
+          "budget": {
+            "preferred_provider_mix": []
+          }
+        },
+        "runtime_agents": [
+          {
+            "instance_id": "inst_fallback_1",
+            "slot_id": "slot_fallback_1",
+            "role_id": "builder",
+            "display_label": "Fallback Builder",
+            "preset_id": "coder",
+            "synthesized": false,
+            "attached_skill_ids": [
+              "skill.run_trace_debugging.v1"
+            ],
+            "attached_skills": [
+              {
+                "skill_id": "skill.run_trace_debugging.v1",
+                "selected_by": "runtime",
+                "load_level": "instructions",
+                "status": "selected"
+              }
+            ],
+            "context_pack_id": "cp_fallback_1",
+            "authority_profile_id": "worker_publish_guarded",
+            "template_id": "coder",
+            "role_label": "fallback builder",
+            "capability_tags": [],
+            "status": "ready",
+            "ephemeral": false,
+            "fallback": false
+          }
+        ],
+        "context_packs": [
+          {
+            "context_pack_id": "cp_fallback_1",
+            "id": "cp_fallback_1",
+            "run_id": "run_contract_fallback",
+            "scope": "role",
+            "target_instance_id": "inst_fallback_1",
+            "target_runtime_agent_instance_id": "inst_fallback_1",
+            "context_types": [],
+            "evidence_node_ids": [],
+            "budget_tokens": 1000,
+            "load_level": "instructions",
+            "shared_items": [],
+            "role_specific_items": [],
+            "skill_items": [
+              {
+                "skill_id": "skill.run_trace_debugging.v1",
+                "load_level": "instructions",
+                "selected_by": "skill_resolver",
+                "status": "selected"
+              }
+            ],
+            "excluded_items": [],
+            "missing_items": [],
+            "conflicts": [],
+            "token_budget": {
+              "soft_limit": 600,
+              "hard_limit": 1000
+            }
+          }
+        ],
+        "context_runtime_mode": "shared_memory",
+        "legacy_context_pack_count": 1,
+        "legacy_context_packs_enabled": true,
+        "legacy_context_strategy": "primary",
+        "authority_graph": [
+          {
+            "slot_id": "slot_fallback_1",
+            "instance_id": "inst_fallback_1",
+            "role_id": "builder",
+            "authority_profile_id": "worker_publish_guarded",
+            "allowed_actions": [
+              "read",
+              "search",
+              "write",
+              "execute",
+              "draft",
+              "summarize"
+            ],
+            "denied_actions": [
+              "merge",
+              "destructive_write"
+            ],
+            "approval_required_for": [
+              "publish",
+              "commit",
+              "network_write",
+              "destructive_write"
+            ],
+            "tool_allowlist": [
+              "web",
+              "workspace_fs",
+              "shell"
+            ],
+            "max_parallel_children": 1
+          },
+          {
+            "instance_id": "supervisor_runtime",
+            "role_id": "supervisor_runtime",
+            "authority_profile_id": "supervisor_controlled",
+            "allowed_actions": [
+              "read",
+              "search",
+              "coordinate",
+              "assign",
+              "draft"
+            ],
+            "denied_actions": [
+              "publish",
+              "commit",
+              "merge",
+              "destructive_write"
+            ],
+            "approval_required_for": [
+              "spawn_worker",
+              "workspace_write",
+              "tool_execute",
+              "network_write"
+            ],
+            "tool_allowlist": [
+              "web",
+              "read_only_fs",
+              "control_plane"
+            ],
+            "max_parallel_children": 5
+          }
+        ],
+        "execution_graph": {
+          "nodes": [
+            {
+              "slot_id": "slot_fallback_1",
+              "role_id": "builder",
+              "parallelizable": true
+            }
+          ],
+          "edges": [],
+          "order": [
+            "slot_fallback_1"
+          ],
+          "role_order": [
+            "builder"
+          ],
+          "parallel_groups": [],
+          "supervisor_edges": [
+            {
+              "supervisor_instance_id": "supervisor_runtime",
+              "target_slot_ids": [
+                "slot_fallback_1"
+              ],
+              "relation": "manages",
+              "report_back": true
+            }
+          ],
+          "collaboration_cells": [],
+          "checkpoints": [],
+          "interrupt_ready": false
+        },
+        "selection_explanations": [
+          {
+            "subject_id": "slot_fallback_1",
+            "reason": "Fallback recovery path"
+          }
+        ],
+        "selected_skill_ids": [
+          "skill.run_trace_debugging.v1"
+        ],
+        "skill_load_levels": {
+          "inst_fallback_1": {
+            "skill.run_trace_debugging.v1": "instructions"
+          }
+        },
+        "selection_reason_summary": {
+          "builder": "fallback recovery"
+        },
+        "skill_usage_events": [
+          {
+            "run_id": "run_contract_fallback",
+            "runtime_agent_instance_id": "inst_fallback_1",
+            "skill_id": "skill.run_trace_debugging.v1",
+            "event_type": "used",
+            "payload": {
+              "summary": "fallback recovery executed"
+            },
+            "created_at": "2026-03-14T01:00:01.000Z"
+          }
+        ],
+        "skill_usage_summary": {
+          "total": 1,
+          "by_skill_id": {
+            "skill.run_trace_debugging.v1": 1
+          },
+          "by_event_type": {
+            "used": 1
+          }
+        },
+        "supervisor_runtime": {
+          "enabled": true,
+          "runtime_id": "local_control_plane",
+          "instance_id": "supervisor_runtime",
+          "coordination_mode": "balanced",
+          "interaction_mode": "passive_observer",
+          "planner_requested": false,
+          "max_parallel_workers": 3,
+          "authority_profile_id": "supervisor_controlled",
+          "user_visible": false,
+          "control_actions": [
+            "launch_children",
+            "receive_reports",
+            "request_human_approval",
+            "pause_children",
+            "cancel_child",
+            "reroute_child",
+            "emit_intermediate_summaries"
+          ],
+          "selection_reason": "team plan"
+        },
+        "generated_at": "2026-03-14T01:00:00.000Z",
+        "source": "team_builder",
+        "mode": "standalone",
+        "plan_source": "local_fallback",
+        "context_source": "local",
+        "agent_catalog_source": "local",
+        "conversation_team_source": "local",
+        "skill_catalog_source": "local",
+        "degraded_mode": true,
+        "fallback_reason": "planner service unavailable",
+        "status": "running"
+      },
+      "step_payload": {
+        "run_id": "run_contract_fallback",
+        "status": "running",
+        "agent_id": "inst_fallback_1",
+        "runtime_instance_id": "inst_fallback_1"
+      },
+      "expected": {
+        "counts": {
+          "runtime_agents": 1,
+          "attached_skills": 1,
+          "context_packs": 1,
+          "skill_usage": 1,
+          "collaboration": 0,
+          "checkpoints": 0
+        },
+        "runtime_agent_instance_ids": [
+          "inst_fallback_1"
+        ],
+        "context_pack_ids": [
+          "cp_fallback_1"
+        ],
+        "attached_skill_ids": [
+          "skill.run_trace_debugging.v1"
+        ],
+        "skill_usage_ids": [
+          "skill.run_trace_debugging.v1"
+        ],
+        "collaboration_patterns": [],
+        "supervisor_runtime_instance_id": null,
+        "interrupt_ready": false,
+        "degraded_mode": true,
+        "plan_source": "local_fallback"
+      }
+    }
+  ]
+}

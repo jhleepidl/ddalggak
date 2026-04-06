@@ -2,6 +2,7 @@ import { EXECUTION_ROLE_OPTIONS, STRUCTURE_PARTICIPANT_KIND_OPTIONS, STRUCTURE_P
 import { deriveKnowledgeBaseDesign } from '../knowledge_base/profile.js';
 import { normalizeRuntimeExecutionPolicy } from '../application/runtime_execution_policy.js';
 import { normalizeParticipantExecutionSchema, getParticipantLegacyRequiredToolIds, getParticipantLegacyOptionalToolIds, getParticipantLegacyRecommendedToolIds } from './participant_schema.js';
+import { inferExecutionRoleFromText } from './work_intent.js';
 
 function asArray(value) { return Array.isArray(value) ? value : []; }
 function asObject(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
@@ -50,7 +51,7 @@ function inferParticipantRole(raw = {}) {
   const row = asObject(raw);
   const explicit = cleanId(row.role || row.role_id || row.roleId || row.role_label || row.roleLabel || '');
   if (explicit && explicit !== 'specialist' && explicit !== 'agent' && explicit !== 'participant' && explicit !== 'worker') return explicit;
-  const text = [
+  const inferred = inferExecutionRoleFromText([
     row.role,
     row.role_id,
     row.roleId,
@@ -67,13 +68,8 @@ function inferParticipantRole(raw = {}) {
     row.id,
     row.purpose,
     row.description,
-  ].filter(Boolean).join(' ').toLowerCase();
-  if (/(^|[^a-z])(builder|coder|developer|implementer|frontend|backend|fullstack|engineer)([^a-z]|$)|구현|코더|개발자|빌더/.test(text)) return 'builder';
-  if (/(^|[^a-z])(reviewer|review|critic|verifier|quality|qa)([^a-z]|$)|리뷰어|검토|검수|비평|품질/.test(text)) return 'reviewer';
-  if (/(^|[^a-z])(synthesizer|synth|summarizer|summary|writer|delivery)([^a-z]|$)|요약|정리|합성|전달/.test(text)) return 'synthesizer';
-  if (/(^|[^a-z])(operator|coordinator|orchestrator|router|manager)([^a-z]|$)|운영|조정|오퍼레이터/.test(text)) return 'operator';
-  if (/(^|[^a-z])(researcher|scout|analyst|investigator|planner|research)([^a-z]|$)|조사|연구|분석|스카우트/.test(text)) return 'researcher';
-  return explicit || 'specialist';
+  ].filter(Boolean).join(' '), { fallback: explicit || 'specialist' });
+  return inferred || explicit || 'specialist';
 }
 
 function normalizeParticipant(raw = {}, index = 0) {
