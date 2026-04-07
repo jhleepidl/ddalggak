@@ -286,7 +286,7 @@ export function createTelegramUploadService(deps = {}) {
       `- workspace_path: ${workspaceRelPath}`,
       `- file_id: ${candidate.fileId}`,
       cleanUploadNote ? `- note: ${cleanUploadNote}` : "",
-    ].filter(Boolean).join("\n"));
+    ].filter(Boolean).join("\n"), { source: 'uploader', purpose: 'implementation', eventType: 'upload_received', actorKind: 'system', pipelineStage: 'artifact_ingest', semanticKind: 'progress' });
     tracking.append(jobId, "artifacts", [
       "## uploaded artifact",
       `- kind: ${cleanKind}`,
@@ -295,7 +295,7 @@ export function createTelegramUploadService(deps = {}) {
       `- sha256: ${sha256}`,
       `- file_id: ${candidate.fileId}`,
       cleanUploadNote ? `- note: ${cleanUploadNote}` : "",
-    ].filter(Boolean).join("\n"));
+    ].filter(Boolean).join("\n"), { source: 'uploader', purpose: 'artifact', eventType: 'artifact_registered', actorKind: 'system', pipelineStage: 'artifact_ingest', semanticKind: 'artifacts' });
     await appendWorkspaceUploadArtifactToGoc(jobId, {
       fileName: cleanName,
       fileSize: actualSize,

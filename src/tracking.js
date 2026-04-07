@@ -25,15 +25,44 @@ function cleanText(value = "") {
   return String(value || "").trim();
 }
 
+function cleanLower(value = "") {
+  return cleanText(value).toLowerCase();
+}
+
+function normalizePurpose(value = "") {
+  const key = cleanLower(value);
+  if (!key) return "";
+  if (["research", "implementation", "review", "final", "artifact", "worklog"].includes(key)) return key;
+  if (["decision", "decisions", "publish", "signoff"].includes(key)) return "final";
+  if (["artifacts", "artifact_index", "artifact_register"].includes(key)) return "artifact";
+  if (["progress", "repair", "plan", "execution", "implementation_log"].includes(key)) return "implementation";
+  return key;
+}
+
+function inferSemanticKindFromDocName(name = "") {
+  const key = cleanLower(name).replace(/\.md$/i, "");
+  if (!key) return "";
+  if (["plan", "mission_brief", "implementation_blueprint", "research_brief", "experiment_plan"].includes(key)) return "plan";
+  if (["research", "evidence_ledger", "positions_and_evidence", "defect_log", "critic_log", "review_findings", "observations_and_data"].includes(key)) return "research";
+  if (["implementation_notes", "repair_log", "progress", "working_memory", "change_log", "repair_journal", "analysis_journal", "run_log"].includes(key)) return "progress";
+  if (["final_answer", "decisions", "recommendation_memo", "verdict_and_rationale", "conclusions_and_next_steps", "signoff_summary"].includes(key)) return "decisions";
+  if (["artifact_index", "artifacts", "artifact_manifest", "artifact_register", "submission_packet", "repair_artifacts", "supporting_materials"].includes(key)) return "artifacts";
+  return "";
+}
+
+function inferPurposeFromSemanticKind(kind = "") {
+  const key = cleanLower(kind);
+  if (!key) return "";
+  if (key === "research") return "research";
+  if (key === "decisions") return "final";
+  if (key === "artifacts") return "artifact";
+  if (key === "review") return "review";
+  if (["plan", "progress"].includes(key)) return "implementation";
+  return "";
+}
+
 function inferPurposeFromDocName(name = "") {
-  const key = cleanText(name).toLowerCase();
-  if (!key) return "worklog";
-  if (["research", "evidence_ledger", "positions_and_evidence", "defect_log"].includes(key)) return "research";
-  if (["implementation_notes", "repair_log", "progress", "working_memory", "change_log", "repair_journal", "analysis_journal", "run_log"].includes(key)) return "implementation";
-  if (["review_findings", "critic_log", "defect_log", "signoff_summary"].includes(key)) return "review";
-  if (["final_answer", "decisions", "recommendation_memo", "verdict_and_rationale", "conclusions_and_next_steps"].includes(key)) return "final";
-  if (["artifact_index", "artifacts", "artifact_manifest", "artifact_register", "submission_packet", "repair_artifacts", "supporting_materials"].includes(key)) return "artifact";
-  return "worklog";
+  return inferPurposeFromSemanticKind(inferSemanticKindFromDocName(name)) || "worklog";
 }
 
 function safeJsonlAppend(filePath = "", payload = {}) {
@@ -59,11 +88,33 @@ export class Tracking {
   constructor(jobs, opts = {}) {
     this.jobs = jobs;
     this.appendHook = typeof opts.appendHook === "function" ? opts.appendHook : null;
+    this.profileCache = new Map();
   }
 
   setAppendHook(hook) {
     this.appendHook = typeof hook === "function" ? hook : null;
     return this.appendHook;
+  }
+
+  _logInternalWarning(jobId, message) {
+    try {
+      if (!jobId || !this.jobs || typeof this.jobs.log !== 'function') return;
+      this.jobs.log(jobId, `[tracking] ${String(message || '').trim()}`);
+    } catch {}
+  }
+
+  _invokeAppendHook(jobId, payload = {}) {
+    if (typeof this.appendHook !== 'function') return;
+    try {
+      const maybePromise = this.appendHook(payload);
+      if (maybePromise && typeof maybePromise.then === 'function') {
+        maybePromise.catch((error) => {
+          this._logInternalWarning(jobId, `append hook async failure: ${String(error?.message || error || 'unknown')}`);
+        });
+      }
+    } catch (error) {
+      this._logInternalWarning(jobId, `append hook failure: ${String(error?.message || error || 'unknown')}`);
+    }
   }
 
   _sharedDir(jobId) {
@@ -74,6 +125,62 @@ export class Tracking {
 
   _profilePath(jobId) {
     return path.join(this._sharedDir(jobId), PROFILE_FILE);
+  }
+
+  _invalidateProfileCache(jobId) {
+    this.profileCache.delete(String(jobId || ''));
+  }
+
+  _readProfileFromDisk(filePath) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      return normalizeKnowledgeBaseProfile(parsed || {});
+    } catch {
+      return null;
+    }
+  }
+
+  _statProfileMtime(filePath) {
+    try {
+      return fs.statSync(filePath).mtimeMs || 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  _resolveAppendMetadata(jobId, docName, {
+    purpose = '',
+    source = 'system',
+    eventType = '',
+    actorKind = '',
+    pipelineStage = '',
+    semanticKind = '',
+  } = {}) {
+    const profile = this.loadProfile(jobId);
+    const entry = profile ? getKnowledgeDocEntry(profile, docName) : null;
+    const entrySemanticKind = Array.isArray(entry?.semantic_slots)
+      ? cleanLower(entry.semantic_slots.find((row) => cleanText(row)))
+      : '';
+    const normalizedSemanticKind = cleanLower(semanticKind)
+      || entrySemanticKind
+      || cleanLower(entry?.doc_id)
+      || inferSemanticKindFromDocName(docName);
+    const normalizedPurpose = normalizePurpose(purpose)
+      || inferPurposeFromSemanticKind(normalizedSemanticKind)
+      || inferPurposeFromDocName(docName)
+      || 'worklog';
+    const normalizedActorKind = cleanLower(actorKind) || undefined;
+    const normalizedPipelineStage = cleanLower(pipelineStage) || undefined;
+    const normalizedEventType = cleanLower(eventType) || undefined;
+    const normalizedSource = cleanLower(source) || normalizedActorKind || 'system';
+    return {
+      purpose: normalizedPurpose,
+      source: normalizedSource,
+      eventType: normalizedEventType,
+      actorKind: normalizedActorKind,
+      pipelineStage: normalizedPipelineStage,
+      semanticKind: normalizedSemanticKind || undefined,
+    };
   }
 
   _validateName(name) {
@@ -98,25 +205,38 @@ export class Tracking {
   }
 
   loadProfile(jobId) {
-    const filePath = this._profilePath(jobId);
-    if (!fs.existsSync(filePath)) return null;
-    try {
-      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
-      return normalizeKnowledgeBaseProfile(parsed || {});
-    } catch {
+    const cleanJobId = String(jobId || '');
+    const filePath = this._profilePath(cleanJobId);
+    if (!fs.existsSync(filePath)) {
+      this._invalidateProfileCache(cleanJobId);
       return null;
     }
+    const mtimeMs = this._statProfileMtime(filePath);
+    const cached = this.profileCache.get(cleanJobId);
+    if (cached && cached.mtimeMs === mtimeMs) {
+      return cached.profile;
+    }
+    const profile = this._readProfileFromDisk(filePath);
+    if (!profile) {
+      this._invalidateProfileCache(cleanJobId);
+      return null;
+    }
+    this.profileCache.set(cleanJobId, { mtimeMs, profile });
+    return profile;
   }
 
   saveProfile(jobId, profile = {}) {
+    const cleanJobId = String(jobId || '');
     const normalized = normalizeKnowledgeBaseProfile(profile || {});
-    const sharedDir = this._sharedDir(jobId);
-    fs.writeFileSync(this._profilePath(jobId), JSON.stringify(normalized, null, 2), "utf8");
+    const sharedDir = this._sharedDir(cleanJobId);
+    const profilePath = this._profilePath(cleanJobId);
+    fs.writeFileSync(profilePath, JSON.stringify(normalized, null, 2), "utf8");
     fs.writeFileSync(
       path.join(sharedDir, KNOWLEDGE_BASE_CONTRACT_FILE),
       renderKnowledgeBaseContractMarkdown(normalized),
       "utf8",
     );
+    this.profileCache.set(cleanJobId, { mtimeMs: this._statProfileMtime(profilePath), profile: normalized });
     return normalized;
   }
 
@@ -241,7 +361,18 @@ export class Tracking {
     return fs.readFileSync(p, "utf8");
   }
 
-  append(jobId, name, markdown, { timestamp = true } = {}) {
+  append(jobId, name, markdown, {
+    timestamp = true,
+    provider = '',
+    roleId = '',
+    purpose = '',
+    source = 'system',
+    eventType = '',
+    actorKind = '',
+    pipelineStage = '',
+    semanticKind = '',
+    memoryContractEnforced = false,
+  } = {}) {
     name = this.resolveDocName(jobId, name);
     if (READ_ONLY_SYSTEM_DOCS.has(String(name || '').trim().toLowerCase())) {
       throw new Error(`Tracking doc is read-only: ${name}`);
@@ -250,22 +381,33 @@ export class Tracking {
     const prefix = timestamp ? `\n\n---\n\n**${new Date().toISOString()}**\n\n` : "\n\n";
     const chunk = prefix + markdown;
     fs.appendFileSync(p, chunk, "utf8");
+    const meta = this._resolveAppendMetadata(jobId, name, {
+      purpose,
+      source,
+      eventType,
+      actorKind,
+      pipelineStage,
+      semanticKind,
+    });
 
-    if (typeof this.appendHook === "function") {
-      try {
-        const maybePromise = this.appendHook({
-          jobId: String(jobId),
-          docName: name,
-          markdown: String(markdown),
-          chunk,
-          timestamp,
-        });
-        if (maybePromise && typeof maybePromise.then === "function") {
-          maybePromise.catch(() => {});
-        }
-      } catch {}
-    }
+    this._invokeAppendHook(jobId, {
+      jobId: String(jobId),
+      docName: name,
+      markdown: String(markdown),
+      chunk,
+      timestamp,
+      provider: cleanLower(provider) || undefined,
+      roleId: cleanLower(roleId) || undefined,
+      purpose: meta.purpose,
+      source: meta.source,
+      eventType: meta.eventType,
+      actorKind: meta.actorKind,
+      pipelineStage: meta.pipelineStage,
+      semanticKind: meta.semanticKind,
+      memoryContractEnforced: memoryContractEnforced === true,
+    });
   }
+
   _memoryWriteEventsPath(jobId) {
     try {
       return path.join(this.jobs.jobDir(jobId), MEMORY_WRITE_EVENTS_FILE);
@@ -287,7 +429,22 @@ export class Tracking {
   }
 
   recordTeamSelectionEvent(jobId, payload = {}) {
-    safeJsonlAppend(this._teamSelectionEventsPath(jobId), { ts: new Date().toISOString(), ...payload });
+    const row = payload && typeof payload === 'object' && !Array.isArray(payload) ? { ...payload } : {};
+    const recommendation = row.recommendation && typeof row.recommendation === 'object' && !Array.isArray(row.recommendation)
+      ? { ...row.recommendation }
+      : {};
+    const candidates = Array.isArray(recommendation.candidates) ? recommendation.candidates : [];
+    const selectedBlueprintId = String(row.selected_blueprint_id || row.selectedBlueprintId || '').trim();
+    const selectedCandidate = selectedBlueprintId
+      ? candidates.find((candidate) => String(candidate?.template_id || candidate?.blueprint_id || '').trim() === selectedBlueprintId) || null
+      : null;
+    if (selectedCandidate && !recommendation.selected_candidate_snapshot) {
+      recommendation.selected_candidate_snapshot = selectedCandidate;
+    }
+    if (Object.keys(recommendation).length) {
+      row.recommendation = recommendation;
+    }
+    safeJsonlAppend(this._teamSelectionEventsPath(jobId), { ts: new Date().toISOString(), ...row });
   }
 
   readTeamSelectionEvents(jobId, limit = null) {
@@ -342,21 +499,46 @@ export class Tracking {
     fallbackDoc = 'progress',
     strict = false,
     source = 'system',
+    eventType = '',
+    actorKind = '',
+    pipelineStage = '',
+    semanticKind = '',
   } = {}) {
     const cleanRequested = cleanText(requestedName || fallbackDoc || 'progress');
-    const cleanProvider = cleanText(provider).toLowerCase();
-    const cleanRoleId = cleanText(roleId).toLowerCase();
-    const inferredPurpose = cleanText(purpose).toLowerCase() || inferPurposeFromDocName(cleanRequested);
+    const cleanProvider = cleanLower(provider);
+    const cleanRoleId = cleanLower(roleId);
+    const meta = this._resolveAppendMetadata(jobId, cleanRequested, {
+      purpose,
+      source,
+      eventType,
+      actorKind,
+      pipelineStage,
+      semanticKind,
+    });
     const profile = this.loadProfile(jobId);
 
     if (!profile || (!cleanRoleId && !cleanProvider)) {
-      this.append(jobId, cleanRequested || fallbackDoc || 'progress', markdown, { timestamp });
+      this.append(jobId, cleanRequested || fallbackDoc || 'progress', markdown, {
+        timestamp,
+        provider: cleanProvider,
+        roleId: cleanRoleId,
+        purpose: meta.purpose,
+        source: meta.source,
+        eventType: meta.eventType,
+        actorKind: meta.actorKind,
+        pipelineStage: meta.pipelineStage,
+        semanticKind: meta.semanticKind,
+      });
       const resolvedName = this.resolveDocName(jobId, cleanRequested || fallbackDoc || 'progress');
       const event = {
-        source,
+        source: meta.source,
         provider: cleanProvider || undefined,
         role_id: cleanRoleId || undefined,
-        purpose: inferredPurpose,
+        purpose: meta.purpose,
+        semantic_kind: meta.semanticKind,
+        event_type: meta.eventType,
+        actor_kind: meta.actorKind,
+        pipeline_stage: meta.pipelineStage,
         requested_doc: cleanRequested || undefined,
         requested_surface_id: cleanRequested.replace(/\.md$/i, '') || undefined,
         resolved_doc: resolvedName,
@@ -373,18 +555,22 @@ export class Tracking {
       provider: cleanProvider,
       roleId: cleanRoleId,
       requestedDoc: cleanRequested,
-      purpose: inferredPurpose,
+      purpose: meta.purpose,
       fallbackDoc,
     });
 
     if (decision.status === 'rejected' || !decision.target_doc?.file_name) {
-      const requestedSurfaceId = cleanText(decision.requested_doc?.surface_id || decision.requested_doc?.surfaceId || decision.requested_doc?.doc_id).toLowerCase() || cleanRequested.replace(/\.md$/i, '') || undefined;
+      const requestedSurfaceId = cleanLower(decision.requested_doc?.surface_id || decision.requested_doc?.surfaceId || decision.requested_doc?.doc_id) || cleanRequested.replace(/\.md$/i, '') || undefined;
       if (strict) {
-        this._recordMemoryWriteEvent(jobId, {
-          source,
+        const event = {
+          source: meta.source,
           provider: cleanProvider || undefined,
           role_id: cleanRoleId || undefined,
-          purpose: inferredPurpose,
+          purpose: meta.purpose,
+          semantic_kind: meta.semanticKind,
+          event_type: meta.eventType,
+          actor_kind: meta.actorKind,
+          pipeline_stage: meta.pipelineStage,
           requested_doc: cleanRequested || undefined,
           requested_surface_id: requestedSurfaceId,
           resolved_doc: '',
@@ -392,16 +578,34 @@ export class Tracking {
           status: 'rejected',
           reason: decision.reason || 'no_writable_surface',
           policy_blocked: true,
-        });
-        throw new Error(`memory write rejected for ${cleanRoleId || cleanProvider || 'writer'}: ${decision.reason || 'no writable surface'}`);
+        };
+        this._recordMemoryWriteEvent(jobId, event);
+        const error = new Error(`memory write rejected for ${cleanRoleId || cleanProvider || 'writer'}: ${decision.reason || 'no writable surface'}`);
+        error.memory_write_event = event;
+        throw error;
       }
-      this.append(jobId, fallbackDoc, markdown, { timestamp });
+      this.append(jobId, fallbackDoc, markdown, {
+        timestamp,
+        provider: cleanProvider,
+        roleId: cleanRoleId,
+        purpose: meta.purpose,
+        source: meta.source,
+        eventType: meta.eventType,
+        actorKind: meta.actorKind,
+        pipelineStage: meta.pipelineStage,
+        semanticKind: meta.semanticKind,
+        memoryContractEnforced: true,
+      });
       const fallbackResolvedDoc = this.resolveDocName(jobId, fallbackDoc);
       const event = {
-        source,
+        source: meta.source,
         provider: cleanProvider || undefined,
         role_id: cleanRoleId || undefined,
-        purpose: inferredPurpose,
+        purpose: meta.purpose,
+        semantic_kind: meta.semanticKind,
+        event_type: meta.eventType,
+        actor_kind: meta.actorKind,
+        pipeline_stage: meta.pipelineStage,
         requested_doc: cleanRequested || undefined,
         requested_surface_id: requestedSurfaceId,
         resolved_doc: fallbackResolvedDoc,
@@ -415,17 +619,32 @@ export class Tracking {
       return event;
     }
 
-    this.append(jobId, decision.target_doc.file_name, markdown, { timestamp });
+    this.append(jobId, decision.target_doc.file_name, markdown, {
+      timestamp,
+      provider: cleanProvider,
+      roleId: cleanRoleId,
+      purpose: meta.purpose,
+      source: meta.source,
+      eventType: meta.eventType,
+      actorKind: meta.actorKind,
+      pipelineStage: meta.pipelineStage,
+      semanticKind: meta.semanticKind,
+      memoryContractEnforced: true,
+    });
     const resolvedDocName = this.resolveDocName(jobId, decision.target_doc.file_name);
     const event = {
-      source,
+      source: meta.source,
       provider: cleanProvider || undefined,
       role_id: cleanRoleId || undefined,
-      purpose: inferredPurpose,
+      purpose: meta.purpose,
+      semantic_kind: meta.semanticKind,
+      event_type: meta.eventType,
+      actor_kind: meta.actorKind,
+      pipeline_stage: meta.pipelineStage,
       requested_doc: cleanRequested || undefined,
-      requested_surface_id: cleanText(decision.requested_doc?.surface_id || decision.requested_doc?.surfaceId || decision.requested_doc?.doc_id).toLowerCase() || cleanRequested.replace(/\.md$/i, '') || undefined,
+      requested_surface_id: cleanLower(decision.requested_doc?.surface_id || decision.requested_doc?.surfaceId || decision.requested_doc?.doc_id) || cleanRequested.replace(/\.md$/i, '') || undefined,
       resolved_doc: resolvedDocName,
-      target_surface_id: cleanText(decision.target_doc?.surface_id || decision.target_doc?.surfaceId || decision.target_doc?.doc_id).toLowerCase() || resolvedDocName.replace(/\.md$/i, ''),
+      target_surface_id: cleanLower(decision.target_doc?.surface_id || decision.target_doc?.surfaceId || decision.target_doc?.doc_id) || resolvedDocName.replace(/\.md$/i, ''),
       status: decision.status || 'allowed',
       reason: decision.reason || 'requested_surface_allowed',
       fallback_used: decision.fallback_used === true,

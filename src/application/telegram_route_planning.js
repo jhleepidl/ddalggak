@@ -429,7 +429,7 @@ async function suggestNextPrompt(bot, chatId, jobId, question, trigger = "run", 
       `- confidence: ${confidence}`,
       `- signals: ${signals}`,
       `- reason: ${decision.reason || "(no reason)"}`,
-    ].join("\n"));
+    ].join("\n"), { source: 'planner', purpose: 'final', eventType: 'auto_suggest_reflection', actorKind: 'planner', pipelineStage: 'routing', semanticKind: 'decisions' });
   } catch {}
   if (!decision.shouldAsk) return;
 

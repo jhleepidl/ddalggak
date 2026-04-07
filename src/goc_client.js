@@ -966,6 +966,79 @@ export class GocClient {
     return thread;
   }
 
+  async createMemorySurface(threadId, body = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("createMemorySurface requires threadId");
+    return await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/memory/surfaces`, body },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/memory/surfaces`, body },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/memory/surfaces`, body },
+      ],
+    });
+  }
+
+  async createMemoryNode(threadId, body = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("createMemoryNode requires threadId");
+    return await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/memory/nodes`, body },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/memory/nodes`, body },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/memory/nodes`, body },
+      ],
+    });
+  }
+
+  async createMemoryProjection(threadId, body = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("createMemoryProjection requires threadId");
+    return await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/memory/project`, body },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/memory/project`, body },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/memory/project`, body },
+      ],
+    });
+  }
+
+  async getRunStudioRunBundle(threadId, { contextSetId = "", runId = "" } = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("getRunStudioRunBundle requires threadId");
+    const query = {};
+    const cleanContextSetId = String(contextSetId || "").trim();
+    const cleanRunId = String(runId || "").trim();
+    if (cleanContextSetId) query.context_set_id = cleanContextSetId;
+    if (cleanRunId) query.run_id = cleanRunId;
+    return await this._requestAny({
+      method: "GET",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/run_studio/run_bundle`, query },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/run_studio/run_bundle`, query },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/run_studio/run_bundle`, query },
+      ],
+    });
+  }
+
+  async getRunStudioSummary(threadId, { contextSetId = "" } = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("getRunStudioSummary requires threadId");
+    const query = {};
+    const cleanContextSetId = String(contextSetId || "").trim();
+    if (cleanContextSetId) query.context_set_id = cleanContextSetId;
+    return await this._requestAny({
+      method: "GET",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/run_studio/summary`, query },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/run_studio/summary`, query },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/run_studio/summary`, query },
+      ],
+    });
+  }
+
   async listThreads() {
     const data = await this._requestAny({
       method: "GET",

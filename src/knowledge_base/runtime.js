@@ -217,13 +217,18 @@ export function resolveRoleWriteDecision({
     };
   }
   const fallbackEntry = fallbackDoc ? (getKnowledgeDocEntry(normalized, fallbackDoc) || normalized.docs.find((doc) => docMatchesName(doc, fallbackDoc))) : null;
-  if (fallbackEntry && isWritablePolicy(fallbackEntry.write_policy || fallbackEntry.writePolicy)) {
+  const allowedFallback = fallbackEntry
+    ? contract.write_docs.find((doc) => cleanText(doc.file_name, { lower: true }) === cleanText(fallbackEntry.file_name, { lower: true }))
+      || contract.publish_docs.find((doc) => cleanText(doc.file_name, { lower: true }) === cleanText(fallbackEntry.file_name, { lower: true }))
+      || null
+    : null;
+  if (allowedFallback && isWritablePolicy(allowedFallback.write_policy || allowedFallback.writePolicy)) {
     return {
       contract,
       status: 'rerouted',
-      reason: 'role_has_no_primary_target_using_fallback',
+      reason: 'role_has_no_primary_target_using_declared_fallback',
       requested_doc: requestedEntry,
-      target_doc: fallbackEntry,
+      target_doc: allowedFallback,
       fallback_used: true,
     };
   }

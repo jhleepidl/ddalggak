@@ -79,7 +79,7 @@ async function handlePasteModeMessage({
 } = {}) {
   const jobId = pasteState.jobId;
   const planDocName = typeof tracking?.resolveDocName === "function" ? tracking.resolveDocName(jobId, "plan") : "plan";
-  tracking.append(jobId, "plan", `## ChatGPT reply (pasted)\n\n${text}\n`);
+  tracking.append(jobId, "plan", `## ChatGPT reply (pasted)\n\n${text}\n`, { source: 'operator', purpose: 'implementation', eventType: 'external_plan_reply', actorKind: 'operator', pipelineStage: 'manual_input', semanticKind: 'plan' });
   jobs.appendConversation(jobId, "chatgpt", text, { kind: "plan_reply" });
 
   const plan = extractJsonPlan(text);

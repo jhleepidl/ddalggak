@@ -1,21 +1,44 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { recommendTeamBlueprintCandidates, scoreTeamBlueprintCandidate } from '../src/application/team_composer_advisor.js';
-import { buildTeamSeedFromTaskArchetype } from '../src/application/team_blueprint_templates.js';
-import { attachTeamBlueprint } from '../src/application/team_blueprint.js';
 
-test('team composer advisor ranks implementation archetype for code task', () => {
-  const candidates = recommendTeamBlueprintCandidates({ taskText: 'Implement a code patch and modify the repo files', limit: 2 });
-  assert.ok(candidates.length >= 1);
-  assert.equal(candidates[0].task_archetype, 'implementation');
-  assert.ok(candidates[0].executable_definition.member_count >= 1);
+import { recommendTeamBlueprintCandidates, scoreTeamBlueprintCandidate } from '../src/application/team_composer_advisor.js';
+
+test('scoreTeamBlueprintCandidate uses structured features instead of whole serialized manifest', () => {
+  const score = scoreTeamBlueprintCandidate({
+    taskText: 'Implement a code patch in the repo and verify it',
+    blueprint: {
+      blueprint_id: 'impl_team',
+      title: 'Implementation Strike Team',
+      description: 'Inspect a repository, implement a scoped patch, verify it, and summarize the change.',
+      task_archetype: 'implementation',
+      structure: {
+        participants: [
+          { role: 'researcher', name: 'Repo Scout' },
+          { role: 'builder', name: 'Builder' },
+          { role: 'reviewer', name: 'Reviewer' },
+        ],
+      },
+      topology: { pattern: 'sequential', participants: [{ role: 'researcher' }, { role: 'builder' }, { role: 'reviewer' }], edges: [] },
+      memory_plan: {
+        surfaces: [
+          { surface_id: 'working_memory', write_policy: 'shared', semantic_slots: ['progress'] },
+          { surface_id: 'final_answer', write_policy: 'final', semantic_slots: ['final_answer'] },
+        ],
+      },
+      catalog: { tags: ['implementation', 'repo'], good_for: ['repo fixes'] },
+    },
+  });
+
+  assert.ok(score.semantic_score >= 3);
+  assert.equal(score.feature_score_breakdown.implementation_boost, 4);
+  assert.equal(score.memory_fit.final_answer_surface_ready, true);
+  assert.ok(score.rationale.includes('final_answer_surface_ready'));
 });
 
-test('team composer score exposes topology and memory fit', () => {
-  const seed = buildTeamSeedFromTaskArchetype('review_repair', { taskBrief: 'Review and repair a regression bug' });
-  const attached = attachTeamBlueprint(seed, { applyState: 'pending', source: 'test' });
-  const scored = scoreTeamBlueprintCandidate({ taskText: 'Review and repair a regression bug', blueprint: attached.team_blueprint });
-  assert.equal(scored.archetype, 'review_repair');
-  assert.ok(typeof scored.topology.pattern === 'string');
-  assert.ok(typeof scored.memory_fit.final_answer_surface_ready === 'boolean');
+test('recommendTeamBlueprintCandidates prefers implementation for code task', () => {
+  const candidates = recommendTeamBlueprintCandidates({ taskText: 'Implement a code patch in the repo and verify it', limit: 2 });
+  assert.equal(candidates.length, 2);
+  assert.equal(candidates[0].task_archetype, 'implementation');
+  assert.ok(candidates[0].feature_score_breakdown);
+  assert.ok(Array.isArray(candidates[0].rationale));
 });

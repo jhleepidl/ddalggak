@@ -28,6 +28,11 @@ import {
   dedupeScopeNodeIds as dedupeLensNodeIds,
 } from "../domain/scope_hint_core.js";
 import { createDefaultRunRoute } from "./orchestrator.js";
+import {
+  deriveKnowledgeBaseMemorySurfaceSpec,
+  buildGocMemoryNodePayload,
+  ensureKnowledgeBaseMemorySurfacesInGoc as ensureKnowledgeBaseMemorySurfacesInGocShared,
+} from "./goc_memory_sync.js";
 import { isScopedContextMode, normalizeContextRuntimeMode } from "../domain/context_runtime.js";
 import { sendLong as sendLongAdapter } from "../adapters/telegram/send.js";
 import {
@@ -175,6 +180,169 @@ import * as routePlanning from "./telegram_route_planning.js";
 import * as gocRuntime from "./telegram_goc_runtime.js";
 import * as runtimeUi from "./telegram_runtime_ui.js";
 
+function uniqueLowerList(values = []) {
+  const seen = new Set();
+  const out = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const clean = String(value || '').trim().toLowerCase();
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    out.push(clean);
+  }
+  return out;
+}
+
+function buildTelegramAgentIndex({ runtime = null, routePlan = null, actions = [], extraSources = [] } = {}) {
+  return buildAgentDisplayIndexShared(
+    agentRegistry,
+    runtime,
+    runtime?.runtime_team_snapshot || runtime?.runtimeTeamSnapshot || null,
+    routePlan,
+    routePlan?.team_plan,
+    { actions },
+    ...(Array.isArray(extraSources) ? extraSources : []),
+  );
+}
+
+function resolveRuntimeExecutionPolicyForRuntime(runtime = null) {
+  const source = runtime && typeof runtime === 'object'
+    ? (runtime.runtime_execution || runtime.runtimeExecution || runtime.runtime_execution_policy || runtime.runtimeExecutionPolicy || runtime.execution_policy || runtime.executionPolicy || runtime)
+    : {};
+  return normalizeRuntimeExecutionPolicy(source);
+}
+
+function sendLong(bot, chatId, text, options = undefined) {
+  return sendLongAdapter(bot, chatId, text, options);
+}
+
+function useCompactProgressUpdates(verbose = false) {
+  if (verbose) return false;
+  return TELEGRAM_PROGRESS_DETAIL_MODE !== 'full';
+}
+
+function buildRoleAwareContextContract(jobId, { provider = '', roleId = '', maxReadDocs = 4 } = {}) {
+  const profile = tracking.loadProfile(jobId);
+  if (!profile) return null;
+  return buildRoleMemoryContract({ profile, provider, roleId, maxReadDocs });
+}
+
+function loadContextDocs(jobId, docNames, maxCharsPerDoc = 3500, options = {}) {
+  return runtimeIo.loadContextDocs(jobId, docNames, maxCharsPerDoc, options);
+}
+
+function buildWorkspaceFilesPromptSection(jobId, options = {}) {
+  return runtimeIo.buildWorkspaceFilesPromptSection(jobId, options);
+}
+
+function ensureCommandOk(name, result) {
+  return runtimeIo.ensureCommandOk(name, result);
+}
+
+function maybeSendArtifactSummary(bot, chatId, jobId, options = {}) {
+  return runtimeIo.maybeSendArtifactSummary(bot, chatId, jobId, options);
+}
+
+function buildAgentOutputContractBlock({ roleId = '', runtimeExecutionPolicy = null } = {}) {
+  const policy = normalizeRuntimeExecutionPolicy(runtimeExecutionPolicy || {});
+  const lines = [
+    'OUTPUT CONTRACT',
+    `- role_id: ${String(roleId || '').trim().toLowerCase() || '(unspecified)'}`,
+    `- checkpointing: ${policy.checkpointing?.enabled === false ? 'disabled' : 'enabled'}`,
+    `- continuous_improvement: ${policy.continuous_improvement?.enabled ? 'enabled' : 'disabled'}`,
+    '- respond with concrete artifacts, verification notes, and next-step risks when relevant',
+  ];
+  return lines.join('\n');
+}
+
+function getCurrentTurnReplyMessageId(chatId) {
+  if (routePlanning && typeof routePlanning.getCurrentTurnReplyMessageId === 'function') {
+    return routePlanning.getCurrentTurnReplyMessageId(chatId);
+  }
+  return null;
+}
+
+function buildCompactExecutionUpdateText({ displayName = '', output = '', routeSignals = [], final = false } = {}) {
+  const lines = [
+    final ? '🧩 최종 합성 완료' : '🤖 실행 완료',
+    displayName ? `- agent: ${displayName}` : '',
+    Array.isArray(routeSignals) && routeSignals.length > 0 ? `- route_signals: ${routeSignals.join(', ')}` : '',
+    output ? `- preview: ${clip(String(output || '').trim(), 500)}` : '',
+  ].filter(Boolean);
+  return lines.join('\n');
+}
+
+function withAgentOutputContract(action = {}, { runtimeExecutionPolicy = null } = {}) {
+  const normalizedAction = action && typeof action === 'object' ? { ...action } : {};
+  const inputs = normalizedAction.inputs && typeof normalizedAction.inputs === 'object' ? { ...normalizedAction.inputs } : {};
+  const inferredRoleId = String(inputs.role_id || inputs.roleId || normalizedAction.role_id || normalizedAction.roleId || '').trim().toLowerCase();
+  const outputContract = buildAgentOutputContractBlock({
+    roleId: inferredRoleId,
+    runtimeExecutionPolicy: normalizeRuntimeExecutionPolicy(runtimeExecutionPolicy || {}),
+  });
+  if (outputContract && !String(inputs.output_contract || inputs.outputContract || '').trim()) {
+    inputs.output_contract = outputContract;
+  }
+  normalizedAction.inputs = inputs;
+  return normalizedAction;
+}
+
+function resolveProviderRuntimeOptionsForJob({ runtime = null, provider = '', action = null, agent = null, jobId = '' } = {}) {
+  const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
+  const actionInputs = action?.inputs && typeof action.inputs === 'object' ? action.inputs : {};
+  return resolveProviderRuntimeOptions({
+    runtimeExecutionPolicy,
+    provider,
+    workspaceRoot: runWorkspaceDir(jobId),
+    agent,
+    action,
+  });
+}
+
+function normalizeActionShape(raw = {}) {
+  if (routePlanning && typeof routePlanning.normalizeActionShape === 'function') {
+    return routePlanning.normalizeActionShape(raw);
+  }
+  return raw && typeof raw === 'object' ? raw : null;
+}
+
+function enforceAgentPublishContract(jobId, { runtime = null, agentId = '', agent = null, provider = '', roleId = '', displayLabel = '', finalSynthesis = false, requestedSurface = '' } = {}) {
+  const profile = tracking.loadProfile(jobId);
+  const runtimeAgent = findAgentConfigInRuntime(agentId, runtime) || agent || {};
+  const declaredPublishTargets = uniqueLowerList([
+    ...(runtimeAgent?.memory_contract?.publish_surface_ids || runtimeAgent?.memoryContract?.publishSurfaceIds || []),
+    ...(runtimeAgent?.context_policy?.writes?.publish_targets || runtimeAgent?.contextPolicy?.writes?.publish_targets || runtimeAgent?.contextPolicy?.writes?.publishTargets || []),
+  ]);
+  const enforcement = summarizeRoleMemoryEnforcement({ profile, provider, roleId });
+  const targetSurface = String(requestedSurface || '').trim().toLowerCase();
+  const finalRequested = finalSynthesis === true || targetSurface === 'final_answer';
+  const roleCanPublishTarget = targetSurface
+    ? canRolePublishSurface({ profile, provider, roleId, surfaceId: targetSurface })
+    : false;
+  const roleCanPublishFinal = canRolePublishSurface({ profile, provider, roleId, surfaceId: 'final_answer' });
+  const declaredFinalPublisher = declaredPublishTargets.includes('final_answer');
+  let allowed = true;
+  let summary = 'allowed';
+
+  if (finalRequested && !(roleCanPublishFinal || declaredFinalPublisher)) {
+    allowed = false;
+    summary = 'publish contract blocked: final synthesis는 final_answer surface가 선언된 agent만 수행할 수 있습니다';
+  } else if (targetSurface && !(roleCanPublishTarget || declaredPublishTargets.includes(targetSurface))) {
+    allowed = false;
+    summary = `publish contract blocked: ${displayLabel || agentId || roleId || 'agent'} cannot publish to ${targetSurface}`;
+  }
+
+  return {
+    allowed,
+    summary,
+    contract: {
+      ...enforcement,
+      publish_targets: declaredPublishTargets,
+      final_owner_required: finalRequested,
+      final_owner_label: declaredFinalPublisher ? (displayLabel || agentId || roleId || '') : '',
+    },
+  };
+}
+
 async function maybeBuildStructureConflictRefineDraft({ sessionStore, chatId, teamConfig, instruction, runtime }) {
   const currentState = typeof getSessionTeamState === 'function' ? getSessionTeamState(sessionStore, chatId) : {};
   try {
@@ -226,600 +394,182 @@ const {
   requestChatInterrupt,
   enqueue,
 } = runtimeState;
-const {
-  appendChatMessageToGoc,
-  buildContextInfo,
-  buildWorkspaceFilesPromptSection,
-  ensureCommandOk,
-  loadContextDocs,
-  sendContextInfo,
-  maybeSendArtifactSummary,
-  sendLong,
-} = runtimeIo;
 
-const replyAnchorStore = new ReplyAnchorStore({ sessionStore: chatSessionStore });
-const {
-  getGoalFromResearch,
-  normalizeActionShape,
-  actionLabel,
-  formatRegistryLines,
-  chatActionLabel,
-  buildQueuedAgentStatusFromActions,
-  getCurrentTurnReplyMessageId,
-  sendRouterAckMessage,
-  sendPlanPreviewMessage,
-  normalizeForceMode,
-  buildAutopilotProgressSummary,
-  buildAutopilotFollowupMessage,
-  sanitizeSupervisorRoutePlan,
-  recommendTeamForTask,
-  rewritePlanToReuseAgents,
-  normalizeDeliverableList,
-  mergeSuggestedActions,
-  collectSuggestedActionsFromOutputs,
-  updateCompletedDeliverablesFromOutputs,
-  buildPendingApprovalPrompt,
-  sendGeminiRetryMessage,
-  sendGeminiModelSwitchMessage,
-  sendGeminiGiveUpMessage,
-  sendAgentStatusTransitionMessage,
-} = routePlanning;
+function deriveGocMemorySurfaceSpec(doc = {}) {
+  return deriveKnowledgeBaseMemorySurfaceSpec(doc);
+}
 
-
-function safeRunDir(jobId = "") {
-  try {
-    return runDir(jobId);
-  } catch {
-    return "";
+function formatGocProjectionContext(projectionResult = {}, { maxChars = 9000 } = {}) {
+  const projection = projectionResult && typeof projectionResult === 'object'
+    ? (projectionResult.projection && typeof projectionResult.projection === 'object' ? projectionResult.projection : projectionResult)
+    : {};
+  const visibleNodes = Array.isArray(projection.visible_nodes) ? projection.visible_nodes : [];
+  const blockedNodes = Array.isArray(projection.blocked_nodes) ? projection.blocked_nodes : [];
+  const visibleSurfaceIds = Array.isArray(projection.visible_surface_ids) ? projection.visible_surface_ids : [];
+  const blockedSurfaceIds = Array.isArray(projection.blocked_surface_ids) ? projection.blocked_surface_ids : [];
+  if (visibleNodes.length === 0 && blockedNodes.length === 0 && visibleSurfaceIds.length === 0) {
+    return { text: '', visibleNodeCount: 0, blockedNodeCount: 0 };
   }
-}
-
-function resolveRuntimeExecutionPolicyForRuntime(runtime = null) {
-  const structurePolicy = runtime?.activeTeamConfig?.structure_v2?.control_policy?.runtime_execution
-    || runtime?.activeTeamConfig?.runtime_execution
-    || runtime?.runtimeTeamSnapshot?.structure_v2?.control_policy?.runtime_execution
-    || runtime?.runtimeTeamSnapshot?.runtime_execution
-    || runtime?.runtime_team_snapshot?.structure_v2?.control_policy?.runtime_execution
-    || runtime?.runtime_team_snapshot?.runtime_execution
-    || {};
-  return normalizeRuntimeExecutionPolicy(structurePolicy);
-}
-
-function resolveProviderRuntimeOptionsForJob({ runtime = null, provider = '', action = null, agent = null, jobId = '' } = {}) {
-  const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
-  let workspaceRoot = process.cwd();
-  try {
-    if (jobId) workspaceRoot = runWorkspaceDir(jobId);
-  } catch {}
-  return resolveProviderRuntimeOptions({
-    runtimeExecutionPolicy,
-    provider,
-    workspaceRoot,
-    action,
-    agent,
-  });
-}
-
-function continuousStopSignalsMatched(activeSignals = [], policy = {}) {
-  const signals = new Set((Array.isArray(activeSignals) ? activeSignals : []).map((row) => String(row || '').trim().toLowerCase()).filter(Boolean));
-  return (Array.isArray(policy?.stop_signals) ? policy.stop_signals : [])
-    .map((row) => String(row || '').trim().toLowerCase())
-    .filter(Boolean)
-    .filter((row) => signals.has(row));
-}
-
-function shouldRequestQualityDecision({ roleId = '', runtimeExecutionPolicy = {} } = {}) {
-  const roleKey = String(roleId || '').trim().toLowerCase();
-  if ((runtimeExecutionPolicy?.continuous_improvement || {}).enabled === true) return true;
-  return ['reviewer', 'judge', 'synthesizer', 'operator', 'chair'].includes(roleKey);
-}
-
-function buildQualityAssessmentInstruction({ roleId = '', runtimeExecutionPolicy = {} } = {}) {
-  if (!shouldRequestQualityDecision({ roleId, runtimeExecutionPolicy })) return '';
-  const stopSignals = (Array.isArray(runtimeExecutionPolicy?.continuous_improvement?.stop_signals)
-    ? runtimeExecutionPolicy.continuous_improvement.stop_signals
-    : ['quality_threshold_met', 'ready_for_user', 'final_answer_ready', 'done_enough'])
-    .map((row) => String(row || '').trim())
-    .filter(Boolean);
-  const continueSignals = ['needs_more_revision', 'needs_more_research', 'quality_gap_remaining', 'evidence_gap_remaining', 'not_ready_yet'];
-  const exampleStop = JSON.stringify({ decision: 'stop', signals: [stopSignals[0] || 'quality_threshold_met'], reason: 'The output is coherent, verified, and ready for the user.' });
-  const exampleContinue = JSON.stringify({ decision: 'continue', signals: ['needs_more_revision'], reason: 'The output still has quality gaps that require another iteration.' });
-  return [
-    '[QUALITY SIGNAL CONTRACT]',
-    '- If you can judge whether the current workspace/output is good enough to stop refining, include a QUALITY_DECISION_JSON block.',
-    `- Stop signals (exact strings): ${stopSignals.join(', ') || '(none)'}`,
-    `- Continue/refine signals (exact strings): ${continueSignals.join(', ')}`,
-    '- Use only exact signal strings. Do not invent new signal names unless the route explicitly asked for them.',
-    '- If the work is ready for user delivery, emit at least one stop signal.',
-    '- If the work still needs another iteration, emit at least one continue/refine signal.',
-    '- Format:',
-    'QUALITY_DECISION_JSON',
-    '```json',
-    exampleStop,
-    '```',
-    '- Or when not ready:',
-    'QUALITY_DECISION_JSON',
-    '```json',
-    exampleContinue,
-    '```',
-  ].join('\n');
-}
-
-function buildAgentOutputContractBlock({ roleId = '', runtimeExecutionPolicy = {} } = {}) {
-  const outputContract = [
-    '[OUTPUT CONTRACT]',
-    '- 사용자에게 채팅방에 바로 공유할 중간 결과가 있으면 CHAT_UPDATE 블록을 포함하라.',
-    '- CHAT_UPDATE는 3~6줄의 자연어 요약으로 쓰고, 근거/핵심 판단/다음 포인트만 남겨라.',
-    '- 형식:',
-    'CHAT_UPDATE',
-    '```text',
-    '핵심 발견 2~3개',
-    '왜 중요한지',
-    '다음으로 넘길 포인트',
-    '```',
-    '- 필요하면 마지막에 NEXT_ACTIONS_JSON 블록으로 후속 작업을 제안하라.',
-    '- 형식:',
-    'NEXT_ACTIONS_JSON',
-    '```json',
-    '{"actions":[{"type":"run_agent","agent_id":"coder","goal":"..."}]}',
-    '```',
-    '- 후속 제안이 없으면 NEXT_ACTIONS_JSON 블록은 생략한다.',
-  ].join('\n');
-  const qualityInstruction = buildQualityAssessmentInstruction({ roleId, runtimeExecutionPolicy });
-  return [outputContract, qualityInstruction].filter(Boolean).join('\n\n');
-}
-
-function withAgentOutputContract(action = {}, { runtimeExecutionPolicy = {} } = {}) {
-  const row = action && typeof action === 'object' ? action : {};
-  const basePrompt = String(row.prompt || row.goal || '').trim();
-  if (!basePrompt) return row;
-  if (basePrompt.includes('[OUTPUT CONTRACT]')) return row;
-  const inputs = row.inputs && typeof row.inputs === 'object' ? row.inputs : {};
-  const roleId = String(inputs.role_id || inputs.roleId || row.agent || row.agent_id || '').trim().toLowerCase();
-  const contract = buildAgentOutputContractBlock({ roleId, runtimeExecutionPolicy });
-  if (!contract) return row;
-  return {
-    ...row,
-    prompt: [basePrompt, contract].filter(Boolean).join('\n\n'),
-  };
-}
-
-function buildContinuousImprovementFollowup({
-  originalUserText = '',
-  followupHint = '',
-  deliverables = [],
-  completedDeliverables = [],
-  stopSignals = [],
-  turn = 1,
-  maxTurns = 1,
-  customPrompt = '',
-} = {}) {
-  const remaining = (Array.isArray(deliverables) ? deliverables : []).filter((item) => {
-    const key = String(item || '').trim().toLowerCase();
-    return key && !(Array.isArray(completedDeliverables) ? completedDeliverables : []).some((done) => String(done || '').trim().toLowerCase() === key);
-  });
-  return [
-    customPrompt || '현재 workspace 결과를 스스로 검토하고 더 개선하라. 아직 품질이 충분하지 않다면 다음 개선 단계를 이어서 수행하라.',
-    `original_request=${String(originalUserText || '').trim()}`,
-    `continuous_turn=${turn}/${maxTurns}`,
-    remaining.length > 0 ? `remaining_deliverables=${remaining.join(', ')}` : 'remaining_deliverables=(none)',
-    followupHint ? `followup_hint=${followupHint}` : '',
-    stopSignals.length > 0 ? `observed_stop_signals=${stopSignals.join(', ')}` : '',
-    '이번 턴의 목표: 품질을 높이기 위한 self-refine / verify / rewrite / strengthen 작업을 계속하라. 단, stop signal을 충족하면 마무리해도 된다.',
-    'quality_contract=가능하면 QUALITY_DECISION_JSON 블록으로 stop/continue 판단과 정확한 signal 문자열을 남겨라.',
-  ].filter(Boolean).join('\n');
-}
-
-
-function normalizeComparableDeltaText(text = '') {
-  return String(text || '')
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase()
-    .slice(0, 320);
-}
-
-function buildTurnDeltaFingerprint(outputs = []) {
-  return (Array.isArray(outputs) ? outputs : [])
-    .map((row) => {
-      const actor = String(row?.agentId || row?.agent || row?.label || '').trim().toLowerCase();
-      const body = normalizeComparableDeltaText(row?.output || row?.text || row?.summary || '');
-      return actor && body ? `${actor}:${body}` : body;
-    })
-    .filter(Boolean)
-    .slice(-3)
-    .join(' || ');
-}
-
-function buildContinuousImprovementProgressMessage({ turn = 1, maxTurns = 1, deliverables = [], completedDeliverables = [], stopSignals = [] } = {}) {
-  const remaining = (Array.isArray(deliverables) ? deliverables : []).filter((item) => {
-    const key = String(item || '').trim().toLowerCase();
-    return key && !(Array.isArray(completedDeliverables) ? completedDeliverables : []).some((done) => String(done || '').trim().toLowerCase() === key);
-  });
-  return [
-    `♻️ self-refine progress ${turn}/${maxTurns}`,
-    `- completed: ${Array.isArray(completedDeliverables) && completedDeliverables.length > 0 ? completedDeliverables.join(', ') : '(none)'}`,
-    `- remaining: ${remaining.length > 0 ? remaining.join(', ') : '(none)'}`,
-    stopSignals.length > 0 ? `- stop_signals: ${stopSignals.join(', ')}` : '',
-  ].filter(Boolean).join('\n');
-}
-const {
-  createJob,
-  composeCapabilitiesForRun,
-  loadSupervisorRuntime,
-  summarizeSelectionState,
-  refreshAgentRegistry,
-  resolveMembershipTargetForThread,
-  recordMembershipMutationDiagnostic,
-  createAgentDraftProposal,
-  openAgentsUiInfo,
-  findLatestDraftByAgentId,
-  findDraftByNodeId,
-  updateJobConfigSelection,
-  parseNodeCreatedAtMs,
-  nodeTypeKey,
-  nodeResourceKind,
-  messageRoleOf,
-  summarizeActiveTypeBreakdown,
-  normalizeCatalogIds,
-  resolveInstallCandidateFromSession,
-  filterPublicBlueprintCandidates,
-  findLatestAgentProfileNodeForPublish,
-  buildGocAgentCreateSpec,
-} = gocRuntime;
-const { buildChatStatusCard } = runtimeUi;
-
-function buildTelegramAgentIndex({ runtime = null, routePlan = null, actions = [], extraSources = [] } = {}) {
-  return buildAgentDisplayIndexShared(
-    agentRegistry,
-    runtime,
-    runtime?.runtime_team_snapshot || runtime?.runtimeTeamSnapshot || null,
-    routePlan,
-    routePlan?.team_plan,
-    { actions },
-    ...(Array.isArray(extraSources) ? extraSources : []),
-  );
-}
-
-function buildRuntimeAgentMetadataIndex(runtime = null) {
-  const index = new Map();
-  const pushRow = (row = {}) => {
-    if (!row || typeof row !== 'object') return;
-    const id = String(row.id || row.agent_id || row.agentId || row.template_id || row.templateId || row.instance_id || row.instanceId || '').trim().toLowerCase();
-    if (!id) return;
-    const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
-    const next = {
-      id,
-      name: String(row.name || row.display_label || row.displayLabel || row.agent_name || '').trim(),
-      role: String(row.role || row.role_id || row.roleId || row.role_label || row.roleLabel || '').trim().toLowerCase(),
-      provider: String(row.provider || '').trim().toLowerCase(),
-      model: String(row.model || row.configured_model || '').trim(),
-      skills: Array.isArray(row.skills)
-        ? row.skills
-        : (Array.isArray(row.attached_skill_ids) ? row.attached_skill_ids : (Array.isArray(row.attachedSkillIds) ? row.attachedSkillIds : [])),
-      purpose: String(row.purpose || row.assigned_goal || row.assignedGoal || '').trim(),
-      agency_overlay_id: String(row.agency_overlay_id || row.agencyOverlayId || metadata.agency_overlay_id || '').trim(),
-      agency_overlay: row.agency_overlay || row.agencyOverlay || metadata.agency_overlay || null,
-    };
-    const prev = index.get(id) || {};
-    index.set(id, {
-      ...prev,
-      ...next,
-      name: next.name || prev.name || '',
-      role: next.role || prev.role || '',
-      provider: next.provider || prev.provider || '',
-      model: next.model || prev.model || '',
-      skills: Array.isArray(next.skills) && next.skills.length > 0 ? next.skills : (Array.isArray(prev.skills) ? prev.skills : []),
-      purpose: next.purpose || prev.purpose || '',
-      agency_overlay_id: next.agency_overlay_id || prev.agency_overlay_id || '',
-      agency_overlay: next.agency_overlay || prev.agency_overlay || null,
-    });
-  };
-  for (const row of (Array.isArray(runtime?.activeTeamConfig?.agents) ? runtime.activeTeamConfig.agents : [])) pushRow(row);
-  for (const row of (Array.isArray(runtime?.agents) ? runtime.agents : [])) pushRow(row);
-  for (const row of (Array.isArray(runtime?.agentsCatalog) ? runtime.agentsCatalog : [])) pushRow(row);
-  for (const row of (Array.isArray(runtime?.runtimeTeamSnapshot?.runtime_agents) ? runtime.runtimeTeamSnapshot.runtime_agents : [])) pushRow(row);
-  return index;
-}
-
-function extractChatUpdateBlock(text = "") {
-  const src = String(text || "");
-  if (!src) return "";
-  const regexes = [
-    /CHAT_UPDATE\s*[:：]?\s*```(?:text)?\s*([\s\S]*?)```/i,
-    /CHAT_UPDATE\s*[:：]?\s*([\s\S]*?)(?:\n[A-Z0-9_]+_JSON\b|$)/i,
+  const bySurface = new Map();
+  for (const row of visibleNodes) {
+    const surfaceId = String(row?.surface_id || 'memory').trim().toLowerCase() || 'memory';
+    if (!bySurface.has(surfaceId)) bySurface.set(surfaceId, []);
+    bySurface.get(surfaceId).push(row);
+  }
+  const lines = [
+    '### GOC ROLE-SCOPED MEMORY PROJECTION',
+    '',
+    `- visible_surfaces: ${visibleSurfaceIds.join(', ') || '(none)'}`,
+    `- blocked_surfaces: ${blockedSurfaceIds.join(', ') || '(none)'}`,
+    `- visible_nodes: ${visibleNodes.length}`,
+    `- blocked_nodes: ${blockedNodes.length}`,
+    '',
   ];
-  for (const re of regexes) {
-    const match = src.match(re);
-    const candidate = String(match?.[1] || "").trim();
-    if (candidate) return candidate;
+  for (const [surfaceId, rows] of bySurface.entries()) {
+    lines.push(`#### surface:${surfaceId}`);
+    for (const row of rows.slice(0, 6)) {
+      const preview = String(row?.content_preview || row?.text || '').trim();
+      const trust = String(row?.trust_tier || '').trim();
+      const confidence = Number(row?.confidence);
+      const reason = String(row?.visibility_reason || 'visible').trim();
+      const meta = [
+        trust ? `trust=${trust}` : '',
+        Number.isFinite(confidence) ? `confidence=${confidence}` : '',
+        reason ? `reason=${reason}` : '',
+      ].filter(Boolean).join(' · ');
+      lines.push(`- ${preview || '[empty]'}${meta ? ` (${meta})` : ''}`);
+    }
+    if (rows.length > 6) lines.push(`- … ${rows.length - 6} more visible nodes`);
+    lines.push('');
   }
-  return "";
+  if (blockedNodes.length > 0) {
+    lines.push('### BLOCKED MEMORY NODES');
+    lines.push('');
+    for (const row of blockedNodes.slice(0, 6)) {
+      const surfaceId = String(row?.surface_id || 'memory').trim().toLowerCase() || 'memory';
+      const preview = String(row?.content_preview || row?.text || '').trim();
+      const reason = String(row?.blocked_reason || 'blocked').trim();
+      lines.push(`- ${surfaceId}: ${reason}${preview ? ` · ${preview}` : ''}`);
+    }
+    if (blockedNodes.length > 6) lines.push(`- … ${blockedNodes.length - 6} more blocked nodes`);
+  }
+  const textOut = clip(lines.join('\n').trim(), Math.max(1200, Math.floor(Number(maxChars) || 9000)));
+  return {
+    text: textOut,
+    visibleNodeCount: visibleNodes.length,
+    blockedNodeCount: blockedNodes.length,
+  };
 }
 
-function buildAgentChatUpdateText({ agentId = "", output = "" } = {}) {
-  const displayName = formatChatAgentDisplayName(agentId, buildTelegramAgentIndex());
-  const explicit = extractChatUpdateBlock(output);
-  if (explicit) return `🧾 ${displayName} 중간 결과\n${clip(explicit, 2400)}`;
-  const cleanOutput = String(output || "").trim();
-  if (!cleanOutput) return `🧾 ${displayName} 완료`;
-  return `🧾 ${displayName} 중간 결과\n${clip(cleanOutput, 2400)}`;
+async function ensureKnowledgeBaseMemorySurfacesInGoc(jobId, { client = null, threadId = '' } = {}) {
+  const profile = tracking.loadProfile(jobId);
+  const docs = Array.isArray(profile?.docs) ? profile.docs : [];
+  return ensureKnowledgeBaseMemorySurfacesInGocShared({
+    jobId,
+    client,
+    threadId,
+    docs,
+    deriveSpec: deriveGocMemorySurfaceSpec,
+  });
 }
 
-
-function useCompactProgressUpdates(verbose = false) {
-  return !verbose && TELEGRAM_PROGRESS_DETAIL_MODE !== 'full';
+function deriveGocMemoryNodePayload({ jobId = '', markdown = '', provider = '', roleId = '', purpose = '', writeEvent = null } = {}) {
+  const event = writeEvent && typeof writeEvent === 'object' ? writeEvent : {};
+  const targetSurfaceId = String(event?.target_surface_id || event?.requested_surface_id || '').trim().toLowerCase();
+  const cleanPurpose = String(purpose || event?.purpose || '').trim().toLowerCase() || undefined;
+  return buildGocMemoryNodePayload({
+    clip,
+    jobId,
+    markdown,
+    provider: String(provider || event?.provider || '').trim().toLowerCase(),
+    roleId: String(roleId || event?.role_id || '').trim().toLowerCase(),
+    purpose: cleanPurpose,
+    eventType: String(event?.event_type || event?.eventType || '').trim().toLowerCase(),
+    actorKind: String(event?.actor_kind || event?.actorKind || '').trim().toLowerCase(),
+    pipelineStage: String(event?.pipeline_stage || event?.pipelineStage || '').trim().toLowerCase(),
+    semanticKind: String(event?.semantic_kind || event?.semanticKind || '').trim().toLowerCase(),
+    requestedDoc: String(event?.requested_doc || '').trim(),
+    resolvedDoc: String(event?.resolved_doc || '').trim(),
+    requestedSurfaceId: String(event?.requested_surface_id || '').trim().toLowerCase(),
+    targetSurfaceId,
+    memoryWriteStatus: String(event?.status || '').trim().toLowerCase(),
+    defaultConfidence: event?.status === 'rerouted' ? 0.75 : 0.85,
+    nodeTypeHint: ['final', 'artifact'].includes(String(cleanPurpose || '').trim().toLowerCase()) || ['final_answer', 'artifact_index'].includes(targetSurfaceId) ? 'decision' : '',
+  });
 }
 
-function buildCompactExecutionUpdateText({ displayName = '', output = '', routeSignals = [], final = false } = {}) {
-  const cleanDisplayName = String(displayName || '').trim() || 'Agent';
-  const explicit = extractChatUpdateBlock(output);
-  const raw = explicit || String(output || '').split(/\r?\n/).map((line) => String(line || '').trim()).filter(Boolean).slice(0, 3).join(' ');
-  const summary = clip(String(raw || (final ? '최종 정리를 마쳤습니다.' : '작업을 마쳤습니다.')).replace(/\s+/g, ' ').trim(), final ? 600 : 220);
-  const lines = [final ? `🧩 ${cleanDisplayName} 최종 정리` : `✅ ${cleanDisplayName} 완료`, summary];
-  if (Array.isArray(routeSignals) && routeSignals.length > 0) lines.push(`route_signals=${routeSignals.join(', ')}`);
-  return lines.join('\n');
-}
-
-function buildAgentKnowledgeBaseBlock(jobId, { provider = "", roleId = "", agentId = "", detailLevel = "compact" } = {}) {
+async function syncRoleAwareMemoryWriteToGoc(jobId, markdown, { provider = '', roleId = '', purpose = '', writeEvent = null } = {}) {
+  if (memoryModeWithFallback() !== 'goc') return null;
+  const cleanMarkdown = String(markdown || '').trim();
+  if (!cleanMarkdown) return null;
+  const event = writeEvent && typeof writeEvent === 'object' ? writeEvent : {};
+  const surfaceId = String(event?.target_surface_id || event?.requested_surface_id || '').trim().toLowerCase();
+  if (!surfaceId || event?.policy_blocked === true || event?.status === 'rejected') return null;
   try {
-    const profile = tracking.loadProfile(jobId);
-    if (!profile) return "";
-    return buildAgentKnowledgeBaseGuidance({
-      profile,
-      sharedDir: runSharedDir(jobId),
+    const client = requireGocClient();
+    const map = await ensureJobThread(client, {
+      jobId,
+      jobDir: runDir(jobId),
+      title: `job:${jobId}`,
+    });
+    await ensureKnowledgeBaseMemorySurfacesInGoc(jobId, { client, threadId: map.threadId });
+    return await client.createMemoryNode(map.threadId, deriveGocMemoryNodePayload({
+      jobId,
+      markdown: cleanMarkdown,
       provider,
       roleId,
-      agentId,
-      detailLevel,
-    });
-  } catch {
-    return "";
-  }
-}
-
-function escapePromptRegex(text = '') {
-  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function extractBracketSection(text = '', label = '', { maxChars = 600, tailLines = 0 } = {}) {
-  const cleanLabel = String(label || '').trim();
-  const cleanText = String(text || '');
-  if (!cleanLabel || !cleanText) return '';
-  const re = new RegExp(`\\[${escapePromptRegex(cleanLabel)}\\]\\n([\\s\\S]*?)(?=\\n\\[[A-Z][A-Z_ ]*\\]\\n|$)`, 'i');
-  const match = cleanText.match(re);
-  if (!match) return '';
-  let body = String(match[1] || '').trim();
-  if (!body) return '';
-  if (Number.isFinite(Number(tailLines)) && Number(tailLines) > 0) {
-    const rows = body.split(/\r?\n/).map((line) => String(line || '').trim()).filter(Boolean);
-    body = rows.slice(Math.max(0, rows.length - Math.max(1, Math.floor(Number(tailLines))))).join('\n');
-  }
-  body = clip(body, Math.max(120, Math.floor(Number(maxChars) || 600)));
-  return body ? `[${cleanLabel}]\n${body}` : '';
-}
-
-function extractDirectiveBullets(text = '', { maxItems = 4, maxChars = 720 } = {}) {
-  const src = String(text || '');
-  if (!src) return '';
-  const directiveRe = /(반드시|절대로|하지\s*마|하지마|아니라|대신|다른\s+모드|다르다|혼동하지\s*않도록|혼동하지\s*말|주의해|주의하|기억해|기억해둬|잊지\s*마|잊지마|must|never|do not|don't|instead|rather than|not\s+.*but)/i;
-  const seen = new Set();
-  const bullets = [];
-  for (const rawLine of src.split(/\r?\n/)) {
-    const cleanLine = String(rawLine || '').trim();
-    if (!cleanLine || !directiveRe.test(cleanLine)) continue;
-    const normalized = cleanLine
-      .replace(/^[-*]\s*/, '')
-      .replace(/^(user|system|assistant|researcher|builder|reviewer|critic|synthesizer|operator)\s*:\s*/i, '')
-      .trim();
-    if (!normalized || normalized.length < 8) continue;
-    const key = normalized.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    bullets.push(`- ${clip(normalized, 220)}`);
-    if (bullets.length >= Math.max(1, Math.floor(Number(maxItems) || 4))) break;
-  }
-  return clip(bullets.join('\n'), Math.max(180, Math.floor(Number(maxChars) || 720)));
-}
-
-function compactTaskText(value = '', { maxChars = 2400 } = {}) {
-  const text = String(value || '').trim();
-  const limit = Number.isFinite(Number(maxChars)) ? Math.max(600, Math.floor(Number(maxChars))) : 2400;
-  if (!text || text.length <= limit) return text;
-
-  const head = clip(text, Math.max(420, Math.floor(limit * 0.48)));
-  const tail = clip(text.slice(Math.max(0, text.length - Math.max(180, Math.floor(limit * 0.12)))).trim(), Math.max(180, Math.floor(limit * 0.12)));
-  const preserved = [
-    extractBracketSection(text, 'CURRENT TASK PACKET', { maxChars: Math.max(360, Math.floor(limit * 0.28)) }),
-    extractBracketSection(text, 'ACTIVE DIRECTIVES', { maxChars: Math.max(260, Math.floor(limit * 0.2)) }),
-    extractBracketSection(text, 'PINNED FACTS', { maxChars: Math.max(260, Math.floor(limit * 0.2)) }),
-    extractBracketSection(text, 'DELIVERY REQUIREMENTS', { maxChars: Math.max(240, Math.floor(limit * 0.18)) }),
-    extractBracketSection(text, 'JOB CONSTRAINTS', { maxChars: Math.max(220, Math.floor(limit * 0.16)) }),
-    extractBracketSection(text, 'RECENT TURNS', { maxChars: Math.max(320, Math.floor(limit * 0.24)), tailLines: 6 }),
-  ].filter(Boolean);
-  const directiveBullets = extractDirectiveBullets(text, {
-    maxItems: 4,
-    maxChars: Math.max(200, Math.floor(limit * 0.2)),
-  });
-  if (directiveBullets) {
-    const hasTaskPacket = preserved.some((block) => /^\[CURRENT TASK PACKET\]/i.test(String(block || '').trim()));
-    const hasPinnedFacts = preserved.some((block) => /^\[PINNED FACTS\]/i.test(String(block || '').trim()));
-    preserved.push(
-      !hasTaskPacket
-        ? `[LATEST USER QUOTES]
-${directiveBullets}`
-        : (hasPinnedFacts ? `[LATEST USER DIRECTIVES]
-${directiveBullets}` : `[PINNED FACTS]
-${directiveBullets}`)
-    );
-  }
-
-
-  const noteBlock = [
-    '[truncated for prompt efficiency]',
-    '- Full request and working details are preserved in the shared memory surfaces.',
-    '- Use mission_brief / working_memory as the source of truth for the complete task context.',
-    tail ? `- tail excerpt: ${tail}` : '',
-  ].filter(Boolean).join('\n');
-
-  const compacted = [
-    head,
-    preserved.length > 0 ? '[PRESERVED CRITICAL CONTEXT]' : '',
-    preserved.join('\n\n'),
-    noteBlock,
-  ].filter(Boolean).join('\n\n');
-
-  if (compacted.length <= limit) return compacted;
-  const truncationMarker = '\n…(truncated)…';
-  const hardLimit = Math.max(120, limit - truncationMarker.length);
-  return `${compacted.slice(0, hardLimit)}${truncationMarker}`;
-}
-
-
-function buildRoleAwareContextDocList(jobId, { provider = '', roleId = '', fallbackDocIds = ['plan', 'research'] } = {}) {
-  try {
-    const profile = tracking.loadProfile(jobId);
-    if (!profile) return fallbackDocIds;
-    const contract = buildRoleMemoryContract({ profile, provider, roleId, maxReadDocs: 4 });
-    const orderedDocs = [
-      ...(Array.isArray(contract.primary_docs) ? contract.primary_docs : []),
-      ...(Array.isArray(contract.read_docs) ? contract.read_docs : []),
-    ];
-    const seen = new Set();
-    const docIds = orderedDocs
-      .map((doc) => String(doc?.doc_id || doc?.surface_id || '').trim().toLowerCase())
-      .filter(Boolean)
-      .filter((docId) => {
-        if (seen.has(docId)) return false;
-        seen.add(docId);
-        return true;
-      });
-    return docIds.length > 0 ? docIds : fallbackDocIds;
-  } catch {
-    return fallbackDocIds;
-  }
-}
-
-function buildRoleAwareContextContract(jobId, { provider = '', roleId = '', maxReadDocs = 4 } = {}) {
-  try {
-    const profile = tracking.loadProfile(jobId);
-    if (!profile) return null;
-    return buildRoleMemoryContract({ profile, provider, roleId, maxReadDocs });
-  } catch {
+      purpose,
+      writeEvent: event,
+    }));
+  } catch (error) {
+    jobs.log(jobId, `GoC memory node sync failed (${surfaceId}): ${String(error?.message || error)}`);
     return null;
   }
 }
 
-function normalizeComparableId(value = '') {
-  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-}
-
-function normalizeStringListLocal(value) {
-  return Array.isArray(value)
-    ? value.map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean)
-    : [];
-}
-
-function resolveRuntimeSnapshotLike(runtime = null) {
-  return runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === 'object'
-    ? runtime.runtimeTeamSnapshot
-    : (runtime?.runtime_team_snapshot && typeof runtime.runtime_team_snapshot === 'object' ? runtime.runtime_team_snapshot : null);
-}
-
-function resolveRuntimeFinalOwnerContract(runtime = null) {
-  const snapshot = resolveRuntimeSnapshotLike(runtime) || {};
-  const teamPlan = snapshot?.team_plan && typeof snapshot.team_plan === 'object' ? snapshot.team_plan : {};
-  const structure = snapshot?.structure_v2 && typeof snapshot.structure_v2 === 'object' ? snapshot.structure_v2 : {};
-  const activeTeam = runtime?.activeTeamConfig && typeof runtime.activeTeamConfig === 'object' ? runtime.activeTeamConfig : {};
-  const interaction = teamPlan?.interaction_spec && typeof teamPlan.interaction_spec === 'object'
-    ? teamPlan.interaction_spec
-    : (activeTeam?.interaction_spec && typeof activeTeam.interaction_spec === 'object' ? activeTeam.interaction_spec : {});
-  const controlPolicy = structure?.control_policy && typeof structure.control_policy === 'object' ? structure.control_policy : {};
-  const topology = structure?.topology && typeof structure.topology === 'object' ? structure.topology : {};
-  return {
-    owner_label: String(interaction?.final_answer_owner || '').trim(),
-    owner_participant_id: String(controlPolicy?.final_answer_owner_participant_id || topology?.final_participant_id || '').trim().toLowerCase(),
-  };
-}
-
-function summarizeAgentPublishContract(jobId, { runtime = null, agentId = '', agent = null, provider = '', roleId = '', displayLabel = '' } = {}) {
-  let profile = null;
+function recordBlockedMemoryWriteAudit(jobId, { provider = '', roleId = '', purpose = '', writeEvent = null, error = null } = {}) {
+  const event = writeEvent && typeof writeEvent === 'object' ? writeEvent : {};
+  const lines = [
+    '## memory_write_blocked',
+    `- provider: ${String(provider || event?.provider || '').trim().toLowerCase() || '(unknown)'}`,
+    `- role_id: ${String(roleId || event?.role_id || '').trim().toLowerCase() || '(unknown)'}`,
+    `- purpose: ${String(purpose || event?.purpose || '').trim().toLowerCase() || '(unknown)'}`,
+    `- requested_surface: ${String(event?.requested_surface_id || event?.requested_doc || '').trim() || '(unknown)'}`,
+    `- reason: ${String(event?.reason || error?.message || error || 'memory write rejected').trim()}`,
+  ];
   try {
-    profile = tracking.loadProfile(jobId);
+    tracking.append(jobId, 'decisions', lines.join('\n'));
   } catch {
-    profile = null;
+    jobs.log(jobId, lines.join(' | '));
   }
-  const publishSummary = summarizeRoleMemoryEnforcement({ profile, provider, roleId });
-  const runtimeAgent = findAgentConfigInRuntime(agentId, runtime) || (agent && typeof agent === 'object' ? agent : {});
-  const policy = runtimeAgent?.context_policy && typeof runtimeAgent.context_policy === 'object'
-    ? runtimeAgent.context_policy
-    : (runtimeAgent?.contextPolicy && typeof runtimeAgent.contextPolicy === 'object' ? runtimeAgent.contextPolicy : {});
-  const writes = policy?.writes && typeof policy.writes === 'object' ? policy.writes : {};
-  const publishTargets = normalizeStringListLocal(writes.publish_targets || writes.publishTargets || []);
-  const finalOwner = resolveRuntimeFinalOwnerContract(runtime);
-  const identityTokens = [
-    agentId,
-    displayLabel,
-    runtimeAgent?.name,
-    runtimeAgent?.display_label,
-    runtimeAgent?.displayLabel,
-    runtimeAgent?.role,
-    runtimeAgent?.role_id,
-    runtimeAgent?.roleId,
-    runtimeAgent?.template_id,
-    runtimeAgent?.templateId,
-    runtimeAgent?.participant_id,
-    runtimeAgent?.participantId,
-  ].map((entry) => normalizeComparableId(entry)).filter(Boolean);
-  const ownerTokens = [
-    finalOwner.owner_label,
-    finalOwner.owner_participant_id,
-  ].map((entry) => normalizeComparableId(entry)).filter(Boolean);
-  const isFinalOwner = ownerTokens.length === 0
-    ? true
-    : ownerTokens.some((token) => identityTokens.includes(token));
-  return {
-    provider: String(provider || '').trim().toLowerCase(),
-    role_id: String(roleId || '').trim().toLowerCase(),
-    publish_surface_ids: Array.isArray(publishSummary.publish_surface_ids) ? publishSummary.publish_surface_ids : [],
-    publish_targets: publishTargets,
-    can_publish_final_answer: canRolePublishSurface({ profile, provider, roleId, surfaceId: 'final_answer' }),
-    can_publish_artifact_index: canRolePublishSurface({ profile, provider, roleId, surfaceId: 'artifact_index' }),
-    final_owner_required: Boolean(finalOwner.owner_label || finalOwner.owner_participant_id),
-    final_owner_label: finalOwner.owner_label || finalOwner.owner_participant_id || '',
-    is_final_owner: isFinalOwner,
-  };
 }
 
-function enforceAgentPublishContract(jobId, { runtime = null, agentId = '', agent = null, provider = '', roleId = '', displayLabel = '', finalSynthesis = false, requestedSurface = '' } = {}) {
-  const contract = summarizeAgentPublishContract(jobId, { runtime, agentId, agent, provider, roleId, displayLabel });
-  const targetSurface = String(requestedSurface || '').trim().toLowerCase().replace(/\.md$/i, '');
-  const reasons = [];
-  if (targetSurface === 'artifact_index' && !contract.can_publish_artifact_index) {
-    reasons.push('declared artifact publish surface가 없습니다');
+async function loadRoleScopedGocProjectionContext(jobId, { provider = '', roleId = '', maxCharsPerDoc = 3500, docNames = [], enforcement = {} } = {}) {
+  if (memoryModeWithFallback() !== 'goc') return { text: '', visibleNodeCount: 0, blockedNodeCount: 0 };
+  try {
+    const client = requireGocClient();
+    const map = await ensureJobThread(client, {
+      jobId,
+      jobDir: runDir(jobId),
+      title: `job:${jobId}`,
+    });
+    await ensureKnowledgeBaseMemorySurfacesInGoc(jobId, { client, threadId: map.threadId });
+    const includeSurfaceIds = Array.isArray(enforcement?.read_surface_ids) && enforcement.read_surface_ids.length > 0
+      ? enforcement.read_surface_ids
+      : docNames;
+    const projectionResult = await client.createMemoryProjection(map.threadId, {
+      role_id: String(roleId || '').trim().toLowerCase() || undefined,
+      agent_id: `${String(provider || 'agent').trim().toLowerCase() || 'agent'}:${String(roleId || 'worker').trim().toLowerCase() || 'worker'}`,
+      include_surface_ids: includeSurfaceIds,
+    });
+    gocFallbackByJob.delete(String(jobId));
+    return formatGocProjectionContext(projectionResult, { maxChars: Math.max(2200, Math.floor(maxCharsPerDoc * 2.4)) });
+  } catch (error) {
+    const reason = String(error?.message || error);
+    gocFallbackByJob.set(String(jobId), reason);
+    jobs.log(jobId, `GoC role-scoped projection failed; fallback to local: ${reason}`);
+    return { text: '', visibleNodeCount: 0, blockedNodeCount: 0, error: reason };
   }
-  if (targetSurface === 'final_answer' && !contract.can_publish_final_answer) {
-    reasons.push('declared final_answer publish surface가 없습니다');
-  }
-  if (finalSynthesis) {
-    if (!contract.can_publish_final_answer) reasons.push('final synthesis는 final_answer surface가 선언된 agent만 수행할 수 있습니다');
-    if (contract.final_owner_required && !contract.is_final_owner) {
-      reasons.push(`현재 final_answer_owner는 ${contract.final_owner_label || '다른 participant'} 입니다`);
-    }
-  }
-  if (reasons.length === 0) {
-    return {
-      allowed: true,
-      summary: '',
-      contract,
-    };
-  }
-  return {
-    allowed: false,
-    summary: `publish contract blocked: ${reasons.join('; ')}`,
-    contract,
-  };
 }
 
 async function loadRoleScopedContextDocs(jobId, { provider = '', roleId = '', fallbackDocIds = ['plan', 'research'], maxCharsPerDoc = 3500 } = {}) {
@@ -828,36 +578,73 @@ async function loadRoleScopedContextDocs(jobId, { provider = '', roleId = '', fa
   const docNames = buildRoleAwareContextDocList(jobId, { provider: cleanProvider, roleId: cleanRoleId, fallbackDocIds });
   const contract = buildRoleAwareContextContract(jobId, { provider: cleanProvider, roleId: cleanRoleId, maxReadDocs: 4 });
   const enforcement = summarizeRoleMemoryEnforcement({ profile: tracking.loadProfile(jobId), provider: cleanProvider, roleId: cleanRoleId });
-  return loadContextDocs(jobId, docNames, maxCharsPerDoc, {
+  const localFallback = loadContextDocs(jobId, docNames, maxCharsPerDoc, {
     roleContract: contract,
     enforceLocalOnly: !!contract,
     enforcementNote: [
       '### MEMORY CONTRACT ENFORCEMENT',
       '',
       '- role-scoped read contract enforced',
-      '- shared compiled GoC context skipped for this agent run',
+      '- GoC projection unavailable; using local degraded fallback for this agent run',
       `- readable surfaces: ${(enforcement.read_surface_ids || []).join(', ') || '(none)'}`,
       `- writable surfaces: ${(enforcement.write_surface_ids || []).join(', ') || '(none)'}`,
       `- publish surfaces: ${(enforcement.publish_surface_ids || []).join(', ') || '(none)'}`,
     ].join('\n'),
   });
+  const projection = await loadRoleScopedGocProjectionContext(jobId, {
+    provider: cleanProvider,
+    roleId: cleanRoleId,
+    maxCharsPerDoc,
+    docNames,
+    enforcement,
+  });
+  if (projection.visibleNodeCount > 0) {
+    return [
+      '### MEMORY CONTRACT ENFORCEMENT',
+      '',
+      '- role-scoped read contract enforced',
+      '- GoC role-scoped projection applied for this agent run',
+      `- readable surfaces: ${(enforcement.read_surface_ids || []).join(', ') || '(none)'}`,
+      `- writable surfaces: ${(enforcement.write_surface_ids || []).join(', ') || '(none)'}`,
+      `- publish surfaces: ${(enforcement.publish_surface_ids || []).join(', ') || '(none)'}`,
+      '',
+      projection.text,
+    ].filter(Boolean).join('\n');
+  }
+  return localFallback;
 }
 
 function appendRoleAwareTracking(jobId, markdown, { provider = '', roleId = '', purpose = 'worklog', fallbackDoc = 'progress', requestedDoc = '' } = {}) {
   const cleanMarkdown = String(markdown || '').trim();
   if (!cleanMarkdown) return null;
   try {
-    return tracking.appendWithContract(jobId, requestedDoc || fallbackDoc, cleanMarkdown, {
+    const writeEvent = tracking.appendWithContract(jobId, requestedDoc || fallbackDoc, cleanMarkdown, {
       provider,
       roleId,
       purpose,
       fallbackDoc,
-      strict: false,
+      strict: true,
       source: 'agent_output',
     });
-  } catch {
-    tracking.append(jobId, fallbackDoc, cleanMarkdown);
-    return { status: 'fallback', resolved_doc: fallbackDoc, reason: 'append_with_contract_failed' };
+    void syncRoleAwareMemoryWriteToGoc(jobId, cleanMarkdown, {
+      provider,
+      roleId,
+      purpose,
+      writeEvent,
+    });
+    return writeEvent;
+  } catch (error) {
+    const writeEvent = error?.memory_write_event && typeof error.memory_write_event === 'object'
+      ? error.memory_write_event
+      : { status: 'rejected', reason: String(error?.message || error || 'append_with_contract_failed') };
+    recordBlockedMemoryWriteAudit(jobId, {
+      provider,
+      roleId,
+      purpose,
+      writeEvent,
+      error,
+    });
+    return writeEvent;
   }
 }
 
@@ -944,6 +731,145 @@ function decoratePlanActionsWithAgentMetadata(actions = [], runtime = null) {
     };
   };
   return (Array.isArray(actions) ? actions : []).map((action) => decorateOne(action));
+}
+
+function buildAgentKnowledgeBaseBlock(jobId, { provider = "", roleId = "", agentId = "", detailLevel = "compact" } = {}) {
+  try {
+    const profile = tracking.loadProfile(jobId);
+    if (!profile) return "";
+    return buildAgentKnowledgeBaseGuidance({
+      profile,
+      sharedDir: runSharedDir(jobId),
+      provider,
+      roleId,
+      agentId,
+      detailLevel,
+    });
+  } catch {
+    return "";
+  }
+}
+
+function escapePromptRegex(text = '') {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractBracketSection(text = '', label = '', { maxChars = 600, tailLines = 0 } = {}) {
+  const cleanLabel = String(label || '').trim();
+  const cleanTextValue = String(text || '');
+  if (!cleanLabel || !cleanTextValue) return '';
+  const re = new RegExp(`\[${escapePromptRegex(cleanLabel)}\]\n([\s\S]*?)(?=\n\[[A-Z][A-Z_ ]*\]\n|$)`, 'i');
+  const match = cleanTextValue.match(re);
+  if (!match) return '';
+  let body = String(match[1] || '').trim();
+  if (!body) return '';
+  if (Number.isFinite(Number(tailLines)) && Number(tailLines) > 0) {
+    const rows = body.split(/\r?\n/).map((line) => String(line || '').trim()).filter(Boolean);
+    body = rows.slice(Math.max(0, rows.length - Math.max(1, Math.floor(Number(tailLines))))).join('\n');
+  }
+  body = clip(body, Math.max(120, Math.floor(Number(maxChars) || 600)));
+  return body ? `[${cleanLabel}]\n${body}` : '';
+}
+
+function extractDirectiveBullets(text = '', { maxItems = 4, maxChars = 720 } = {}) {
+  const src = String(text || '');
+  if (!src) return '';
+  const directiveRe = /(반드시|절대로|하지\s*마|하지마|아니라|대신|다른\s+모드|다르다|혼동하지\s*않도록|혼동하지\s*말|주의해|주의하|기억해|기억해둬|잊지\s*마|잊지마|must|never|do not|don't|instead|rather than|not\s+.*but)/i;
+  const seen = new Set();
+  const bullets = [];
+  for (const rawLine of src.split(/\r?\n/)) {
+    const cleanLine = String(rawLine || '').trim();
+    if (!cleanLine || !directiveRe.test(cleanLine)) continue;
+    const normalized = cleanLine
+      .replace(/^[-*]\s*/, '')
+      .replace(/^(user|system|assistant|researcher|builder|reviewer|critic|synthesizer|operator)\s*:\s*/i, '')
+      .trim();
+    if (!normalized || normalized.length < 8) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    bullets.push(`- ${clip(normalized, 220)}`);
+    if (bullets.length >= Math.max(1, Math.floor(Number(maxItems) || 4))) break;
+  }
+  return clip(bullets.join('\n'), Math.max(180, Math.floor(Number(maxChars) || 720)));
+}
+
+function compactTaskText(value = '', { maxChars = 2400 } = {}) {
+  const text = String(value || '').trim();
+  const limit = Number.isFinite(Number(maxChars)) ? Math.max(600, Math.floor(Number(maxChars))) : 2400;
+  if (!text || text.length <= limit) return text;
+
+  const head = clip(text, Math.max(420, Math.floor(limit * 0.48)));
+  const tail = clip(text.slice(Math.max(0, text.length - Math.max(180, Math.floor(limit * 0.12)))).trim(), Math.max(180, Math.floor(limit * 0.12)));
+  const preserved = [
+    extractBracketSection(text, 'CURRENT TASK PACKET', { maxChars: Math.max(360, Math.floor(limit * 0.28)) }),
+    extractBracketSection(text, 'ACTIVE DIRECTIVES', { maxChars: Math.max(260, Math.floor(limit * 0.2)) }),
+    extractBracketSection(text, 'PINNED FACTS', { maxChars: Math.max(260, Math.floor(limit * 0.2)) }),
+    extractBracketSection(text, 'DELIVERY REQUIREMENTS', { maxChars: Math.max(240, Math.floor(limit * 0.18)) }),
+    extractBracketSection(text, 'JOB CONSTRAINTS', { maxChars: Math.max(220, Math.floor(limit * 0.16)) }),
+    extractBracketSection(text, 'RECENT TURNS', { maxChars: Math.max(320, Math.floor(limit * 0.24)), tailLines: 6 }),
+  ].filter(Boolean);
+  const directiveBullets = extractDirectiveBullets(text, {
+    maxItems: 4,
+    maxChars: Math.max(200, Math.floor(limit * 0.2)),
+  });
+  if (directiveBullets) {
+    const hasTaskPacket = preserved.some((block) => /^\[CURRENT TASK PACKET\]/i.test(String(block || '').trim()));
+    const hasPinnedFacts = preserved.some((block) => /^\[PINNED FACTS\]/i.test(String(block || '').trim()));
+    preserved.push(
+      !hasTaskPacket
+        ? `[LATEST USER QUOTES]\n${directiveBullets}`
+        : (hasPinnedFacts ? `[LATEST USER DIRECTIVES]\n${directiveBullets}` : `[PINNED FACTS]\n${directiveBullets}`)
+    );
+  }
+
+  const noteBlock = [
+    '[truncated for prompt efficiency]',
+    '- Full request and working details are preserved in the shared memory surfaces.',
+    '- Use mission_brief / working_memory as the source of truth for the complete task context.',
+    tail ? `- tail excerpt: ${tail}` : '',
+  ].filter(Boolean).join('\n');
+
+  const compacted = [
+    head,
+    preserved.length > 0 ? '[PRESERVED CRITICAL CONTEXT]' : '',
+    preserved.join('\n\n'),
+    noteBlock,
+  ].filter(Boolean).join('\n\n');
+
+  if (compacted.length <= limit) return compacted;
+  const truncationMarker = '\n…(truncated)…';
+  const hardLimit = Math.max(120, limit - truncationMarker.length);
+  return `${compacted.slice(0, hardLimit)}${truncationMarker}`;
+}
+
+function buildRoleAwareContextDocList(jobId, { provider = '', roleId = '', fallbackDocIds = ['plan', 'research'] } = {}) {
+  try {
+    const profile = tracking.loadProfile(jobId);
+    if (!profile) return fallbackDocIds;
+    const contract = buildRoleMemoryContract({ profile, provider, roleId, maxReadDocs: 4 });
+    const orderedDocs = [
+      ...(Array.isArray(contract.primary_docs) ? contract.primary_docs : []),
+      ...(Array.isArray(contract.read_docs) ? contract.read_docs : []),
+    ];
+    const seen = new Set();
+    const docIds = [];
+    for (const doc of orderedDocs) {
+      const fileName = String(doc?.file_name || '').trim();
+      const docId = String(doc?.doc_id || doc?.surface_id || '').trim();
+      const candidates = [fileName, docId].filter(Boolean);
+      for (const candidate of candidates) {
+        const key = candidate.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        docIds.push(candidate);
+        break;
+      }
+    }
+    return docIds.length > 0 ? docIds : fallbackDocIds;
+  } catch {
+    return fallbackDocIds;
+  }
 }
 
 async function geminiResearch(jobId, goal, signal = null, opts = {}) {
@@ -5416,19 +5342,43 @@ reason=${String(note?.reason || 'parallel spawn unavailable').trim()}`
     }
 
     if (act.type === "track_append") {
-      const writeEvent = tracking.appendWithContract(jobId, act.doc || "plan", String(act.markdown || ""), {
-        provider: String(act.provider || act.inputs?.provider || 'chatgpt').trim().toLowerCase(),
-        roleId: String(act.role_id || act.roleId || act.inputs?.role_id || act.inputs?.roleId || 'operator').trim().toLowerCase(),
-        purpose: String(act.memory_purpose || act.memoryPurpose || act.inputs?.memory_purpose || act.inputs?.memoryPurpose || '').trim().toLowerCase(),
-        fallbackDoc: 'progress',
-        strict: false,
-        source: 'plan_action',
-      });
-      const resolvedDocName = String(writeEvent?.resolved_doc || tracking.resolveDocName(jobId, act.doc || "plan")).trim();
-      const rerouteNote = writeEvent?.requested_doc && writeEvent?.requested_doc !== resolvedDocName
-        ? ` (requested=${writeEvent.requested_doc} → resolved=${resolvedDocName})`
-        : '';
-      await bot.sendMessage(chatId, `📝 기록 업데이트: ${resolvedDocName}${rerouteNote}`);
+      const cleanProvider = String(act.provider || act.inputs?.provider || 'chatgpt').trim().toLowerCase();
+      const cleanRoleId = String(act.role_id || act.roleId || act.inputs?.role_id || act.inputs?.roleId || 'operator').trim().toLowerCase();
+      const cleanPurpose = String(act.memory_purpose || act.memoryPurpose || act.inputs?.memory_purpose || act.inputs?.memoryPurpose || '').trim().toLowerCase();
+      const cleanMarkdown = String(act.markdown || "");
+      try {
+        const writeEvent = tracking.appendWithContract(jobId, act.doc || "plan", cleanMarkdown, {
+          provider: cleanProvider,
+          roleId: cleanRoleId,
+          purpose: cleanPurpose,
+          fallbackDoc: 'progress',
+          strict: true,
+          source: 'plan_action',
+        });
+        void syncRoleAwareMemoryWriteToGoc(jobId, cleanMarkdown, {
+          provider: cleanProvider,
+          roleId: cleanRoleId,
+          purpose: cleanPurpose,
+          writeEvent,
+        });
+        const resolvedDocName = String(writeEvent?.resolved_doc || tracking.resolveDocName(jobId, act.doc || "plan")).trim();
+        const rerouteNote = writeEvent?.requested_doc && writeEvent?.requested_doc !== resolvedDocName
+          ? ` (requested=${writeEvent.requested_doc} → resolved=${resolvedDocName})`
+          : '';
+        await bot.sendMessage(chatId, `📝 기록 업데이트: ${resolvedDocName}${rerouteNote}`);
+      } catch (error) {
+        const writeEvent = error?.memory_write_event && typeof error.memory_write_event === 'object'
+          ? error.memory_write_event
+          : { status: 'rejected', reason: String(error?.message || error || 'plan_action_memory_write_rejected') };
+        recordBlockedMemoryWriteAudit(jobId, {
+          provider: cleanProvider,
+          roleId: cleanRoleId,
+          purpose: cleanPurpose,
+          writeEvent,
+          error,
+        });
+        await bot.sendMessage(chatId, `⛔ 기록 업데이트 차단: ${String(writeEvent?.reason || error?.message || error || 'memory write rejected').trim()}`);
+      }
       continue;
     }
 
@@ -5655,4 +5605,7 @@ export {
   executeRoutedPlan,
   executeActions,
   compactTaskText,
+  deriveGocMemorySurfaceSpec,
+  deriveGocMemoryNodePayload,
+  formatGocProjectionContext,
 };

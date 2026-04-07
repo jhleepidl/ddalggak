@@ -29,6 +29,12 @@ import {
   dedupeScopeNodeIds as dedupeLensNodeIds,
 } from "../domain/scope_hint_core.js";
 import { createDefaultRunRoute } from "./orchestrator.js";
+import {
+  inferTrackingAppendPurpose,
+  deriveTrackingMemorySurfaceSpec as deriveTrackingMemorySurfaceSpecShared,
+  buildGocMemoryNodePayload,
+  ensureKnowledgeBaseMemorySurfacesInGoc as ensureKnowledgeBaseMemorySurfacesInGocShared,
+} from "./goc_memory_sync.js";
 import { sendLong as sendLongAdapter } from "../adapters/telegram/send.js";
 import {
   buildPendingApprovalPrompt as buildPendingApprovalPromptAdapter,
@@ -295,8 +301,72 @@ const loadSupervisorRuntime = createSupervisorRuntimeLoader({
   jobs,
 });
 
+
+function deriveTrackingMemorySurfaceSpec(jobId, docName = '') {
+  return deriveTrackingMemorySurfaceSpecShared({ tracking, jobId, docName });
+}
+
+function deriveTrackingMemoryNodePayload({ jobId = '', docName = '', markdown = '', provider = '', roleId = '', purpose = '', source = 'system', eventType = '', actorKind = '', pipelineStage = '', semanticKind = '' } = {}) {
+  const surfaceSpec = deriveTrackingMemorySurfaceSpec(jobId, docName);
+  const surfaceId = String(surfaceSpec?.surface_id || String(docName || '').trim().toLowerCase().replace(/\.md$/i, '')).trim().toLowerCase();
+  if (!surfaceId) return null;
+  const cleanPurpose = inferTrackingAppendPurpose(docName, purpose);
+  return buildGocMemoryNodePayload({
+    clip,
+    jobId,
+    markdown,
+    provider: String(provider || 'chatgpt').trim().toLowerCase(),
+    roleId: String(roleId || 'operator').trim().toLowerCase(),
+    purpose: cleanPurpose,
+    source: String(source || 'system').trim().toLowerCase() || 'system',
+    eventType,
+    actorKind,
+    pipelineStage,
+    semanticKind: String(semanticKind || surfaceSpec?.semantic_kind || '').trim().toLowerCase(),
+    requestedDoc: String(docName || '').trim(),
+    resolvedDoc: String(docName || '').trim(),
+    requestedSurfaceId: surfaceId,
+    targetSurfaceId: surfaceId,
+    memoryWriteStatus: 'system_appended',
+    defaultConfidence: 0.8,
+    nodeTypeHint: ['decisions', 'final_answer'].includes(surfaceId) ? 'decision' : (cleanPurpose === 'artifact' ? 'artifact' : ''),
+  });
+}
+
+async function ensureKnowledgeBaseMemorySurfacesInGoc(jobId, { client = null, threadId = '' } = {}) {
+  return ensureKnowledgeBaseMemorySurfacesInGocShared({
+    jobId,
+    client,
+    threadId,
+    docs: tracking.listDocs(jobId),
+    deriveSpec: (doc) => deriveTrackingMemorySurfaceSpec(jobId, doc?.file_name || ''),
+  });
+}
+
+async function syncTrackingAppendToGocMemory({ jobId = '', docName = '', markdown = '', provider = '', roleId = '', purpose = '', source = 'system', eventType = '', actorKind = '', pipelineStage = '', semanticKind = '', memoryContractEnforced = false } = {}) {
+  if (memoryModeWithFallback() !== 'goc') return null;
+  if (memoryContractEnforced === true) return null;
+  const cleanSource = String(source || '').trim().toLowerCase();
+  if (['agent_output', 'plan_action'].includes(cleanSource)) return null;
+  const payload = deriveTrackingMemoryNodePayload({ jobId, docName, markdown, provider, roleId, purpose, source: cleanSource || 'system', eventType, actorKind, pipelineStage, semanticKind });
+  if (!payload?.surface_id || !String(payload?.content?.text || '').trim()) return null;
+  try {
+    const client = requireGocClient();
+    const map = await ensureJobThread(client, {
+      jobId,
+      jobDir: runDir(jobId),
+      title: `job:${jobId}`,
+    });
+    await ensureKnowledgeBaseMemorySurfacesInGoc(jobId, { client, threadId: map.threadId });
+    return await client.createMemoryNode(map.threadId, payload);
+  } catch (e) {
+    jobs.log(jobId, `GoC memory append hook failed (${docName}): ${String(e?.message ?? e)}`);
+    return null;
+  }
+}
+
 function installTrackingGocHook() {
-  tracking.setAppendHook(async ({ jobId, docName, chunk }) => {
+  tracking.setAppendHook(async ({ jobId, docName, chunk, markdown, provider, roleId, purpose, source, eventType, actorKind, pipelineStage, semanticKind, memoryContractEnforced }) => {
     if (memoryModeWithFallback() !== "goc") return;
     const trackedDocs = tracking.listDocs(jobId).map((entry) => String(entry?.file_name || '').trim()).filter(Boolean);
     if (!trackedDocs.includes(docName) && !TRACK_DOC_NAMES.includes(docName)) return;
@@ -310,6 +380,20 @@ function installTrackingGocHook() {
     } catch (e) {
       jobs.log(jobId, `GoC append hook failed (${docName}): ${String(e?.message ?? e)}`);
     }
+    void syncTrackingAppendToGocMemory({
+      jobId,
+      docName,
+      markdown,
+      provider,
+      roleId,
+      purpose,
+      source,
+      eventType,
+      actorKind,
+      pipelineStage,
+      semanticKind,
+      memoryContractEnforced,
+    });
   });
 }
 
@@ -347,19 +431,19 @@ async function createJob(goal, { ownerUserId = null, ownerChatId = null, teamCon
   const knowledgeDesign = deriveKnowledgeBaseDesign({ goal, teamConfig });
   const knowledgeBaseProfile = knowledgeDesign.profile;
   tracking.init(job.jobId, knowledgeBaseProfile);
-  tracking.append(job.jobId, "plan", orchestratorNotes({ goal, knowledgeBaseProfile }), { timestamp: false });
+  tracking.append(job.jobId, "plan", orchestratorNotes({ goal, knowledgeBaseProfile }), { timestamp: false, source: 'planner', purpose: 'implementation', eventType: 'planner_brief_seed', actorKind: 'planner', pipelineStage: 'initialization', semanticKind: 'plan' });
   tracking.append(job.jobId, "research", `## Goal
 
 ${goal}
-`, { timestamp: false });
+`, { timestamp: false, source: 'planner', purpose: 'research', eventType: 'task_goal_seed', actorKind: 'planner', pipelineStage: 'initialization', semanticKind: 'research' });
   tracking.append(job.jobId, "progress", `## Started
 - goal: ${goal}
-`, { timestamp: false });
+`, { timestamp: false, source: 'system', purpose: 'implementation', eventType: 'run_started', actorKind: 'system', pipelineStage: 'initialization', semanticKind: 'progress' });
   tracking.append(job.jobId, "artifacts", [
     "## Artifact policy",
     "- uploads, generated files, exports, and delivery references should be indexed here.",
     `- kb_profile: ${knowledgeBaseProfile.profile_id}`,
-  ].join("\n"), { timestamp: false });
+  ].join("\n"), { timestamp: false, source: 'system', purpose: 'artifact', eventType: 'artifact_index_initialized', actorKind: 'system', pipelineStage: 'initialization', semanticKind: 'artifacts' });
   jobs.appendConversation(job.jobId, "user", goal, { kind: "goal" });
   return job;
 }

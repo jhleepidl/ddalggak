@@ -79,7 +79,7 @@ export async function executeRunCommand({
           actionSource: String(route.action_source || "unknown"),
         }),
         `- actions: ${route.actions.map((a) => actionLabel(a)).join(" -> ")}`,
-      ].join("\n"));
+      ].join("\n"), { source: 'team_builder', purpose: 'final', eventType: 'routing_decision', actorKind: 'planner', pipelineStage: 'routing', semanticKind: 'decisions' });
       if (executionBlueprintLines.length > 0) {
         await bot.sendMessage(chatId, `🧩 선택된 팀 템플릿\n${executionBlueprintLines.join("\n")}`);
       }
@@ -193,7 +193,7 @@ export async function executeContinueCommand({
         actionSource: String(route.action_source || "unknown"),
       }),
       `- actions: ${route.actions.map((a) => actionLabel(a)).join(" -> ")}`,
-    ].join("\n"));
+    ].join("\n"), { source: 'team_builder', purpose: 'final', eventType: 'routing_decision', actorKind: 'planner', pipelineStage: 'routing', semanticKind: 'decisions' });
     if (executionBlueprintLines.length > 0) {
       await bot.sendMessage(chatId, `🧩 선택된 팀 템플릿\n${executionBlueprintLines.join("\n")}`);
     }
