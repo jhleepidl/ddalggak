@@ -184,3 +184,41 @@ test("goc client removeConversationAgent prefers canonical thread team member ro
   assert.equal(paths[0], "/api/threads/thread_1/team/members/planner");
   assert(paths.includes("/api/conversations/conv_1/agents/planner"));
 });
+
+
+test('goc client getTeamConfig prefers canonical thread config routes', async () => {
+  const client = new GocClient({
+    apiBase: 'https://example.invalid',
+    serviceKey: 'svc',
+  });
+  let captured = null;
+  client._requestAny = async ({ method, attempts = [] }) => {
+    captured = { method, attempts };
+    return { ok: true };
+  };
+
+  await client.getTeamConfig({ threadId: 'thread_cfg_1' });
+  const paths = (captured?.attempts || []).map((attempt) => String(attempt.path || ''));
+  assert.equal(captured?.method, 'GET');
+  assert.deepEqual(paths, [
+    '/api/threads/thread_cfg_1/team/config',
+    '/threads/thread_cfg_1/team/config',
+  ]);
+});
+
+test('goc client getTeamBlueprint unwraps manifest payload', async () => {
+  const client = new GocClient({
+    apiBase: 'https://example.invalid',
+    serviceKey: 'svc',
+  });
+  client._requestAny = async () => ({
+    manifest: {
+      kind: 'ddalggak_team_blueprint',
+      thread_id: 'thread_bp_1',
+    },
+  });
+
+  const manifest = await client.getTeamBlueprint({ threadId: 'thread_bp_1' });
+  assert.equal(manifest.kind, 'ddalggak_team_blueprint');
+  assert.equal(manifest.thread_id, 'thread_bp_1');
+});

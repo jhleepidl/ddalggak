@@ -152,7 +152,7 @@ const {
   findAgentConfigInRuntime,
   enqueue,
 } = runtimeState;
-const { loadContextDocs, convoToText, sendLong } = runtimeIo;
+const { loadContextDocs, loadRoleScopedContextDocs, convoToText, sendLong } = runtimeIo;
 const { composeCapabilitiesForRun, getAgentRolesText, getRegisteredAgentsText } = gocRuntime;
 
 function parseAutoSuggestDecision(raw) {
@@ -181,7 +181,7 @@ function defaultRouteFor(mode, goal, seedInstruction = "") {
 }
 
 async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal = null }) {
-  const docs = await loadContextDocs(jobId, ["research", "plan", "progress", "decisions"], 2200);
+  const docs = await loadRoleScopedContextDocs(jobId, { provider: "system", roleId: "planner", fallbackDocIds: ["research", "plan", "progress", "decisions"], maxCharsPerDoc: 2200 });
   const convo = clip(convoToText(jobs.tailConversation(jobId, 50)), 4200);
   const routerPrompt = memory.getRouterPrompt();
   const roleText = getAgentRolesText();
@@ -349,7 +349,7 @@ async function reflectAutoSuggest(jobId, trigger, question, signal = null) {
   }
 
   const goal = getGoalFromResearch(jobId);
-  const docs = await loadContextDocs(jobId, ["research", "plan", "progress", "decisions"], 2200);
+  const docs = await loadRoleScopedContextDocs(jobId, { provider: "system", roleId: "planner", fallbackDocIds: ["research", "plan", "progress", "decisions"], maxCharsPerDoc: 2200 });
   const convo = clip(convoToText(jobs.tailConversation(jobId, 50)), 5000);
   const policyPrompt = memory.getPolicyPrompt();
 
@@ -438,7 +438,7 @@ async function suggestNextPrompt(bot, chatId, jobId, question, trigger = "run", 
 
 async function sendChatGPTPrompt(bot, chatId, jobId, question) {
   const goal = getGoalFromResearch(jobId);
-  const docs = await loadContextDocs(jobId, ["research", "plan", "progress"], 3000);
+  const docs = await loadRoleScopedContextDocs(jobId, { provider: "chatgpt", roleId: "operator", fallbackDocIds: ["research", "plan", "progress"], maxCharsPerDoc: 3000 });
   const convo = jobs.tailConversation(jobId, 60);
   const prompt = buildChatGPTNextStepPrompt({
     jobId,

@@ -248,7 +248,12 @@ export async function handleActionApprovalCallback({
   }
 
   if (!pendingJobId) {
-    chatSessionStore.upsert(chatId, { state: "idle", pending_approval: null });
+    chatSessionStore.upsert(chatId, {
+      state: "idle",
+      pending_approval: null,
+      interrupt: null,
+      pending_user_messages: [],
+    });
     await bot.answerCallbackQuery(q.id, { text: "job 없음" });
     await bot.sendMessage(chatId, "승인 재개 대상 jobId를 찾지 못해 pending 상태를 정리했습니다.");
     return { handled: true };
@@ -259,6 +264,8 @@ export async function handleActionApprovalCallback({
       jobId: pendingJobId,
       state: "idle",
       pending_approval: null,
+      interrupt: null,
+      pending_user_messages: [],
     });
     tracking.append(pendingJobId, "decisions", [
       "## /chat approval rejected",
@@ -287,6 +294,8 @@ export async function handleActionApprovalCallback({
       jobId: pendingJobId,
       state: "idle",
       pending_approval: null,
+      interrupt: null,
+      pending_user_messages: [],
     });
     await bot.sendMessage(chatId, "재개할 남은 action이 없어 승인 대기를 해제했습니다.");
     return { handled: true };

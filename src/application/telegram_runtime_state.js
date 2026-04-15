@@ -11,7 +11,7 @@ import { GocClient } from "../goc_client.js";
 import {
   KNOWLEDGE_BASE_CONTRACT_FILE,
 } from "../knowledge_base/runtime.js";
-import { formatKnowledgeBaseMemoryMap } from "../knowledge_base/profile.js";
+import { formatKnowledgeBaseMemoryMap, normalizeKnowledgeBaseProfile } from "../knowledge_base/profile.js";
 import { ChatSessionStore } from "../chat/session.js";
 import {
   createJobRuntimeState,
@@ -130,14 +130,98 @@ if (MEMORY_MODE === "goc") {
 }
 
 const TRACK_DOC_NAMES = ["plan", "research", "progress", "decisions", "artifacts"];
-const gocFallbackByJob = new Map();
+
+
+const GOC_FALLBACK_TTL_MS = Number.isFinite(Number(process.env.GOC_FALLBACK_TTL_MS))
+  ? Math.max(60_000, Math.floor(Number(process.env.GOC_FALLBACK_TTL_MS)))
+  : 30 * 60 * 1000;
+const GOC_FALLBACK_MAX_ENTRIES = Number.isFinite(Number(process.env.GOC_FALLBACK_MAX_ENTRIES))
+  ? Math.max(50, Math.floor(Number(process.env.GOC_FALLBACK_MAX_ENTRIES)))
+  : 1000;
+const AGENT_STATUS_STATE_TTL_MS = Number.isFinite(Number(process.env.AGENT_STATUS_STATE_TTL_MS))
+  ? Math.max(60_000, Math.floor(Number(process.env.AGENT_STATUS_STATE_TTL_MS)))
+  : 6 * 60 * 60 * 1000;
+const AGENT_STATUS_STATE_MAX_ENTRIES = Number.isFinite(Number(process.env.AGENT_STATUS_STATE_MAX_ENTRIES))
+  ? Math.max(50, Math.floor(Number(process.env.AGENT_STATUS_STATE_MAX_ENTRIES)))
+  : 500;
+const AWAITING_STATE_TTL_MS = Number.isFinite(Number(process.env.AWAITING_STATE_TTL_MS))
+  ? Math.max(60_000, Math.floor(Number(process.env.AWAITING_STATE_TTL_MS)))
+  : 20 * 60 * 1000;
+const AWAITING_STATE_MAX_ENTRIES = Number.isFinite(Number(process.env.AWAITING_STATE_MAX_ENTRIES))
+  ? Math.max(50, Math.floor(Number(process.env.AWAITING_STATE_MAX_ENTRIES)))
+  : 1000;
+
+class ExpiringMap extends Map {
+  constructor({ ttlMs = 0, maxEntries = 0 } = {}) {
+    super();
+    this.ttlMs = Number.isFinite(Number(ttlMs)) ? Math.max(0, Math.floor(Number(ttlMs))) : 0;
+    this.maxEntries = Number.isFinite(Number(maxEntries)) ? Math.max(0, Math.floor(Number(maxEntries))) : 0;
+  }
+
+  #wrap(value) {
+    return { value, expiresAt: this.ttlMs > 0 ? Date.now() + this.ttlMs : 0, touchedAt: Date.now() };
+  }
+
+  #unwrap(key, wrapped) {
+    if (!wrapped || typeof wrapped !== 'object' || !('value' in wrapped)) return wrapped;
+    if (wrapped.expiresAt > 0 && Date.now() > wrapped.expiresAt) {
+      super.delete(key);
+      return undefined;
+    }
+    wrapped.touchedAt = Date.now();
+    return wrapped.value;
+  }
+
+  prune() {
+    if (this.size === 0) return;
+    for (const [key, wrapped] of super.entries()) this.#unwrap(key, wrapped);
+    if (this.maxEntries > 0 && this.size > this.maxEntries) {
+      const overflow = this.size - this.maxEntries;
+      const ordered = Array.from(super.entries())
+        .sort((a, b) => Number(a[1]?.touchedAt || 0) - Number(b[1]?.touchedAt || 0))
+        .slice(0, overflow);
+      for (const [key] of ordered) super.delete(key);
+    }
+  }
+
+  get(key) {
+    this.prune();
+    return this.#unwrap(key, super.get(key));
+  }
+
+  set(key, value) {
+    super.set(key, this.#wrap(value));
+    this.prune();
+    return this;
+  }
+
+  has(key) {
+    this.prune();
+    return super.has(key);
+  }
+
+  values() {
+    this.prune();
+    return Array.from(super.entries(), ([key, wrapped]) => this.#unwrap(key, wrapped)).values();
+  }
+
+  entries() {
+    this.prune();
+    return Array.from(super.entries(), ([key, wrapped]) => [key, this.#unwrap(key, wrapped)]).values();
+  }
+
+  [Symbol.iterator]() {
+    return this.entries();
+  }
+}
+const gocFallbackByJob = new ExpiringMap({ ttlMs: GOC_FALLBACK_TTL_MS, maxEntries: GOC_FALLBACK_MAX_ENTRIES });
 
 const jobRuntimeState = createJobRuntimeState();
 const { jobAbortControllers, activeJobByChat, lastChatJobByChat } = jobRuntimeState;
-const agentStatusMessageStateByChat = new Map();
+const agentStatusMessageStateByChat = new ExpiringMap({ ttlMs: AGENT_STATUS_STATE_TTL_MS, maxEntries: AGENT_STATUS_STATE_MAX_ENTRIES });
 let running = 0;
 const queue = [];
-const awaiting = new Map();
+const awaiting = new ExpiringMap({ ttlMs: AWAITING_STATE_TTL_MS, maxEntries: AWAITING_STATE_MAX_ENTRIES });
 
 function setAgentRegistry(nextRegistry = null) {
   if (nextRegistry && typeof nextRegistry === "object") {
@@ -354,7 +438,7 @@ function setAwait(chatId, jobId, userId) {
   awaiting.set(String(chatId), {
     jobId,
     userId,
-    expiresAt: Date.now() + 20 * 60 * 1000,
+    expiresAt: Date.now() + AWAITING_STATE_TTL_MS,
   });
 }
 
@@ -365,7 +449,7 @@ function clearAwait(chatId) {
 function getAwait(chatId) {
   const state = awaiting.get(String(chatId));
   if (!state) return null;
-  if (Date.now() > state.expiresAt) {
+  if (Number(state.expiresAt || 0) > 0 && Date.now() > state.expiresAt) {
     awaiting.delete(String(chatId));
     return null;
   }

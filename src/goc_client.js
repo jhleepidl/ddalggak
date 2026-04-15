@@ -1,3 +1,11 @@
+import {
+  getTeamConfigApi,
+  getTeamBlueprintApi,
+  installTeamBlueprintApi,
+  setTeamConfigApi,
+  validateTeamBlueprintApi,
+} from './goc_client_team_api.js';
+
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
 }
@@ -1019,6 +1027,32 @@ export class GocClient {
         { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/run_studio/run_bundle`, query },
         { path: `/threads/${encodeURIComponent(cleanThreadId)}/run_studio/run_bundle`, query },
         { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/run_studio/run_bundle`, query },
+      ],
+    });
+  }
+
+  async getHarnessSpec(threadId) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("getHarnessSpec requires threadId");
+    return await this._requestAny({
+      method: "GET",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/harness_spec` },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/harness_spec` },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/harness_spec` },
+      ],
+    });
+  }
+
+  async updateHarnessSpec(threadId, harnessSpec = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("updateHarnessSpec requires threadId");
+    return await this._requestAny({
+      method: "PUT",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/harness_spec`, body: { harness_spec: harnessSpec } },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/harness_spec`, body: { harness_spec: harnessSpec } },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/harness_spec`, body: { harness_spec: harnessSpec } },
       ],
     });
   }
@@ -2083,71 +2117,25 @@ export class GocClient {
 
 
   async getTeamConfig(threadTarget) {
-    const target = summarizeTeamTarget(threadTarget, { client: this });
-    const threadId = String(target.thread_id || '').trim();
-    if (!threadId) throw new Error('threadTarget requires threadId');
-    return await this._requestAny({
-      method: 'GET',
-      attempts: [
-        { path: `/api/threads/${encodeURIComponent(threadId)}/team/config` },
-        { path: `/threads/${encodeURIComponent(threadId)}/team/config` },
-      ],
-    });
+    return await getTeamConfigApi(this, threadTarget);
   }
 
   async setTeamConfig(threadTarget, teamConfig = {}) {
-    const target = summarizeTeamTarget(threadTarget, { client: this });
-    const threadId = String(target.thread_id || '').trim();
-    if (!threadId) throw new Error('threadTarget requires threadId');
-    return await this._requestAny({
-      method: 'PUT',
-      attempts: [
-        { path: `/api/threads/${encodeURIComponent(threadId)}/team/config`, body: { team_config: teamConfig } },
-        { path: `/threads/${encodeURIComponent(threadId)}/team/config`, body: { team_config: teamConfig } },
-      ],
-    });
+    return await setTeamConfigApi(this, threadTarget, teamConfig);
   }
 
 
 
   async getTeamBlueprint(threadTarget) {
-    const target = summarizeTeamTarget(threadTarget, { client: this });
-    const threadId = String(target.thread_id || '').trim();
-    if (!threadId) throw new Error('threadTarget requires threadId');
-    const data = await this._requestAny({
-      method: 'GET',
-      attempts: [
-        { path: `/api/threads/${encodeURIComponent(threadId)}/team/blueprint` },
-        { path: `/threads/${encodeURIComponent(threadId)}/team/blueprint` },
-      ],
-    });
-    return normalizeEntity(data, ['manifest', 'data']) || asObject(data);
+    return await getTeamBlueprintApi(this, threadTarget);
   }
 
   async validateTeamBlueprint(threadTarget, blueprint = {}, applyState = 'active') {
-    const target = summarizeTeamTarget(threadTarget, { client: this });
-    const threadId = String(target.thread_id || '').trim();
-    if (!threadId) throw new Error('threadTarget requires threadId');
-    return await this._requestAny({
-      method: 'POST',
-      attempts: [
-        { path: `/api/threads/${encodeURIComponent(threadId)}/team/blueprint/validate`, body: { manifest: blueprint, apply_state: applyState } },
-        { path: `/threads/${encodeURIComponent(threadId)}/team/blueprint/validate`, body: { manifest: blueprint, apply_state: applyState } },
-      ],
-    });
+    return await validateTeamBlueprintApi(this, threadTarget, blueprint, applyState);
   }
 
   async installTeamBlueprint(threadTarget, blueprint = {}, applyState = 'active') {
-    const target = summarizeTeamTarget(threadTarget, { client: this });
-    const threadId = String(target.thread_id || '').trim();
-    if (!threadId) throw new Error('threadTarget requires threadId');
-    return await this._requestAny({
-      method: 'POST',
-      attempts: [
-        { path: `/api/threads/${encodeURIComponent(threadId)}/team/blueprint/install`, body: { manifest: blueprint, apply_state: applyState } },
-        { path: `/threads/${encodeURIComponent(threadId)}/team/blueprint/install`, body: { manifest: blueprint, apply_state: applyState } },
-      ],
-    });
+    return await installTeamBlueprintApi(this, threadTarget, blueprint, applyState);
   }
 
   async getTeamManifest(threadTarget) {

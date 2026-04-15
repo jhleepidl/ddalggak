@@ -53,3 +53,44 @@ test('runtime checkpoint bundle can be restored into CLI support files', () => {
   assert.equal(fs.existsSync(path.join(workspaceRoot, '.orchestrator', 'runtime_restore.md')), true);
   assert.equal(fs.existsSync(path.join(workspaceRoot, '.orchestrator', 'runtime_restore.json')), true);
 });
+
+
+test('runtime checkpoint loader falls back when latest.json is corrupted', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ddalggak-runtime-checkpoint-corrupt-'));
+  const workspaceRoot = path.join(root, 'workspace');
+  const sharedDir = path.join(root, 'shared');
+  fs.mkdirSync(workspaceRoot, { recursive: true });
+  fs.mkdirSync(sharedDir, { recursive: true });
+
+  const first = writeRuntimeCheckpointBundle({
+    sharedDir,
+    jobId: 'job-a',
+    stage: 'approval_pause',
+    trigger: 'pending_approval',
+    userText: '첫 번째 체크포인트',
+    reason: 'awaiting approval',
+    results: [],
+    outputs: [],
+    remainingActions: [{ type: 'run_agent', agent_id: 'reviewer' }],
+  });
+  const second = writeRuntimeCheckpointBundle({
+    sharedDir,
+    jobId: 'job-b',
+    stage: 'resume',
+    trigger: 'resume_after_approval',
+    userText: '두 번째 체크포인트',
+    reason: 'resuming',
+    results: [{ label: 'planner', status: 'ok' }],
+    outputs: [],
+    remainingActions: [],
+  });
+  const runtimeDir = path.join(sharedDir, 'runtime_checkpoints');
+  fs.writeFileSync(path.join(runtimeDir, 'latest.json'), '{broken json', 'utf8');
+
+  const restored = loadLatestRuntimeCheckpoint({ workspaceRoot });
+  assert.ok(restored);
+  assert.equal(restored?.payload?.job_id, second.payload.job_id);
+  assert.equal(restored?.json_file, second.json_file);
+  assert.match(String(restored?.summary || ''), /resume/i);
+  assert.notEqual(restored?.json_file, first.json_file);
+});

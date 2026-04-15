@@ -1,4 +1,6 @@
-import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import process from 'node:process';
 
 import { runCodexExec } from '../codex.js';
 import { parseJsonObjectFromText } from '../shared/json_extract.js';
@@ -30,6 +32,42 @@ function cleanId(value = '') {
 
 let codexAvailabilityCache = null;
 
+function codexCandidateNames() {
+  if (process.platform !== 'win32') return ['codex'];
+  const exts = clean(process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM')
+    .split(';')
+    .map((entry) => clean(entry).toLowerCase())
+    .filter(Boolean);
+  const out = ['codex'];
+  for (const ext of exts) out.push(`codex${ext}`);
+  return out;
+}
+
+function isExecutableFile(target) {
+  try {
+    const stat = fs.statSync(target);
+    if (!stat.isFile()) return false;
+    if (process.platform === 'win32') return true;
+    fs.accessSync(target, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasCodexBinaryOnPath() {
+  const pathValue = clean(process.env.PATH);
+  if (!pathValue) return false;
+  const entries = pathValue.split(path.delimiter).map((entry) => clean(entry)).filter(Boolean);
+  const candidates = codexCandidateNames();
+  for (const entry of entries) {
+    for (const candidate of candidates) {
+      if (isExecutableFile(path.join(entry, candidate))) return true;
+    }
+  }
+  return false;
+}
+
 export function resetFreeformPlannerAvailabilityCache() {
   codexAvailabilityCache = null;
 }
@@ -39,12 +77,7 @@ export function isCodexPlannerEnabled() {
   if (mode === 'off' || mode === 'disabled' || mode === 'false' || mode === '0') return false;
   if (mode === 'on' || mode === 'enabled' || mode === 'true' || mode === '1' || mode === 'codex') return true;
   if (codexAvailabilityCache !== null) return codexAvailabilityCache;
-  try {
-    const probe = spawnSync('codex', ['--version'], { encoding: 'utf8', timeout: 1500 });
-    codexAvailabilityCache = !probe.error && probe.status === 0;
-  } catch {
-    codexAvailabilityCache = false;
-  }
+  codexAvailabilityCache = hasCodexBinaryOnPath();
   return codexAvailabilityCache;
 }
 
