@@ -1,5 +1,7 @@
 import { buildPreviewAgentDisplayIndex, formatChatAgentDisplayName, resolveActionAgentNameHint } from "../shared/agent_labels.js";
 import { randomUUID } from "node:crypto";
+import { OPENHARNESS_RUN_SYNC_SCHEMA_VERSION, OPENHARNESS_RUN_TRACE_SCHEMA_VERSION, buildHarnessPackageRef } from "../shared/openharness_contracts.js";
+import { isHarnessLifecycleVisible, isHarnessTimelineEnabled } from "../application/harness_runtime_behavior.js";
 import {
   normalizeActionSource as normalizeActionSourceShared,
   normalizeRuntimeMetadataEnvelope,
@@ -13,6 +15,9 @@ function asObject(v) {
   return v && typeof v === "object" ? v : {};
 }
 
+function asArray(v) {
+  return Array.isArray(v) ? v : [];
+}
 
 function userFacingAgentLabel(agentId = '', action = null, runtimeMetadata = null) {
   const nameHint = action ? resolveActionAgentNameHint(action) : '';
@@ -97,6 +102,9 @@ export class GocExecutionGraphRecorder {
     chatId = "",
     jobId = "",
     logger = null,
+    harnessPackage = null,
+    runtimeBundleRef = null,
+    runtimePolicy = null,
   } = {}) {
     this.client = client || null;
     this.threadId = String(threadId || "").trim();
@@ -115,6 +123,9 @@ export class GocExecutionGraphRecorder {
     this.chatId = String(chatId || "").trim();
     this.jobId = String(jobId || "").trim();
     this.logger = typeof logger === "function" ? logger : null;
+    this.harnessPackageRef = harnessPackage ? buildHarnessPackageRef(harnessPackage) : null;
+    this.runtimeBundleRef = asObject(runtimeBundleRef);
+    this.runtimePolicy = runtimePolicy || null;
 
     this.runNodeId = "";
     this.payloadByNodeId = new Map();
@@ -138,7 +149,15 @@ export class GocExecutionGraphRecorder {
   }
 
   isEnabled() {
-    return !!(this.client && this.threadId);
+    return this._timelineEnabled() && !!(this.client && this.threadId);
+  }
+
+  _timelineEnabled() {
+    return isHarnessTimelineEnabled(this.runtimePolicy);
+  }
+
+  _lifecycleEnabled() {
+    return isHarnessLifecycleVisible(this.runtimePolicy);
   }
 
   getRunNodeId() {
@@ -232,6 +251,17 @@ export class GocExecutionGraphRecorder {
     return runtimeMetadataPatch(this.runtimeMetadata);
   }
 
+  _contractPayload() {
+    return {
+      run_trace_schema_version: OPENHARNESS_RUN_TRACE_SCHEMA_VERSION,
+      run_sync_schema_version: OPENHARNESS_RUN_SYNC_SCHEMA_VERSION,
+      run_sync_source: "ddalggak",
+      run_sync_target: "goc",
+      harness_package_ref: this.harnessPackageRef || undefined,
+      runtime_bundle_ref: Object.keys(this.runtimeBundleRef).length > 0 ? this.runtimeBundleRef : undefined,
+    };
+  }
+
   async setRuntimeMetadata(metadata = null, { updateRun = true } = {}) {
     const normalized = normalizeRuntimeMetadata(metadata);
     if (!normalized) return;
@@ -261,6 +291,7 @@ export class GocExecutionGraphRecorder {
       user_message_preview: clipPreview(userText, 300) || undefined,
       ...this._runtimeMetadataPatch(),
       ...this._sharedContextPayload(),
+      ...this._contractPayload(),
     };
     const run = await this._createNode("Run", {
       name: `run:${this.runId}`,
@@ -317,7 +348,7 @@ export class GocExecutionGraphRecorder {
   }
 
   async queueMainSteps(actions = [], { metadata = null } = {}) {
-    if (!this.isEnabled()) return;
+    if (!this.isEnabled() || !this._lifecycleEnabled()) return;
     await this.setRuntimeMetadata(metadata, { updateRun: true });
     const rows = Array.isArray(actions) ? actions : [];
     let previousStepNodeId = "";
@@ -391,6 +422,7 @@ export class GocExecutionGraphRecorder {
   }
 
   async markStepRunning(action, { extra = {} } = {}) {
+    if (!this._lifecycleEnabled()) return;
     const nodeId = this.getStepNodeId(action);
     if (!nodeId) return;
     await this._updateNodePayload(nodeId, {
@@ -403,6 +435,7 @@ export class GocExecutionGraphRecorder {
   }
 
   async markStepDone(action, { output = "", extra = {} } = {}) {
+    if (!this._lifecycleEnabled()) return;
     const nodeId = this.getStepNodeId(action);
     if (!nodeId) return;
     await this._updateNodePayload(nodeId, {
@@ -416,6 +449,7 @@ export class GocExecutionGraphRecorder {
   }
 
   async markStepSkipped(action, { reason = "", extra = {} } = {}) {
+    if (!this._lifecycleEnabled()) return;
     const nodeId = this.getStepNodeId(action);
     if (!nodeId) return;
     await this._updateNodePayload(nodeId, {
@@ -429,6 +463,7 @@ export class GocExecutionGraphRecorder {
   }
 
   async markStepError(action, error, { output = "", extra = {} } = {}) {
+    if (!this._lifecycleEnabled()) return;
     const nodeId = this.getStepNodeId(action);
     if (!nodeId) return;
     await this._updateNodePayload(nodeId, {
@@ -443,6 +478,7 @@ export class GocExecutionGraphRecorder {
   }
 
   async markStepNodeRunning(stepNodeId, { extra = {} } = {}) {
+    if (!this._lifecycleEnabled()) return;
     const nodeId = String(stepNodeId || "").trim();
     if (!nodeId) return;
     await this._updateNodePayload(nodeId, {
@@ -455,6 +491,7 @@ export class GocExecutionGraphRecorder {
   }
 
   async markStepNodeDone(stepNodeId, { output = "", extra = {} } = {}) {
+    if (!this._lifecycleEnabled()) return;
     const nodeId = String(stepNodeId || "").trim();
     if (!nodeId) return;
     await this._updateNodePayload(nodeId, {
@@ -468,6 +505,7 @@ export class GocExecutionGraphRecorder {
   }
 
   async markStepNodeError(stepNodeId, error, { output = "", extra = {} } = {}) {
+    if (!this._lifecycleEnabled()) return;
     const nodeId = String(stepNodeId || "").trim();
     if (!nodeId) return;
     await this._updateNodePayload(nodeId, {
@@ -482,7 +520,7 @@ export class GocExecutionGraphRecorder {
   }
 
   async createSpawnChildSteps({ parentAction, children = [] } = {}) {
-    if (!this.isEnabled()) return [];
+    if (!this.isEnabled() || !this._lifecycleEnabled()) return [];
     const list = Array.isArray(children) ? children : [];
     const parentNodeId = this.getStepNodeId(parentAction);
     const out = [];
@@ -560,7 +598,7 @@ export class GocExecutionGraphRecorder {
     goal = "",
     summary = "",
   } = {}) {
-    if (!this.isEnabled()) return null;
+    if (!this.isEnabled() || !this._lifecycleEnabled()) return null;
     const parentNodeId = this.getStepNodeId(parentAction);
     const joinStepId = `step_${randomUUID()}`;
     const payload = {
@@ -577,6 +615,7 @@ export class GocExecutionGraphRecorder {
       error: null,
       ...this._runtimeMetadataPatch(),
       ...this._sharedContextPayload(),
+      ...this._contractPayload(),
     };
     const joinNode = await this._createNode("Step", {
       name: `step:${joinStepId}`,
@@ -603,6 +642,7 @@ export class GocExecutionGraphRecorder {
     status = "running",
     extraPayload = {},
   } = {}) {
+    if (!this._lifecycleEnabled()) return null;
     const cleanStepId = String(stepNodeId || "").trim();
     const name = String(toolName || "").trim() || "tool";
     if (!cleanStepId) return null;
@@ -631,6 +671,7 @@ export class GocExecutionGraphRecorder {
     error = "",
     extraPayload = {},
   } = {}) {
+    if (!this._lifecycleEnabled()) return;
     const nodeId = String(toolCallNodeId || "").trim();
     if (!nodeId) return;
     const normalizedStatus = String(status || "").trim().toLowerCase() || "done";
@@ -654,6 +695,7 @@ export class GocExecutionGraphRecorder {
     error = "",
     extraPayload = {},
   } = {}) {
+    if (!this._lifecycleEnabled()) return null;
     const stepId = String(stepNodeId || "").trim();
     if (!stepId) return null;
     const name = String(toolName || "").trim() || "tool";
@@ -680,6 +722,159 @@ export class GocExecutionGraphRecorder {
     return result;
   }
 
+
+  async recordParticipantContribution({
+    participant = null,
+    contribution = null,
+    decision = null,
+  } = {}) {
+    if (!this.isEnabled() || !this._lifecycleEnabled()) return null;
+    const participantRow = asObject(participant);
+    const contributionRow = asObject(contribution);
+    const decisionRow = asObject(decision);
+    const label = String(participantRow.label || participantRow.participant_id || 'participant').trim() || 'participant';
+    const kind = String(contributionRow.kind || 'note').trim() || 'note';
+    const node = await this._createNode('ParticipantSignal', {
+      name: `participant:${label}@${nowIso()}`,
+      summary: clipPreview(`${label} ${kind}: ${contributionRow.summary || contributionRow.content || decisionRow.action || ''}`, 220),
+      payload: {
+        run_id: this.runId,
+        participant,
+        contribution,
+        decision,
+        ts: nowIso(),
+        ...this._runtimeMetadataPatch(),
+        ...this._sharedContextPayload(),
+        ...this._contractPayload(),
+      },
+    });
+    const nodeId = String(node?.id || '').trim();
+    if (nodeId && this.runNodeId) await this._createEdge(this.runNodeId, nodeId, 'HAS_PART');
+    return node;
+  }
+
+  async recordParticipantDigest({
+    turn_id: turnId = '',
+    mode = '',
+    item_count: itemCount = 0,
+    participant_labels: participantLabels = [],
+    participant_ids: participantIds = [],
+    contribution_ids: contributionIds = [],
+    kinds = [],
+    prompt_block: promptBlock = '',
+    digest_block: digestBlock = '',
+    signature = '',
+    kind_counts: kindCounts = null,
+  } = {}) {
+    if (!this.isEnabled() || !this._lifecycleEnabled()) return null;
+    const labels = Array.isArray(participantLabels) ? participantLabels.map((row) => String(row || '').trim()).filter(Boolean).slice(0, 8) : [];
+    const summarySeed = labels.length > 0 ? labels.join(', ') : 'participant signals';
+    const node = await this._createNode('ParticipantDigest', {
+      name: `participant-digest@${nowIso()}`,
+      summary: clipPreview(`folded ${Number(itemCount) || 0} signals · ${summarySeed}`, 220),
+      payload: {
+        run_id: this.runId,
+        turn_id: String(turnId || '').trim() || undefined,
+        mode: String(mode || '').trim().toLowerCase() || undefined,
+        item_count: Math.max(0, Math.floor(Number(itemCount) || 0)),
+        participant_labels: labels,
+        participant_ids: Array.isArray(participantIds) ? participantIds.map((row) => String(row || '').trim()).filter(Boolean).slice(0, 8) : [],
+        contribution_ids: Array.isArray(contributionIds) ? contributionIds.map((row) => String(row || '').trim()).filter(Boolean).slice(0, 16) : [],
+        kinds: Array.isArray(kinds) ? kinds.map((row) => String(row || '').trim().toLowerCase()).filter(Boolean).slice(0, 8) : [],
+        kind_counts: asObject(kindCounts),
+        prompt_block: clipPreview(promptBlock, 2400) || undefined,
+        digest_block: clipPreview(digestBlock, 1800) || undefined,
+        signature: String(signature || '').trim() || undefined,
+        ts: nowIso(),
+        ...this._runtimeMetadataPatch(),
+        ...this._sharedContextPayload(),
+        ...this._contractPayload(),
+      },
+    });
+    const nodeId = String(node?.id || '').trim();
+    if (nodeId && this.runNodeId) await this._createEdge(this.runNodeId, nodeId, 'HAS_PART');
+    return node;
+  }
+
+  async recordChannelVerifierDecision({
+    status = '',
+    overall_recommendation: overallRecommendation = '',
+    motif = null,
+    participant_policy: participantPolicy = null,
+    participation_pct: participationPct = 0,
+    score = 0,
+    goal_excerpt: goalExcerpt = '',
+    execution_pattern: executionPattern = '',
+  } = {}) {
+    if (!this.isEnabled() || !this._lifecycleEnabled()) return null;
+    const motifRow = asObject(motif);
+    const participantRow = asObject(participantPolicy);
+    const summary = [
+      String(overallRecommendation || '').trim() || 'hold',
+      motifRow.recommendation ? `motif=${motifRow.recommendation}` : '',
+      participantRow.recommendation ? `participant=${participantRow.recommendation}` : '',
+      Number.isFinite(Number(participationPct)) ? `participation=${Math.round(Number(participationPct) || 0)}%` : '',
+    ].filter(Boolean).join(' · ');
+    const node = await this._createNode('ChannelVerifierDecision', {
+      name: `channel-verifier@${nowIso()}`,
+      summary: clipPreview(summary || 'channel verifier evaluated active experiment channels', 220),
+      payload: {
+        run_id: this.runId,
+        status: String(status || '').trim().toLowerCase() || undefined,
+        overall_recommendation: String(overallRecommendation || '').trim().toLowerCase() || undefined,
+        motif: motifRow,
+        participant_policy: participantRow,
+        participation_pct: Number.isFinite(Number(participationPct)) ? Number(participationPct) : undefined,
+        score: Number.isFinite(Number(score)) ? Number(score) : undefined,
+        goal_excerpt: clipPreview(goalExcerpt, 280) || undefined,
+        execution_pattern: String(executionPattern || '').trim().toLowerCase() || undefined,
+        ts: nowIso(),
+        ...this._runtimeMetadataPatch(),
+        ...this._sharedContextPayload(),
+        ...this._contractPayload(),
+      },
+    });
+    const nodeId = String(node?.id || '').trim();
+    if (nodeId && this.runNodeId) await this._createEdge(this.runNodeId, nodeId, 'HAS_PART');
+    return node;
+  }
+
+
+  async recordChannelPromotionApplied({
+    overall_recommendation: overallRecommendation = '',
+    goal_excerpt: goalExcerpt = '',
+    motif = null,
+    participant_policy: participantPolicy = null,
+  } = {}) {
+    if (!this.isEnabled() || !this._lifecycleEnabled()) return null;
+    const motifRow = asObject(motif);
+    const participantRow = asObject(participantPolicy);
+    const summary = [
+      String(overallRecommendation || '').trim() || 'hold',
+      asArray(motifRow.promoted_motif_ids).length > 0 ? `promoted=${asArray(motifRow.promoted_motif_ids).length}` : '',
+      asArray(motifRow.rolled_back_motif_ids).length > 0 ? `rolled_back=${asArray(motifRow.rolled_back_motif_ids).length}` : '',
+      participantRow.snapshot ? 'participant_snapshot=applied' : '',
+    ].filter(Boolean).join(' · ');
+    const node = await this._createNode('ChannelPromotionApplied', {
+      name: `channel-promotion@${nowIso()}`,
+      summary: clipPreview(summary || 'channel promotion summary applied', 220),
+      payload: {
+        run_id: this.runId,
+        overall_recommendation: String(overallRecommendation || '').trim().toLowerCase() || undefined,
+        goal_excerpt: clipPreview(goalExcerpt, 280) || undefined,
+        motif: motifRow,
+        participant_policy: participantRow,
+        ts: nowIso(),
+        ...this._runtimeMetadataPatch(),
+        ...this._sharedContextPayload(),
+        ...this._contractPayload(),
+      },
+    });
+    const nodeId = String(node?.id || '').trim();
+    if (nodeId && this.runNodeId) await this._createEdge(this.runNodeId, nodeId, 'HAS_PART');
+    return node;
+  }
+
   async attachArtifact(stepNodeId, {
     name = "",
     summary = "",
@@ -687,7 +882,7 @@ export class GocExecutionGraphRecorder {
     uri = "",
     payload = {},
   } = {}) {
-    if (!this.isEnabled()) return null;
+    if (!this.isEnabled() || !this._lifecycleEnabled()) return null;
     const stepId = String(stepNodeId || "").trim();
     if (!stepId) return null;
     const artifactText = String(text || "");

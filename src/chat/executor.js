@@ -43,6 +43,10 @@ import {
   buildProviderRuntimePolicySummary,
   resolveProviderRuntimeOptions,
 } from "../application/provider_runtime_policy.js";
+import {
+  buildRecoveryAttemptEvent,
+  classifyExecutionFailure,
+} from "../application/failure_recovery_policy.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};

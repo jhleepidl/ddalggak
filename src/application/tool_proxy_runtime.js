@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { runCommand } from "../proc.js";
 import { normalizeRuntimeExecutionPolicy } from "./runtime_execution_policy.js";
+import { buildHarnessApprovalGuidance } from "./harness_runtime_behavior.js";
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -121,6 +122,7 @@ export async function executeToolProxyAction({
   tracking = null,
   signal = null,
   runtimeExecutionPolicy = {},
+  harnessRuntimePolicy = null,
   env = {},
 } = {}) {
   const root = path.resolve(String(workspaceRoot || process.cwd()).trim() || process.cwd());
@@ -135,7 +137,8 @@ export async function executeToolProxyAction({
         `🛠️ ${label}`,
         `workspace=${root}`,
         'runtime policy denied verification execution.',
-      ].join("\n"),
+        ...buildHarnessApprovalGuidance(harnessRuntimePolicy, { reason: 'verification denied by runtime policy' }),
+      ].filter(Boolean).join("\n"),
       route_signals: ['verification_blocked', 'approval_denied'],
       commands: [],
     };
@@ -147,7 +150,8 @@ export async function executeToolProxyAction({
         `🛠️ ${label}`,
         `workspace=${root}`,
         'verification execution requires explicit approval under runtime policy.',
-      ].join("\n"),
+        ...buildHarnessApprovalGuidance(harnessRuntimePolicy, { reason: 'verification requires approval', requireExplicitApproval: true }),
+      ].filter(Boolean).join("\n"),
       route_signals: ['verification_requires_approval'],
       commands: [],
     };

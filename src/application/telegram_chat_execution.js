@@ -71,6 +71,11 @@ import { interpretTask } from "../control_plane/task_interpreter.js";
 import { repairRoutePlanForTeamExecution } from "./team_route_repair.js";
 import { buildExecutionInsightSnapshot } from "./team_execution_insights.js";
 import { recordExecutionFeedback } from "./execution_feedback.js";
+import { recordTeamMotifFeedback } from "./team_motif_feedback.js";
+import { recordChannelExperimentVerification } from "./channel_experiment_verifier.js";
+import { recordChannelPromotion } from "./channel_promotion_manager.js";
+import { recordAdaptiveExecutionOutcome } from "./execution_mode_adaptation.js";
+import { buildExecutionQualitySignals } from './execution_quality_signals.js';
 import { buildScopedPromptAssembly, hydrateRuntimeScopesViaGoC, resolveScopeExecutionState } from "./goc_scope_runtime.js";
 import { markActionsSkipped, wasInterruptedByReplan } from "./run_status_cleanup.js";
 import {
@@ -92,7 +97,11 @@ import {
 } from "./team_intent.js";
 import { buildExplicitTeamReconfigurationActions } from "./team_config_diff.js";
 import { applyPendingTeam, applyTeamConfigurationToRuntime, buildAutoRefineDraftFromStructureConflict, formatTeamProposalMessage, getSessionTeamState, hydrateSessionTeamStateFromConversationStore, storePendingTeam, syncTeamConfigurationToConversationStore, validateTeamConfiguration } from "./team_configuration.js";
+import { bootstrapTelegramRuntimeSession } from './telegram_runtime_session.js';
+import { resolveRuntimePolicyForRuntime } from './runtime_behavior_resolver.js';
+import { setRuntimeCurrentTurn } from './runtime_session_state.js';
 import { appendRecentAgentTurn, planAgentFollowupShortcut } from "./agent_followup_shortcuts.js";
+import { appendFoldedContributionDigest, collectFoldedParticipantSignals, recordFoldedParticipantSignals } from './participant_reply_integration.js';
 import { buildAnswerCapsules } from "./answer_capsules.js";
 import { detectCapabilityGapsFromExecution } from "./capability_gap_detector.js";
 import { archivePendingInstallProposal, buildInstallProposalPrompt, buildInstallProposalStateFromExecution, clearPendingInstallProposal, getPendingInstallProposal, resolveAutomaticInstallProposalAction, setPendingInstallProposal } from './install_proposal_state.js';
@@ -495,6 +504,7 @@ async function runToolProxyStep({ action = {}, jobId = "", signal = null, runtim
     tracking,
     signal,
     runtimeExecutionPolicy: resolveRuntimeExecutionPolicyForRuntime(runtime),
+    harnessRuntimePolicy: runtime?.harnessRuntimePolicy || runtime?.openharnessInstallState?.runtime_policy || null,
     env: resolveCredentialEnvForChat(chatSessionStore, chatId),
   });
 }
@@ -681,7 +691,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const concurrencyKey = String(opts.concurrencyKey || "").trim() || `job:${String(jobId || "").trim()}`;
   const preferredModel = String(opts.model || "").trim();
   const roleMemo = memory.getAgentRole("gemini");
-  const ctx = await runtimeIo.loadRoleScopedContextDocs(jobId, { provider: 'gemini', roleId: String(opts.roleId || 'researcher').trim().toLowerCase(), fallbackDocIds: ['plan', 'research', 'progress'], maxCharsPerDoc: 2600, audienceLabel: 'agent run' });
+  const ctx = await runtimeIo.loadRoleScopedContextDocs(jobId, { provider: 'gemini', roleId: String(opts.roleId || 'researcher').trim().toLowerCase(), fallbackDocIds: ['plan', 'research', 'progress'], maxCharsPerDoc: 2600, audienceLabel: 'agent run', runtimePolicy: opts.runtime?.harnessRuntimePolicy || opts.runtime?.openharnessInstallState?.runtime_policy || null });
   const workspacePath = runWorkspaceDir(jobId);
   const providerOptions = opts.providerOptions && typeof opts.providerOptions === 'object'
     ? opts.providerOptions
@@ -795,7 +805,7 @@ async function codexImplement(jobId, instruction, signal = null, opts = {}) {
     });
   const credentialEnv = resolveCredentialEnvForChat(chatSessionStore, opts.chatId || '');
   const roleMemo = memory.getAgentRole("codex");
-  const ctx = await runtimeIo.loadRoleScopedContextDocs(jobId, { provider: 'codex', roleId: String(opts.roleId || 'builder').trim().toLowerCase(), fallbackDocIds: ['plan', 'progress', 'research'], maxCharsPerDoc: 3200, audienceLabel: 'agent run' });
+  const ctx = await runtimeIo.loadRoleScopedContextDocs(jobId, { provider: 'codex', roleId: String(opts.roleId || 'builder').trim().toLowerCase(), fallbackDocIds: ['plan', 'progress', 'research'], maxCharsPerDoc: 3200, audienceLabel: 'agent run', runtimePolicy: opts.runtime?.harnessRuntimePolicy || opts.runtime?.openharnessInstallState?.runtime_policy || null });
   const workspacePath = runWorkspaceDir(jobId);
   const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 5 });
   const kbContract = buildAgentKnowledgeBaseBlock(jobId, { provider: "codex", roleId: String(opts.roleId || 'builder').trim().toLowerCase(), agentId: String(opts.agentId || 'codex').trim().toLowerCase() || 'codex', detailLevel: "compact" });
@@ -917,21 +927,36 @@ function buildChatSynthesisFallback(message, execution = {}, runtime = null) {
 
 async function synthesizeChatReply(message, routePlan, execution = {}) {
   if (execution && typeof execution === 'object' && !execution.runtime && routePlan?.runtime) execution.runtime = routePlan.runtime;
+  const runtime = execution?.runtime || routePlan?.runtime || null;
+  const foldedSignals = collectFoldedParticipantSignals(runtime, {
+    turnId: runtime?.currentTurnId || runtime?.current_turn_id || runtime?.runtimeSessionState?.active_turn?.turn_id || runtime?.runtime_session_state?.active_turn?.turn_id || '',
+  });
+  await recordFoldedParticipantSignals(runtime, foldedSignals, {
+    turnId: runtime?.currentTurnId || runtime?.current_turn_id || runtime?.runtimeSessionState?.active_turn?.turn_id || runtime?.runtime_session_state?.active_turn?.turn_id || '',
+    runEventSink: execution?.runEventSink || runtime?.runEventSink || runtime?.run_event_sink || null,
+    jobId: String(execution?.currentJobId || runtime?.currentJobId || runtime?.current_job_id || '').trim(),
+  });
+  const appendFoldedDigestOnFallback = ['folded_only', 'always_append'].includes(String(foldedSignals?.mode || '').trim().toLowerCase());
+  const appendFoldedDigestAlways = String(foldedSignals?.mode || '').trim().toLowerCase() === 'always_append';
   const outputs = Array.isArray(execution.outputs) ? execution.outputs : [];
   const hardFailures = Array.isArray(execution?.results)
     ? execution.results.filter((row) => ['error', 'blocked'].includes(String(row?.status || '').trim().toLowerCase()))
     : [];
   const capabilityGapDetected = detectCapabilityGapsFromExecution(execution).length > 0;
   if (outputs.length === 0 || hardFailures.length > 0 || capabilityGapDetected) {
-    return buildChatSynthesisFallback(message, execution, execution?.runtime || null);
+    const fallback = buildChatSynthesisFallback(message, execution, runtime || null);
+    return appendFoldedDigestOnFallback ? appendFoldedContributionDigest(fallback, foldedSignals) : fallback;
   }
   const special = summarizeSpecialChatOutputs(outputs);
   const hasAgentOutput = outputs.some((row) => String(row?.agentId || "").trim().toLowerCase() !== "system");
   if (String(routePlan?.reason || "").trim().toLowerCase() === "direct_agent_followup_shortcut") {
     const direct = outputs.find((row) => String(row?.agentId || "").trim().toLowerCase() !== "system" && String(row?.output || "").trim());
-    if (direct) return clip(String(direct.output || "").trim(), 3800);
+    if (direct) {
+      const directText = clip(String(direct.output || "").trim(), 3800);
+      return appendFoldedDigestAlways ? appendFoldedContributionDigest(directText, foldedSignals) : directText;
+    }
   }
-  if (special && !hasAgentOutput) return special;
+  if (special && !hasAgentOutput) return appendFoldedDigestOnFallback ? appendFoldedContributionDigest(special, foldedSignals) : special;
 
   const outputText = outputs
     .map((row, idx) => [
@@ -971,6 +996,7 @@ async function synthesizeChatReply(message, routePlan, execution = {}) {
     outputText,
     special ? "특수 실행 요약:" : "",
     special ? special : "",
+    foldedSignals.prompt_block ? foldedSignals.prompt_block : "",
     "",
     "최종 답변:",
   ].join("\n");
@@ -987,10 +1013,14 @@ async function synthesizeChatReply(message, routePlan, execution = {}) {
       { jobId, label: "chat_synthesize" }
     );
     const out = String(r?.stdout || r?.stderr || "").trim();
-    if (r?.ok && out) return clip(out, 3800);
+    if (r?.ok && out) {
+      const reply = clip(out, 3800);
+      return appendFoldedDigestAlways ? appendFoldedContributionDigest(reply, foldedSignals) : reply;
+    }
   } catch {}
 
-  return buildChatSynthesisFallback(message, execution, execution?.runtime || null);
+  const fallback = buildChatSynthesisFallback(message, execution, runtime || null);
+  return appendFoldedDigestOnFallback ? appendFoldedContributionDigest(fallback, foldedSignals) : fallback;
 }
 
 
@@ -2967,6 +2997,17 @@ async function runSupervisorChat(
       chatMeta: chatInfo,
       telegramUserId: userId,
     });
+    const { installedHarnessState } = bootstrapTelegramRuntimeSession({
+      runtime,
+      sessionStore: chatSessionStore,
+      chatId,
+      telegramUserId: userId,
+      currentTurnId: currentJobId,
+      jobId: currentJobId,
+      runsDir: jobs?.runsDir || '',
+      jobDir: runDir(currentJobId),
+    });
+    setRuntimeCurrentTurn(runtime, currentJobId);
     const lockedTeamState = await hydrateSessionTeamStateFromConversationStore({ sessionStore: chatSessionStore, chatId, runtime }).catch(() => getSessionTeamState(chatSessionStore, chatId));
     const activeTeamConfig = teamConfig && typeof teamConfig === 'object'
       ? teamConfig
@@ -3071,12 +3112,18 @@ async function runSupervisorChat(
         chatId: String(chatId || ""),
         jobId: String(currentJobId || ""),
         logger: (line) => jobs.log(currentJobId, line),
+        harnessPackage: installedHarnessState?.package_ref || null,
+        runtimePolicy: resolveRuntimePolicyForRuntime(runtime, installedHarnessState?.runtime_policy || null),
       })
       : null;
     const currentRunId = String(executionGraph?.runId || '').trim() || undefined;
     runEventSink = runtimeCapabilities?.createRunEventSink
-      ? runtimeCapabilities.createRunEventSink({ executionGraph })
+      ? runtimeCapabilities.createRunEventSink({ executionGraph, runtimePolicy: resolveRuntimePolicyForRuntime(runtime, installedHarnessState?.runtime_policy || null) })
       : null;
+    runtime.runEventSink = runEventSink || null;
+    runtime.run_event_sink = runEventSink || null;
+    runtime.currentJobId = String(currentJobId || '').trim();
+    runtime.current_job_id = String(currentJobId || '').trim();
     if (runEventSink && typeof runEventSink.startRun === "function") {
       await runEventSink.startRun({
         userMessageNodeId: String(userMessageGoc?.id || "").trim(),
@@ -3085,6 +3132,7 @@ async function runSupervisorChat(
           runtime_team_snapshot: runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
             ? runtime.runtimeTeamSnapshot
             : undefined,
+          harness_package_ref: installedHarnessState?.package_ref || undefined,
           ...buildRunAuthorityPatch({ runtime_authority: runtimeAuthority }),
         },
       }, {
@@ -3926,6 +3974,61 @@ async function runSupervisorChat(
       runtimeTeamSnapshot: routePlan?.runtime_team_snapshot || runtime?.runtimeTeamSnapshot || runtime?.runtime_team_snapshot || null,
       status: mergedExecution.pendingApproval || routePlan.await_user === true ? 'await_user' : 'done',
     });
+    recordTeamMotifFeedback({
+      runsDir: jobs?.runsDir || '',
+      jobDir: runDir(currentJobId),
+      runId: String(executionGraph?.runId || '').trim(),
+      goal: message,
+      status: mergedExecution.pendingApproval || routePlan.await_user === true ? 'await_user' : 'done',
+      plannerMetadata: routePlan?.runtime_team_snapshot?.team_plan?.planner_metadata || routePlan?.runtime_team_snapshot?.team_plan?.plannerMetadata || routePlan?.planner_metadata || runtime?.runtimeTeamSnapshot?.team_plan?.planner_metadata || runtime?.runtimeTeamSnapshot?.team_plan?.plannerMetadata || runtime?.plannerMetadata || null,
+      runtimeTeamSnapshot: routePlan?.runtime_team_snapshot || runtime?.runtimeTeamSnapshot || runtime?.runtime_team_snapshot || null,
+      executionInsights,
+      executionFeedback,
+    });
+    const executionQualitySignals = buildExecutionQualitySignals({
+      status: mergedExecution.pendingApproval || routePlan.await_user === true ? 'await_user' : 'done',
+      routePlan,
+      execution: mergedExecution,
+      executionInsights,
+      executionFeedback,
+      runtime,
+      runtimeSessionState: runtime?.runtimeSessionState || runtime?.runtime_session_state || null,
+      capabilityGapCount: detectCapabilityGapsFromExecution(mergedExecution).length,
+    });
+    const channelVerification = recordChannelExperimentVerification({
+      runsDir: jobs?.runsDir || '',
+      jobDir: runDir(currentJobId),
+      runEventSink: runtime?.runEventSink || runtime?.run_event_sink || null,
+      jobId: String(currentJobId || ''),
+      runId: String(executionGraph?.runId || '').trim(),
+      goal: message,
+      status: mergedExecution.pendingApproval || routePlan.await_user === true ? 'await_user' : 'done',
+      runtimePolicy: runtime?.openharnessInstallState?.runtime_policy || runtime?.harnessRuntimePolicy || runtime?.runtimePolicy || null,
+      runtimeBehavior: runtime?.runtimeBehavior || runtime?.runtime_behavior || null,
+      plannerMetadata: routePlan?.runtime_team_snapshot?.team_plan?.planner_metadata || routePlan?.runtime_team_snapshot?.team_plan?.plannerMetadata || routePlan?.planner_metadata || runtime?.runtimeTeamSnapshot?.team_plan?.planner_metadata || runtime?.runtimeTeamSnapshot?.team_plan?.plannerMetadata || runtime?.plannerMetadata || null,
+      runtimeTeamSnapshot: routePlan?.runtime_team_snapshot || runtime?.runtimeTeamSnapshot || runtime?.runtime_team_snapshot || null,
+      executionInsights,
+      executionFeedback,
+      runtimeSessionState: runtime?.runtimeSessionState || runtime?.runtime_session_state || null,
+      runtime,
+      executionQualitySignals,
+    });
+    recordChannelPromotion({
+      runsDir: jobs?.runsDir || '',
+      jobDir: runDir(currentJobId),
+      runEventSink: runtime?.runEventSink || runtime?.run_event_sink || null,
+      jobId: String(currentJobId || ''),
+      verificationRecord: channelVerification?.record || null,
+      verificationSummary: channelVerification?.summary || null,
+      runtimeBehavior: runtime?.runtimeBehavior || runtime?.runtime_behavior || null,
+    });
+    recordAdaptiveExecutionOutcome({
+      runtime,
+      status: mergedExecution.pendingApproval || routePlan.await_user === true ? 'await_user' : 'done',
+      plannerMetadata: routePlan?.runtime_team_snapshot?.team_plan?.planner_metadata || routePlan?.runtime_team_snapshot?.team_plan?.plannerMetadata || routePlan?.planner_metadata || runtime?.runtimeTeamSnapshot?.team_plan?.planner_metadata || runtime?.runtimeTeamSnapshot?.team_plan?.plannerMetadata || runtime?.plannerMetadata || null,
+      capabilityGapCount: detectCapabilityGapsFromExecution(mergedExecution).length,
+      qualitySignals: executionQualitySignals,
+    });
 
     let installProposalState = null;
     let autoInstallResumeRequest = null;
@@ -4240,6 +4343,7 @@ async function runSupervisorChat(
             chatId: String(chatId || ""),
             jobId: String(currentJobId || ""),
             logger: (line) => jobs.log(currentJobId, line),
+            harnessPackage: runtime?.openharnessInstallState?.package_ref || runtime?.harnessPackageRef || null,
           });
           await executionGraph.startRun({
             userMessageNodeId: String(userMessageGoc?.id || "").trim(),
@@ -4248,6 +4352,8 @@ async function runSupervisorChat(
               runtime_team_snapshot: runtime?.runtimeTeamSnapshot && typeof runtime.runtimeTeamSnapshot === "object"
                 ? runtime.runtimeTeamSnapshot
                 : undefined,
+              harness_package_ref: runtime?.openharnessInstallState?.package_ref || runtime?.harnessPackageRef || undefined,
+              harness_runtime_policy: runtime?.openharnessInstallState?.runtime_policy || runtime?.harnessRuntimePolicy || undefined,
               ...buildRunAuthorityPatch(runtime),
             },
           });
@@ -4259,6 +4365,63 @@ async function runSupervisorChat(
         }
       } catch {}
     }
+    try {
+      recordTeamMotifFeedback({
+        runsDir: jobs?.runsDir || '',
+        jobDir: currentJobId ? runDir(currentJobId) : '',
+        runId: String(executionGraph?.runId || '').trim(),
+        goal: message,
+        status: 'error',
+        plannerMetadata: routePlan?.runtime_team_snapshot?.team_plan?.planner_metadata || routePlan?.runtime_team_snapshot?.team_plan?.plannerMetadata || routePlan?.planner_metadata || runtime?.runtimeTeamSnapshot?.team_plan?.planner_metadata || runtime?.runtimeTeamSnapshot?.team_plan?.plannerMetadata || runtime?.plannerMetadata || null,
+        runtimeTeamSnapshot: routePlan?.runtime_team_snapshot || runtime?.runtimeTeamSnapshot || runtime?.runtime_team_snapshot || null,
+        executionInsights,
+        executionFeedback,
+      });
+      const executionQualitySignals = buildExecutionQualitySignals({
+        status: 'error',
+        routePlan,
+        execution,
+        executionInsights,
+        executionFeedback,
+        runtime,
+        runtimeSessionState: runtime?.runtimeSessionState || runtime?.runtime_session_state || null,
+        capabilityGapCount: detectCapabilityGapsFromExecution(execution || {}).length,
+      });
+      const channelVerification = recordChannelExperimentVerification({
+        runsDir: jobs?.runsDir || '',
+        jobDir: currentJobId ? runDir(currentJobId) : '',
+        runEventSink: runtime?.runEventSink || runtime?.run_event_sink || null,
+        jobId: String(currentJobId || ''),
+        runId: String(executionGraph?.runId || '').trim(),
+        goal: message,
+        status: 'error',
+        runtimePolicy: runtime?.openharnessInstallState?.runtime_policy || runtime?.harnessRuntimePolicy || runtime?.runtimePolicy || null,
+        runtimeBehavior: runtime?.runtimeBehavior || runtime?.runtime_behavior || null,
+        plannerMetadata: routePlan?.runtime_team_snapshot?.team_plan?.planner_metadata || routePlan?.runtime_team_snapshot?.team_plan?.plannerMetadata || routePlan?.planner_metadata || runtime?.runtimeTeamSnapshot?.team_plan?.planner_metadata || runtime?.runtimeTeamSnapshot?.team_plan?.plannerMetadata || runtime?.plannerMetadata || null,
+        runtimeTeamSnapshot: routePlan?.runtime_team_snapshot || runtime?.runtimeTeamSnapshot || runtime?.runtime_team_snapshot || null,
+        executionInsights,
+        executionFeedback,
+        runtimeSessionState: runtime?.runtimeSessionState || runtime?.runtime_session_state || null,
+        runtime,
+        executionQualitySignals,
+      });
+      recordChannelPromotion({
+        runsDir: jobs?.runsDir || '',
+        jobDir: currentJobId ? runDir(currentJobId) : '',
+        runEventSink: runtime?.runEventSink || runtime?.run_event_sink || null,
+        jobId: String(currentJobId || ''),
+        verificationRecord: channelVerification?.record || null,
+        verificationSummary: channelVerification?.summary || null,
+        runtimeBehavior: runtime?.runtimeBehavior || runtime?.runtime_behavior || null,
+      });
+      recordAdaptiveExecutionOutcome({
+        runtime,
+        status: 'error',
+        plannerMetadata: routePlan?.runtime_team_snapshot?.team_plan?.planner_metadata || routePlan?.runtime_team_snapshot?.team_plan?.plannerMetadata || routePlan?.planner_metadata || runtime?.runtimeTeamSnapshot?.team_plan?.planner_metadata || runtime?.runtimeTeamSnapshot?.team_plan?.plannerMetadata || runtime?.plannerMetadata || null,
+        capabilityGapCount: detectCapabilityGapsFromExecution(execution || {}).length,
+        qualitySignals: executionQualitySignals,
+      });
+    } catch {}
     throw e;
   } finally {
     if (contextEngine && typeof contextEngine.onRunEnd === "function") {
@@ -4771,6 +4934,7 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
         for (const child of Array.isArray(act.agents) ? act.agents : []) {
           collectFailure(formatChatAgentDisplayName(child?.agent || '', agentIndex), prepareScopedAction(withAgentOutputContract(child, {
             runtimeExecutionPolicy: resolveRuntimeExecutionPolicyForRuntime(runtime),
+    harnessRuntimePolicy: runtime?.harnessRuntimePolicy || runtime?.openharnessInstallState?.runtime_policy || null,
           })));
         }
       }

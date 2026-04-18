@@ -21,11 +21,17 @@ import { SkillResolver } from "../control_plane/skill_resolver.js";
 import { SkillLoader } from "./skill_loader.js";
 import { ScopePlanner } from "../control_plane/scope_planner.js";
 import { LegacyContextPackBuilder } from "../control_plane/legacy_context_pack_builder.js";
+import { buildTeamMotifRegistry } from "./team_motif_registry.js";
+import { loadTeamMotifFeedbackSummary } from "./team_motif_feedback.js";
+import { loadChannelPromotionSummary } from "./channel_promotion_manager.js";
+import { applyGraphLibrarianPlan, planTeamCompositionWithGraphLibrarian } from "./team_graph_librarian.js";
 import { PresetRegistry } from "../catalog/preset_registry.js";
 import { PresetResolver } from "../control_plane/preset_resolver.js";
 import { interpretTask } from "../control_plane/task_interpreter.js";
 import { buildCollaborationCells } from "../control_plane/collaboration_policy.js";
 import { buildExecutionCheckpoints } from "../control_plane/checkpoint_policy.js";
+import { readHarnessMotifPolicy } from "./harness_runtime_behavior.js";
+import { applyAdaptiveExecutionModeToTaskInterpretation, selectAdaptiveExecutionMode } from "./execution_mode_adaptation.js";
 import {
   coordinateExecutionPlan,
   createDefaultRunRoute as createDefaultRunRouteV2,
@@ -349,11 +355,21 @@ function buildPlannerMetadata({
   actionSource = "",
   planSource = "local",
   plannerType = "local",
+  teamSynthesisPlan = null,
+  executionModeSelection = null,
 } = {}) {
   return {
     planner_type: plannerType,
     plan_source: planSource,
     pipeline_version: "control_plane_v2",
+    task_type: normalizeText(interpretedTask?.task_type || interpretedTask?.taskType, { lower: true }) || undefined,
+    deliverable_type: normalizeText(interpretedTask?.deliverable_type || interpretedTask?.deliverableType, { lower: true }) || undefined,
+    task_family_key: normalizeText(
+      (interpretedTask?.task_type || interpretedTask?.taskType) && (interpretedTask?.deliverable_type || interpretedTask?.deliverableType)
+        ? `${interpretedTask?.task_type || interpretedTask?.taskType}::${interpretedTask?.deliverable_type || interpretedTask?.deliverableType}`
+        : (interpretedTask?.task_type || interpretedTask?.taskType || interpretedTask?.deliverable_type || interpretedTask?.deliverableType || ''),
+      { lower: true },
+    ) || undefined,
     control_mode: normalizeText(interpretedTask?.control_mode, { lower: true }) || undefined,
     review_policy: normalizeText(interpretedTask?.review_policy, { lower: true }) || undefined,
     action_source: normalizeText(actionSource || routePlan?.action_source, { lower: true }) || undefined,
@@ -372,6 +388,28 @@ function buildPlannerMetadata({
     selected_skill_count: asArray(selectedSkillIds).length,
     checkpoint_count: asArray(teamPlan?.checkpoints).length,
     missing_roles: normalizeStringList(missingRoles, { max: 24, lower: true }),
+    team_synthesis_mode: normalizeText(teamSynthesisPlan?.planner_metadata?.team_synthesis_mode, { lower: true }) || undefined,
+    selected_motif_ids: normalizeStringList(teamSynthesisPlan?.selected_motif_ids || [], { max: 12, lower: true }),
+    target_agent_count: Number.isFinite(Number(teamSynthesisPlan?.target_agent_count)) ? Math.max(1, Math.floor(Number(teamSynthesisPlan?.target_agent_count))) : undefined,
+    beam_width: Number.isFinite(Number(teamSynthesisPlan?.beam_width)) ? Math.max(1, Math.floor(Number(teamSynthesisPlan?.beam_width))) : undefined,
+    motif_feedback_run_count: Number.isFinite(Number(teamSynthesisPlan?.planner_metadata?.motif_feedback_run_count))
+      ? Number(teamSynthesisPlan?.planner_metadata?.motif_feedback_run_count)
+      : undefined,
+    motif_channel: normalizeText(teamSynthesisPlan?.planner_metadata?.motif_channel, { lower: true }) || undefined,
+    execution_mode: normalizeText(executionModeSelection?.mode, { lower: true }) || undefined,
+    execution_mode_reasons: Array.isArray(executionModeSelection?.reasons) ? executionModeSelection.reasons.slice(0, 6) : [],
+    execution_mode_signals: executionModeSelection?.signals && typeof executionModeSelection.signals === 'object'
+      ? { ...executionModeSelection.signals }
+      : undefined,
+    execution_quality_signals: executionModeSelection?.quality_signals && typeof executionModeSelection.quality_signals === 'object'
+      ? { ...executionModeSelection.quality_signals }
+      : undefined,
+    execution_mode_history_tail: Array.isArray(executionModeSelection?.history_tail)
+      ? executionModeSelection.history_tail.slice(-5).map((entry) => ({ ...(entry || {}) }))
+      : undefined,
+    task_family_mode_hint: executionModeSelection?.task_family_mode_hint && typeof executionModeSelection.task_family_mode_hint === 'object'
+      ? { ...executionModeSelection.task_family_mode_hint }
+      : undefined,
   };
 }
 
@@ -389,7 +427,7 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
     mode,
     goal,
     seedInstruction,
-    taskInterpretation,
+    taskInterpretation: executionModeTaskInterpretation,
   });
 }
 
@@ -438,6 +476,9 @@ export function buildRuntimeOrchestration({
   persistSkillEvents = false,
   planSource = "local",
   plannerType = "local",
+  runtimePolicy = null,
+  runtimeBehavior = null,
+  runtimeSessionState = null,
 } = {}) {
   const normalizedRoute = normalizeRoutePlan(routePlan, {
     maxActions: 8,
@@ -462,15 +503,63 @@ export function buildRuntimeOrchestration({
     registry,
     toolHints: collectedToolIds,
   });
+  const promotionSummary = loadChannelPromotionSummary({
+    runsDir,
+    jobDir: jobId && runsDir ? `${runsDir}/${jobId}` : '',
+  });
+  const executionModeSelection = selectAdaptiveExecutionMode({
+    goal: effectiveGoal,
+    message,
+    taskInterpretation,
+    routePlan: normalizedRoute,
+    preferredRoles,
+    maxAgents,
+    runtimeBehavior,
+    runtimePolicy,
+    runtimeSessionState,
+    promotionSummary,
+  });
+  const executionModeTaskInterpretation = applyAdaptiveExecutionModeToTaskInterpretation(taskInterpretation, executionModeSelection);
+
+  const motifPolicy = readHarnessMotifPolicy(runtimePolicy || runtimeBehavior);
+  const motifFeedbackSummary = loadTeamMotifFeedbackSummary({
+    runsDir,
+    jobDir: jobId && runsDir ? `${runsDir}/${jobId}` : '',
+  });
+  const motifRegistry = buildTeamMotifRegistry({
+    runtimeTeamSnapshot,
+    activeTeam,
+    motifFeedbackSummary,
+    promotionSummary,
+    channel: motifPolicy.channel,
+  });
+  const teamSynthesisPlan = planTeamCompositionWithGraphLibrarian({
+    goal: effectiveGoal,
+    taskInterpretation: executionModeTaskInterpretation,
+    routePlan: normalizedRoute,
+    runtimeTeamSnapshot,
+    motifRegistry,
+    preferredRoles,
+    maxAgents: executionModeSelection?.max_agents || maxAgents,
+    motifFeedbackSummary,
+    motifChannel: motifPolicy.channel,
+    executionMode: executionModeSelection?.mode || 'single_compiled',
+  });
+  const synthesizedTaskInterpretation = applyGraphLibrarianPlan(executionModeTaskInterpretation, teamSynthesisPlan);
+  const planningTaskInterpretation = synthesizedTaskInterpretation;
+  const synthesizedPreferredRoles = normalizeStringList([
+    ...asArray(preferredRoles),
+    ...asArray(teamSynthesisPlan?.preferred_roles),
+  ], { max: 24, lower: true });
 
   const teamBuild = buildTeamFromRegistry({
     goal: effectiveGoal,
     routeContext: normalizedRoute,
     registry,
-    preferredRoles,
-    maxAgents,
+    preferredRoles: synthesizedPreferredRoles,
+    maxAgents: Math.max(1, Math.min(Math.floor(Number(teamSynthesisPlan?.target_agent_count || executionModeSelection?.max_agents || maxAgents) || maxAgents), Math.floor(Number(executionModeSelection?.max_agents || maxAgents) || 6))),
     mode,
-    taskInterpretation,
+    taskInterpretation: synthesizedTaskInterpretation,
   });
 
   const presetRegistryInstance = presetRegistry || new PresetRegistry();
@@ -484,7 +573,7 @@ export function buildRuntimeOrchestration({
   const presetResolution = typeof presetResolverInstance?.resolveForTeam === "function"
     ? presetResolverInstance.resolveForTeam({
       teamPlan: teamBuild.team_plan,
-      taskInterpretation,
+      taskInterpretation: planningTaskInterpretation,
       goal: effectiveGoal,
       registry,
       availableToolIds: collectedToolIds,
@@ -498,6 +587,7 @@ export function buildRuntimeOrchestration({
 
   let combinedSelectionExplanations = [
     ...asArray(teamBuild.team_plan?.selection_explanations),
+    ...asArray(teamSynthesisPlan?.selection_explanations),
     ...asArray(presetResolution.selection_explanations),
   ];
 
@@ -514,7 +604,7 @@ export function buildRuntimeOrchestration({
 
   let teamPlan = normalizeTeamPlan({
     ...(teamBuild.team_plan || {}),
-    task_interpretation: taskInterpretation,
+    task_interpretation: planningTaskInterpretation,
     conversation_preferences: conversationPreferences || undefined,
     runtime_agents: presetResolution.runtime_agents,
     selection_explanations: combinedSelectionExplanations,
@@ -535,7 +625,7 @@ export function buildRuntimeOrchestration({
       teamPlan,
       runtimeAgents,
       contextHints: collectContextHints(effectiveGoal, normalizedRoute),
-      taskInterpretation,
+      taskInterpretation: planningTaskInterpretation,
       availableToolIds: collectedToolIds,
     })
     : {
@@ -566,7 +656,7 @@ export function buildRuntimeOrchestration({
     routePlan: normalizedRoute,
     teamPlan,
     runtimeAgents,
-    taskInterpretation,
+    taskInterpretation: planningTaskInterpretation,
   });
 
   const skillLoaderInstance = skillLoader || new SkillLoader({
@@ -584,7 +674,7 @@ export function buildRuntimeOrchestration({
       runtimeAgents,
       effectiveActions: coordinated.route_plan.actions,
       routeReason: coordinated.route_plan.reason,
-      taskInterpretation,
+      taskInterpretation: planningTaskInterpretation,
     })
     : {
       team_plan: teamPlan,
@@ -596,7 +686,7 @@ export function buildRuntimeOrchestration({
 
   teamPlan = normalizeTeamPlan({
     ...(legacyContextResult.team_plan || teamPlan),
-    task_interpretation: taskInterpretation,
+    task_interpretation: planningTaskInterpretation,
     conversation_preferences: conversationPreferences || undefined,
     runtime_agents: legacyContextResult.runtime_agents,
     selection_explanations: combinedSelectionExplanations,
@@ -610,7 +700,7 @@ export function buildRuntimeOrchestration({
       teamPlan,
       runtimeAgents,
       effectiveActions: coordinated.route_plan.actions,
-      taskInterpretation,
+      taskInterpretation: planningTaskInterpretation,
       legacyContextPacks: legacyContextResult.context_packs,
     })
     : {
@@ -667,7 +757,7 @@ export function buildRuntimeOrchestration({
 
   teamPlan = normalizeTeamPlan({
     ...(planningResult.team_plan || teamPlan),
-    task_interpretation: taskInterpretation,
+    task_interpretation: planningTaskInterpretation,
     conversation_preferences: conversationPreferences || undefined,
     runtime_agents: planningResult.runtime_agents,
     selection_explanations: combinedSelectionExplanations,
@@ -677,7 +767,7 @@ export function buildRuntimeOrchestration({
   const rerankedTeam = rerankResolvedTeamComposition({
     teamPlan,
     runtimeAgents,
-    taskInterpretation,
+    taskInterpretation: planningTaskInterpretation,
     scoredCandidatesBySlot: presetResolution.scored_candidates_by_slot || {},
   });
   combinedSelectionExplanations = [
@@ -720,7 +810,7 @@ export function buildRuntimeOrchestration({
     routePlan: normalizedRoute,
     teamPlan,
     runtimeAgents,
-    taskInterpretation,
+    taskInterpretation: planningTaskInterpretation,
   });
   const alignedParallelGroups = deriveParallelGroupsFromRouteActions(finalizedCoordination.route_plan.actions);
   const parallelismExplanations = asArray(finalizedCoordination.route_plan.actions)
@@ -766,7 +856,7 @@ export function buildRuntimeOrchestration({
       routePlan: normalizedRoute,
       teamPlan,
       runtimeAgents,
-      taskInterpretation,
+      taskInterpretation: planningTaskInterpretation,
     });
   }
 
@@ -792,7 +882,7 @@ export function buildRuntimeOrchestration({
   const executionBlueprintSummary = resolveExecutionBlueprintSummary({
     team: activeTeam || { structure_v2: teamPlan?.structure_v2, memory_plan: teamPlan?.memory_plan },
     goal: effectiveGoal,
-    taskInterpretation,
+    taskInterpretation: planningTaskInterpretation,
     runtimeTeamSnapshot: { team_plan: teamPlan },
   });
   if (routeContract) {
@@ -806,7 +896,7 @@ export function buildRuntimeOrchestration({
   }
 
   const builtRuntimeTeamSnapshot = createRuntimeTeamSnapshot({
-    taskInterpretation,
+    taskInterpretation: planningTaskInterpretation,
     teamPlan,
     runtimeAgents,
     contextPacks: planningResult.context_packs,
@@ -845,7 +935,7 @@ export function buildRuntimeOrchestration({
     visibility_graph: planningResult.visibility_graph,
     scope_grants: planningResult.scope_grants,
     context_runtime_mode: planningResult.context_runtime_mode,
-    task_interpretation: taskInterpretation,
+    task_interpretation: planningTaskInterpretation,
     collaboration_cells: teamPlan?.collaboration_cells,
     authority_graph: teamPlan?.authority_graph,
     checkpoints: teamPlan?.checkpoints,
@@ -860,7 +950,7 @@ export function buildRuntimeOrchestration({
     { max: 24, lower: true }
   );
   const plannerMetadata = buildPlannerMetadata({
-    interpretedTask: taskInterpretation,
+    interpretedTask: planningTaskInterpretation,
     routePlan: routePlanWithSkills,
     teamPlan,
     runtimeAgents,
@@ -878,10 +968,12 @@ export function buildRuntimeOrchestration({
     actionSource: finalizedCoordination.action_source,
     planSource,
     plannerType,
+    teamSynthesisPlan,
+    executionModeSelection,
   });
 
   return {
-    interpreted_task: taskInterpretation,
+    interpreted_task: planningTaskInterpretation,
     team_plan: teamPlan,
     runtime_agents: runtimeAgents,
     context_packs: planningResult.context_packs,

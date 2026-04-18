@@ -114,6 +114,9 @@ export async function invokeRuntimePlanner({
     jobId: String(jobId || "").trim(),
     runsDir: String(runsDir || "").trim(),
     persistSkillEvents: persistSkillEvents === true,
+    runtimePolicy: runtime?.openharnessInstallState?.runtime_policy || runtime?.harnessRuntimePolicy || runtime?.runtimePolicy || null,
+    runtimeBehavior: runtime?.runtimeBehavior || runtime?.runtime_behavior || null,
+    runtimeSessionState: runtime?.runtimeSessionState || runtime?.runtime_session_state || null,
   };
   if (!planner || typeof planner.plan !== "function") {
     throw new Error("planner.plan is unavailable");

@@ -5,6 +5,7 @@ import {
   setTeamConfigApi,
   validateTeamBlueprintApi,
 } from './goc_client_team_api.js';
+import { normalizeHarnessPackage } from './shared/openharness_contracts.js';
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -1044,6 +1045,20 @@ export class GocClient {
     });
   }
 
+  async getHarnessPackage(threadId) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("getHarnessPackage requires threadId");
+    const data = await this._requestAny({
+      method: "GET",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/harness_package` },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/harness_package` },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/harness_package` },
+      ],
+    });
+    return normalizeHarnessPackage(data);
+  }
+
   async updateHarnessSpec(threadId, harnessSpec = {}) {
     const cleanThreadId = String(threadId || "").trim();
     if (!cleanThreadId) throw new Error("updateHarnessSpec requires threadId");
@@ -1055,6 +1070,27 @@ export class GocClient {
         { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/harness_spec`, body: { harness_spec: harnessSpec } },
       ],
     });
+  }
+
+  async installHarnessPackage(threadId, harnessPackage = {}, applyState = 'active') {
+    const cleanThreadId = String(threadId || '').trim();
+    if (!cleanThreadId) throw new Error('installHarnessPackage requires threadId');
+    const pkg = normalizeHarnessPackage(harnessPackage);
+    try {
+      const data = await this._requestAny({
+        method: 'POST',
+        attempts: [
+          { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/harness_package/install`, body: { package: pkg, apply_state: applyState } },
+          { path: `/threads/${encodeURIComponent(cleanThreadId)}/harness_package/install`, body: { package: pkg, apply_state: applyState } },
+          { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/harness_package/install`, body: { package: pkg, apply_state: applyState } },
+        ],
+      });
+      return normalizeHarnessPackage(data);
+    } catch (error) {
+      await this.updateHarnessSpec(cleanThreadId, pkg.harness_spec || {});
+      await this.installTeamBlueprint({ threadId: cleanThreadId }, pkg.team_manifest || {}, applyState);
+      return pkg;
+    }
   }
 
   async getRunStudioSummary(threadId, { contextSetId = "" } = {}) {

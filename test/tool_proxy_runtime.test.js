@@ -83,3 +83,16 @@ test('executeToolProxyAction honors verification approval policy', async () => {
   assert.equal(ask.ok, false);
   assert.deepEqual(ask.route_signals, ['verification_requires_approval']);
 });
+
+
+test('executeToolProxyAction includes harness approval guidance when verification is blocked', async () => {
+  const result = await executeToolProxyAction({
+    action: { label: 'verification', inputs: { commands: ['npm run test'] } },
+    workspaceRoot: process.cwd(),
+    runtimeExecutionPolicy: { approval_matrix: { verification: 'ask' } },
+    harnessRuntimePolicy: { approval_policy: { deny_feedback_mode: 'structured_feedback', default_escalation: 'operator' } },
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.text, /explicit approval required/i);
+  assert.match(result.text, /escalate to operator/i);
+});

@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import { buildRunTraceRecord } from "../shared/openharness_contracts.js";
+import { isHarnessTimelineEnabled } from "../application/harness_runtime_behavior.js";
 
 function asObject(value) {
   return value && typeof value === "object" ? value : {};
@@ -31,10 +33,17 @@ export class LocalRunEventSink {
   constructor({
     jobs = null,
     logger = null,
+    runtimePolicy = null,
   } = {}) {
     this.source = "local";
     this.jobs = jobs || null;
     this.logger = normalizeLogger(logger);
+    this.runIdsByJob = new Map();
+    this.runtimePolicy = runtimePolicy || null;
+  }
+
+  _timelineEnabled() {
+    return isHarnessTimelineEnabled(this.runtimePolicy);
   }
 
   _log(line = "") {
@@ -51,13 +60,22 @@ export class LocalRunEventSink {
   }
 
   record(eventType = "", payload = {}, { jobId = "" } = {}) {
+    if (!this._timelineEnabled()) return;
     const cleanType = String(eventType || "").trim();
     if (!cleanType) return;
-    const filePath = this._eventFile(jobId);
-    appendJsonl(filePath, {
-      event_type: cleanType,
-      payload: asObject(payload),
-    });
+    const cleanJobId = normalizeJobId(jobId);
+    const normalizedPayload = asObject(payload);
+    const explicitRunId = String(normalizedPayload.run_id || normalizedPayload.runId || "").trim();
+    if (cleanJobId && explicitRunId) {
+      this.runIdsByJob.set(cleanJobId, explicitRunId);
+    }
+    const filePath = this._eventFile(cleanJobId);
+    appendJsonl(filePath, buildRunTraceRecord(cleanType, normalizedPayload, {
+      source: 'ddalggak',
+      target: 'local',
+      jobId: cleanJobId,
+      runId: explicitRunId || this.runIdsByJob.get(cleanJobId) || '',
+    }));
     this._log(`[run-events:local] ${cleanType}`);
   }
 
@@ -88,6 +106,8 @@ export class LocalRunEventSink {
 
   async finishRun(input = {}, { jobId = "" } = {}) {
     this.record("run.finish", input, { jobId });
+    const cleanJobId = normalizeJobId(jobId);
+    if (cleanJobId) this.runIdsByJob.delete(cleanJobId);
     return null;
   }
 }
@@ -96,14 +116,20 @@ export class GocRunEventSink {
   constructor({
     executionGraph = null,
     fallbackSink = null,
+    runtimePolicy = null,
   } = {}) {
     this.source = "goc";
     this.executionGraph = executionGraph || null;
     this.fallbackSink = fallbackSink || null;
+    this.runtimePolicy = runtimePolicy || null;
+  }
+
+  _timelineEnabled() {
+    return isHarnessTimelineEnabled(this.runtimePolicy);
   }
 
   isEnabled() {
-    return !!(this.executionGraph && typeof this.executionGraph.isEnabled === "function" && this.executionGraph.isEnabled());
+    return this._timelineEnabled() && !!(this.executionGraph && typeof this.executionGraph.isEnabled === "function" && this.executionGraph.isEnabled());
   }
 
   async startRun(input = {}, { jobId = "" } = {}) {
@@ -137,6 +163,19 @@ export class GocRunEventSink {
   }
 
   async recordAgentEvent(eventType = "", input = {}, { jobId = "" } = {}) {
+    const cleanType = String(eventType || '').trim().toLowerCase();
+    if (this.isEnabled() && cleanType === 'participant.contribution' && typeof this.executionGraph.recordParticipantContribution === 'function') {
+      await this.executionGraph.recordParticipantContribution(input);
+    }
+    if (this.isEnabled() && cleanType === 'participant.folded_digest' && typeof this.executionGraph.recordParticipantDigest === 'function') {
+      await this.executionGraph.recordParticipantDigest(input);
+    }
+    if (this.isEnabled() && cleanType === 'channel.verifier_decision' && typeof this.executionGraph.recordChannelVerifierDecision === 'function') {
+      await this.executionGraph.recordChannelVerifierDecision(input);
+    }
+    if (this.isEnabled() && cleanType === 'channel.promotion_applied' && typeof this.executionGraph.recordChannelPromotionApplied === 'function') {
+      await this.executionGraph.recordChannelPromotionApplied(input);
+    }
     if (this.fallbackSink && typeof this.fallbackSink.recordAgentEvent === "function") {
       return await this.fallbackSink.recordAgentEvent(eventType, input, { jobId });
     }

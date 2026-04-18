@@ -493,3 +493,54 @@ test("finishRun marks leftover queued steps as skipped for hygiene", async () =>
     assert.equal(row.body.payload_json.skip_reason, "await_user");
   }
 });
+
+
+test('harness audit policy can keep run node while suppressing lifecycle step nodes', async () => {
+  const client = createFakeGraphClient();
+  const recorder = new GocExecutionGraphRecorder({
+    client,
+    threadId: 'thread_policy',
+    contextSetId: 'ctx_policy',
+    sharedContextSetId: 'ctx_policy',
+    runId: 'run_policy',
+    runtimePolicy: { audit_flags: { timeline_enabled: true, show_lifecycle: false } },
+  });
+
+  await recorder.startRun({ userText: 'hello policy' });
+  await recorder.queueMainSteps([{ type: 'run_agent', agent_id: 'coder', goal: 'do work' }]);
+
+  assert.equal(client.state.createdNodes.length, 1);
+  assert.equal(client.state.createdNodes[0].body.node_type, 'Run');
+});
+
+test('participant folded digests are persisted as dedicated execution graph nodes', async () => {
+  const client = createFakeGraphClient();
+  const recorder = new GocExecutionGraphRecorder({
+    client,
+    threadId: 'thread_digest',
+    contextSetId: 'ctx_digest',
+    sharedContextSetId: 'ctx_digest',
+    runId: 'run_digest',
+    runtimePolicy: { audit_flags: { timeline_enabled: true, show_lifecycle: true } },
+  });
+
+  await recorder.startRun({ userText: 'digest please' });
+  await recorder.recordParticipantDigest({
+    turn_id: 'turn_digest',
+    mode: 'folded_only',
+    item_count: 2,
+    participant_labels: ['Phone Scout', 'Mini Critic'],
+    participant_ids: ['phone.scout', 'mini.critic'],
+    contribution_ids: ['c1', 'c2'],
+    kinds: ['summary', 'critique'],
+    digest_block: '참고 신호:\n- Phone Scout: 일정 메모\n- Mini Critic: 숫자 검토',
+    signature: 'turn_digest:c1,c2',
+  });
+
+  const digestNode = client.state.createdNodes.find((row) => row.body.node_type === 'ParticipantDigest');
+  assert.ok(digestNode);
+  assert.equal(digestNode.body.payload_json.item_count, 2);
+  assert.deepEqual(digestNode.body.payload_json.participant_labels, ['Phone Scout', 'Mini Critic']);
+  assert.equal(digestNode.body.payload_json.turn_id, 'turn_digest');
+  assert.ok(client.state.createdEdges.some((row) => row.edgeType === 'HAS_PART'));
+});

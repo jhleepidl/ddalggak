@@ -7,6 +7,7 @@ import {
   loadRoleScopedGraphCompressionContext,
   extractHarnessSpecDelivery,
   invalidateRoleScopedContextCache,
+  loadRoleScopedContextDocs,
 } from '../src/application/telegram_projection_context_io.js';
 
 test('extractRoleScopedGraphCompression maps planner requests onto operator role views', () => {
@@ -189,4 +190,75 @@ test('loadRoleScopedGraphCompressionContext reuses hot cache for identical reque
   assert.equal(first.graphVersion, 'gv-1');
   assert.equal(second.graphVersion, 'gv-1');
   assert.match(second.text, /cached compressed context/);
+});
+
+
+test('loadRoleScopedGraphCompressionContext falls back to local runtime policy delivery when bundle fetch is unavailable', async () => {
+  const formatted = await loadRoleScopedGraphCompressionContext({
+    client: null,
+    threadId: '',
+    roleId: 'planner',
+    runtimePolicy: {
+      schema_version: 'openharness.runtime_policy/v1',
+      delivery_policy: { default_delivery_mode: 'projection_only', appendix_char_budget_ratio: 0.15, default_budget_tier: 'low', default_risk_level: 'standard', projection_appendix_enabled_by_default: true },
+      resolved_role_delivery: { planner: { effective_role_id: 'operator', delivery_mode: 'projection_only', appendix_enabled: true, appendix_char_budget_ratio: 0.15, budget_tier: 'low', risk_level: 'standard' } },
+    },
+  });
+
+  assert.equal(formatted.roleId, 'operator');
+  assert.equal(formatted.deliveryMode, 'projection_only');
+  assert.equal(formatted.appendixEnabled, true);
+  assert.equal(formatted.appendixCharBudgetRatio, 0.15);
+});
+
+
+test('formatRoleScopedGraphCompressionContext suppresses conflict and cross-reference details when audit policy disables them', () => {
+  const formatted = formatRoleScopedGraphCompressionContext({
+    graph_native_compression: {
+      summary: {
+        unresolved_conflict_count: 3,
+        omitted_cluster_count: 1,
+      },
+      role_views: [
+        {
+          role_id: 'builder',
+          display_label: 'Builder',
+          visible_cluster_ids: ['cluster-1'],
+          blocked_cluster_ids: [],
+          core_claim_node_ids: ['claim-1'],
+          support_frontier_node_ids: ['node-1'],
+          conflict_frontier_ids: ['conflict-1'],
+          decision_path_event_ids: ['event-1'],
+          rendered_context: 'Implement carefully.',
+          reexpand_handles: {
+            cluster_ids: ['cluster-1'],
+            memory_node_ids: ['node-1'],
+          },
+        },
+      ],
+    },
+  }, {
+    roleId: 'builder',
+    runtimePolicy: { audit_flags: { show_conflict_history: false, cross_reference_enabled: false } },
+  });
+
+  assert.equal(formatted.unresolvedConflictCount, 0);
+  assert.doesNotMatch(formatted.text, /unresolved conflicts/i);
+  assert.doesNotMatch(formatted.text, /re-expand handles/i);
+});
+
+test('loadRoleScopedContextDocs can disable tool-backed retrieval from harness policy', async () => {
+  const text = await loadRoleScopedContextDocs('job_policy', {
+    provider: 'codex',
+    roleId: 'builder',
+    runtimePolicy: {
+      tool_policy: {
+        tool_rag_enabled: false,
+        tool_view_mode: 'task_scoped',
+      },
+    },
+  });
+
+  assert.match(text, /tool-backed retrieval disabled by harness policy/i);
+  assert.match(text, /effective projection role/i);
 });

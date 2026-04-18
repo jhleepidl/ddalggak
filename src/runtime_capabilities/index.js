@@ -118,15 +118,17 @@ export function composeRuntimeCapabilities({
       conversationTeamStore,
       skillCatalog,
       planner,
-      createRunEventSink: ({ executionGraph = null } = {}) => {
+      createRunEventSink: ({ executionGraph = null, runtimePolicy = null } = {}) => {
         const localSink = new LocalRunEventSink({
           jobs,
           logger: runtimeLogger,
+          runtimePolicy,
         });
         if (hasGoc) {
           return new GocRunEventSink({
             executionGraph,
             fallbackSink: localSink,
+            runtimePolicy,
           });
         }
         return localSink;

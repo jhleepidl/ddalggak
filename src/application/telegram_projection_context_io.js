@@ -4,6 +4,7 @@ import { summarizeRoleMemoryEnforcement, buildRoleMemoryContract } from '../know
 import { ensureKnowledgeBaseMemorySurfacesInGoc } from './goc_memory_sync.js';
 import * as runtimeState from './telegram_runtime_state.js';
 import { TimedArtifactCache, buildContextArtifactCacheKey } from './context_cache.js';
+import { isHarnessConflictHistoryEnabled, isHarnessCrossReferenceEnabled, isHarnessToolRagEnabled, readHarnessToolPolicy } from './harness_runtime_behavior.js';
 
 const {
   jobs,
@@ -186,7 +187,7 @@ function extractRoleScopedGraphCompression(graphCompression = {}, { roleId = '' 
   };
 }
 
-function formatRoleScopedGraphCompressionContext(graphCompression = {}, { roleId = '', maxChars = 7000 } = {}) {
+function formatRoleScopedGraphCompressionContext(graphCompression = {}, { roleId = '', maxChars = 7000, runtimePolicy = null } = {}) {
   const { compression, roleView, normalizedRoleId } = extractRoleScopedGraphCompression(graphCompression, { roleId });
   if (!roleView || !cleanText(roleView?.rendered_context)) {
     return {
@@ -206,7 +207,9 @@ function formatRoleScopedGraphCompressionContext(graphCompression = {}, { roleId
   const supportFrontierNodeIds = cleanIdList(roleView.support_frontier_node_ids);
   const conflictFrontierIds = cleanIdList(roleView.conflict_frontier_ids);
   const decisionPathEventIds = cleanIdList(roleView.decision_path_event_ids);
-  const unresolvedConflictCount = countCollection(summary.unresolved_conflict_count ?? summary.conflict_frontier_count);
+  const unresolvedConflictCount = isHarnessConflictHistoryEnabled(runtimePolicy)
+    ? countCollection(summary.unresolved_conflict_count ?? summary.conflict_frontier_count)
+    : 0;
   const omittedClusterCount = countCollection(summary.omitted_cluster_count);
   const lines = [
     '### GOC GRAPH-NATIVE COMPRESSION',
@@ -224,7 +227,7 @@ function formatRoleScopedGraphCompressionContext(graphCompression = {}, { roleId
   lines.push('', '#### rendered context', clip(cleanText(roleView.rendered_context), Math.max(1200, maxChars - 420)));
   const handleNodeIds = cleanIdList(roleView?.reexpand_handles?.memory_node_ids);
   const handleClusterIds = cleanIdList(roleView?.reexpand_handles?.cluster_ids);
-  if (handleNodeIds.length > 0 || handleClusterIds.length > 0) {
+  if (isHarnessCrossReferenceEnabled(runtimePolicy) && (handleNodeIds.length > 0 || handleClusterIds.length > 0)) {
     lines.push('', '#### re-expand handles');
     if (handleClusterIds.length > 0) lines.push(`- cluster ids: ${clip(handleClusterIds.join(', '), 200)}`);
     if (handleNodeIds.length > 0) lines.push(`- memory node ids: ${clip(handleNodeIds.join(', '), 200)}`);
@@ -241,11 +244,11 @@ function formatRoleScopedGraphCompressionContext(graphCompression = {}, { roleId
   };
 }
 
-async function loadRoleScopedGraphCompressionContext({ client = null, threadId = '', contextSetId = '', runId = '', roleId = '', maxCharsPerDoc = 3500 } = {}) {
+async function loadRoleScopedGraphCompressionContext({ client = null, threadId = '', contextSetId = '', runId = '', roleId = '', maxCharsPerDoc = 3500, runtimePolicy = null } = {}) {
   const cleanThreadId = cleanText(threadId);
   const normalizedRoleId = normalizeProjectionRoleId(roleId) || cleanText(roleId).toLowerCase() || '';
   if (!client || typeof client.getRunStudioRunBundle !== 'function' || !cleanThreadId) {
-    return { text: '', roleId: normalizedRoleId, deliveryMode: DEFAULT_HARNESS_DELIVERY_MODE, appendixEnabled: true, appendixCharBudgetRatio: DEFAULT_HARNESS_APPENDIX_CHAR_BUDGET_RATIO };
+    return { text: '', roleId: normalizedRoleId, ...extractHarnessSpecDelivery({ runtime_policy: runtimePolicy }, { roleId }) };
   }
   const cacheKey = buildContextArtifactCacheKey('graph_compression_role_view', {
     threadId: cleanThreadId,
@@ -264,6 +267,7 @@ async function loadRoleScopedGraphCompressionContext({ client = null, threadId =
     const formatted = formatRoleScopedGraphCompressionContext(bundle, {
       roleId,
       maxChars: Math.max(1600, Math.floor(maxCharsPerDoc * 1.8)),
+      runtimePolicy,
     });
     const delivery = extractHarnessSpecDelivery(bundle, { roleId });
     const graphVersion = cleanText(bundle?.graph_version || bundle?.context_cache?.graph_version);
@@ -276,7 +280,7 @@ async function loadRoleScopedGraphCompressionContext({ client = null, threadId =
       roleId: normalizedRoleId,
       deliveryMode: DEFAULT_HARNESS_DELIVERY_MODE,
       appendixEnabled: true,
-      appendixCharBudgetRatio: DEFAULT_HARNESS_APPENDIX_CHAR_BUDGET_RATIO,
+      ...extractHarnessSpecDelivery({ runtime_policy: runtimePolicy }, { roleId }),
       error: cleanText(error?.message || error),
     };
   }
@@ -290,12 +294,14 @@ function normalizeHarnessDeliveryMode(value = '', fallback = DEFAULT_HARNESS_DEL
 }
 
 function extractHarnessSpecDelivery(bundle = {}, { roleId = '' } = {}) {
-  const summary = bundle && typeof bundle === 'object' ? (bundle.harness_summary && typeof bundle.harness_summary === 'object' ? bundle.harness_summary : {}) : {};
+  const row = bundle && typeof bundle === 'object' ? bundle : {};
+  const summary = row.harness_summary && typeof row.harness_summary === 'object' ? row.harness_summary : {};
+  const runtimePolicy = row.runtime_policy && typeof row.runtime_policy === 'object' ? row.runtime_policy : (row.harness_runtime_policy && typeof row.harness_runtime_policy === 'object' ? row.harness_runtime_policy : {});
   const requestedRoleId = cleanText(roleId).toLowerCase();
   const legacyEffectiveRoleId = normalizeProjectionRoleId(requestedRoleId);
-  const resolvedRoleDelivery = summary && typeof summary.resolved_role_delivery === 'object' ? summary.resolved_role_delivery : {};
+  const resolvedRoleDelivery = summary && typeof summary.resolved_role_delivery === 'object' ? summary.resolved_role_delivery : (runtimePolicy && typeof runtimePolicy.resolved_role_delivery === 'object' ? runtimePolicy.resolved_role_delivery : {});
   const directResolved = resolvedRoleDelivery[requestedRoleId] || resolvedRoleDelivery[legacyEffectiveRoleId] || null;
-  const deliveryPolicy = summary && typeof summary.delivery_policy === 'object' ? summary.delivery_policy : {};
+  const deliveryPolicy = summary && typeof summary.delivery_policy === 'object' ? summary.delivery_policy : (runtimePolicy && typeof runtimePolicy.delivery_policy === 'object' ? runtimePolicy.delivery_policy : {});
   const effectiveRoleId = cleanText(directResolved?.effective_role_id).toLowerCase() || legacyEffectiveRoleId;
   const deliveryMode = normalizeHarnessDeliveryMode(
     directResolved?.delivery_mode || deliveryPolicy.default_delivery_mode,
@@ -345,7 +351,7 @@ function resolveRoleScopedReadAccess({ profile = null, provider = '', roleId = '
   };
 }
 
-async function loadRoleScopedGocProjectionContext(jobId, { provider = '', roleId = '', maxCharsPerDoc = 3500, docNames = [], enforcement = {} } = {}) {
+async function loadRoleScopedGocProjectionContext(jobId, { provider = '', roleId = '', maxCharsPerDoc = 3500, docNames = [], enforcement = {}, runtimePolicy = null } = {}) {
   if (memoryModeWithFallback() !== 'goc') return { text: '', visibleNodeCount: 0, blockedNodeCount: 0, compressionText: '' };
   try {
     const client = requireGocClient();
@@ -381,6 +387,7 @@ async function loadRoleScopedGocProjectionContext(jobId, { provider = '', roleId
       contextSetId: map.ctxSharedId,
       roleId,
       maxCharsPerDoc,
+      runtimePolicy,
     });
     gocFallbackByJob.delete(String(jobId));
     const value = {
@@ -410,7 +417,7 @@ async function loadRoleScopedGocProjectionContext(jobId, { provider = '', roleId
   }
 }
 
-async function loadRoleScopedContextDocs(jobId, { provider = '', roleId = '', fallbackDocIds = ['plan', 'research'], maxCharsPerDoc = 3500, audienceLabel = 'orchestrator run' } = {}) {
+async function loadRoleScopedContextDocs(jobId, { provider = '', roleId = '', fallbackDocIds = ['plan', 'research'], maxCharsPerDoc = 3500, audienceLabel = 'orchestrator run', runtimePolicy = null } = {}) {
   const profile = safeLoadTrackingProfile(jobId);
   const access = resolveRoleScopedReadAccess({
     profile,
@@ -419,6 +426,22 @@ async function loadRoleScopedContextDocs(jobId, { provider = '', roleId = '', fa
     fallbackDocIds,
     maxReadDocs: 4,
   });
+  const toolPolicy = readHarnessToolPolicy(runtimePolicy);
+  if (!isHarnessToolRagEnabled(runtimePolicy)) {
+    return [
+      '### MEMORY CONTRACT ENFORCEMENT',
+      '',
+      '- role-scoped read contract enforced',
+      `- tool-backed retrieval disabled by harness policy (tool_view_mode=${toolPolicy.tool_view_mode})`,
+      access.requestedRoleId && access.requestedRoleId !== access.effectiveRoleId
+        ? `- requested role: ${access.requestedRoleId} (effective projection role: ${access.effectiveRoleId})`
+        : `- effective projection role: ${access.effectiveRoleId || '(unspecified)'}`,
+      `- readable surfaces: ${(access.enforcement.read_surface_ids || []).join(', ') || '(none)'}`,
+      `- writable surfaces: ${(access.enforcement.write_surface_ids || []).join(', ') || '(none)'}`,
+      `- publish surfaces: ${(access.enforcement.publish_surface_ids || []).join(', ') || '(none)'}`,
+    ].filter(Boolean).join('\n');
+  }
+
   const localFallback = await loadContextDocs(jobId, access.docNames, maxCharsPerDoc, {
     roleContract: access.contract,
     enforceLocalOnly: true,
@@ -441,6 +464,7 @@ async function loadRoleScopedContextDocs(jobId, { provider = '', roleId = '', fa
     maxCharsPerDoc,
     docNames: access.docNames,
     enforcement: access.enforcement,
+    runtimePolicy,
   });
   if (projection.visibleNodeCount > 0 || cleanText(projection.compressionText)) {
     const sections = [

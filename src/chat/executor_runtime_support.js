@@ -22,6 +22,12 @@ function asObject(v) {
   return v && typeof v === "object" ? v : {};
 }
 
+function buildFailureResultNote(failure = {}, fallbackMessage = '') {
+  const parts = [String(failure?.category || '').trim(), String(failure?.recovery_strategy || '').trim()].filter(Boolean);
+  const suffix = parts.length > 0 ? ` [${parts.join('/')}]` : '';
+  return `${String(fallbackMessage || failure?.message || 'failure').trim()}${suffix}`.trim();
+}
+
 export function isAbortLikeError(error) {
   const code = String(error?.code || "").trim().toUpperCase();
   if (code === "ECANCELLED" || code === "ABORT_ERR") return true;

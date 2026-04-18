@@ -147,6 +147,15 @@ export function normalizePlanningRequest(input = {}) {
     job_id: normalizeText(row.job_id || row.jobId),
     runs_dir: normalizeText(row.runs_dir || row.runsDir),
     persist_skill_events: normalizeBoolean(row.persist_skill_events ?? row.persistSkillEvents),
+    runtime_policy: row.runtime_policy && typeof row.runtime_policy === 'object'
+      ? row.runtime_policy
+      : (row.runtimePolicy && typeof row.runtimePolicy === 'object' ? row.runtimePolicy : null),
+    runtime_behavior: row.runtime_behavior && typeof row.runtime_behavior === 'object'
+      ? row.runtime_behavior
+      : (row.runtimeBehavior && typeof row.runtimeBehavior === 'object' ? row.runtimeBehavior : null),
+    runtime_session_state: row.runtime_session_state && typeof row.runtime_session_state === 'object'
+      ? row.runtime_session_state
+      : (row.runtimeSessionState && typeof row.runtimeSessionState === 'object' ? row.runtimeSessionState : null),
   };
 }
 
