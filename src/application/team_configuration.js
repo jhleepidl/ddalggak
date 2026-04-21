@@ -1887,6 +1887,9 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
 function normalizePlannerMetadata(raw = null) {
   const row = asObject(raw);
   const reasoning = asArray(row.reasoning_summary || row.reasoningSummary || []).map((entry) => clean(entry)).filter(Boolean).slice(0, 5);
+  const adaptiveExpansion = asObject(row.adaptive_expansion || row.adaptiveExpansion);
+  const augmentation = asObject(adaptiveExpansion.augmentation);
+  const roleSeparation = asObject(adaptiveExpansion.role_separation || adaptiveExpansion.roleSeparation);
   return {
     planner_type: cleanId(row.planner_type || row.plannerType || 'heuristic_rule_based') || 'heuristic_rule_based',
     planner_model: clean(row.planner_model || row.plannerModel || ''),
@@ -1897,6 +1900,22 @@ function normalizePlannerMetadata(raw = null) {
     refine_instruction: clean(row.refine_instruction || row.refineInstruction || '') || undefined,
     benchmark_template_id: cleanId(row.benchmark_template_id || row.benchmarkTemplateId || '') || undefined,
     benchmark_source: clean(row.benchmark_source || row.benchmarkSource || '') || undefined,
+    adaptive_expansion: Object.keys(adaptiveExpansion).length > 0 ? {
+      recommendation: cleanId(adaptiveExpansion.recommendation || '' ) || undefined,
+      rationale: asArray(adaptiveExpansion.rationale).map((entry) => clean(entry)).filter(Boolean).slice(0, 6),
+      augmentation: Object.keys(augmentation).length > 0 ? {
+        score: Number.isFinite(Number(augmentation.score)) ? Number(augmentation.score) : undefined,
+        reasons: asArray(augmentation.reasons).map((entry) => clean(entry)).filter(Boolean).slice(0, 6),
+      } : undefined,
+      role_separation: Object.keys(roleSeparation).length > 0 ? {
+        score: Number.isFinite(Number(roleSeparation.score)) ? Number(roleSeparation.score) : undefined,
+        reasons: asArray(roleSeparation.reasons).map((entry) => clean(entry)).filter(Boolean).slice(0, 6),
+        independent_review_needed: roleSeparation.independent_review_needed === true || roleSeparation.independentReviewNeeded === true || undefined,
+        persistent_split_needed: roleSeparation.persistent_split_needed === true || roleSeparation.persistentSplitNeeded === true || undefined,
+      } : undefined,
+      quality_signals: asObject(adaptiveExpansion.quality_signals || adaptiveExpansion.qualitySignals),
+      capability_gap_summary: clean(adaptiveExpansion.capability_gap_summary || adaptiveExpansion.capabilityGapSummary || ''),
+    } : undefined,
   };
 }
 
@@ -2277,6 +2296,84 @@ export async function createFreeformTeamConfigurationAdvanced({ description = ''
   return normalized;
 }
 
+export function buildChatStartTeamConfiguration({ taskText = '', runtime = null, currentTeam = null } = {}) {
+  const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
+  const cleanTaskText = clean(taskText);
+  const planning = buildPlanningContext(cleanTaskText, effectiveRuntime);
+  const { selection } = buildTaskArchetypeSeed({ taskText: cleanTaskText, currentTeam });
+  const baseTeam = suggestTeamConfiguration({
+    taskText: cleanTaskText,
+    runtime: effectiveRuntime,
+    preferredTaskArchetype: selection.archetype,
+    currentTeam,
+  });
+  const slotList = asArray(planning?.taskInterpretation?.candidate_capability_slots);
+  const interpretedTaskType = cleanId(planning?.taskInterpretation?.task_type || planning?.taskInterpretation?.taskType || '');
+  const implementationLikeIntent = /(fix|patch|bug|test|implement|code|repo|workspace|저장소|패치|고치|수정|테스트|구현|코드)/i.test(cleanTaskText);
+  const preferredRole = interpretedTaskType === 'code_change' || selection.archetype === 'implementation' || selection.archetype === 'review_repair' || implementationLikeIntent
+    ? 'builder'
+    : resolvePreferredTeamRole(slotList[0]?.role_id, slotList[0]?.roleId, slotList[0]?.role, baseTeam?.agents?.[0]?.role);
+  const primaryAgent = asArray(baseTeam?.agents).find((agent) => normalizeTeamRole(agent?.role) === preferredRole)
+    || (preferredRole === 'builder'
+      ? {
+          agent_id: 'builder',
+          name: 'Builder',
+          role: 'builder',
+          model: defaultModelForRole('builder'),
+          provider: inferProviderForModel(defaultModelForRole('builder')) || 'codex',
+          purpose: cleanTaskText,
+          capabilities: deriveCapabilityLabels({ role: 'builder', taskText: cleanTaskText, purpose: cleanTaskText, name: 'Builder' }),
+          skills: deriveCapabilityLabels({ role: 'builder', taskText: cleanTaskText, purpose: cleanTaskText, name: 'Builder' }),
+        }
+      : null)
+    || asArray(baseTeam?.agents)[0]
+    || null;
+  if (!primaryAgent) {
+    throw new Error('chat start bootstrap could not resolve a primary agent');
+  }
+  const primaryPurpose = clean(slotList.find((slot) => normalizeTeamRole(slot?.role_id || slot?.roleId || slot?.role) === normalizeTeamRole(primaryAgent.role))?.purpose || primaryAgent.purpose || cleanTaskText) || primaryAgent.role;
+  const { structure_v2: _structureV2, structureV2: _legacyStructureV2, primary_schema: _primarySchema, primarySchema: _legacyPrimarySchema, ...baseWithoutStructure } = baseTeam || {};
+  return normalizeTeamConfig({
+    ...baseWithoutStructure,
+    team_name: cleanTaskText.slice(0, 36).replace(/\s+/g, '_') || 'chat_start_team',
+    composition_mode: 'structured',
+    proposal_mode: 'apply',
+    status: 'active',
+    task_brief: cleanTaskText,
+    design_prompt: cleanTaskText,
+    agents: [
+      {
+        ...primaryAgent,
+        purpose: primaryPurpose,
+      },
+    ],
+    interaction_spec: {
+      execution_pattern: 'single_specialist',
+      final_answer_owner: clean(primaryAgent.name || primaryAgent.agent_id || 'Agent') || 'Agent',
+      handoffs: [],
+      reviewer_visibility: 'folded',
+      builder_direct_response: true,
+    },
+    planner_metadata: normalizePlannerMetadata({
+      planner_type: 'chat_single_bootstrap',
+      planner_model: '',
+      planning_source: 'chat_single_bootstrap',
+      reasoning_summary: Array.from(new Set([
+        ...asArray(baseTeam?.planner_metadata?.reasoning_summary || baseTeam?.planner_metadata?.reasoningSummary || []),
+        `single-agent chat bootstrap:${normalizeTeamRole(primaryAgent.role)}`,
+        'team expansion remains available via /team expand or adaptive refine drafts',
+      ].map((entry) => clean(entry)).filter(Boolean))).slice(0, 5),
+    }),
+  }, { runtime: effectiveRuntime });
+}
+
+export function isChatStartTeamConfiguration(team = null) {
+  const metadata = team && typeof team === 'object'
+    ? normalizePlannerMetadata(team?.planner_metadata || team?.plannerMetadata)
+    : normalizePlannerMetadata(null);
+  return cleanId(metadata.planning_source || metadata.planner_type || '') === 'chat_single_bootstrap';
+}
+
 export function suggestTeamConfiguration({ taskText = '', runtime = null, preferredTaskArchetype = '', currentTeam = null } = {}) {
   const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
   const suggestedName = clean(taskText).slice(0, 36).replace(/\s+/g, '_') || 'team_config';
@@ -2419,6 +2516,30 @@ export function validateTeamConfiguration(raw = {}, { runtime = null } = {}) {
   }
   validateInteractionSpec(team.interaction_spec, { agentRoster: team.agents.map((agent) => ({ name: agent.name })) });
   return team;
+}
+
+
+export async function syncTeamEnvelopeToConversationStore({ runtime = null, envelope = null, source = 'team_state_sync' } = {}) {
+  const teamStore = runtime?.capabilities?.conversationTeamStore;
+  if (!teamStore || typeof teamStore !== 'object' || typeof teamStore.setTeamConfig !== 'function') {
+    return { ok: false, reason: 'team_store_unavailable' };
+  }
+  const normalizedEnvelope = normalizeStoredTeamEnvelope(envelope);
+  const target = teamStoreTarget(runtime, { source });
+  const activeTeam = normalizedEnvelope.active_team ? validateTeamConfiguration(normalizedEnvelope.active_team, { runtime }) : null;
+  const pendingTeam = normalizedEnvelope.pending_team ? validateTeamConfiguration(normalizedEnvelope.pending_team, { runtime }) : null;
+  await teamStore.setTeamConfig({
+    ...target,
+    teamConfig: {
+      status: activeTeam ? 'active' : (pendingTeam ? 'suggested' : normalizedEnvelope.status || 'none'),
+      composition_mode: normalizeCompositionMode(normalizedEnvelope.composition_mode || activeTeam?.composition_mode || pendingTeam?.composition_mode || 'structured'),
+      proposal_mode: normalizeProposalMode(normalizedEnvelope.proposal_mode || pendingTeam?.proposal_mode || activeTeam?.proposal_mode || 'suggest'),
+      active_team: activeTeam,
+      pending_team: pendingTeam,
+      updated_at: nowIso(),
+    },
+  });
+  return { ok: true, target, active_team: activeTeam, pending_team: pendingTeam };
 }
 
 export async function syncTeamConfigurationToConversationStore({ runtime = null, teamConfig = null, source = 'team_apply' } = {}) {

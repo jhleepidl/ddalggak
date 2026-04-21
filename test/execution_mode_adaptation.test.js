@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   applyAdaptiveExecutionModeToTaskInterpretation,
+  assessExecutionStrategy,
   buildAdaptiveExecutionSignals,
   recordAdaptiveExecutionOutcome,
   selectAdaptiveExecutionMode,
@@ -280,3 +281,63 @@ test('runtime orchestration starts single and can expand under adaptive pressure
   assert.ok(escalated.runtime_agents.length >= 2);
 });
 
+
+
+test('strategy assessment prefers dynamic augmentation when noise is high but role separation is weak', () => {
+  const assessment = assessExecutionStrategy({
+    taskInterpretation: {
+      goal: '문서 근거를 보강해줘',
+      task_type: 'analysis',
+      deliverable_type: 'answer',
+      candidate_capability_slots: [
+        { role_id: 'researcher', purpose: 'gather facts' },
+      ],
+    },
+    signals: {
+      participant_pressure: 4,
+      unique_role_count: 1,
+      decomposability_score: 0.6,
+      followup_burden_runs: 1,
+      quality_gap_runs: 1,
+      contradiction_pressure_runs: 1,
+      last_quality_health_score: 0.5,
+    },
+    qualitySignals: {
+      quality_gap: 1,
+      contradiction_pressure: 1,
+      followup_burden: 1,
+      quality_health_score: 0.5,
+    },
+  });
+  assert.equal(assessment.recommendation, 'augment_context');
+  assert.ok((assessment.augmentation.score || 0) > (assessment.role_separation.score || 0));
+});
+
+test('strategy assessment requires role separation signals before recommending team expansion', () => {
+  const assessment = assessExecutionStrategy({
+    taskInterpretation: {
+      goal: '코드 수정 후 독립 검토까지 해줘',
+      task_type: 'code_change',
+      deliverable_type: 'patch',
+      review_policy: 'required',
+      candidate_capability_slots: [
+        { role_id: 'builder', purpose: 'patch code' },
+        { role_id: 'reviewer', purpose: 'independent review' },
+      ],
+    },
+    signals: {
+      unique_role_count: 2,
+      decomposability_score: 2.2,
+      contradiction_pressure_runs: 2,
+      quality_gap_runs: 1,
+      last_quality_health_score: 0.4,
+    },
+    qualitySignals: {
+      quality_gap: 1,
+      contradiction_pressure: 2,
+      quality_health_score: 0.4,
+    },
+  });
+  assert.equal(assessment.recommendation, 'expand_team');
+  assert.ok((assessment.role_separation.score || 0) >= 2.6);
+});

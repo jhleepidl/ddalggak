@@ -154,14 +154,22 @@ function inferSuppressedRoles({
   taskType = "",
   deliverableType = "",
   domainHints = [],
+  riskLevel = "medium",
+  reviewPolicy = "optional",
 } = {}) {
   const suppressed = [];
   if (taskType !== "workflow") suppressed.push("operator");
   if (taskType === "code_change" && deliverableType !== "software_delivery") suppressed.push("synthesizer");
+  const preserveReviewer = taskType === "code_change"
+    || taskType === "workflow"
+    || reviewPolicy === "required"
+    || reviewPolicy === "code_default"
+    || riskLevel === "high"
+    || domainHints.includes("claims");
   if (deliverableType === "brief" || deliverableType === "report") {
     return normalizeStringList(suppressed.filter((entry) => entry !== "synthesizer"), { max: 8, lower: true });
   }
-  if (!domainHints.includes("claims") && taskType !== "code_change") {
+  if (!preserveReviewer) {
     suppressed.push("reviewer");
   }
   return normalizeStringList(suppressed, { max: 8, lower: true });
@@ -375,18 +383,20 @@ export function interpretTask({
     ...domainHints,
     ...normalizedConversationPreferences.preferred_domains,
   ], { max: 16, lower: true });
+  const reviewerPolicy = normalizedConversationPreferences.reviewer_policy || reviewPolicy;
   const suppressedRoleIds = normalizeRoleList([
     ...inferSuppressedRoles({
       taskType,
       deliverableType,
       domainHints,
+      riskLevel,
+      reviewPolicy: reviewerPolicy,
     }),
     ...normalizedConversationPreferences.suppressed_role_ids,
   ], {
     allowDeprecatedControlPlane: false,
     max: 16,
   });
-  const reviewerPolicy = normalizedConversationPreferences.reviewer_policy || reviewPolicy;
   const candidateCapabilitySlots = buildCandidateSlots({
     taskType,
     deliverableType,
