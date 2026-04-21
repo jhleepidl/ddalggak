@@ -29,14 +29,11 @@ function flattenConfigOverrides(raw = {}, prefix = "") {
   return out;
 }
 
-export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId = "", model = "", profile = "", addDirs = [], configOverrides = {}, sandboxMode = "", approvalPolicy = "", env = {}, timeoutMs = null }) {
+export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId = "", model = "", profile = "", addDirs = [], configOverrides = {}, sandboxMode = "", approvalPolicy = "", env = {} }) {
   // Requires Codex CLI logged in on the server
   const effectiveSandboxMode = String(sandboxMode || process.env.CODEX_SANDBOX_MODE || "workspace-write").trim() || "workspace-write";
   const effectiveApprovalPolicy = String(approvalPolicy || process.env.CODEX_APPROVAL_POLICY || "never").trim() || "never";
-  const requestedTimeoutMs = Number(timeoutMs ?? process.env.CODEX_TIMEOUT_MS);
-  const effectiveTimeoutMs = Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
-    ? Math.max(1_000, Math.floor(requestedTimeoutMs))
-    : 45 * 60 * 1000;
+  const timeoutMs = 45 * 60 * 1000;
   const workspacePath = path.resolve(String(workspaceRoot || cwd || process.cwd()).trim() || process.cwd());
   const commandCwd = path.resolve(String(cwd || workspacePath).trim() || workspacePath);
   const requestedModel = String(model || "").trim();
@@ -58,7 +55,7 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
   const addDirArgs = extraDirs.flatMap((entry) => ["--add-dir", entry]);
   const configArgs = flattenConfigOverrides(mergedConfigOverrides).flatMap(([key, value]) => ["-c", `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`]);
   const modernArgs = [...modelArgs, ...profileArgs, "exec", "-C", workspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "-c", `approval_policy=${effectiveApprovalPolicy}`, ...configArgs, "-"];
-  const modern = await runCommand("codex", modernArgs, { cwd: commandCwd, timeoutMs: effectiveTimeoutMs, input: prompt, abortSignal: signal, env });
+  const modern = await runCommand("codex", modernArgs, { cwd: commandCwd, timeoutMs, input: prompt, abortSignal: signal, env });
   if (modern.ok) return modern;
 
   // Fallback for older codex-cli variants that still support this flag in `exec`.
@@ -71,7 +68,7 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
   if (!optionCompatibilityError) return modern;
 
   const legacyArgs = [...modelArgs, ...profileArgs, "exec", "-C", workspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "--ask-for-approval", effectiveApprovalPolicy, "-"];
-  const legacy = await runCommand("codex", legacyArgs, { cwd: commandCwd, timeoutMs: effectiveTimeoutMs, input: prompt, abortSignal: signal, env });
+  const legacy = await runCommand("codex", legacyArgs, { cwd: commandCwd, timeoutMs, input: prompt, abortSignal: signal, env });
   if (legacy.ok) return legacy;
 
   // If legacy flag is unsupported too, keep modern error as the primary one.

@@ -30,12 +30,6 @@ function cleanId(value = '') {
   return clean(value).toLowerCase();
 }
 
-function resolvePlannerTimeoutMs(raw = null, fallback = 20000) {
-  const n = Number(raw);
-  if (Number.isFinite(n) && n > 0) return Math.max(1000, Math.floor(n));
-  return Math.max(1000, Math.floor(Number(fallback) || 20000));
-}
-
 let codexAvailabilityCache = null;
 
 function codexCandidateNames() {
@@ -425,7 +419,6 @@ export async function planFreeformTeamWithCodex({
       prompt,
       jobId: 'team-create-planner',
       model: process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4',
-      timeoutMs: resolvePlannerTimeoutMs(process.env.TEAM_CREATE_PLANNER_TIMEOUT_MS, 20000),
     });
   } catch (error) {
     return { ok: false, reason: `planner_exec_exception:${String(error?.message || error)}` };
@@ -501,7 +494,6 @@ export async function planTeamRefinementWithCodex({
       prompt,
       jobId: 'team-refine-planner',
       model: process.env.TEAM_REFINE_PLANNER_MODEL || process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4',
-      timeoutMs: resolvePlannerTimeoutMs(process.env.TEAM_REFINE_PLANNER_TIMEOUT_MS || process.env.TEAM_CREATE_PLANNER_TIMEOUT_MS, 15000),
     });
   } catch (error) {
     return { ok: false, reason: `planner_exec_exception:${String(error?.message || error)}` };

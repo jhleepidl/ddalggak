@@ -873,7 +873,6 @@ export async function routeWithSupervisor(message, {
   geminiModel = "",
   runtimeTeamSnapshot = null,
   activeTeam = null,
-  executionLane = 'work',
 } = {}) {
   const msg = String(message || "").trim();
   const allowChatGPTPlanner = isExplicitChatGptPlannerRequest(msg);
@@ -887,14 +886,12 @@ export async function routeWithSupervisor(message, {
     activeTeam,
     runtimeTeamSnapshot,
   });
-  const cleanExecutionLane = String(executionLane || 'work').trim().toLowerCase() || 'work';
   const fallback = {
     ...normalizeActionPlan(
       fallbackPlan(msg, { agents, tools, jobConfig, parallelSpawnAllowed, activeTeam, runtimeTeamSnapshot }),
-      { maxActions: cleanExecutionLane === 'fast' ? 1 : 4 }
+      { maxActions: 4 }
     ),
     route_contract: routeHeuristic.summary || undefined,
-    execution_lane: cleanExecutionLane,
   };
 
   const prompt = buildRouterPrompt(msg, {
@@ -922,16 +919,6 @@ export async function routeWithSupervisor(message, {
   });
 
   const cleanJobId = String(currentJobId || '').trim();
-  if (cleanExecutionLane === 'fast') {
-    return {
-      ...fallback,
-      reason: `${fallback.reason || 'default run_agent fallback'}; fast_lane_router_bypass`,
-      final_response_style: 'direct',
-      route_contract: routeHeuristic.summary || fallback.route_contract || undefined,
-      execution_lane: cleanExecutionLane,
-    };
-  }
-
   if (cleanJobId) {
     appendPromptTelemetry({
       jobDir: runDir(cleanJobId),
@@ -955,13 +942,11 @@ export async function routeWithSupervisor(message, {
           progress_summary: String(progressSummary || ''),
           suggested_actions: compactPromptJson((Array.isArray(suggestedActions) ? suggestedActions : []).slice(0, 8), { maxDepth: 4, maxItems: 8, maxStringChars: 160 }),
           user_message: String(message || ''),
-          execution_lane: cleanExecutionLane,
         },
         metadata: {
           current_context_set_id: String(currentContextSetId || '').trim() || undefined,
           autopilot_turn: autopilotTurn,
           team_locked: teamLocked,
-          execution_lane: cleanExecutionLane,
         },
       },
     });
@@ -1048,7 +1033,6 @@ export async function routeWithSupervisor(message, {
       route_contract_adjusted: routeAligned.adjusted === true,
       route_contract_preferred_agent: routeAligned.preferred_agent_id || undefined,
       route_contract_adjustment_type: routeAligned.plan?.route_contract_adjustment_type || undefined,
-      execution_lane: cleanExecutionLane,
       actions: Array.isArray(contractSafe?.plan?.actions) ? contractSafe.plan.actions : (Array.isArray(routeAligned?.plan?.actions) ? routeAligned.plan.actions : hardened),
       final_response_style: normalized.final_response_style,
       done: normalized.done === true,

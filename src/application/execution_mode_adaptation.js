@@ -136,194 +136,6 @@ function buildDecomposabilityScore({ taskInterpretation = null, routePlan = null
   };
 }
 
-
-function round1(value, fallback = 0) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.round(n * 10) / 10;
-}
-
-function uniqueTexts(values = [], { max = 8 } = {}) {
-  return Array.from(new Set(asArray(values).map((entry) => cleanText(entry, { maxLen: 120 })).filter(Boolean))).slice(0, max);
-}
-
-function isCodeLikeTask(taskInterpretation = null) {
-  const interpreted = asObject(taskInterpretation);
-  const taskType = cleanText(interpreted.task_type || interpreted.taskType || '', { lower: true, maxLen: 64 });
-  const deliverableType = cleanText(interpreted.deliverable_type || interpreted.deliverableType || '', { lower: true, maxLen: 64 });
-  return ['code_change', 'implementation', 'workspace_change'].includes(taskType)
-    || deliverableType.includes('patch')
-    || deliverableType.includes('code')
-    || deliverableType.includes('diff');
-}
-
-function hasPersistentReviewNeed(taskInterpretation = null) {
-  const interpreted = asObject(taskInterpretation);
-  const reviewPolicy = cleanText(interpreted.review_policy || interpreted.reviewPolicy || '', { lower: true, maxLen: 32 });
-  if (reviewPolicy === 'required' || reviewPolicy === 'code_default') return true;
-  const roles = new Set(uniqueRoleIds(interpreted.candidate_capability_slots || interpreted.candidateCapabilitySlots));
-  return roles.has('reviewer') && isCodeLikeTask(interpreted);
-}
-
-function summarizeCurrentQualitySignals(signals = null, qualitySignals = null, capabilityGaps = []) {
-  const source = asObject(qualitySignals);
-  const fallback = asObject(signals?.last_quality_signals || signals?.lastQualitySignals);
-  const merged = Object.keys(source).length > 0 ? source : fallback;
-  return {
-    followup_burden: clampInt(merged.followup_burden || merged.followupBurden || signals?.followup_burden_runs, { max: 8 }),
-    quality_gap: clampInt(merged.quality_gap || merged.qualityGap || signals?.quality_gap_runs, { max: 16 }),
-    contradiction_pressure: clampInt(merged.contradiction_pressure || merged.contradictionPressure || signals?.contradiction_pressure_runs, { max: 16 }),
-    quality_health_score: Number.isFinite(Number(merged.quality_health_score || merged.qualityHealthScore))
-      ? Math.max(0, Math.min(1, Number(merged.quality_health_score || merged.qualityHealthScore)))
-      : Math.max(0, Math.min(1, Number(signals?.last_quality_health_score || 0))),
-    capability_gap_count: clampInt(merged.capability_gap_count || merged.capabilityGapCount || asArray(capabilityGaps).length, { max: 16 }),
-  };
-}
-
-function buildAugmentationAssessment({ signals = null, taskInterpretation = null, qualitySignals = null, capabilityGaps = [] } = {}) {
-  const interpreted = asObject(taskInterpretation);
-  const quality = summarizeCurrentQualitySignals(signals, qualitySignals, capabilityGaps);
-  let score = 0;
-  const reasons = [];
-  if (quality.capability_gap_count > 0) {
-    score += Math.min(2.2, quality.capability_gap_count * 1.1);
-    reasons.push('missing_capability_or_skill');
-  }
-  if (quality.quality_gap >= 1) {
-    score += Math.min(1.8, 0.8 + quality.quality_gap * 0.5);
-    reasons.push('quality_gap_present');
-  }
-  if (quality.followup_burden >= 1) {
-    score += Math.min(1.6, 0.7 + quality.followup_burden * 0.4);
-    reasons.push('followup_burden_present');
-  }
-  if (quality.contradiction_pressure >= 1) {
-    score += Math.min(1.4, 0.5 + quality.contradiction_pressure * 0.3);
-    reasons.push('contradiction_requires_better_context');
-  }
-  if (quality.quality_health_score > 0 && quality.quality_health_score < 0.7) {
-    score += quality.quality_health_score < 0.45 ? 1.2 : 0.7;
-    reasons.push('quality_health_low');
-  }
-  if (Number(signals?.participant_pressure || 0) >= 2) {
-    score += 0.4;
-    reasons.push('participant_noise_prefers_context_first');
-  }
-  if (cleanText(interpreted.review_policy || interpreted.reviewPolicy || '', { lower: true, maxLen: 32 }) === 'code_default' && isCodeLikeTask(interpreted)) {
-    score += 0.4;
-    reasons.push('code_task_can_start_with_inline_review_context');
-  }
-  return {
-    score: round1(score),
-    reasons: uniqueTexts(reasons),
-    quality,
-  };
-}
-
-function buildRoleSeparationAssessment({ signals = null, taskInterpretation = null } = {}) {
-  const interpreted = asObject(taskInterpretation);
-  const reviewPolicy = cleanText(interpreted.review_policy || interpreted.reviewPolicy || '', { lower: true, maxLen: 32 });
-  const parallelPreference = cleanText(interpreted.parallelism_preference || interpreted.parallelismPreference || '', { lower: true, maxLen: 32 });
-  const uniqueRoleCount = clampInt(signals?.unique_role_count, { max: 12 });
-  let score = 0;
-  const reasons = [];
-  if (signals?.explicit_multi_intent === true) {
-    score += 4.2;
-    reasons.push('explicit_multi_intent');
-  }
-  if (signals?.explicit_hybrid_intent === true) {
-    score += 2.4;
-    reasons.push('explicit_hybrid_intent');
-  }
-  if (parallelPreference === 'parallel' && uniqueRoleCount >= 3) {
-    score += 2.2;
-    reasons.push('parallel_branching_value');
-  }
-  if (Number(signals?.decomposability_score || 0) >= 2.4) {
-    score += 1.6;
-    reasons.push('high_decomposability');
-  } else if (Number(signals?.decomposability_score || 0) >= 1.6) {
-    score += 0.9;
-    reasons.push('moderate_decomposability');
-  }
-  if (reviewPolicy === 'required') {
-    score += 1.6;
-    reasons.push('independent_review_required');
-  } else if (reviewPolicy === 'code_default' && isCodeLikeTask(interpreted)) {
-    score += 1.1;
-    reasons.push('code_review_benefits_from_sidecar');
-  }
-  if (uniqueRoleCount >= 3) {
-    score += 0.8;
-    reasons.push('multiple_durable_role_candidates');
-  } else if (uniqueRoleCount >= 2) {
-    score += 0.4;
-    reasons.push('secondary_role_candidate_exists');
-  }
-  if (Number(signals?.contradiction_pressure_runs || 0) >= 2 && hasPersistentReviewNeed(interpreted)) {
-    score += 0.8;
-    reasons.push('independent_verification_is_worthwhile');
-  }
-  const independentReviewNeeded = reviewPolicy === 'required' || (reviewPolicy === 'code_default' && isCodeLikeTask(interpreted));
-  const persistentSplitNeeded = parallelPreference === 'parallel' && uniqueRoleCount >= 3;
-  return {
-    score: round1(score),
-    reasons: uniqueTexts(reasons),
-    independent_review_needed: independentReviewNeeded,
-    persistent_split_needed: persistentSplitNeeded,
-  };
-}
-
-export function assessExecutionStrategy({
-  goal = '',
-  message = '',
-  taskInterpretation = null,
-  routePlan = null,
-  runtime = null,
-  runtimeSessionState = null,
-  signals = null,
-  qualitySignals = null,
-  capabilityGaps = [],
-} = {}) {
-  const computedSignals = signals && typeof signals === 'object'
-    ? { ...signals }
-    : buildAdaptiveExecutionSignals({ goal, message, taskInterpretation, routePlan, runtime, runtimeSessionState });
-  const augmentation = buildAugmentationAssessment({ signals: computedSignals, taskInterpretation, qualitySignals, capabilityGaps });
-  const roleSeparation = buildRoleSeparationAssessment({ signals: computedSignals, taskInterpretation });
-  let recommendation = 'keep_single';
-  const rationale = [];
-  if (roleSeparation.score >= 4.2 && (roleSeparation.persistent_split_needed || Number(computedSignals.failure_streak || 0) >= 1 || augmentation.quality.quality_gap >= 2)) {
-    recommendation = 'expand_team';
-    rationale.push('persistent_role_separation_has_clear_value');
-  } else if (roleSeparation.score >= 2.6 && (roleSeparation.independent_review_needed || augmentation.quality.quality_gap >= 1 || augmentation.quality.contradiction_pressure >= 1 || augmentation.quality.capability_gap_count >= 1)) {
-    recommendation = 'expand_team';
-    rationale.push('independent_sidecar_is_justified');
-  } else if (augmentation.score >= 1.2) {
-    recommendation = 'augment_context';
-    rationale.push('prefer_memory_skill_context_augmentation');
-  } else {
-    rationale.push('single_agent_path_is_adequate');
-  }
-  if (augmentation.score > roleSeparation.score + 0.7 && recommendation === 'expand_team') {
-    recommendation = 'augment_context';
-    rationale.length = 0;
-    rationale.push('augmentation_outweighs_role_split');
-  }
-  return {
-    signals: computedSignals,
-    augmentation: {
-      ...augmentation,
-      preferred_action: 'augment_context',
-    },
-    role_separation: {
-      ...roleSeparation,
-      preferred_action: 'expand_team',
-    },
-    recommendation,
-    rationale: uniqueTexts(rationale),
-  };
-}
-
 export function buildAdaptiveExecutionSignals({
   goal = '',
   message = '',
@@ -410,9 +222,8 @@ function buildHybridSlots(taskInterpretation = null, preferredRoles = [], signal
   const primary = buildSingleCompiledSlots(interpreted, preferredRoles)[0];
   const slots = [primary];
   const roleIds = new Set(uniqueRoleIds(asArray(interpreted.candidate_capability_slots || interpreted.candidateCapabilitySlots)));
-  const reviewPolicy = cleanText(interpreted.review_policy || interpreted.reviewPolicy, { lower: true });
   const sidecarRole = (
-    (signals?.critique_signal_count || 0) > 0 || reviewPolicy === 'required' || reviewPolicy === 'code_default'
+    (signals?.critique_signal_count || 0) > 0 || cleanText(interpreted.review_policy || interpreted.reviewPolicy, { lower: true }) === 'required'
       ? (roleIds.has('reviewer') ? 'reviewer' : 'synthesizer')
       : (signals?.decomposability_score || 0) >= 1.2
         ? (roleIds.has('researcher') && cleanText(primary.role_id, { lower: true }) !== 'researcher' ? 'researcher' : (roleIds.has('synthesizer') ? 'synthesizer' : 'reviewer'))
@@ -426,20 +237,6 @@ function buildHybridSlots(taskInterpretation = null, preferredRoles = [], signal
       : { role_id: sidecarRole, purpose: sidecarRole, selection_reason: `execution_mode_sidecar:${sidecarRole}` });
   }
   return slots.slice(0, 2);
-}
-
-function shouldDirectHybridStart({
-  taskInterpretation = null,
-  signals = null,
-} = {}) {
-  const interpreted = asObject(taskInterpretation);
-  const reviewPolicy = cleanText(interpreted.review_policy || interpreted.reviewPolicy || '', { lower: true });
-  const taskType = cleanText(interpreted.task_type || interpreted.taskType || '', { lower: true });
-  const roleIds = new Set(uniqueRoleIds(asArray(interpreted.candidate_capability_slots || interpreted.candidateCapabilitySlots)));
-  if (!roleIds.has('reviewer')) return false;
-  if (reviewPolicy === 'code_default') return true;
-  if (taskType === 'code_change' && (signals?.decomposability_score || 0) >= 0.9) return true;
-  return false;
 }
 
 export function selectAdaptiveExecutionMode({
@@ -457,17 +254,6 @@ export function selectAdaptiveExecutionMode({
 } = {}) {
   const policy = readHarnessExecutionModePolicy(runtimeBehavior || runtimePolicy || runtime || null);
   const signals = buildAdaptiveExecutionSignals({ goal, message, taskInterpretation, routePlan, runtime, runtimeSessionState });
-  const strategyAssessment = assessExecutionStrategy({ goal, message, taskInterpretation, routePlan, runtime, runtimeSessionState, signals });
-  const enrichedSignals = {
-    ...signals,
-    augmentation_score: strategyAssessment.augmentation.score,
-    augmentation_reasons: strategyAssessment.augmentation.reasons,
-    role_separation_score: strategyAssessment.role_separation.score,
-    role_separation_reasons: strategyAssessment.role_separation.reasons,
-    strategy_recommendation: strategyAssessment.recommendation,
-    independent_review_needed: strategyAssessment.role_separation.independent_review_needed,
-    persistent_split_needed: strategyAssessment.role_separation.persistent_split_needed,
-  };
   const taskFamilyModeHint = resolveTaskFamilyModeHint({ promotionSummary, taskInterpretation });
   const currentLevel = modeLevel(signals.current_mode || policy.default_mode);
   let nextLevel = modeLevel(policy.default_mode);
@@ -511,9 +297,6 @@ export function selectAdaptiveExecutionMode({
       if (initialStart && policy.allow_direct_multi_start && highDecomp && signals.unique_role_count >= 3 && cleanText(taskInterpretation?.parallelism_preference || taskInterpretation?.parallelismPreference, { lower: true }) === 'parallel') {
         nextLevel = 2;
         reasons.push('direct_multi_start_structure');
-      } else if (initialStart && policy.allow_direct_hybrid_start && shouldDirectHybridStart({ taskInterpretation, signals })) {
-        nextLevel = Math.max(nextLevel, 1);
-        reasons.push('direct_hybrid_start_review_policy');
       } else if (initialStart && policy.allow_direct_hybrid_start && signals.explicit_hybrid_intent && policy.respect_explicit_hybrid_intent) {
         nextLevel = Math.max(nextLevel, 1);
         reasons.push('direct_hybrid_start_structure');
@@ -560,11 +343,10 @@ export function selectAdaptiveExecutionMode({
     mode,
     escalation_level: nextLevel,
     policy,
-    signals: enrichedSignals,
+    signals,
     reasons,
     history_tail: asArray(signals.mode_history_tail).slice(-5),
     quality_signals: asObject(signals.last_quality_signals),
-    strategy_assessment: strategyAssessment,
     task_family_mode_hint: taskFamilyModeHint,
     max_agents: shapedMaxAgents,
     shaped_candidate_capability_slots: shapedSlots,
@@ -605,9 +387,6 @@ function summarizeModeSignals(signals = null) {
     contradiction_pressure_runs: clampInt(row.contradiction_pressure_runs || row.contradictionPressureRuns, { max: 32 }),
     last_quality_health_score: Number.isFinite(Number(row.last_quality_health_score || row.lastQualityHealthScore)) ? Math.round(Math.max(0, Math.min(1, Number(row.last_quality_health_score || row.lastQualityHealthScore))) * 10) / 10 : 0,
     decomposability_score: Number.isFinite(Number(row.decomposability_score)) ? Math.round(Number(row.decomposability_score) * 10) / 10 : 0,
-    augmentation_score: Number.isFinite(Number(row.augmentation_score || row.augmentationScore)) ? Math.round(Number(row.augmentation_score || row.augmentationScore) * 10) / 10 : 0,
-    role_separation_score: Number.isFinite(Number(row.role_separation_score || row.roleSeparationScore)) ? Math.round(Number(row.role_separation_score || row.roleSeparationScore) * 10) / 10 : 0,
-    strategy_recommendation: cleanText(row.strategy_recommendation || row.strategyRecommendation || '', { lower: true, maxLen: 64 }) || undefined,
     explicit_multi_intent: row.explicit_multi_intent === true,
     explicit_hybrid_intent: row.explicit_hybrid_intent === true,
     task_family_key: cleanText(row.task_family_key || row.taskFamilyKey || '', { lower: true, maxLen: 96 }) || undefined,
@@ -628,14 +407,6 @@ export function recordAdaptiveExecutionOutcome({
   const mode = cleanMode(planner.execution_mode || planner.executionMode || current.current_mode || 'single_compiled');
   const lastSignals = summarizeModeSignals(planner.execution_mode_signals || planner.executionModeSignals || current.last_signals || {});
   const quality = asObject(qualitySignals);
-  const strategyAssessment = assessExecutionStrategy({
-    taskInterpretation: asObject(target.runtimeTeamSnapshot?.team_plan?.task_interpretation || target.runtime_team_snapshot?.team_plan?.task_interpretation || planner.task_interpretation || planner.taskInterpretation),
-    runtime: target,
-    runtimeSessionState: state,
-    signals: { ...lastSignals, current_mode: mode, failure_streak: current.failure_streak, followup_burden_runs: current.followup_burden_runs, quality_gap_runs: current.quality_gap_runs, contradiction_pressure_runs: current.contradiction_pressure_runs, explicit_multi_intent: lastSignals.explicit_multi_intent, explicit_hybrid_intent: lastSignals.explicit_hybrid_intent, unique_role_count: current.unique_role_count || lastSignals.unique_role_count, decomposability_score: lastSignals.decomposability_score },
-    qualitySignals: quality,
-    capabilityGaps: Array.from({ length: clampInt(quality.capability_gap_count || quality.capabilityGapCount || capabilityGapCount, { max: 8 }) }, (_, idx) => ({ kind: `gap_${idx + 1}` })),
-  });
   const summarizedQuality = {
     followup_burden: clampInt(quality.followup_burden || quality.followupBurden, { max: 8 }),
     quality_gap: clampInt(quality.quality_gap || quality.qualityGap, { max: 16 }),
@@ -652,8 +423,8 @@ export function recordAdaptiveExecutionOutcome({
     last_mode: cleanMode(current.current_mode || current.currentMode || mode),
     escalation_level: modeLevel(mode),
     last_status: cleanText(status, { lower: true, maxLen: 32 }) || 'done',
-    last_signals: { ...lastSignals, augmentation_score: strategyAssessment.augmentation.score, role_separation_score: strategyAssessment.role_separation.score, strategy_recommendation: strategyAssessment.recommendation },
-    last_quality_signals: { ...summarizedQuality, strategy_recommendation: strategyAssessment.recommendation },
+    last_signals: lastSignals,
+    last_quality_signals: summarizedQuality,
     failure_streak: clampInt(current.failure_streak, { max: 16 }),
     success_streak: clampInt(current.success_streak, { max: 16 }),
     capability_gap_runs: clampInt(current.capability_gap_runs, { max: 16 }),

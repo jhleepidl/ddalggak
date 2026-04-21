@@ -74,7 +74,7 @@ import { recordExecutionFeedback } from "./execution_feedback.js";
 import { recordTeamMotifFeedback } from "./team_motif_feedback.js";
 import { recordChannelExperimentVerification } from "./channel_experiment_verifier.js";
 import { recordChannelPromotion } from "./channel_promotion_manager.js";
-import { assessExecutionStrategy, recordAdaptiveExecutionOutcome } from "./execution_mode_adaptation.js";
+import { recordAdaptiveExecutionOutcome } from "./execution_mode_adaptation.js";
 import { buildExecutionQualitySignals } from './execution_quality_signals.js';
 import { buildScopedPromptAssembly, hydrateRuntimeScopesViaGoC, resolveScopeExecutionState } from "./goc_scope_runtime.js";
 import { markActionsSkipped, wasInterruptedByReplan } from "./run_status_cleanup.js";
@@ -96,7 +96,7 @@ import {
   isExplicitTeamConfigurationIntentMessage,
 } from "./team_intent.js";
 import { buildExplicitTeamReconfigurationActions } from "./team_config_diff.js";
-import { applyPendingTeam, applyTeamConfigurationToRuntime, buildAutoRefineDraftFromStructureConflict, buildChatStartTeamConfiguration, formatTeamProposalMessage, getSessionTeamState, hydrateSessionTeamStateFromConversationStore, isChatStartTeamConfiguration, refineTeamConfigurationAdvanced, storePendingTeam, syncTeamConfigurationToConversationStore, syncTeamEnvelopeToConversationStore, validateTeamConfiguration } from "./team_configuration.js";
+import { applyPendingTeam, applyTeamConfigurationToRuntime, buildAutoRefineDraftFromStructureConflict, formatTeamProposalMessage, getSessionTeamState, hydrateSessionTeamStateFromConversationStore, storePendingTeam, syncTeamConfigurationToConversationStore, validateTeamConfiguration } from "./team_configuration.js";
 import { bootstrapTelegramRuntimeSession } from './telegram_runtime_session.js';
 import { resolveRuntimePolicyForRuntime } from './runtime_behavior_resolver.js';
 import { setRuntimeCurrentTurn } from './runtime_session_state.js';
@@ -186,10 +186,6 @@ import * as runtimeUiHelpers from "./telegram_status_notifications.js";
 import { runAgentProviderExecution } from "./telegram_provider_execution.js";
 import { createGocTrackingIo } from "./telegram_goc_tracking_io.js";
 
-function normalizeForceMode(raw) {
-  return normalizeForceModeDomain(raw);
-}
-
 function uniqueLowerList(values = []) {
   const seen = new Set();
   const out = [];
@@ -200,81 +196,6 @@ function uniqueLowerList(values = []) {
     out.push(clean);
   }
   return out;
-}
-
-
-const CHAT_EXECUTION_LANE_DEFAULTS = Object.freeze({
-  fast: {
-    lane: 'fast',
-    router_budget_tokens: 260,
-    agent_budget_tokens: 420,
-    max_turns_override: 1,
-    skip_router_model: true,
-    skip_final_synthesis: true,
-    compact_start_notice: true,
-    skip_auto_team_expansion: true,
-  },
-  work: {
-    lane: 'work',
-    router_budget_tokens: 720,
-    agent_budget_tokens: 900,
-    max_turns_override: 1,
-    skip_router_model: false,
-    skip_final_synthesis: false,
-    compact_start_notice: false,
-    skip_auto_team_expansion: false,
-  },
-  deep: {
-    lane: 'deep',
-    router_budget_tokens: 1400,
-    agent_budget_tokens: 1600,
-    max_turns_override: null,
-    skip_router_model: false,
-    skip_final_synthesis: false,
-    compact_start_notice: false,
-    skip_auto_team_expansion: false,
-  },
-});
-
-function getChatExecutionLaneDefaults(lane = 'work') {
-  const key = String(lane || '').trim().toLowerCase();
-  return CHAT_EXECUTION_LANE_DEFAULTS[key] || CHAT_EXECUTION_LANE_DEFAULTS.work;
-}
-
-function assessChatExecutionLane({ message = '', runtime = null, forceMode = 'normal' } = {}) {
-  const text = String(message || '').trim();
-  const normalized = text.toLowerCase();
-  const reasons = [];
-  const explicitDeep = ['deep', 'analyze deeply', 'step by step', 'research', '리서치', '깊게', '깊이', '분석', '설계', '비교', '구현', '패치', '버그', '테스트', '파일', '코드', 'zip', '문서', 'benchmark'].some((token) => normalized.includes(token));
-  const explicitFast = ['짧게', '한줄', '한 문장', '간단히', '간단하게', '빠르게'].some((token) => normalized.includes(token));
-  const hasHeavyKeyword = /(patch|bug|debug|fix|implement|implementation|code|test|trace|benchmark|research|analy|design|architecture|document|file|repo|diff|리팩터|패치|버그|디버그|구현|코드|테스트|분석|설계|문서|파일|리포지토리|근거|비교)/i.test(text);
-  const hasMultiArtifactIntent = /(3개|세 개|표로|bullet|리스트|outline|plan|계획|단계|roadmap|보고서|정리해줘|요약해줘.*근거)/i.test(text);
-  const hasQuestionForm = /\?|왜|무엇|뭐야|뭔가|어떻게|언제|어디|can you|what|why|how|which/i.test(text);
-  const longMessage = text.length >= 240 || (text.match(/\n/g) || []).length >= 3;
-  const forced = normalizeForceMode(forceMode);
-  if (forced === 'deep' || forced === 'multi' || forced === 'hybrid') {
-    reasons.push(`force_mode=${forced}`);
-    return { ...getChatExecutionLaneDefaults('deep'), reasons };
-  }
-  if (explicitDeep || hasHeavyKeyword || longMessage || hasMultiArtifactIntent) {
-    if (explicitDeep) reasons.push('explicit_deep_request');
-    if (hasHeavyKeyword) reasons.push('heavy_work_keywords');
-    if (longMessage) reasons.push('long_or_multiline_request');
-    if (hasMultiArtifactIntent) reasons.push('multi_artifact_intent');
-    return { ...getChatExecutionLaneDefaults(longMessage || explicitDeep ? 'deep' : 'work'), reasons };
-  }
-  const activePattern = String(runtime?.teamTopologyPattern || runtime?.runtimeTeamSnapshot?.team_topology_pattern || '').trim().toLowerCase();
-  if (activePattern && !['single_specialist', 'single_compiled', 'single'].includes(activePattern)) {
-    reasons.push(`active_pattern=${activePattern}`);
-    return { ...getChatExecutionLaneDefaults('work'), reasons };
-  }
-  if ((explicitFast || hasQuestionForm) && text.length <= 120) {
-    if (explicitFast) reasons.push('explicit_fast_request');
-    if (hasQuestionForm) reasons.push('short_question_form');
-    return { ...getChatExecutionLaneDefaults('fast'), reasons };
-  }
-  reasons.push('default_work_lane');
-  return { ...getChatExecutionLaneDefaults('work'), reasons };
 }
 
 function buildTelegramAgentIndex({ runtime = null, routePlan = null, actions = [], extraSources = [] } = {}) {
@@ -330,18 +251,6 @@ function safeRunWorkspaceDir(jobId = '') {
 
 function sendLong(bot, chatId, text, options = undefined) {
   return runtimeUiHelpers.sendLong(bot, chatId, text, options);
-}
-
-function buildAgentChatUpdateText({ agentId = '', output = '' } = {}) {
-  const cleanAgentId = String(agentId || '').trim().toLowerCase();
-  const displayName = formatChatAgentDisplayName(cleanAgentId, buildTelegramAgentIndex({}))
-    || cleanAgentId
-    || 'agent';
-  const preview = clip(String(output || '').trim(), 3500);
-  return [
-    `🤖 ${displayName} 완료`,
-    preview,
-  ].filter(Boolean).join('\n');
 }
 
 function buildRoleAwareContextContract(jobId, { provider = '', roleId = '', maxReadDocs = 4 } = {}) {
@@ -475,192 +384,6 @@ async function maybeBuildStructureConflictRefineDraft({ sessionStore, chatId, te
   }
 }
 
-function summarizeCapabilityGapsForTeamStrategy(capabilityGaps = []) {
-  return (Array.isArray(capabilityGaps) ? capabilityGaps : [])
-    .slice(0, 4)
-    .map((gap) => {
-      const kind = String(gap?.canonical_kind || gap?.kind || '').trim() || 'gap';
-      const subject = String(gap?.capability_id || gap?.external_tool_id || gap?.credential_key || gap?.skill_id || gap?.tool_id || gap?.agent_name || '').trim();
-      return subject ? `${kind}:${subject}` : kind;
-    })
-    .filter(Boolean)
-    .join(', ');
-}
-
-function buildChatAutoExpandInstruction({ message = '', qualitySignals = null, capabilityGaps = [] } = {}) {
-  const signals = qualitySignals && typeof qualitySignals === 'object' ? qualitySignals : {};
-  const gapSummary = summarizeCapabilityGapsForTeamStrategy(capabilityGaps);
-  return [
-    'Expand this chat-start single-agent setup into the smallest useful collaborative team.',
-    'Keep the current primary owner, but add reviewer for implementation or risky changes, add researcher when evidence gathering is needed, and add synthesizer only if it clearly improves delivery.',
-    'Preserve a direct final answer flow and do not add unnecessary agents.',
-    `Latest user request: ${String(message || '').trim()}`,
-    gapSummary ? `Observed gaps: ${gapSummary}` : '',
-    `quality_gap=${Number(signals.quality_gap || 0)} contradiction_pressure=${Number(signals.contradiction_pressure || 0)} followup_burden=${Number(signals.followup_burden || 0)}`,
-  ].filter(Boolean).join('\n');
-}
-
-function buildLatestTeamStrategyState({ strategyAssessment = null, qualitySignals = null, capabilityGaps = [], recommendation = '', autoPreparedDraft = false } = {}) {
-  const strategy = strategyAssessment && typeof strategyAssessment === 'object' ? strategyAssessment : {};
-  const augmentation = strategy.augmentation && typeof strategy.augmentation === 'object' ? strategy.augmentation : {};
-  const roleSeparation = strategy.role_separation && typeof strategy.role_separation === 'object' ? strategy.role_separation : {};
-  const quality = qualitySignals && typeof qualitySignals === 'object' ? qualitySignals : {};
-  const nextRecommendation = String(recommendation || strategy.recommendation || '').trim().toLowerCase() || 'keep_single';
-  return {
-    recommendation: nextRecommendation,
-    rationale: Array.isArray(strategy.rationale) ? strategy.rationale.slice(0, 6) : [],
-    augmentation: {
-      score: Number.isFinite(Number(augmentation.score)) ? Math.round(Number(augmentation.score) * 10) / 10 : 0,
-      reasons: Array.isArray(augmentation.reasons) ? augmentation.reasons.slice(0, 6) : [],
-    },
-    role_separation: {
-      score: Number.isFinite(Number(roleSeparation.score)) ? Math.round(Number(roleSeparation.score) * 10) / 10 : 0,
-      reasons: Array.isArray(roleSeparation.reasons) ? roleSeparation.reasons.slice(0, 6) : [],
-      independent_review_needed: roleSeparation.independent_review_needed === true,
-      persistent_split_needed: roleSeparation.persistent_split_needed === true,
-    },
-    quality: {
-      quality_gap: Number(quality.quality_gap || 0) || 0,
-      contradiction_pressure: Number(quality.contradiction_pressure || 0) || 0,
-      followup_burden: Number(quality.followup_burden || 0) || 0,
-      quality_health_score: Number.isFinite(Number(quality.quality_health_score)) ? Math.round(Number(quality.quality_health_score) * 10) / 10 : undefined,
-    },
-    capability_gap_summary: summarizeCapabilityGapsForTeamStrategy(capabilityGaps),
-    auto_prepared_draft: autoPreparedDraft === true,
-    ts: new Date().toISOString(),
-  };
-}
-
-
-function attachAdaptiveExpansionMetaToTeam(team = null, strategyState = null, { source = 'latest_run', autoPreparedDraft = false } = {}) {
-  if (!team || typeof team !== 'object' || !strategyState || typeof strategyState !== 'object') return team;
-  const plannerMetadata = team.planner_metadata && typeof team.planner_metadata === 'object'
-    ? { ...team.planner_metadata }
-    : {};
-  const adaptiveExpansion = {
-    recommendation: String(strategyState.recommendation || '').trim().toLowerCase() || 'keep_single',
-    rationale: Array.isArray(strategyState.rationale) ? strategyState.rationale.slice(0, 6) : [],
-    augmentation: strategyState.augmentation && typeof strategyState.augmentation === 'object'
-      ? {
-          score: Number.isFinite(Number(strategyState.augmentation.score)) ? Number(strategyState.augmentation.score) : 0,
-          reasons: Array.isArray(strategyState.augmentation.reasons) ? strategyState.augmentation.reasons.slice(0, 6) : [],
-        }
-      : { score: 0, reasons: [] },
-    role_separation: strategyState.role_separation && typeof strategyState.role_separation === 'object'
-      ? {
-          score: Number.isFinite(Number(strategyState.role_separation.score)) ? Number(strategyState.role_separation.score) : 0,
-          reasons: Array.isArray(strategyState.role_separation.reasons) ? strategyState.role_separation.reasons.slice(0, 6) : [],
-          independent_review_needed: strategyState.role_separation.independent_review_needed === true,
-          persistent_split_needed: strategyState.role_separation.persistent_split_needed === true,
-        }
-      : { score: 0, reasons: [] },
-    quality: strategyState.quality && typeof strategyState.quality === 'object' ? { ...strategyState.quality } : {},
-    capability_gap_summary: String(strategyState.capability_gap_summary || '').trim(),
-    auto_prepared_draft: autoPreparedDraft === true || strategyState.auto_prepared_draft === true,
-    source: String(source || '').trim() || 'latest_run',
-    ts: String(strategyState.ts || new Date().toISOString()).trim() || new Date().toISOString(),
-  };
-  plannerMetadata.adaptive_expansion = adaptiveExpansion;
-  plannerMetadata.team_strategy_recommendation = adaptiveExpansion.recommendation;
-  plannerMetadata.team_strategy_source = adaptiveExpansion.source;
-  plannerMetadata.team_strategy_updated_at = adaptiveExpansion.ts;
-  return {
-    ...team,
-    planner_metadata: plannerMetadata,
-  };
-}
-
-async function persistLatestTeamStrategyToConversationStore({
-  sessionStore = null,
-  chatId = '',
-  runtime = null,
-  strategyState = null,
-  source = 'latest_run',
-  pendingDraft = false,
-} = {}) {
-  if (!sessionStore?.upsert || !chatId || !strategyState || typeof strategyState !== 'object') return null;
-  const current = getSessionTeamState(sessionStore, chatId);
-  const nextActiveTeam = current.active_team ? attachAdaptiveExpansionMetaToTeam(current.active_team, strategyState, { source, autoPreparedDraft: false }) : null;
-  const nextPendingTeam = current.pending_team
-    ? attachAdaptiveExpansionMetaToTeam(current.pending_team, strategyState, { source: pendingDraft ? 'pending_team_draft' : source, autoPreparedDraft: pendingDraft })
-    : null;
-  const nextEnvelope = {
-    status: nextActiveTeam ? 'active' : (nextPendingTeam ? 'suggested' : current.status || 'none'),
-    composition_mode: current.composition_mode,
-    proposal_mode: current.proposal_mode,
-    active_team: nextActiveTeam,
-    pending_team: nextPendingTeam,
-    updated_at: new Date().toISOString(),
-  };
-  sessionStore.upsert(chatId, (session) => ({
-    ...session,
-    team_config: nextEnvelope,
-  }));
-  if (runtime && (nextEnvelope.active_team || nextEnvelope.pending_team)) {
-    await syncTeamEnvelopeToConversationStore({ runtime, envelope: nextEnvelope, source: `team_strategy:${source}` }).catch(() => null);
-  }
-  return nextEnvelope;
-}
-
-
-function buildTelegramTeamStrategyNotice(strategyState = null, { pendingDraft = false } = {}) {
-  const state = strategyState && typeof strategyState === 'object' ? strategyState : null;
-  if (!state) return '';
-  const recommendation = String(state.recommendation || '').trim().toLowerCase();
-  const augmentation = state.augmentation && typeof state.augmentation === 'object' ? state.augmentation : {};
-  const roleSeparation = state.role_separation && typeof state.role_separation === 'object' ? state.role_separation : {};
-  const quality = state.quality && typeof state.quality === 'object' ? state.quality : {};
-  const lines = [];
-  if (recommendation === 'augment_context') {
-    lines.push('🧠 이번 턴은 team 확장보다 memory / skill / context augmentation이 더 낫다고 판단했습니다.');
-  } else if (recommendation === 'expand_team') {
-    lines.push(pendingDraft
-      ? '🪄 이번 요청은 역할 분리 가치가 충분하다고 판단되어 pending team 확장안을 준비했습니다.'
-      : '🪄 이번 요청은 역할 분리 가치가 보여 team 확장이 더 유리하다고 판단했습니다.');
-  } else {
-    lines.push('✅ 이번 턴은 현재 single-agent 경로를 유지해도 충분하다고 판단했습니다.');
-  }
-  lines.push(`- recommendation: ${recommendation || 'keep_single'}`);
-  lines.push(`- scores: augmentation=${Number(augmentation.score || 0)} · role_separation=${Number(roleSeparation.score || 0)}`);
-  if (quality.quality_gap || quality.contradiction_pressure || quality.followup_burden) {
-    lines.push(`- quality_signals: gap=${Number(quality.quality_gap || 0)} · contradiction=${Number(quality.contradiction_pressure || 0)} · followup=${Number(quality.followup_burden || 0)}`);
-  }
-  const rationale = Array.isArray(state.rationale) ? state.rationale.filter(Boolean).slice(0, 3) : [];
-  if (rationale.length > 0) lines.push(`- why: ${rationale.join(', ')}`);
-  if (state.capability_gap_summary) lines.push(`- capability_gaps: ${String(state.capability_gap_summary)}`);
-  if (roleSeparation.independent_review_needed === true || roleSeparation.persistent_split_needed === true) {
-    const detail = [];
-    if (roleSeparation.independent_review_needed === true) detail.push('independent_review_needed');
-    if (roleSeparation.persistent_split_needed === true) detail.push('persistent_split_needed');
-    lines.push(`- role_split_signals: ${detail.join(', ')}`);
-  }
-  lines.push(recommendation === 'expand_team'
-    ? '- next: /team apply 또는 /team refine 로 조정'
-    : '- detail: /team why');
-  return lines.join('\n');
-}
-
-function shouldAutoSuggestTeamExpansion({ teamConfig = null, sessionTeamState = null, qualitySignals = null, capabilityGaps = [], strategyAssessment = null } = {}) {
-  if (!isChatStartTeamConfiguration(teamConfig)) return false;
-  if (Array.isArray(teamConfig?.agents) && teamConfig.agents.length > 1) return false;
-  if (sessionTeamState?.pending_team && typeof sessionTeamState.pending_team === 'object') return false;
-  const strategy = strategyAssessment && typeof strategyAssessment === 'object' ? strategyAssessment : null;
-  const recommendation = String(strategy?.recommendation || '').trim().toLowerCase();
-  if (recommendation === 'expand_team') return true;
-  if (recommendation === 'augment_context') return false;
-  const signals = qualitySignals && typeof qualitySignals === 'object' ? qualitySignals : {};
-  const contradictionPressure = Number(signals.contradiction_pressure || 0);
-  const qualityGap = Number(signals.quality_gap || 0);
-  const followupBurden = Number(signals.followup_burden || 0);
-  const gaps = Array.isArray(capabilityGaps) ? capabilityGaps : [];
-  const teamLikeGap = gaps.some((gap) => {
-    const kind = String(gap?.canonical_kind || gap?.kind || '').trim().toLowerCase();
-    return kind === 'missing_skill' || kind === 'missing_capability';
-  });
-  return qualityGap >= 2 || contradictionPressure >= 2 || followupBurden >= 2 || teamLikeGap;
-}
-
-
 const {
   FENCE,
   CHAT_VERBOSE,
@@ -694,73 +417,6 @@ const {
   requestChatInterrupt,
   enqueue,
 } = runtimeState;
-
-const {
-  appendChatMessageToGoc,
-  buildContextInfo,
-  invalidateRoleScopedContextCache,
-  sendContextInfo,
-} = runtimeIo;
-
-const {
-  buildGocAgentCreateSpec,
-  composeCapabilitiesForRun,
-  createAgentDraftProposal,
-  createJob,
-  filterPublicBlueprintCandidates,
-  findLatestAgentProfileNodeForPublish,
-  loadSupervisorRuntime,
-  messageRoleOf,
-  nodeResourceKind,
-  nodeTypeKey,
-  normalizeCatalogIds,
-  parseNodeCreatedAtMs,
-  recordMembershipMutationDiagnostic,
-  refreshAgentRegistry,
-  resolveInstallCandidateFromSession,
-  summarizeActiveTypeBreakdown,
-  summarizeSelectionState,
-  updateJobConfigSelection,
-} = gocRuntime;
-
-const {
-  buildApprovalActionSummaryLines,
-  buildAutopilotFollowupMessage,
-  buildAutopilotProgressSummary,
-  buildPendingApprovalPrompt,
-  buildPlanPreviewLines,
-  buildQueuedAgentStatusFromActions,
-  buildRoutedDashboardText,
-  chatActionLabel,
-  collectSuggestedActionsFromOutputs,
-  formatActionAgentLabel,
-  formatRegistryLines,
-  getActionGoal,
-  inferApprovalPreviewReason,
-  mergeSuggestedActions,
-  normalizeDeliverableList,
-  parseAutoSuggestDecision,
-  parseJsonObjectFromText,
-  parseRouterPlan,
-  recommendTeamForTask,
-  rewritePlanToReuseAgents,
-  sanitizeSupervisorRoutePlan,
-  sendAgentStatusTransitionMessage,
-  sendChatGPTPrompt,
-  sendPlanPreviewMessage,
-  sendRouterAckMessage,
-  updateCompletedDeliverablesFromOutputs,
-} = routePlanning;
-
-const {
-  buildChatStatusCard,
-} = runtimeUi;
-
-const {
-  summarizeUserSafeGocFallbackReason,
-} = runtimeUiHelpers;
-
-const replyAnchorStore = new ReplyAnchorStore({ sessionStore: chatSessionStore });
 
 function deriveGocMemorySurfaceSpec(doc = {}) {
   return deriveKnowledgeBaseMemorySurfaceSpec(doc);
@@ -802,7 +458,6 @@ const {
   appendRoleAwareTracking,
   appendRoleAwareTrackingWithStatus,
 } = gocTrackingIo;
-
 
 function ensureCliWorkspaceSupportFiles(jobId, { provider = "", roleMemo = "", kbContract = "", goal = "", instruction = "", runtimeExecutionPolicy = {}, providerOptions = {}, allowDirectExecution = false } = {}) {
   let workspacePath = "";
@@ -888,78 +543,6 @@ function decoratePlanActionsWithAgentMetadata(actions = [], runtime = null) {
     };
   };
   return (Array.isArray(actions) ? actions : []).map((action) => decorateOne(action));
-}
-
-function buildRuntimeAgentMetadataIndex(runtime = null) {
-  const index = new Map();
-  const pushAgent = (agent = {}) => {
-    if (!agent || typeof agent !== 'object') return;
-    const agentId = String(agent.agent_id || agent.agentId || agent.id || agent.name || '').trim().toLowerCase();
-    if (!agentId) return;
-    const current = index.get(agentId) || {};
-    index.set(agentId, {
-      ...current,
-      id: agentId,
-      name: String(agent.name || current.name || agentId).trim(),
-      role: String(agent.role_id || agent.roleId || agent.role || current.role || '').trim().toLowerCase(),
-      provider: String(agent.provider || current.provider || '').trim().toLowerCase(),
-      model: String(agent.model || current.model || '').trim(),
-      skills: Array.isArray(agent.skills) ? agent.skills : (Array.isArray(agent.attached_skill_ids) ? agent.attached_skill_ids : (Array.isArray(agent.attachedSkillIds) ? agent.attachedSkillIds : (Array.isArray(agent.skill_ids) ? agent.skill_ids : (Array.isArray(current.skills) ? current.skills : [])))),
-      purpose: String(agent.slot_purpose || agent.slotPurpose || agent.purpose || current.purpose || '').trim(),
-      agency_overlay: agent.agency_role_overlay || agent.agencyRoleOverlay || current.agency_overlay || undefined,
-      agency_overlay_id: String(agent.agency_role_overlay_id || agent.agencyRoleOverlayId || current.agency_overlay_id || '').trim() || undefined,
-    });
-  };
-  const collect = (source = null) => {
-    if (!source || typeof source !== 'object') return;
-    const arrays = [
-      source.agents,
-      source.members,
-      source.runtime_team_snapshot?.agents,
-      source.runtimeTeamSnapshot?.agents,
-      source.runtime_team?.agents,
-      source.runtimeTeam?.agents,
-      source.team_config?.agents,
-      source.teamConfig?.agents,
-      source.active_team?.agents,
-      source.activeTeam?.agents,
-      source.pending_team?.agents,
-      source.pendingTeam?.agents,
-      source.team_plan?.agents,
-      source.teamPlan?.agents,
-      source.job_config?.team?.agents,
-      source.jobConfig?.team?.agents,
-    ];
-    for (const arr of arrays) {
-      if (!Array.isArray(arr)) continue;
-      for (const agent of arr) pushAgent(agent);
-    }
-  };
-  collect(runtime);
-  return index;
-}
-
-function continuousStopSignalsMatched(activeSignals = [], policy = {}) {
-  const configured = uniqueLowerList(policy?.stop_signals || policy?.stopSignals || []);
-  const signals = uniqueLowerList(activeSignals);
-  if (signals.length === 0) return [];
-  if (configured.length === 0) return signals;
-  return signals.filter((signal) => configured.includes(signal));
-}
-
-function buildTurnDeltaFingerprint(outputs = []) {
-  const rows = [];
-  for (const output of Array.isArray(outputs) ? outputs : []) {
-    if (!output || typeof output !== 'object') continue;
-    rows.push(JSON.stringify({
-      type: String(output.type || '').trim().toLowerCase(),
-      role: String(output.role || output.role_id || output.roleId || '').trim().toLowerCase(),
-      summary: String(output.summary || '').trim(),
-      text: String(output.text || output.raw_text || output.rawText || '').trim().slice(0, 1000),
-      path: String(output.rel || output.path || output.uri || '').trim(),
-    }));
-  }
-  return rows.join('\n');
 }
 
 function buildAgentKnowledgeBaseBlock(jobId, { provider = "", roleId = "", agentId = "", detailLevel = "compact" } = {}) {
@@ -1345,7 +928,6 @@ function buildChatSynthesisFallback(message, execution = {}, runtime = null) {
 async function synthesizeChatReply(message, routePlan, execution = {}) {
   if (execution && typeof execution === 'object' && !execution.runtime && routePlan?.runtime) execution.runtime = routePlan.runtime;
   const runtime = execution?.runtime || routePlan?.runtime || null;
-  const executionLane = String(execution?.executionLane || routePlan?.execution_lane || runtime?.currentChatExecutionLane || runtime?.current_chat_execution_lane || 'work').trim().toLowerCase() || 'work';
   const foldedSignals = collectFoldedParticipantSignals(runtime, {
     turnId: runtime?.currentTurnId || runtime?.current_turn_id || runtime?.runtimeSessionState?.active_turn?.turn_id || runtime?.runtime_session_state?.active_turn?.turn_id || '',
   });
@@ -1367,13 +949,6 @@ async function synthesizeChatReply(message, routePlan, execution = {}) {
   }
   const special = summarizeSpecialChatOutputs(outputs);
   const hasAgentOutput = outputs.some((row) => String(row?.agentId || "").trim().toLowerCase() !== "system");
-  if (executionLane === 'fast' && hasAgentOutput && outputs.length === 1 && !special) {
-    const direct = outputs.find((row) => String(row?.agentId || '').trim().toLowerCase() !== 'system' && String(row?.output || '').trim());
-    if (direct) {
-      const directText = clip(String(direct.output || '').trim(), 3800);
-      return appendFoldedDigestAlways ? appendFoldedContributionDigest(directText, foldedSignals) : directText;
-    }
-  }
   if (String(routePlan?.reason || "").trim().toLowerCase() === "direct_agent_followup_shortcut") {
     const direct = outputs.find((row) => String(row?.agentId || "").trim().toLowerCase() !== "system" && String(row?.output || "").trim());
     if (direct) {
@@ -1777,7 +1352,7 @@ function buildSupervisorExecutionCallbacks({
         stepKind: "agent",
         budgetTokens: Number.isFinite(Number(lens?.budget_tokens))
           ? Number(lens.budget_tokens)
-          : getChatExecutionLaneDefaults(runtime?.currentChatExecutionLane || runtime?.current_chat_execution_lane || 'work').agent_budget_tokens,
+          : undefined,
         lensSpec: lens && typeof lens === "object" ? lens : null,
         detailContext: cleanDetail,
         runMeta: {
@@ -1910,7 +1485,7 @@ function buildSupervisorExecutionCallbacks({
     if (
       lensSpec.mode === "shared_only"
       && !cleanDetail
-      && estimateTokens(sharedCompiled) <= Number(lensSpec?.budget_tokens || getChatExecutionLaneDefaults(runtime?.currentChatExecutionLane || runtime?.current_chat_execution_lane || 'work').agent_budget_tokens || 1200)
+      && estimateTokens(sharedCompiled) <= Number(lensSpec?.budget_tokens || 1200)
     ) {
       return {
         final_prompt: [
@@ -2237,8 +1812,7 @@ function buildSupervisorExecutionCallbacks({
         slotId,
         scopeId,
       });
-      const executionLane = String(runtime?.currentChatExecutionLane || runtime?.current_chat_execution_lane || 'work').trim().toLowerCase() || 'work';
-      if (executionLane !== 'fast' && String(result?.output || "").trim()) {
+      if (String(result?.output || "").trim()) {
         await sendLong(
           bot,
           chatId,
@@ -3434,31 +3008,12 @@ async function runSupervisorChat(
       jobDir: runDir(currentJobId),
     });
     setRuntimeCurrentTurn(runtime, currentJobId);
-    const chatExecutionLane = assessChatExecutionLane({ message, runtime, forceMode: cleanForceMode });
-    runtime.currentChatExecutionLane = chatExecutionLane.lane;
-    runtime.current_chat_execution_lane = chatExecutionLane.lane;
-    runtime.currentChatExecutionLaneAssessment = chatExecutionLane;
-    runtime.current_chat_execution_lane_assessment = chatExecutionLane;
-    chatSessionStore.upsert(chatId, {
-      current_chat_execution_lane: chatExecutionLane.lane,
-      current_chat_execution_lane_assessment: chatExecutionLane,
-    });
     const lockedTeamState = await hydrateSessionTeamStateFromConversationStore({ sessionStore: chatSessionStore, chatId, runtime }).catch(() => getSessionTeamState(chatSessionStore, chatId));
-    let activeTeamConfig = teamConfig && typeof teamConfig === 'object'
+    const activeTeamConfig = teamConfig && typeof teamConfig === 'object'
       ? teamConfig
       : (lockedTeamState?.active_team && typeof lockedTeamState.active_team === 'object' ? lockedTeamState.active_team : null);
     if (!activeTeamConfig) {
-      const starterTeam = buildChatStartTeamConfiguration({ taskText: message, runtime });
-      storePendingTeam(chatSessionStore, chatId, starterTeam);
-      const appliedStarter = await applyPendingTeam({ sessionStore: chatSessionStore, chatId, runtime });
-      activeTeamConfig = appliedStarter;
-      if (!chatExecutionLane.compact_start_notice) {
-        await bot.sendMessage(
-          chatId,
-          '🧩 활성 team 없이 시작해서 이번 대화는 single-agent chat starter로 바로 실행합니다. 필요해지면 자동으로 확장 draft를 만들거나 /team expand 로 넓힐 수 있어요.',
-          Number.isFinite(Number(currentTurnAckMessageId)) ? { reply_to_message_id: Number(currentTurnAckMessageId) } : undefined,
-        ).catch(() => null);
-      }
+      throw new Error('active team is required before /chat execution');
     }
     const normalizedActiveTeamConfig = validateTeamConfiguration(activeTeamConfig, { runtime });
     applyTeamConfigurationToRuntime(runtime, normalizedActiveTeamConfig);
@@ -3588,12 +3143,9 @@ async function runSupervisorChat(
     const continuousImprovementPolicy = runtimeExecutionPolicy.continuous_improvement || {};
     const checkpointPolicy = runtimeExecutionPolicy.checkpointing || {};
     const autopilotEnabled = AUTOPILOT_ENABLED || continuousImprovementPolicy.enabled === true;
-    const policyMaxTurns = continuousImprovementPolicy.enabled === true
+    const maxTurns = continuousImprovementPolicy.enabled === true
       ? Number(continuousImprovementPolicy.max_turns || AUTOPILOT_MAX_TURNS || 1)
       : (autopilotEnabled ? AUTOPILOT_MAX_TURNS : 1);
-    const maxTurns = Number.isFinite(Number(chatExecutionLane.max_turns_override))
-      ? Math.max(1, Math.min(policyMaxTurns || 1, Number(chatExecutionLane.max_turns_override)))
-      : policyMaxTurns;
     const maxTotalActions = continuousImprovementPolicy.enabled === true
       ? Number(continuousImprovementPolicy.max_total_actions || AUTOPILOT_MAX_TOTAL_ACTIONS || 4)
       : (autopilotEnabled ? AUTOPILOT_MAX_TOTAL_ACTIONS : 4);
@@ -3783,7 +3335,7 @@ async function runSupervisorChat(
           stepKind: "router",
           goal: lastUserText,
           userMessageText: lastUserText,
-          budgetTokens: Number(chatExecutionLane.router_budget_tokens || 900),
+          budgetTokens: 900,
           runMeta: routerRunMeta,
         }).catch(() => null);
         if (preparedRouter && typeof preparedRouter === "object") {
@@ -3966,7 +3518,6 @@ async function runSupervisorChat(
         },
         runtimeTeamSnapshot,
         activeTeam: runtime?.activeTeamConfig || null,
-        executionLane: chatExecutionLane.lane,
       });
       routePlan = sanitizeSupervisorRoutePlan(rawRoutePlan, {
         message: lastUserText,
@@ -3974,7 +3525,6 @@ async function runSupervisorChat(
         allowReadOnlyControl: false,
         forceMode: cleanForceMode,
       });
-      routePlan.execution_lane = String(rawRoutePlan?.execution_lane || chatExecutionLane.lane || 'work').trim().toLowerCase() || 'work';
       routePlan.team_locked = runtime.teamLocked === true;
       routePlan.interaction_spec = runtime.teamInteractionSpec || runtime.activeTeamConfig?.interaction_spec || null;
       let usedSuggestedActionsFallback = false;
@@ -4085,20 +3635,17 @@ async function runSupervisorChat(
           final_response_style: routePlan.final_response_style || runtime.jobConfig?.final_response_style || "concise",
         },
       });
-      let planPreviewMessageId = null;
-      if (chatExecutionLane.lane !== 'fast') {
-        planPreviewMessageId = await sendPlanPreviewMessage(bot, chatId, {
-          actions: planActions,
-          replyToMessageId: currentTurnAckMessageId,
-          activeTeam: runtime?.activeTeamConfig || null,
-          runtimeTeamSnapshot,
-          routeReason: routePlan.reason || "",
+      const planPreviewMessageId = await sendPlanPreviewMessage(bot, chatId, {
+        actions: planActions,
+        replyToMessageId: currentTurnAckMessageId,
+        activeTeam: runtime?.activeTeamConfig || null,
+        runtimeTeamSnapshot,
+        routeReason: routePlan.reason || "",
+      });
+      if (Number.isFinite(Number(planPreviewMessageId)) && Number(planPreviewMessageId) > 0) {
+        chatSessionStore.upsert(chatId, {
+          current_turn_plan_message_id: Number(planPreviewMessageId),
         });
-        if (Number.isFinite(Number(planPreviewMessageId)) && Number(planPreviewMessageId) > 0) {
-          chatSessionStore.upsert(chatId, {
-            current_turn_plan_message_id: Number(planPreviewMessageId),
-          });
-        }
       }
 
       if (verbose) {
@@ -4475,111 +4022,13 @@ async function runSupervisorChat(
       verificationSummary: channelVerification?.summary || null,
       runtimeBehavior: runtime?.runtimeBehavior || runtime?.runtime_behavior || null,
     });
-    const detectedCapabilityGaps = detectCapabilityGapsFromExecution(mergedExecution);
-    const adaptiveExecutionState = recordAdaptiveExecutionOutcome({
+    recordAdaptiveExecutionOutcome({
       runtime,
       status: mergedExecution.pendingApproval || routePlan.await_user === true ? 'await_user' : 'done',
       plannerMetadata: routePlan?.runtime_team_snapshot?.team_plan?.planner_metadata || routePlan?.runtime_team_snapshot?.team_plan?.plannerMetadata || routePlan?.planner_metadata || runtime?.runtimeTeamSnapshot?.team_plan?.planner_metadata || runtime?.runtimeTeamSnapshot?.team_plan?.plannerMetadata || runtime?.plannerMetadata || null,
-      capabilityGapCount: detectedCapabilityGaps.length,
+      capabilityGapCount: detectCapabilityGapsFromExecution(mergedExecution).length,
       qualitySignals: executionQualitySignals,
     });
-    const shouldEvaluateAdaptiveStrategy = chatExecutionLane.skip_auto_team_expansion !== true;
-    const taskInterpretationForStrategy = routePlan?.runtime_team_snapshot?.team_plan?.task_interpretation
-      || routePlan?.runtime_team_snapshot?.team_plan?.taskInterpretation
-      || runtime?.runtimeTeamSnapshot?.team_plan?.task_interpretation
-      || runtime?.runtimeTeamSnapshot?.team_plan?.taskInterpretation
-      || runtime?.runtime_team_snapshot?.team_plan?.task_interpretation
-      || runtime?.plannerMetadata?.task_interpretation
-      || runtime?.plannerMetadata?.taskInterpretation
-      || null;
-    const postRunStrategy = shouldEvaluateAdaptiveStrategy
-      ? assessExecutionStrategy({
-        goal: message,
-        message,
-        taskInterpretation: taskInterpretationForStrategy,
-        runtime,
-        runtimeSessionState: runtime?.runtimeSessionState || runtime?.runtime_session_state || null,
-        qualitySignals: executionQualitySignals,
-        capabilityGaps: detectedCapabilityGaps,
-      })
-      : null;
-    let latestTeamStrategyState = shouldEvaluateAdaptiveStrategy
-      ? buildLatestTeamStrategyState({
-        strategyAssessment: postRunStrategy,
-        qualitySignals: executionQualitySignals,
-        capabilityGaps: detectedCapabilityGaps,
-        recommendation: adaptiveExecutionState?.last_signals?.strategy_recommendation || adaptiveExecutionState?.last_quality_signals?.strategy_recommendation || postRunStrategy?.recommendation,
-      })
-      : null;
-    if (latestTeamStrategyState) {
-      chatSessionStore.upsert(chatId, {
-        last_team_strategy: latestTeamStrategyState,
-      });
-      await persistLatestTeamStrategyToConversationStore({
-        sessionStore: chatSessionStore,
-        chatId,
-        runtime,
-        strategyState: latestTeamStrategyState,
-        source: 'latest_run',
-        pendingDraft: false,
-      }).catch(() => null);
-    }
-    const teamStateAfterRun = getSessionTeamState(chatSessionStore, chatId);
-    if (shouldEvaluateAdaptiveStrategy && shouldAutoSuggestTeamExpansion({
-      teamConfig: normalizedActiveTeamConfig,
-      sessionTeamState: teamStateAfterRun,
-      qualitySignals: executionQualitySignals,
-      capabilityGaps: detectedCapabilityGaps,
-      strategyAssessment: postRunStrategy,
-    })) {
-      try {
-        const expandDraft = await refineTeamConfigurationAdvanced({
-          team: normalizedActiveTeamConfig,
-          instruction: buildChatAutoExpandInstruction({ message, qualitySignals: executionQualitySignals, capabilityGaps: detectedCapabilityGaps }),
-          runtime,
-          jobId: currentJobId,
-        });
-        if (expandDraft && typeof expandDraft === 'object') {
-          latestTeamStrategyState = buildLatestTeamStrategyState({
-            strategyAssessment: postRunStrategy,
-            qualitySignals: executionQualitySignals,
-            capabilityGaps: detectedCapabilityGaps,
-            recommendation: 'expand_team',
-            autoPreparedDraft: true,
-          });
-          const expandDraftWithStrategy = attachAdaptiveExpansionMetaToTeam(expandDraft, latestTeamStrategyState, {
-            source: 'pending_team_draft',
-            autoPreparedDraft: true,
-          });
-          storePendingTeam(chatSessionStore, chatId, expandDraftWithStrategy);
-          chatSessionStore.upsert(chatId, {
-            last_team_strategy: latestTeamStrategyState,
-          });
-          await persistLatestTeamStrategyToConversationStore({
-            sessionStore: chatSessionStore,
-            chatId,
-            runtime,
-            strategyState: latestTeamStrategyState,
-            source: 'pending_team_draft',
-            pendingDraft: true,
-          }).catch(() => null);
-          const strategyNotice = buildTelegramTeamStrategyNotice(latestTeamStrategyState, { pendingDraft: true });
-          await sendLong(bot, chatId, [
-            strategyNotice,
-            '',
-            formatTeamProposalMessage(expandDraft, { runtime }),
-          ].filter(Boolean).join('\n')).catch(() => null);
-        }
-      } catch {}
-    } else if (isChatStartTeamConfiguration(normalizedActiveTeamConfig) && String(latestTeamStrategyState?.recommendation || '').trim().toLowerCase() === 'augment_context') {
-      const strategyNotice = buildTelegramTeamStrategyNotice(latestTeamStrategyState, { pendingDraft: false });
-      if (strategyNotice) {
-        await bot.sendMessage(chatId, strategyNotice, {
-          reply_to_message_id: getCurrentTurnReplyMessageId(chatId) || undefined,
-          disable_web_page_preview: true,
-        }).catch(() => null);
-      }
-    }
 
     let installProposalState = null;
     let autoInstallResumeRequest = null;

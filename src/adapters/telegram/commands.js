@@ -34,50 +34,70 @@ import { buildBenchmarkTeamTemplate, buildBenchmarkTemplateCatalogText } from '.
 
 const HELP_TEXT = [
   "Commands:",
-  "- /chat [text]: 대화/작업 지시",
-  "- /team [suggest <목적>|create <자연어 팀 설명>|refine <자연어 수정>|expand [확장 방향]|apply|why|requirements|proposal|template|options]: 팀 제안/적용/점검",
-  "- /status [full|recent|prompt]: 현재 단계·팀·최근 진행·prompt 효율 보기",
-  "- /context [global]: 현재 job 컨텍스트/GoC 링크 보기",
-  "- /artifacts [limit]: 주요 산출물 후보 보기",
-  "- /send <번호|path>: 산출물 파일 전송",
-  "- /send bundle <번호,번호|path,...>: 여러 산출물을 zip으로 전송",
-  "- /stop [jobId]: 현재 실행 또는 지정 job 중단",
-  "- /upload (+파일 첨부) [메모]: 실행 없이 업로드만 저장",
-  "- /help advanced: credential/files/running 등 고급 명령 보기",
+  "- /chat <text>: 질문/작업 시작",
+  "- /team: 현재 team 상태 보기",
+  "- /team suggest <목적>: 필요한 team 초안 만들기",
+  "- /team create <설명>: 원하는 team 직접 설명해서 만들기",
+  "- /team refine <수정>: 현재/대기 team 수정하기",
+  "- /team apply: 대기 team 적용",
+  "- /status: 지금 진행 상황 보기",
+  "- /context: 현재 작업과 GoC 링크 보기",
+  "- /artifacts [limit]: 결과물 보기",
+  "- /send <번호|path>: 결과물 전송",
+  "- /files [all|workspace|uploads] [limit]: 파일 보기",
+  "- /stop [jobId]: 실행 중지",
+  "- /help more: 고급/확장 명령 보기",
 ].join("\n");
 
 const ADVANCED_HELP_TEXT = [
-  "Commands:",
-  "- /chat [text]: 대화/작업 지시",
+  "More commands:",
   "- /whoami: 현재 chat_id / user_id 확인",
   "- /running: 실행/대기 job 목록 확인",
-  "- /status [full|recent|prompt]: 현재 chat/job 상태와 최근 작업·prompt 효율 보기",
-  "- /credential [list|pending|set <KEY> <secret> [--resume]|bind <KEY> env <ENV_KEY> [--resume]|clear <KEY>]: credential 바인딩 (env/local secret store 권장, set은 Telegram 노출 주의 fallback)",
-  "- /stop [jobId]: 현재 실행 또는 지정 job 중단",
-  "- /memory [show|md|kb|policy|routing|role|agents|note|lesson|reset]: 런타임 메모리/KB 조회·수정",
-  "- /settings ...: /memory alias",
-  "- /team [suggest <목적>|create <자연어 팀 설명>|refine <자연어 수정>|expand [확장 방향]|apply|why|requirements|proposal|export|install <JSON>|pull|push|template|validate <JSON>|options|reset|modes]: 팀 제안/생성/수정/동기화",
-  "- /agents ...: legacy alias of /team (팀 상태/수정은 /team 권장)",
+  "- /credential ...: credential 바인딩/확인",
+  "- /memory ... 또는 /settings ...: 런타임 메모리/KB 조회·수정",
   "- /skills: 현재/예정 agent roster와 대표 skill 보기",
   "- /tools: 현재 job의 tool 상태 보기",
-  "- /artifacts [limit]: 주요 산출물 후보 보기",
-  "- /send <번호|path>: 산출물 파일 전송",
-  "- /send bundle <번호,번호|path,...>: 여러 산출물을 zip으로 전송",
-  "- /upload (+파일 첨부) [메모]: 실행 없이 업로드만 저장 (/attach는 legacy alias)",
-  "- /files [uploads|workspace|all] [limit]: workspace 파일 목록 보기",
-  "- /outputs [limit]: legacy alias of /artifacts",
-  "- /sendfile <relative_path>: legacy alias of /send",
+  "- /upload (+파일 첨부) [메모]: 실행 없이 업로드만 저장",
+  "- /team more: team의 고급 명령 보기",
   "- /chat [--debug] <message>|reset: supervisor chat 실행 또는 세션 초기화",
-  "- /context <jobId|global>: 컨텍스트 보기 (jobId 생략 시 현재 job)",
   "- /run <goal>: goal 기반 실행 시작",
   "- /continue <jobId>: 기존 job 이어서 실행",
   "- /gptprompt <jobId> <question>: GPT 확인용 프롬프트 생성",
   "- /gptapply [jobId]: GPT 응답 적용",
   "- /gptdone: GPT paste 대기 모드 종료",
   "- /commit <jobId> <message>: 작업 결과 커밋",
+  "",
+  "Legacy aliases removed:",
+  "- /agents → /team",
+  "- /outputs → /artifacts",
+  "- /sendfile → /send",
+  "- /attach → /upload",
+].join("\n");
+
+const TEAM_CORE_HELP_TEXT = [
+  "Team commands:",
+  "- /team: 현재 team 상태 보기",
+  "- /team suggest <목적>: 목적 기반으로 team 제안 받기",
+  "- /team create <설명>: 자연어로 team 만들기",
+  "- /team refine <수정>: 현재/대기 team 수정하기",
+  "- /team apply: 대기 team 적용",
+  "- /team reset: team 초기화",
+  "- /team more: 고급 team 명령 보기",
+].join("\n");
+
+const TEAM_ADVANCED_HELP_TEXT = [
+  "More team commands:",
+  "- /team requirements",
+  "- /team proposal",
+  "- /team export",
+  "- /team install <JSON>",
+  "- /team pull",
+  "- /team push",
+  "- /team template",
+  "- /team validate <JSON>",
+  "- /team options",
+  "- /team modes",
   ...buildTeamSchemaOptionsSummaryLines(),
-  "- 실행 중 최신 유저 요청이 team pattern과 충돌하면 이번 turn에 한해 임시 execution override가 적용될 수 있습니다.",
-  "- 팀 구조 자체를 바꾸려면 /team refine 를 사용하세요.",
 ].join("\n");
 
 export function createTelegramCommandHandler(deps = {}) {
@@ -165,79 +185,6 @@ export function createTelegramCommandHandler(deps = {}) {
     return buildTeamBlueprint(baseTeam, { runtime, applyState, source, installProposalState: sessionInstallProposal });
   }
 
-  function labelTeamStrategyReason(code = '') {
-    const value = String(code || '').trim().toLowerCase();
-    const map = {
-      augmentation_outweighs_role_split: 'context augmentation 이 role split보다 효율적',
-      prefer_memory_skill_context_augmentation: 'memory/skill/context augmentation 우선',
-      persistent_role_separation_has_clear_value: '지속 역할 분리 가치가 큼',
-      independent_sidecar_is_justified: '독립 reviewer/sidecar 가치가 있음',
-      single_agent_path_is_adequate: 'single-agent 경로로 충분함',
-      missing_capability_or_skill: 'skill/capability 보강 필요',
-      participant_noise_prefers_context_first: '잡음은 team보다 context 보강이 우선',
-      contradiction_requires_better_context: '충돌 신호는 context 보강이 우선',
-      quality_gap_present: '품질 격차가 남아 있음',
-      quality_health_low: '품질 건강도가 낮음',
-      followup_burden_present: '후속 질의 부담이 큼',
-      code_task_can_start_with_inline_review_context: '코드 작업은 inline review로 시작 가능',
-      code_review_benefits_from_sidecar: '코드 리뷰 sidecar가 유리함',
-      independent_review_required: '독립 검토가 필요함',
-      independent_verification_is_worthwhile: '독립 검증 가치가 있음',
-      parallel_branching_value: '병렬 분기 가치가 있음',
-      high_decomposability: '작업 분해 이득이 큼',
-      moderate_decomposability: '작업 분해 이득이 중간 정도',
-      multiple_durable_role_candidates: '지속 역할 후보가 여러 개',
-      secondary_role_candidate_exists: '보조 역할 후보가 있음',
-    };
-    return map[value] || value;
-  }
-
-  function buildTeamStrategyLines(teamState = {}, session = {}) {
-    const pendingTeam = teamState?.pending_team && typeof teamState.pending_team === 'object' ? teamState.pending_team : null;
-    const activeTeam = teamState?.active_team && typeof teamState.active_team === 'object' ? teamState.active_team : null;
-    const pendingStrategy = pendingTeam?.planner_metadata?.adaptive_expansion && typeof pendingTeam.planner_metadata.adaptive_expansion === 'object'
-      ? pendingTeam.planner_metadata.adaptive_expansion
-      : null;
-    const sessionStrategy = session?.last_team_strategy && typeof session.last_team_strategy === 'object'
-      ? session.last_team_strategy
-      : null;
-    const activeStrategy = activeTeam?.planner_metadata?.adaptive_expansion && typeof activeTeam.planner_metadata.adaptive_expansion === 'object'
-      ? activeTeam.planner_metadata.adaptive_expansion
-      : null;
-    const strategy = pendingStrategy || sessionStrategy || activeStrategy;
-    const source = pendingStrategy ? 'pending_team_draft' : (sessionStrategy ? 'latest_run' : (activeStrategy ? 'active_team' : ''));
-    if (!strategy) return [];
-    const augmentation = strategy?.augmentation && typeof strategy.augmentation === 'object' ? strategy.augmentation : {};
-    const roleSeparation = strategy?.role_separation && typeof strategy.role_separation === 'object' ? strategy.role_separation : {};
-    const recommendation = String(strategy?.recommendation || '').trim().toLowerCase() || 'keep_single';
-    const lines = ['Latest team strategy'];
-    lines.push(`- source: ${source || 'latest_run'}`);
-    lines.push(`- recommendation: ${recommendation}`);
-    lines.push(`- scores: augmentation=${Number(augmentation.score || 0)} · role_separation=${Number(roleSeparation.score || 0)}`);
-    const reasons = [
-      ...(Array.isArray(strategy?.rationale) ? strategy.rationale : []),
-      ...(Array.isArray(augmentation.reasons) ? augmentation.reasons : []),
-      ...(Array.isArray(roleSeparation.reasons) ? roleSeparation.reasons : []),
-    ].map((entry) => labelTeamStrategyReason(entry)).filter(Boolean);
-    if (reasons.length > 0) {
-      lines.push(`- why: ${Array.from(new Set(reasons)).slice(0, 4).join(' · ')}`);
-    }
-    const capabilityGapSummary = String(strategy?.capability_gap_summary || strategy?.capabilityGapSummary || '').trim();
-    if (capabilityGapSummary) lines.push(`- capability_gaps: ${capabilityGapSummary}`);
-    if (roleSeparation.independent_review_needed === true || roleSeparation.persistent_split_needed === true) {
-      const detail = [];
-      if (roleSeparation.independent_review_needed === true) detail.push('independent_review_needed');
-      if (roleSeparation.persistent_split_needed === true) detail.push('persistent_split_needed');
-      lines.push(`- role_split_signals: ${detail.join(', ')}`);
-    }
-    const autoPrepared = strategy?.auto_prepared_draft === true || strategy?.autoPreparedDraft === true;
-    if (autoPrepared) lines.push('- status: pending draft auto-prepared');
-    lines.push(recommendation === 'expand_team'
-      ? '- next: /team apply 또는 /team refine'
-      : '- detail: /team why');
-    return lines;
-  }
-
   function buildTeamStatusOverview(teamState = {}, { chatId = '', runtime = null } = {}) {
     const lines = [buildTeamListMessage(teamState, { runtime })];
     const session = chatSessionStore?.get?.(chatId) || {};
@@ -277,8 +224,6 @@ export function createTelegramCommandHandler(deps = {}) {
       stateLines.push(`latest rejoin: ${String(lastRejoin.agent_id || 'forked')} -> ${String(lastRejoin.source_agent_id || 'source')}${lastRejoin?.summary ? ` · ${String(lastRejoin.summary)}` : ''}`);
     }
     lines.push('', 'Runtime state', ...stateLines);
-    const strategyLines = buildTeamStrategyLines(teamState, session);
-    if (strategyLines.length > 0) lines.push('', ...strategyLines);
     const pendingApplyGuardrails = pendingTeam ? buildTeamTransitionGuardrails(activeTeam, pendingTeam) : null;
     const confirmationState = session?.pending_team_apply_confirmation && typeof session.pending_team_apply_confirmation === 'object'
       ? session.pending_team_apply_confirmation
@@ -301,6 +246,67 @@ export function createTelegramCommandHandler(deps = {}) {
     if (nextSteps.length > 0) lines.push('', '추천 명령', ...nextSteps);
     return lines.join('\n');
   }
+  function countConfiguredAgents(team = null) {
+    return Array.isArray(team?.agents) ? team.agents.length : 0;
+  }
+
+  function summarizeTeamSlot(label = '', team = null) {
+    if (!team || typeof team !== 'object') return `${label}: none`;
+    const name = String(team.team_name || `${label}_team`).trim() || `${label}_team`;
+    const agentCount = countConfiguredAgents(team);
+    const compositionMode = String(team.composition_mode || '').trim().toLowerCase() || 'structured';
+    const pattern = String(team?.structure_v2?.topology?.pattern || '').trim();
+    const extras = [];
+    if (pattern) extras.push(pattern);
+    if (team?.planner_metadata?.auto_refine_from_pattern_conflict) extras.push('auto-refine');
+    const summaryParts = [`${label}: ${name}`, `${agentCount} agent${agentCount === 1 ? '' : 's'}`, compositionMode, ...extras];
+    return summaryParts.join(' · ');
+  }
+
+  function buildCompactTeamStatusMessage(teamState = {}, { chatId = '', runtime = null } = {}) {
+    const session = chatSessionStore?.get?.(chatId) || {};
+    const pendingTeam = teamState?.pending_team && typeof teamState.pending_team === 'object' ? teamState.pending_team : null;
+    const activeTeam = teamState?.active_team && typeof teamState.active_team === 'object' ? teamState.active_team : null;
+    const pendingInstallProposal = getPendingInstallProposal(chatSessionStore, chatId);
+    const patternConflict = session?.pattern_conflict && typeof session.pattern_conflict === 'object' ? session.pattern_conflict : null;
+    const pendingApplyGuardrails = pendingTeam ? buildTeamTransitionGuardrails(activeTeam, pendingTeam) : null;
+    const lines = [
+      'Team',
+      summarizeTeamSlot('active', activeTeam),
+      summarizeTeamSlot('pending', pendingTeam),
+    ];
+
+    if (runtime?.conversationInfo?.executionLane) {
+      lines.push(`lane: ${String(runtime.conversationInfo.executionLane)}`);
+    }
+    if (pendingInstallProposal) {
+      lines.push(`install proposal: ${String(pendingInstallProposal.status || 'awaiting_install_approval')} · gaps=${Number(pendingInstallProposal?.proposal?.gap_count || 0)}`);
+    }
+    if (patternConflict?.classification) {
+      lines.push(`pattern conflict: ${String(patternConflict.classification)}`);
+    }
+    if (pendingApplyGuardrails?.warning_count > 0) {
+      lines.push(`apply check: warnings ${Number(pendingApplyGuardrails.warning_count || 0)}`);
+    }
+
+    const nextSteps = [];
+    if (pendingTeam) {
+      nextSteps.push(pendingApplyGuardrails?.destructive_changes_present ? '/team apply (confirm twice)' : '/team apply');
+      nextSteps.push('/team refine <수정>');
+    } else if (activeTeam) {
+      nextSteps.push('/chat <요청>');
+      nextSteps.push('/team suggest <목적>');
+    } else {
+      nextSteps.push('/team suggest <목적>');
+      nextSteps.push('/team create <설명>');
+    }
+    if (pendingInstallProposal) nextSteps.push('/team proposal');
+
+    lines.push('', 'Next', ...nextSteps.map((entry) => `- ${entry}`), '', 'More', '- /team details', '- /team more');
+    return lines.join('\n');
+  }
+
+
 
   async function resumeFromInstallProposal({ state = null, runtime = null, chatId = '', userId = '', currentTeam = null } = {}) {
     const resume = state?.resume_request && typeof state.resume_request === 'object' ? state.resume_request : null;
@@ -342,7 +348,7 @@ export function createTelegramCommandHandler(deps = {}) {
 
     if (cmd === "/help" || cmd === "/commands") {
       const sub = String(args || "").trim().toLowerCase();
-      if (sub === "advanced") {
+      if (sub === "advanced" || sub === "more") {
         await bot.sendMessage(chatId, ADVANCED_HELP_TEXT);
         return true;
       }
@@ -535,7 +541,12 @@ export function createTelegramCommandHandler(deps = {}) {
       return true;
     }
 
-    if (cmd === "/agents" || cmd === "/team") {
+    if (cmd === "/agents") {
+      await bot.sendMessage(chatId, '이제 /agents 는 제거되었습니다. team 관련 작업은 /team 을 사용해 주세요.');
+      return true;
+    }
+
+    if (cmd === "/team") {
       const sub = String(rest[0] || "").trim().toLowerCase();
       let teamState = getSessionTeamState(chatSessionStore, chatId);
       const currentJobId = resolveLiveJobIdForChat(chatId);
@@ -550,16 +561,21 @@ export function createTelegramCommandHandler(deps = {}) {
         teamState = getSessionTeamState(chatSessionStore, chatId);
       }
       if (!sub) {
-        await sendLong(bot, chatId, buildTeamStatusOverview(teamState, { chatId, runtime: runtimeForTeam }));
+        await bot.sendMessage(chatId, buildCompactTeamStatusMessage(teamState, { chatId, runtime: runtimeForTeam }));
         return true;
       }
-      if (sub === 'why' || sub === 'strategy') {
-        const strategyLines = buildTeamStrategyLines(teamState, chatSessionStore?.get?.(chatId) || {});
-        if (strategyLines.length === 0) {
-          await bot.sendMessage(chatId, '아직 team 전략 판단 결과가 없습니다. 먼저 /chat 으로 한 턴 실행해 보세요.');
-          return true;
-        }
-        await sendLong(bot, chatId, strategyLines.join('\n'));
+      if (sub === 'help') {
+        await bot.sendMessage(chatId, TEAM_CORE_HELP_TEXT);
+        return true;
+      }
+      if (sub === 'details' || sub === 'status') {
+        await sendLong(bot, chatId, `${buildTeamStatusOverview(teamState, { chatId, runtime: runtimeForTeam })}
+
+${TEAM_CORE_HELP_TEXT}`);
+        return true;
+      }
+      if (sub === 'more') {
+        await sendLong(bot, chatId, TEAM_ADVANCED_HELP_TEXT);
         return true;
       }
       if (sub === 'suggest') {
@@ -580,49 +596,13 @@ export function createTelegramCommandHandler(deps = {}) {
       if (sub === 'create') {
         const description = String(rawArgs.replace(/^create\s+/i, '') || '').trim();
         if (!description) {
-          await bot.sendMessage(chatId, 'Usage: /team create <자연어 팀 설명>\n\n선택지 참고: /team options 또는 /help advanced');
+          await bot.sendMessage(chatId, 'Usage: /team create <자연어 팀 설명>\n\n더 많은 옵션: /team more');
           return true;
         }
         await bot.sendMessage(chatId, '해당 요청에 맞는 팀을 구성하겠습니다. 잠시만 기다려주세요.');
-        try {
-          const proposal = await createFreeformTeamConfigurationAdvanced({ description, runtime: runtimeForTeam, jobId: currentJobId });
-          storePendingTeam(chatSessionStore, chatId, proposal);
-          await sendLong(bot, chatId, formatTeamProposalMessage(proposal, { runtime: runtimeForTeam }));
-        } catch (error) {
-          const fallbackProposal = createFreeformTeamConfiguration({ description, runtime: runtimeForTeam });
-          storePendingTeam(chatSessionStore, chatId, fallbackProposal);
-          await sendLong(bot, chatId, [
-            `⚠️ /team create planner 경로가 실패해 heuristic fallback으로 팀 초안을 만들었습니다.`,
-            `reason: ${String(error?.message ?? error)}`,
-            '',
-            formatTeamProposalMessage(fallbackProposal, { runtime: runtimeForTeam }),
-          ].join('\n'));
-        }
-        return true;
-      }
-      if (sub === 'expand') {
-        const instruction = String(rawArgs.replace(/^expand\s*/i, '') || '').trim();
-        const baseTeam = teamState.pending_team || teamState.active_team;
-        if (!baseTeam) {
-          await bot.sendMessage(chatId, '확장할 팀이 없습니다. 먼저 그냥 대화를 시작하거나 /team suggest <목적> 으로 기본 팀을 만든 뒤 다시 시도해 주세요.');
-          return true;
-        }
-        const effectiveInstruction = instruction || 'Expand this single-agent or minimal team into the smallest useful collaborative team. Keep the current primary owner, add reviewer/researcher/synthesizer only when clearly justified, and preserve direct answer flow.';
-        await bot.sendMessage(chatId, '현재 구성을 바탕으로 필요한 만큼만 팀을 확장한 draft를 만들겠습니다.');
-        try {
-          const next = await refineTeamConfigurationAdvanced({ team: baseTeam, instruction: effectiveInstruction, runtime: runtimeForTeam, jobId: currentJobId });
-          storePendingTeam(chatSessionStore, chatId, next);
-          await sendLong(bot, chatId, formatTeamProposalMessage(next, { runtime: runtimeForTeam }));
-        } catch (error) {
-          const next = refineTeamConfiguration(baseTeam, effectiveInstruction, { runtime: runtimeForTeam });
-          storePendingTeam(chatSessionStore, chatId, next);
-          await sendLong(bot, chatId, [
-            `⚠️ /team expand planner 경로가 실패해 heuristic fallback으로 확장 draft를 만들었습니다.`,
-            `reason: ${String(error?.message ?? error)}`,
-            '',
-            formatTeamProposalMessage(next, { runtime: runtimeForTeam }),
-          ].join('\n'));
-        }
+        const proposal = await createFreeformTeamConfigurationAdvanced({ description, runtime: runtimeForTeam, jobId: currentJobId });
+        storePendingTeam(chatSessionStore, chatId, proposal);
+        await sendLong(bot, chatId, formatTeamProposalMessage(proposal, { runtime: runtimeForTeam }));
         return true;
       }
       if (sub === 'refine') {
@@ -633,24 +613,13 @@ export function createTelegramCommandHandler(deps = {}) {
           return true;
         }
         if (!instruction) {
-          await bot.sendMessage(chatId, 'Usage: /team refine <자연어 수정>\n\n선택지 참고: /team options 또는 /help advanced');
+          await bot.sendMessage(chatId, 'Usage: /team refine <자연어 수정>\n\n더 많은 옵션: /team more');
           return true;
         }
         await bot.sendMessage(chatId, '기존 팀 구성을 바탕으로 수정안을 다시 설계하겠습니다. 잠시만 기다려주세요.');
-        try {
-          const next = await refineTeamConfigurationAdvanced({ team: baseTeam, instruction, runtime: runtimeForTeam, jobId: currentJobId });
-          storePendingTeam(chatSessionStore, chatId, next);
-          await sendLong(bot, chatId, formatTeamProposalMessage(next, { runtime: runtimeForTeam }));
-        } catch (error) {
-          const next = refineTeamConfiguration(baseTeam, instruction, { runtime: runtimeForTeam });
-          storePendingTeam(chatSessionStore, chatId, next);
-          await sendLong(bot, chatId, [
-            `⚠️ /team refine planner 경로가 실패해 heuristic fallback으로 수정 draft를 만들었습니다.`,
-            `reason: ${String(error?.message ?? error)}`,
-            '',
-            formatTeamProposalMessage(next, { runtime: runtimeForTeam }),
-          ].join('\n'));
-        }
+        const next = await refineTeamConfigurationAdvanced({ team: baseTeam, instruction, runtime: runtimeForTeam, jobId: currentJobId });
+        storePendingTeam(chatSessionStore, chatId, next);
+        await sendLong(bot, chatId, formatTeamProposalMessage(next, { runtime: runtimeForTeam }));
         return true;
       }
 
@@ -761,7 +730,7 @@ ${buildTeamListMessage({ active_team: applied }, { runtime: runtimeForTeam })}`)
         await bot.sendMessage(chatId, '✅ 팀 구성을 초기화했습니다. 다시 /team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 시작해 주세요.');
         return true;
       }
-      await bot.sendMessage(chatId, '지원되는 /team 명령: suggest, create, refine, expand, apply, requirements, proposal, export, install, pull, push, template, validate, options, reset, modes');
+      await bot.sendMessage(chatId, `알 수 없는 /team 명령입니다.\n\n${TEAM_CORE_HELP_TEXT}`);
       return true;
     }
 
@@ -812,13 +781,18 @@ ${formatWorkspaceFileListText(currentJobId, entries, { scope, limit })}`
       return true;
     }
 
-    if (cmd === "/artifacts" || cmd === "/outputs") {
+    if (cmd === "/outputs") {
+      await bot.sendMessage(chatId, '이제 /outputs 는 제거되었습니다. 결과물은 /artifacts 를 사용해 주세요.');
+      return true;
+    }
+
+    if (cmd === "/artifacts") {
       const currentJobId = resolveLiveJobIdForChat(chatId);
       if (!currentJobId) {
         await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어요. 먼저 /chat 또는 /run으로 job을 시작해 주세요.");
         return true;
       }
-      const legacyMode = cmd === "/outputs";
+      const legacyMode = false;
       const first = String(rest[0] || '').trim().toLowerCase();
       if (legacyMode && first === 'send') {
         await bot.sendMessage(chatId, '이제 자동 첨부 전송은 사용하지 않아요. /artifacts 로 후보를 본 뒤 /send <번호|path> 를 사용해 주세요.');
@@ -843,7 +817,12 @@ ${contractLines.join('\n')}`);
       return true;
     }
 
-    if (cmd === "/send" || cmd === "/sendfile") {
+    if (cmd === "/sendfile") {
+      await bot.sendMessage(chatId, '이제 /sendfile 은 제거되었습니다. /send <번호|path> 를 사용해 주세요.');
+      return true;
+    }
+
+    if (cmd === "/send") {
       const currentJobId = resolveLiveJobIdForChat(chatId);
       if (!currentJobId) {
         await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어요. 먼저 /chat 또는 /run으로 job을 시작해 주세요.");
@@ -916,6 +895,11 @@ size=${formatByteSize(sentBundle.size)}`
       return true;
     }
 
+    if (cmd === "/attach") {
+      await bot.sendMessage(chatId, '이제 /attach 는 제거되었습니다. 파일 업로드는 /upload 를 사용해 주세요.');
+      return true;
+    }
+
     if (cmd === "/chat") {
       const raw = String(args || "").trim();
       if (!raw) {
@@ -944,6 +928,11 @@ size=${formatByteSize(sentBundle.size)}`
             await hydrateSessionTeamStateFromConversationStore({ sessionStore: chatSessionStore, chatId, runtime: runtimeForChat }).catch(() => null);
             teamState = getSessionTeamState(chatSessionStore, chatId);
           } catch {}
+        }
+        if (!teamState.active_team) {
+          await bot.sendMessage(chatId, `현재 활성 팀이 없습니다.
+먼저 /team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 팀을 구성한 뒤 /team apply 후 /chat 을 실행해 주세요.`);
+          return true;
         }
         await sendRouterAckMessage(bot, chatId, { replyToMessageId: msg.message_id });
         if (!parsed.debug) {

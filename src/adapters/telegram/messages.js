@@ -203,7 +203,12 @@ export function createTelegramMessageHandler(deps = {}) {
         );
         return;
       }
-      if (isUploadOnlyCommand) return;
+      if (isUploadOnlyCommand) {
+        if (loweredText === '/attach' || loweredText.startsWith('/attach ')) {
+          await bot.sendMessage(chatId, '업로드는 저장했어요. 다음부터는 /upload 를 사용해 주세요.', replyToMessageOptions(msg));
+        }
+        return;
+      }
     }
 
     if (!text) return;
