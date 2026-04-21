@@ -2,7 +2,7 @@ import {
   isActionApprovalCallbackData,
   handleActionApprovalCallback,
 } from "../../application/approval_flow.js";
-import { applyPendingTeam, getSessionTeamState, storePendingTeam, buildTeamListMessage, formatTeamProposalMessage, buildTeamTransitionGuardrails, formatTeamTransitionGuardrailLines } from '../../application/team_configuration.js';
+import { applyPendingTeam, getSessionTeamState, storePendingTeam, buildTeamListMessage, formatTeamProposalMessage, buildTeamTransitionGuardrails, formatTeamTransitionGuardrailLines, teamConfigChangeRequiresApproval } from '../../application/team_configuration.js';
 import crypto from 'node:crypto';
 import { getPendingInstallProposal, archivePendingInstallProposal, buildInstallProposalPrompt } from '../../application/install_proposal_state.js';
 import { handleTelegramInstallProposalCallback } from './install_proposal_callbacks.js';
@@ -224,7 +224,8 @@ ${contractLines.join('\n')}`);
           const confirmationValid = confirmationState
             && String(confirmationState.key || '').trim() === confirmationKey
             && Date.parse(String(confirmationState.expires_at || '')) > Date.now();
-          if (transitionGuardrails?.destructive_changes_present && !confirmationValid) {
+          const requiresApproval = teamConfigChangeRequiresApproval(teamState?.active_team, teamState?.pending_team);
+          if (requiresApproval && !confirmationValid) {
             chatSessionStore?.upsert?.(chatId, (session) => ({
               ...session,
               pending_team_apply_confirmation: {
@@ -234,9 +235,9 @@ ${contractLines.join('\n')}`);
               },
             }));
             await sendLong(bot, chatId, [
-              '⚠️ pending team 적용 전에 확인이 필요합니다.',
-              '이 변경은 현재 active team의 일부 역할/에이전트/도구 구성을 줄일 수 있습니다.',
-              ...formatTeamTransitionGuardrailLines(transitionGuardrails, { maxWarnings: 5 }),
+              '⚠️ pending team 적용 전에 사용자 승인이 필요합니다.',
+              '현재 active team과 다른 pending team이 준비되어 있습니다.',
+              ...(transitionGuardrails?.warning_count > 0 ? formatTeamTransitionGuardrailLines(transitionGuardrails, { maxWarnings: 5 }) : []),
               '',
               '같은 버튼을 한 번 더 누르면 적용합니다. 다른 변경을 하면 확인은 초기화됩니다.',
             ].join('\n'));

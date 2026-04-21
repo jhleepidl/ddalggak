@@ -2277,6 +2277,87 @@ export async function createFreeformTeamConfigurationAdvanced({ description = ''
   return normalized;
 }
 
+
+export function buildStarterSingleAgentTeamConfiguration({ taskText = '', runtime = null, preferredRole = '', source = 'chat_autostart' } = {}) {
+  const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
+  const cleanTask = clean(taskText);
+  const starterRole = resolvePreferredTeamRole(
+    preferredRole,
+    inferExecutionRoleFromText(cleanTask, { fallback: '' }),
+    hasSoftwareDeliveryIntent(cleanTask) || hasImplementationLikeIntent(cleanTask) ? 'builder' : '',
+    'researcher',
+  );
+  const seen = new Set();
+  const starterAgent = enrichAgentDraft(agentDraft({
+    name: starterRole === 'builder' ? 'Builder' : 'Research Lead',
+    role: starterRole,
+    purpose: cleanTask,
+    provider: starterRole === 'builder' ? 'codex' : 'gemini',
+  }, { seen, taskText: cleanTask || 'starter chat', index: 1 }), buildPlanningContext(cleanTask, effectiveRuntime));
+  return normalizeTeamConfig({
+    team_name: `starter_${starterRole || 'agent'}`,
+    mode: 'scoped_context',
+    composition_mode: 'structured',
+    proposal_mode: 'apply',
+    lock_after_apply: false,
+    agents: [starterAgent],
+    shortcut_policy: normalizeShortcutPolicy(buildDefaultShortcutPolicy()),
+    status: 'active',
+    task_brief: cleanTask,
+    design_prompt: cleanTask,
+    task_archetype: starterRole === 'builder' ? 'implementation' : 'research',
+    runtime_execution: {
+      execution_mode: 'single_compiled',
+      execution_mode_hint: 'starter_single_agent',
+    },
+    planner_metadata: normalizePlannerMetadata({
+      planner_type: 'starter_single_agent',
+      planning_source: source || 'chat_autostart',
+      reasoning_summary: [
+        'no active team was configured, so chat started with a single-agent starter',
+        starterRole === 'builder'
+          ? 'starter role selected as builder from implementation-like intent'
+          : 'starter role selected as research lead for general chat intent',
+      ],
+      adaptive_expansion: {
+        recommendation: 'augment_context',
+        approval_required_for_team_change: true,
+        starter_mode: 'single_agent_bootstrap',
+      },
+    }),
+  }, { runtime: effectiveRuntime });
+}
+
+export function teamConfigChangeRequiresApproval(currentTeam = null, nextTeam = null) {
+  if (!(currentTeam && typeof currentTeam === 'object') || !(nextTeam && typeof nextTeam === 'object')) return false;
+  const stable = (team) => {
+    const row = team && typeof team === 'object' ? validateTeamConfiguration(team, { runtime: null }) : null;
+    if (!row) return null;
+    return {
+      team_name: clean(row.team_name),
+      composition_mode: cleanId(row.composition_mode || 'structured'),
+      task_brief: clean(row.task_brief),
+      task_archetype: cleanId(row.task_archetype || ''),
+      agents: asArray(row.agents).map((agent) => ({
+        agent_id: cleanId(agent.agent_id),
+        name: clean(agent.name),
+        role: cleanId(agent.role),
+        model: clean(agent.model),
+        purpose: clean(agent.purpose),
+        skills: uniqueIds(agent.skills || agent.capabilities || []),
+        attached_skill_ids: uniqueIds(agent.attached_skill_ids || agent.attachedSkillIds || []),
+        provider: cleanId(agent.provider || ''),
+      })),
+      interaction_spec: normalizeInteractionSpec(row.interaction_spec),
+    };
+  };
+  try {
+    return JSON.stringify(stable(currentTeam)) !== JSON.stringify(stable(nextTeam));
+  } catch {
+    return true;
+  }
+}
+
 export function suggestTeamConfiguration({ taskText = '', runtime = null, preferredTaskArchetype = '', currentTeam = null } = {}) {
   const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
   const suggestedName = clean(taskText).slice(0, 36).replace(/\s+/g, '_') || 'team_config';

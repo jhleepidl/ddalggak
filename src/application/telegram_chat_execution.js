@@ -96,7 +96,7 @@ import {
   isExplicitTeamConfigurationIntentMessage,
 } from "./team_intent.js";
 import { buildExplicitTeamReconfigurationActions } from "./team_config_diff.js";
-import { applyPendingTeam, applyTeamConfigurationToRuntime, buildAutoRefineDraftFromStructureConflict, formatTeamProposalMessage, getSessionTeamState, hydrateSessionTeamStateFromConversationStore, storePendingTeam, syncTeamConfigurationToConversationStore, validateTeamConfiguration } from "./team_configuration.js";
+import { applyPendingTeam, applyTeamConfigurationToRuntime, buildAutoRefineDraftFromStructureConflict, buildStarterSingleAgentTeamConfiguration, formatTeamProposalMessage, getSessionTeamState, hydrateSessionTeamStateFromConversationStore, storePendingTeam, syncTeamConfigurationToConversationStore, validateTeamConfiguration } from "./team_configuration.js";
 import { bootstrapTelegramRuntimeSession } from './telegram_runtime_session.js';
 import { resolveRuntimePolicyForRuntime } from './runtime_behavior_resolver.js';
 import { setRuntimeCurrentTurn } from './runtime_session_state.js';
@@ -2984,6 +2984,7 @@ async function runSupervisorChat(
   let patternConflictState = null;
   let temporaryExecutionOverride = null;
   let patternRecoveryState = null;
+  let pendingTeamApprovalNotice = '';
   const sessionAtStart = chatSessionStore.get(chatId);
   let currentTurnAckMessageId = Number(sessionAtStart?.current_turn_ack_message_id || 0);
   if (!(Number.isFinite(currentTurnAckMessageId) && currentTurnAckMessageId > 0)) {
@@ -3009,11 +3010,16 @@ async function runSupervisorChat(
     });
     setRuntimeCurrentTurn(runtime, currentJobId);
     const lockedTeamState = await hydrateSessionTeamStateFromConversationStore({ sessionStore: chatSessionStore, chatId, runtime }).catch(() => getSessionTeamState(chatSessionStore, chatId));
-    const activeTeamConfig = teamConfig && typeof teamConfig === 'object'
+    let activeTeamConfig = teamConfig && typeof teamConfig === 'object'
       ? teamConfig
       : (lockedTeamState?.active_team && typeof lockedTeamState.active_team === 'object' ? lockedTeamState.active_team : null);
     if (!activeTeamConfig) {
-      throw new Error('active team is required before /chat execution');
+      if (isExplicitTeamConfigurationIntentMessage(message)) {
+        throw new Error('이 요청은 team 구성을 직접 지정하는 성격입니다. /team suggest 또는 /team create 로 team을 먼저 정의해 주세요.');
+      }
+      const starterTeam = buildStarterSingleAgentTeamConfiguration({ taskText: message, runtime, source: 'chat_autostart' });
+      storePendingTeam(chatSessionStore, chatId, starterTeam);
+      activeTeamConfig = await applyPendingTeam({ sessionStore: chatSessionStore, chatId, runtime }).catch(() => starterTeam);
     }
     const normalizedActiveTeamConfig = validateTeamConfiguration(activeTeamConfig, { runtime });
     applyTeamConfigurationToRuntime(runtime, normalizedActiveTeamConfig);
@@ -4065,7 +4071,7 @@ async function runSupervisorChat(
           if (baseTeam) {
             const patched = applyInstallProposalActionsToTeam(baseTeam, installProposalState.proposal || {}).team;
             storePendingTeam(chatSessionStore, chatId, patched);
-            autoInstallResumeTeam = await applyPendingTeam({ sessionStore: chatSessionStore, chatId, runtime }).catch(() => patched);
+            pendingTeamApprovalNotice = '🟡 필요한 team 변경을 pending으로 준비했습니다. 검토 후 /team apply confirm 으로 승인해 주세요.';
           }
           const appliedRuntimeSupport = autoInstallRuntimeSupport({ proposal: installProposalState.proposal || {}, jobs, jobId: currentJobId });
           if (runtime && typeof runtime === 'object' && Array.isArray(appliedRuntimeSupport) && appliedRuntimeSupport.length > 0) {
@@ -4082,13 +4088,14 @@ async function runSupervisorChat(
             runtime.availableToolIds = [...toolIds];
             runtime.available_tool_ids = [...toolIds];
           }
-          archivePendingInstallProposal(chatSessionStore, chatId, 'applied_active', {
-            apply_state: 'active',
-            summary: automaticInstallAction.message,
+          setPendingInstallProposal(chatSessionStore, chatId, {
+            ...installProposalState,
+            status: 'installed_pending',
+            apply_state: 'pending',
+            summary: `${automaticInstallAction.message} · team approval required`,
           });
-          autoInstallResumeRequest = installProposalState.resume_request && typeof installProposalState.resume_request === 'object'
-            ? installProposalState.resume_request
-            : null;
+          autoInstallResumeRequest = null;
+          autoInstallResumeTeam = null;
           installProposalState = null;
         } else {
           setPendingInstallProposal(chatSessionStore, chatId, installProposalState);
@@ -4190,6 +4197,12 @@ async function runSupervisorChat(
         ? finalReply
         : `${finalReply}\n\n⚠️ 승인 필요: ${mergedExecution.pendingApproval.reason}\n다음 명령으로 risk를 낮추거나 요청을 분할해 주세요.`)
       : finalReply;
+
+    if (!mergedExecution.pendingApproval && pendingTeamApprovalNotice) {
+      replyText = `${replyText}
+
+${pendingTeamApprovalNotice}`.trim();
+    }
 
     if (!mergedExecution.pendingApproval && routePlan.await_user === true) {
       const hint = String(routePlan.followup_hint || forcedAwaitReason || "").trim();

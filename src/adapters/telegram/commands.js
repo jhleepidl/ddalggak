@@ -10,6 +10,7 @@ import {
   createFreeformTeamConfiguration,
   createFreeformTeamConfigurationAdvanced,
   buildTeamListMessage,
+  buildStarterSingleAgentTeamConfiguration,
   formatSupportedModelLines,
   formatTeamProposalMessage,
   getSessionTeamState,
@@ -21,6 +22,7 @@ import {
   storePendingTeam,
   suggestTeamConfiguration,
   validateTeamConfiguration,
+  teamConfigChangeRequiresApproval,
 } from "../../application/team_configuration.js";
 import { buildTeamBlueprint, installTeamBlueprintToSession, normalizeTeamBlueprint } from '../../application/team_blueprint_runtime.js';
 import { buildTeamInstallProposal, formatTeamInstallProposalMessage } from '../../application/install_proposal.js';
@@ -700,6 +702,22 @@ ${formatTeamProposalMessage(validated, { runtime: runtimeForTeam })}`);
       }
       if (sub === 'apply') {
         try {
+          const confirmApply = /(?:^|\s)confirm(?:\s|$)/i.test(rest || '');
+          const activeTeam = teamState?.active_team || null;
+          const pendingTeam = teamState?.pending_team || null;
+          const requiresApproval = teamConfigChangeRequiresApproval(activeTeam, pendingTeam);
+          if (requiresApproval && !confirmApply) {
+            const guardrails = buildTeamTransitionGuardrails(activeTeam, pendingTeam);
+            await sendLong(bot, chatId, [
+              '⚠️ team 변경 적용 전 승인 확인이 필요합니다.',
+              '현재 active team과 다른 pending team이 준비되어 있습니다.',
+              ...(guardrails?.warning_count > 0 ? formatTeamTransitionGuardrailLines(guardrails, { maxWarnings: 5 }) : []),
+              '',
+              '승인하려면 /team apply confirm',
+              '검토하려면 /team details',
+            ].filter(Boolean).join('\n'));
+            return true;
+          }
           const applied = await applyPendingTeam({ sessionStore: chatSessionStore, chatId, runtime: runtimeForTeam });
           await sendLong(bot, chatId, `✅ 활성 팀 적용 완료
 
@@ -709,7 +727,6 @@ ${buildTeamListMessage({ active_team: applied }, { runtime: runtimeForTeam })}`)
         }
         return true;
       }
-
       if (sub === 'options' || sub === 'roles' || sub === 'patterns' || sub === 'schema') {
         await sendLong(bot, chatId, buildTeamSchemaOptionsText());
         return true;
@@ -929,11 +946,6 @@ size=${formatByteSize(sentBundle.size)}`
             teamState = getSessionTeamState(chatSessionStore, chatId);
           } catch {}
         }
-        if (!teamState.active_team) {
-          await bot.sendMessage(chatId, `현재 활성 팀이 없습니다.
-먼저 /team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 팀을 구성한 뒤 /team apply 후 /chat 을 실행해 주세요.`);
-          return true;
-        }
         await sendRouterAckMessage(bot, chatId, { replyToMessageId: msg.message_id });
         if (!parsed.debug) {
           await chatRunManager.handleIncoming({
@@ -943,7 +955,7 @@ size=${formatByteSize(sentBundle.size)}`
             kind: "normal",
             telegramMessageId: msg.message_id,
             userReplyToMessageId: Number.isFinite(Number(msg?.reply_to_message?.message_id)) ? Number(msg.reply_to_message.message_id) : null,
-            teamConfig: teamState.active_team,
+            teamConfig: teamState.active_team || null,
             chatInfo: {
               chat_id: String(chatId || ""),
               title: String(msg.chat?.title || msg.chat?.username || "").trim(),
@@ -954,7 +966,7 @@ size=${formatByteSize(sentBundle.size)}`
         }
         await runSupervisorChat(bot, chatId, userId, message, {
           debug: parsed.debug,
-          teamConfig: teamState.active_team,
+          teamConfig: teamState.active_team || null,
           chatInfo: {
             chat_id: String(chatId || ""),
             title: String(msg.chat?.title || msg.chat?.username || "").trim(),
