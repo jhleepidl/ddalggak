@@ -206,7 +206,13 @@ export function detectTeamCapabilityGaps({ team = {}, runtime = null, skillRegis
     }
     for (const skillId of uniqueIds(participant.skill_package.skill_ids || [], { max: 12 })) {
       const skill = skillRegistry?.resolve?.(skillId);
-      const requiredFromSkill = mergeUniqueIds(skill?.required_tools || [], skill?.required_tool_ids || []);
+      const adapter = skill?.execution_adapter && typeof skill.execution_adapter === 'object' ? skill.execution_adapter : {};
+      const requiredFromSkill = mergeUniqueIds(
+        skill?.required_tools || [],
+        skill?.required_tool_ids || [],
+        adapter.runtime_capabilities_required || [],
+        adapter.external_tool_requirements || [],
+      );
       for (const toolId of requiredFromSkill) {
         const classified = classifyToolishId(toolId);
         if (classified.kind === 'capability') {
@@ -233,6 +239,19 @@ export function detectTeamCapabilityGaps({ team = {}, runtime = null, skillRegis
           skill_id: skillId,
           detail: `${agentName}의 실행 skill ${skillId} 에 ${classified.canonical_id} external tool이 필요합니다.`,
           suggested_action: inferToolSuggestion(classified.canonical_id),
+        });
+      }
+      for (const requirement of asArray(skill?.credential_requirements)) {
+        const credentialKey = clean(requirement?.key || requirement?.credential_key || requirement?.credentialKey);
+        if (!credentialKey || requirement?.required === false) continue;
+        push({
+          kind: 'missing_credential',
+          severity: 'blocking',
+          agent_name: agentName,
+          credential_key: credentialKey,
+          skill_id: skillId,
+          detail: `${agentName} skill ${skillId} 실행에 credential ${credentialKey} 가 필요합니다.`,
+          suggested_action: '사용 가능한 env binding 또는 secret store binding을 연결해 주세요.',
         });
       }
     }

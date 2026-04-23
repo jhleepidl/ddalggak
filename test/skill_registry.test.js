@@ -79,3 +79,34 @@ test("registry list filters incompatible roles without breaking no-role listing"
   const allVisible = registry.list();
   assert.ok(allVisible.length >= reviewerSkills.length);
 });
+
+
+test("skill registry keeps structured adapter and credential metadata", () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "skill-registry-structured-"));
+  const validDir = path.join(tmpRoot, "kskill_proxy");
+  fs.mkdirSync(validDir, { recursive: true });
+
+  fs.writeFileSync(path.join(validDir, "manifest.json"), JSON.stringify({
+    id: "skill.kskill_proxy.v1",
+    name: "k-skill Proxy Search",
+    execution_adapter: {
+      kind: "http_proxy",
+      endpoint_env: "KSKILL_PROXY_BASE_URL",
+      external_tool_requirements: ["proxy_http"],
+    },
+    credential_requirements: [
+      { key: "KSKILL_PROXY_BASE_URL", required: false, provider: "k-skill-proxy" },
+    ],
+    trust_level: "reviewed",
+    side_effect_level: "read_only",
+  }, null, 2));
+
+  const registry = new SkillRegistry({ skillsDir: tmpRoot });
+  const loaded = registry.load({ refresh: true });
+  assert.equal(loaded.skills.length, 1);
+  const skill = loaded.skills[0];
+  assert.equal(skill.execution_adapter.kind, "http_proxy");
+  assert.equal(skill.credential_requirements[0].key, "KSKILL_PROXY_BASE_URL");
+  assert.equal(skill.trust_level, "reviewed");
+  assert.equal(skill.side_effect_level, "read_only");
+});

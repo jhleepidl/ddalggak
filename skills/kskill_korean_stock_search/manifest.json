@@ -1,0 +1,64 @@
+{
+  "id": "skill.kskill_korean_stock_search.v1",
+  "slug": "kskill_korean_stock_search",
+  "name": "k-skill Korean Stock Search",
+  "version": "1.0.0",
+  "description": "Use the k-skill proxy route to query Korean stock listings and daily prices.",
+  "category": "finance",
+  "kind": "tool",
+  "capability_tags": [
+    "k-skill",
+    "stock",
+    "krx",
+    "search"
+  ],
+  "trigger_terms": [
+    "한국 주식",
+    "krx",
+    "종목 조회",
+    "stock search"
+  ],
+  "compatible_roles": [
+    "researcher",
+    "analyst"
+  ],
+  "required_tools": [
+    "proxy_http"
+  ],
+  "instructions_ref": "SKILL.md",
+  "execution_adapter": {
+    "kind": "http_proxy",
+    "endpoint_env": "KSKILL_PROXY_BASE_URL",
+    "external_tool_requirements": [
+      "proxy_http"
+    ],
+    "install_hint": "Hosted fallback usually works without per-user API keys."
+  },
+  "credential_requirements": [
+    {
+      "key": "KSKILL_PROXY_BASE_URL",
+      "required": false,
+      "provider": "k-skill-proxy",
+      "delivery": "job_env",
+      "scope": "skill:kskill_korean_stock_search"
+    }
+  ],
+  "install_recipe": {
+    "setup_steps": [
+      "Install k-skill or point DDALGGAK_KSKILL_PROXY_BASE_URL to a hosted proxy."
+    ],
+    "verify_commands": [
+      "curl $KSKILL_PROXY_BASE_URL/healthz"
+    ]
+  },
+  "source_package": {
+    "type": "github_repo",
+    "repo_url": "https://github.com/NomaDamas/k-skill",
+    "repo_path": "korean-stock-search",
+    "license": "MIT"
+  },
+  "trust_level": "reviewed",
+  "side_effect_level": "read_only",
+  "visibility": "internal",
+  "status": "active"
+}

@@ -4,6 +4,7 @@ import { buildInstallProposalPrompt, createPendingInstallProposalState, getPendi
 import { formatManifestRequirementLines, normalizeManifestRequirements } from '../../shared/manifest_requirements.js';
 import { applyInstallProposalActionsToTeam, autoInstallRuntimeSupport } from '../../application/tool_install_adapter.js';
 import { getCredentialBindingState, getCredentialCoverageForProposal } from '../../application/credential_binding.js';
+import { syncSkillPackagesFromGoC } from '../../application/skill_package_runtime.js';
 
 function clean(value = '') { return String(value || '').trim(); }
 function parseApplyStateTokens(tokens = []) {
@@ -15,6 +16,23 @@ function getCurrentThreadId(runtime = null) { return clean(runtime?.map?.threadI
 function buildManifestWithSessionState(baseTeam, { runtime = null, applyState = 'pending', source = 'telegram', sessionInstallProposal = null, credentialBindingState = null } = {}) {
   return buildTeamBlueprint(baseTeam, { runtime, applyState, source, installProposalState: sessionInstallProposal, credentialBindingState });
 }
+
+function collectTeamSkillIds(team = {}) {
+  const agents = Array.isArray(team?.agents) ? team.agents : [];
+  const out = [];
+  const seen = new Set();
+  for (const agent of agents) {
+    const items = Array.isArray(agent?.attached_skill_ids) ? agent.attached_skill_ids : (Array.isArray(agent?.attachedSkillIds) ? agent.attachedSkillIds : (Array.isArray(agent?.skills) ? agent.skills : []));
+    for (const raw of items) {
+      const value = clean(raw).toLowerCase();
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      out.push(value);
+    }
+  }
+  return out.slice(0, 24);
+}
+
 
 export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
   const {
@@ -202,7 +220,15 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
       const client = requireGocClient();
       const manifest = await client.getTeamBlueprint({ threadId });
       const installed = await installTeamBlueprintToSession({ sessionStore: chatSessionStore, chatId, manifest, runtime: runtimeForTeam, applyState });
-      await sendLong(bot, chatId, [`✅ GoC thread team blueprint를 가져와 ${applyState === 'active' ? 'active' : 'pending'} team으로 반영했습니다.`, '', formatTeamProposalMessage(installed.team, { runtime: runtimeForTeam })].join('\n'));
+      const syncedSkillIds = collectTeamSkillIds(installed.team);
+      let syncedSkillCount = 0;
+      if (syncedSkillIds.length > 0) {
+        try {
+          const synced = await syncSkillPackagesFromGoC({ client, skillIds: syncedSkillIds, threadId, includeDefaults: true });
+          syncedSkillCount = synced.length;
+        } catch {}
+      }
+      await sendLong(bot, chatId, [`✅ GoC thread team blueprint를 가져와 ${applyState === 'active' ? 'active' : 'pending'} team으로 반영했습니다.${syncedSkillCount > 0 ? `\n- synced skill packages: ${syncedSkillCount}` : ''}`, '', formatTeamProposalMessage(installed.team, { runtime: runtimeForTeam })].join('\n'));
     } catch (e) {
       await bot.sendMessage(chatId, `❌ GoC blueprint pull 실패: ${String(e?.message ?? e)}`);
     }

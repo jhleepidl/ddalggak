@@ -1,0 +1,75 @@
+{
+  "id": "skill.kskill_srt_booking.v1",
+  "slug": "kskill_srt_booking",
+  "name": "k-skill SRT Booking",
+  "version": "1.0.0",
+  "description": "Use k-skill to search/book/cancel SRT reservations through a Python CLI style adapter.",
+  "category": "travel",
+  "kind": "tool",
+  "capability_tags": [
+    "k-skill",
+    "srt",
+    "booking",
+    "travel"
+  ],
+  "trigger_terms": [
+    "srt",
+    "train booking",
+    "기차 예매",
+    "srt 예약"
+  ],
+  "compatible_roles": [
+    "operator",
+    "planner"
+  ],
+  "required_tools": [
+    "shell_exec"
+  ],
+  "instructions_ref": "SKILL.md",
+  "execution_adapter": {
+    "kind": "python_cli",
+    "entrypoint": "python -m srt_booking",
+    "runtime_capabilities_required": [
+      "shell_exec"
+    ],
+    "install_hint": "Install SRTrain and configure credential bindings before first run."
+  },
+  "credential_requirements": [
+    {
+      "key": "KSKILL_SRT_ID",
+      "required": true,
+      "provider": "srt",
+      "delivery": "job_env",
+      "scope": "skill:kskill_srt_booking"
+    },
+    {
+      "key": "KSKILL_SRT_PASSWORD",
+      "required": true,
+      "provider": "srt",
+      "delivery": "job_env",
+      "scope": "skill:kskill_srt_booking"
+    }
+  ],
+  "install_recipe": {
+    "python_packages": [
+      "SRTrain"
+    ],
+    "setup_steps": [
+      "Install k-skill and SRTrain dependencies.",
+      "Bind KSKILL_SRT_ID and KSKILL_SRT_PASSWORD before execution."
+    ],
+    "verify_commands": [
+      "python -m srt_booking --help"
+    ]
+  },
+  "source_package": {
+    "type": "github_repo",
+    "repo_url": "https://github.com/NomaDamas/k-skill",
+    "repo_path": "srt-booking",
+    "license": "MIT"
+  },
+  "trust_level": "reviewed",
+  "side_effect_level": "transactional",
+  "visibility": "internal",
+  "status": "active"
+}

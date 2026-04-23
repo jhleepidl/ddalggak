@@ -1093,6 +1093,134 @@ export class GocClient {
     }
   }
 
+  async listSkills({ threadId = '', includeDefaults = true } = {}) {
+    const query = {};
+    const cleanThreadId = String(threadId || '').trim();
+    if (cleanThreadId) query.thread_id = cleanThreadId;
+    query.include_defaults = includeDefaults ? 'true' : 'false';
+    return await this._requestAny({
+      method: 'GET',
+      attempts: [
+        { path: '/api/skills', query },
+        { path: '/skills', query },
+      ],
+    });
+  }
+
+  async getSkillPackage(skillId, { threadId = '', includeDefaults = true } = {}) {
+    const cleanSkillId = String(skillId || '').trim();
+    if (!cleanSkillId) throw new Error('getSkillPackage requires skillId');
+    const query = {};
+    const cleanThreadId = String(threadId || '').trim();
+    if (cleanThreadId) query.thread_id = cleanThreadId;
+    query.include_defaults = includeDefaults ? 'true' : 'false';
+    return await this._requestAny({
+      method: 'GET',
+      attempts: [
+        { path: `/api/skills/${encodeURIComponent(cleanSkillId)}`, query },
+        { path: `/skills/${encodeURIComponent(cleanSkillId)}`, query },
+      ],
+    });
+  }
+
+  async exportSkillPackage(skillId, { threadId = '', includeDefaults = true } = {}) {
+    const cleanSkillId = String(skillId || '').trim();
+    if (!cleanSkillId) throw new Error('exportSkillPackage requires skillId');
+    const query = {};
+    const cleanThreadId = String(threadId || '').trim();
+    if (cleanThreadId) query.thread_id = cleanThreadId;
+    query.include_defaults = includeDefaults ? 'true' : 'false';
+    return await this._requestAny({
+      method: 'GET',
+      attempts: [
+        { path: `/api/skills/${encodeURIComponent(cleanSkillId)}/export`, query },
+        { path: `/skills/${encodeURIComponent(cleanSkillId)}/export`, query },
+      ],
+    });
+  }
+
+  async installSkillPackage({ threadId = '', skillId = '', package: skillPackage = null, sourceThreadId = '', contextSetId = '' } = {}) {
+    const cleanThreadId = String(threadId || '').trim();
+    if (!cleanThreadId) throw new Error('installSkillPackage requires threadId');
+    if (!String(skillId || '').trim() && !asObject(skillPackage) && !skillPackage) throw new Error('installSkillPackage requires skillId or package');
+    const body = {
+      thread_id: cleanThreadId,
+      skill_id: String(skillId || '').trim() || undefined,
+      package: skillPackage || undefined,
+      source_thread_id: String(sourceThreadId || '').trim() || undefined,
+      context_set_id: String(contextSetId || '').trim() || undefined,
+      auto_activate: true,
+    };
+    return await this._requestAny({
+      method: 'POST',
+      attempts: [
+        { path: '/api/skills/install', body },
+        { path: '/skills/install', body },
+      ],
+    });
+  }
+
+  async publishSkillPackage({ skillId = '', package: skillPackage = null, threadId = '' } = {}) {
+    if (!String(skillId || '').trim() && !asObject(skillPackage) && !skillPackage) throw new Error('publishSkillPackage requires skillId or package');
+    const body = {
+      skill_id: String(skillId || '').trim() || undefined,
+      package: skillPackage || undefined,
+      thread_id: String(threadId || '').trim() || undefined,
+      visibility: 'public',
+    };
+    return await this._requestAny({
+      method: 'POST',
+      attempts: [
+        { path: '/api/skills/publish', body },
+        { path: '/skills/publish', body },
+      ],
+    });
+  }
+
+
+  async getThreadBoard(threadId, { includeRawHistory = true, includeOtherResources = true, limitPerLane = 24 } = {}) {
+    const cleanThreadId = String(threadId || '').trim();
+    if (!cleanThreadId) throw new Error('getThreadBoard requires threadId');
+    const query = {
+      include_raw_history: includeRawHistory ? 'true' : 'false',
+      include_other_resources: includeOtherResources ? 'true' : 'false',
+      limit_per_lane: String(limitPerLane),
+    };
+    return await this._requestAny({
+      method: 'GET',
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/board`, query },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/board`, query },
+      ],
+    });
+  }
+
+  async approveBoardCandidate(threadId, candidateNodeId, { publishToLibrary = false } = {}) {
+    const cleanThreadId = String(threadId || '').trim();
+    const cleanCandidateNodeId = String(candidateNodeId || '').trim();
+    if (!cleanThreadId) throw new Error('approveBoardCandidate requires threadId');
+    if (!cleanCandidateNodeId) throw new Error('approveBoardCandidate requires candidateNodeId');
+    return await this._requestAny({
+      method: 'POST',
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/board/candidates/${encodeURIComponent(cleanCandidateNodeId)}/approve`, body: { publish_to_library: publishToLibrary === true } },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/board/candidates/${encodeURIComponent(cleanCandidateNodeId)}/approve`, body: { publish_to_library: publishToLibrary === true } },
+      ],
+    });
+  }
+
+  async upsertRawHistory(threadId, body = {}) {
+    const cleanThreadId = String(threadId || '').trim();
+    if (!cleanThreadId) throw new Error('upsertRawHistory requires threadId');
+    const payload = asObject(body);
+    return await this._requestAny({
+      method: 'POST',
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/raw_history`, body: payload },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/raw_history`, body: payload },
+      ],
+    });
+  }
   async getRunStudioSummary(threadId, { contextSetId = "" } = {}) {
     const cleanThreadId = String(threadId || "").trim();
     if (!cleanThreadId) throw new Error("getRunStudioSummary requires threadId");

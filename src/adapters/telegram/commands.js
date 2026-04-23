@@ -33,6 +33,7 @@ import { handleTelegramCredentialCommand } from './credential_commands.js';
 import { getCredentialBindingState } from '../../application/credential_binding.js';
 import { buildTeamSchemaOptionsText, buildTeamSchemaOptionsSummaryLines } from '../../shared/team_schema_catalog.js';
 import { buildBenchmarkTeamTemplate, buildBenchmarkTemplateCatalogText } from '../../application/benchmark_team_templates.js';
+import { syncRawHistoryToGoC } from '../../application/goc_raw_history_sync.js';
 
 const HELP_TEXT = [
   "Commands:",
@@ -67,6 +68,8 @@ const ADVANCED_HELP_TEXT = [
   "- /gptprompt <jobId> <question>: GPT 확인용 프롬프트 생성",
   "- /gptapply [jobId]: GPT 응답 적용",
   "- /gptdone: GPT paste 대기 모드 종료",
+  "- /goc history push: GoC Board용 raw history snapshot 동기화",
+  "- /goc candidate approve <nodeId> [publish]: Board candidate 승격",
   "- /commit <jobId> <message>: 작업 결과 커밋",
   "",
   "Legacy aliases removed:",
@@ -896,6 +899,68 @@ size=${formatByteSize(sentBundle.size)}`
         const prefix = cmd === '/sendfile' ? '/sendfile' : '/send';
         await bot.sendMessage(chatId, `❌ ${prefix} 실패: ${clip(String(e?.message ?? e), 260)}`);
       }
+      return true;
+    }
+
+    if (cmd === "/goc") {
+      const sub = String(rest[0] || '').trim().toLowerCase();
+      const action = String(rest[1] || '').trim().toLowerCase();
+      if (sub === 'history' && (!action || action === 'push' || action === 'sync')) {
+        const runtimeForGoc = await requireCurrentRuntime(chatId, userId);
+        const threadId = getCurrentThreadId(runtimeForGoc);
+        if (!threadId || memoryModeWithFallback?.() !== 'goc' || typeof requireGocClient !== 'function') {
+          await bot.sendMessage(chatId, '현재 GoC thread에 연결된 runtime이 없어 raw history를 push 할 수 없습니다.');
+          return true;
+        }
+        try {
+          const client = requireGocClient();
+          const teamState = getSessionTeamState(chatSessionStore, chatId);
+          const synced = await syncRawHistoryToGoC({ client, threadId, chatId, chatSessionStore, runtime: runtimeForGoc, teamState });
+          const derivedCount = Number(synced?.saved?.derived_candidates?.count || 0);
+          await sendLong(bot, chatId, [
+            '✅ raw history snapshot을 GoC Board로 동기화했습니다.',
+            `- thread_id: ${threadId}`,
+            `- stream_key: ${String(synced?.snapshot?.stream_key || '-')}`,
+            `- summary: ${String(synced?.snapshot?.summary || '-')}`,
+            `- derived_candidates: ${derivedCount}`,
+            '- policy: visible in board / raw history excluded from learning',
+            '- structured candidates stay in review lane until promoted',
+          ].join('\n'));
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ /goc history push 실패: ${String(e?.message ?? e)}`);
+        }
+        return true;
+      }
+      if (sub === 'candidate' && action === 'approve') {
+        const runtimeForGoc = await requireCurrentRuntime(chatId, userId);
+        const threadId = getCurrentThreadId(runtimeForGoc);
+        const candidateNodeId = String(rest[2] || '').trim();
+        const publishToLibrary = String(rest[3] || '').trim().toLowerCase() === 'publish';
+        if (!threadId || memoryModeWithFallback?.() !== 'goc' || typeof requireGocClient !== 'function') {
+          await bot.sendMessage(chatId, '현재 GoC thread에 연결된 runtime이 없어 candidate를 승격할 수 없습니다.');
+          return true;
+        }
+        if (!candidateNodeId) {
+          await bot.sendMessage(chatId, 'Usage:\n/goc candidate approve <nodeId> [publish]');
+          return true;
+        }
+        try {
+          const client = requireGocClient();
+          const result = await client.approveBoardCandidate(threadId, candidateNodeId, { publishToLibrary });
+          await sendLong(bot, chatId, [
+            publishToLibrary ? '✅ Board candidate를 승인하고 library로 publish했습니다.' : '✅ Board candidate를 승인하고 현재 thread 자산으로 승격했습니다.',
+            `- thread_id: ${threadId}`,
+            `- candidate_node_id: ${candidateNodeId}`,
+            `- promoted_resource_kind: ${String(result?.promoted_resource_kind || '-')}`,
+            `- promoted_node_id: ${String(result?.promoted_node?.id || '-')}`,
+            `- target_thread_id: ${String(result?.target_thread_id || '-')}`,
+          ].join('\n'));
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ /goc candidate approve 실패: ${String(e?.message ?? e)}`);
+        }
+        return true;
+      }
+      await bot.sendMessage(chatId, `Usage:\n/goc history push\n/goc candidate approve <nodeId> [publish]`);
       return true;
     }
 

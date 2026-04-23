@@ -8,6 +8,8 @@ import {
 } from '../src/application/capability_gap_detector.js';
 import { SkillRegistryV2 as SkillRegistry } from '../src/catalog/skill_registry_v2.js';
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
 
 test('detectCapabilityGapsFromExecution extracts missing tool and credential requirements', () => {
   const gaps = detectCapabilityGapsFromExecution({
@@ -169,4 +171,44 @@ test('detectTeamCapabilityGaps keeps optional file tools advisory for non-build 
   });
 
   assert.equal(gaps.every((gap) => gap.severity === 'advisory'), true);
+});
+
+
+test('detectTeamCapabilityGaps surfaces structured skill package credentials and adapters', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-gap-structured-'));
+  const skillDir = path.join(tmpRoot, 'srt_booking');
+  fs.mkdirSync(skillDir, { recursive: true });
+  fs.writeFileSync(path.join(skillDir, 'manifest.json'), JSON.stringify({
+    id: 'skill.kskill_srt_booking.v1',
+    name: 'k-skill SRT Booking',
+    execution_adapter: {
+      kind: 'python_cli',
+      runtime_capabilities_required: ['shell_exec'],
+    },
+    credential_requirements: [
+      { key: 'KSKILL_SRT_ID', required: true },
+      { key: 'KSKILL_SRT_PASSWORD', required: true },
+    ],
+    side_effect_level: 'transactional',
+  }, null, 2));
+  const registry = new SkillRegistry({ skillsDir: tmpRoot });
+  registry.load({ refresh: true });
+
+  const gaps = detectTeamCapabilityGaps({
+    team: {
+      agents: [
+        {
+          name: 'Travel Operator',
+          role: 'operator',
+          attached_skill_ids: ['skill.kskill_srt_booking.v1'],
+        },
+      ],
+    },
+    runtime: { availableToolIds: [] },
+    skillRegistry: registry,
+  });
+
+  assert.ok(gaps.some((gap) => gap.kind === 'missing_tool' && gap.tool_id === 'shell'));
+  assert.ok(gaps.some((gap) => gap.kind === 'missing_credential' && gap.credential_key === 'KSKILL_SRT_ID'));
+  assert.ok(gaps.some((gap) => gap.kind === 'missing_credential' && gap.credential_key === 'KSKILL_SRT_PASSWORD'));
 });

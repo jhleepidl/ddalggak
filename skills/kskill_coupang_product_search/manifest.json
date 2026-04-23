@@ -1,0 +1,73 @@
+{
+  "id": "skill.kskill_coupang_product_search.v1",
+  "slug": "kskill_coupang_product_search",
+  "name": "k-skill Coupang Product Search",
+  "version": "1.0.0",
+  "description": "Use local MCP or hosted fallback to search Coupang products with optional affiliate-aware links.",
+  "category": "commerce",
+  "kind": "tool",
+  "capability_tags": [
+    "k-skill",
+    "coupang",
+    "shopping",
+    "product_search"
+  ],
+  "trigger_terms": [
+    "쿠팡",
+    "상품 검색",
+    "coupang",
+    "rocket delivery"
+  ],
+  "compatible_roles": [
+    "researcher",
+    "operator",
+    "buyer"
+  ],
+  "required_tools": [
+    "mcp"
+  ],
+  "instructions_ref": "SKILL.md",
+  "execution_adapter": {
+    "kind": "local_mcp",
+    "entrypoint": "coupang-product-search",
+    "external_tool_requirements": [
+      "mcp"
+    ],
+    "install_hint": "Prefer local HMAC credentials when available; otherwise allow hosted fallback."
+  },
+  "credential_requirements": [
+    {
+      "key": "COUPANG_ACCESS_KEY",
+      "required": false,
+      "provider": "coupang",
+      "delivery": "job_env",
+      "scope": "skill:kskill_coupang_product_search"
+    },
+    {
+      "key": "COUPANG_SECRET_KEY",
+      "required": false,
+      "provider": "coupang",
+      "delivery": "job_env",
+      "scope": "skill:kskill_coupang_product_search"
+    }
+  ],
+  "install_recipe": {
+    "setup_steps": [
+      "Install the local MCP adapter or configure hosted fallback.",
+      "Show affiliate disclosure when using deep links or shortlinks."
+    ],
+    "verify_commands": [
+      "coupang-product-search --help"
+    ]
+  },
+  "source_package": {
+    "type": "github_repo",
+    "repo_url": "https://github.com/NomaDamas/k-skill",
+    "repo_path": "coupang-product-search",
+    "license": "MIT"
+  },
+  "trust_level": "experimental",
+  "side_effect_level": "read_only",
+  "visibility": "internal",
+  "status": "active"
+}

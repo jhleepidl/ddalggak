@@ -6,6 +6,9 @@ import { normalizeRoleList } from "../compatibility/legacy_roles.js";
 const VISIBILITY_VALUES = ["public", "internal", "private"];
 const STATUS_VALUES = ["active", "experimental", "deprecated", "disabled"];
 const KIND_VALUES = ["domain", "method", "tool", "policy"];
+const ADAPTER_KIND_VALUES = ["prompt_only", "http_proxy", "python_cli", "local_mcp", "browser_rpa", "shell_command"];
+const TRUST_LEVEL_VALUES = ["trusted", "reviewed", "experimental"];
+const SIDE_EFFECT_LEVEL_VALUES = ["none", "read_only", "external_write", "transactional"];
 
 function asArray(raw) {
   return Array.isArray(raw) ? raw : [];
@@ -134,6 +137,87 @@ function normalizeWeight(raw, fallback = 1) {
   return Math.max(0, Math.min(10, value));
 }
 
+function normalizeStructuredList(raw = [], { max = 32 } = {}) {
+  return asArray(raw).slice(0, max).filter((item) => item && typeof item === "object");
+}
+
+function normalizeAdapterKind(raw = "") {
+  const value = normalizeText(raw, { lower: true });
+  return ADAPTER_KIND_VALUES.includes(value) ? value : "prompt_only";
+}
+
+function normalizeTrustLevel(raw = "") {
+  const value = normalizeText(raw, { lower: true });
+  return TRUST_LEVEL_VALUES.includes(value) ? value : "reviewed";
+}
+
+function normalizeSideEffectLevel(raw = "") {
+  const value = normalizeText(raw, { lower: true });
+  return SIDE_EFFECT_LEVEL_VALUES.includes(value) ? value : "none";
+}
+
+function normalizeExecutionAdapter(raw = {}) {
+  const row = asObject(raw);
+  const runtimeCapabilitiesRequired = normalizeTagList(row.runtime_capabilities_required ?? row.runtimeCapabilitiesRequired ?? row.required_runtime_capabilities ?? []);
+  const externalToolRequirements = normalizeTagList(row.external_tool_requirements ?? row.externalToolRequirements ?? row.required_external_tools ?? []);
+  const adapter = {
+    kind: normalizeAdapterKind(row.kind || row.adapter || row.type || row.mode),
+    transport: normalizeText(row.transport || row.channel || row.protocol, { lower: true }) || undefined,
+    entrypoint: normalizeRef(row.entrypoint || row.command || row.path || row.endpoint) || undefined,
+    endpoint: normalizeRef(row.endpoint || row.url) || undefined,
+    endpoint_env: normalizeText(row.endpoint_env || row.endpointEnv || row.url_env || row.urlEnv, { lower: false }) || undefined,
+    working_directory: normalizeRef(row.working_directory || row.workingDirectory || row.cwd) || undefined,
+    runtime_capabilities_required: runtimeCapabilitiesRequired,
+    external_tool_requirements: externalToolRequirements,
+    install_hint: normalizeText(row.install_hint || row.installHint) || undefined,
+  };
+  if (!adapter.entrypoint && !adapter.endpoint && adapter.kind === 'prompt_only') return { kind: 'prompt_only' };
+  return adapter;
+}
+
+function normalizeCredentialRequirements(raw = []) {
+  const out = [];
+  const seen = new Set();
+  for (const entry of normalizeStructuredList(raw, { max: 32 })) {
+    const key = normalizeText(entry.key || entry.credential_key || entry.credentialKey || entry.env, { lower: false }).toUpperCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      key,
+      kind: normalizeText(entry.kind || entry.type, { lower: true }) || 'api_key',
+      required: entry.required !== false,
+      delivery: normalizeText(entry.delivery || entry.delivery_method || entry.deliveryMethod, { lower: true }) || 'job_env',
+      scope: normalizeText(entry.scope) || undefined,
+      provider: normalizeText(entry.provider) || undefined,
+      env_fallback: normalizeText(entry.env_fallback || entry.envFallback || entry.env, { lower: false }) || undefined,
+      prompt: normalizeText(entry.prompt || entry.description) || undefined,
+    });
+  }
+  return out;
+}
+
+function normalizeInstallRecipe(raw = {}) {
+  const row = asObject(raw);
+  return {
+    setup_steps: normalizeRefList(row.setup_steps ?? row.setupSteps ?? []).slice(0, 64),
+    python_packages: normalizeRefList(row.python_packages ?? row.pythonPackages ?? []).slice(0, 32),
+    npm_packages: normalizeRefList(row.npm_packages ?? row.npmPackages ?? []).slice(0, 32),
+    system_packages: normalizeRefList(row.system_packages ?? row.systemPackages ?? []).slice(0, 32),
+    verify_commands: normalizeRefList(row.verify_commands ?? row.verifyCommands ?? []).slice(0, 32),
+  };
+}
+
+function normalizeSourcePackage(raw = {}) {
+  const row = asObject(raw);
+  return {
+    type: normalizeText(row.type || row.source_type || row.sourceType, { lower: true }) || 'catalog',
+    repo_url: normalizeRef(row.repo_url || row.repoUrl || row.repository) || undefined,
+    repo_path: normalizeRef(row.repo_path || row.repoPath || row.path) || undefined,
+    homepage: normalizeRef(row.homepage) || undefined,
+    license: normalizeText(row.license) || undefined,
+  };
+}
+
 function normalizeTagList(raw = []) {
   return normalizeStringList(raw, { max: 64, lower: true });
 }
@@ -177,7 +261,11 @@ export function normalizeSkillPackage(raw = {}, {
     category: normalizeText(row.category, { lower: true }) || "general",
     kind: normalizeKind(row.kind, row.category),
     tags,
-    required_tools: normalizeTagList(row.required_tools ?? row.requiredTools ?? []),
+    required_tools: normalizeTagList([
+      ...(row.required_tools ?? row.requiredTools ?? []),
+      ...(row.execution_adapter?.runtime_capabilities_required ?? row.executionAdapter?.runtimeCapabilitiesRequired ?? []),
+      ...(row.execution_adapter?.external_tool_requirements ?? row.executionAdapter?.externalToolRequirements ?? []),
+    ]),
     required_context_types: normalizeTagList(
       row.required_context_types ?? row.requiredContextTypes ?? []
     ),
@@ -195,7 +283,13 @@ export function normalizeSkillPackage(raw = {}, {
     default_context_policy: asObject(row.default_context_policy ?? row.defaultContextPolicy),
     validation_policy: asObject(row.validation_policy ?? row.validationPolicy),
     safety_policy: asObject(row.safety_policy ?? row.safetyPolicy),
+    execution_adapter: normalizeExecutionAdapter(row.execution_adapter ?? row.executionAdapter),
+    credential_requirements: normalizeCredentialRequirements(row.credential_requirements ?? row.credentialRequirements ?? []),
+    install_recipe: normalizeInstallRecipe(row.install_recipe ?? row.installRecipe),
+    source_package: normalizeSourcePackage(row.source_package ?? row.sourcePackage),
     ranking_metadata: normalizeRankingMetadata(row.ranking_metadata ?? row.rankingMetadata),
+    trust_level: normalizeTrustLevel(row.trust_level ?? row.trustLevel),
+    side_effect_level: normalizeSideEffectLevel(row.side_effect_level ?? row.sideEffectLevel),
     visibility: normalizeVisibility(row.visibility),
     status: normalizeStatus(row.status),
     manifest_path: normalizeRef(manifestPath) || undefined,
