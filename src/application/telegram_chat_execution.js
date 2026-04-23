@@ -186,6 +186,10 @@ import * as runtimeUiHelpers from "./telegram_status_notifications.js";
 import { runAgentProviderExecution } from "./telegram_provider_execution.js";
 import { createGocTrackingIo } from "./telegram_goc_tracking_io.js";
 
+function normalizeForceMode(raw) {
+  return normalizeForceModeDomain(raw);
+}
+
 function uniqueLowerList(values = []) {
   const seen = new Set();
   const out = [];
@@ -251,6 +255,18 @@ function safeRunWorkspaceDir(jobId = '') {
 
 function sendLong(bot, chatId, text, options = undefined) {
   return runtimeUiHelpers.sendLong(bot, chatId, text, options);
+}
+
+function buildAgentChatUpdateText({ agentId = "", output = "" } = {}) {
+  const cleanAgentId = String(agentId || "").trim().toLowerCase();
+  const displayName = formatChatAgentDisplayName(cleanAgentId, buildTelegramAgentIndex({}))
+    || cleanAgentId
+    || "agent";
+  const preview = clip(String(output || "").trim(), 3500);
+  return [
+    `🤖 ${displayName} 완료`,
+    preview,
+  ].filter(Boolean).join("\n");
 }
 
 function buildRoleAwareContextContract(jobId, { provider = '', roleId = '', maxReadDocs = 4 } = {}) {
@@ -417,6 +433,145 @@ const {
   requestChatInterrupt,
   enqueue,
 } = runtimeState;
+
+const replyAnchorStore = new ReplyAnchorStore({ sessionStore: chatSessionStore });
+
+const {
+  appendChatMessageToGoc,
+  buildContextInfo,
+  invalidateRoleScopedContextCache,
+  sendContextInfo,
+} = runtimeIo;
+
+const {
+  buildGocAgentCreateSpec,
+  composeCapabilitiesForRun,
+  createAgentDraftProposal,
+  createJob,
+  filterPublicBlueprintCandidates,
+  findLatestAgentProfileNodeForPublish,
+  loadSupervisorRuntime,
+  messageRoleOf,
+  nodeResourceKind,
+  nodeTypeKey,
+  normalizeCatalogIds,
+  parseNodeCreatedAtMs,
+  recordMembershipMutationDiagnostic,
+  refreshAgentRegistry,
+  resolveInstallCandidateFromSession,
+  summarizeActiveTypeBreakdown,
+  summarizeSelectionState,
+  updateJobConfigSelection,
+} = gocRuntime;
+
+const {
+  buildApprovalActionSummaryLines,
+  buildAutopilotFollowupMessage,
+  buildAutopilotProgressSummary,
+  buildPendingApprovalPrompt,
+  buildPlanPreviewLines,
+  buildQueuedAgentStatusFromActions,
+  buildRoutedDashboardText,
+  chatActionLabel,
+  collectSuggestedActionsFromOutputs,
+  formatActionAgentLabel,
+  formatRegistryLines,
+  getActionGoal,
+  inferApprovalPreviewReason,
+  mergeSuggestedActions,
+  normalizeDeliverableList,
+  parseAutoSuggestDecision,
+  parseJsonObjectFromText,
+  parseRouterPlan,
+  recommendTeamForTask,
+  rewritePlanToReuseAgents,
+  sanitizeSupervisorRoutePlan,
+  sendAgentStatusTransitionMessage,
+  sendChatGPTPrompt,
+  sendPlanPreviewMessage,
+  sendRouterAckMessage,
+  updateCompletedDeliverablesFromOutputs,
+} = routePlanning;
+
+const {
+  buildChatStatusCard,
+} = runtimeUi;
+
+const {
+  summarizeUserSafeGocFallbackReason,
+} = runtimeUiHelpers;
+
+function buildRuntimeAgentMetadataIndex(runtime = null) {
+  const index = new Map();
+  const pushAgent = (agent = {}) => {
+    if (!agent || typeof agent !== "object") return;
+    const agentId = String(agent.agent_id || agent.agentId || agent.id || agent.name || "").trim().toLowerCase();
+    if (!agentId) return;
+    const current = index.get(agentId) || {};
+    index.set(agentId, {
+      ...current,
+      id: agentId,
+      name: String(agent.name || current.name || agentId).trim(),
+      role: String(agent.role_id || agent.roleId || agent.role || current.role || "").trim().toLowerCase(),
+      provider: String(agent.provider || current.provider || "").trim().toLowerCase(),
+      model: String(agent.model || current.model || "").trim(),
+      skills: Array.isArray(agent.skills) ? agent.skills : (Array.isArray(agent.attached_skill_ids) ? agent.attached_skill_ids : (Array.isArray(agent.attachedSkillIds) ? agent.attachedSkillIds : (Array.isArray(agent.skill_ids) ? agent.skill_ids : (Array.isArray(current.skills) ? current.skills : [])))),
+      purpose: String(agent.slot_purpose || agent.slotPurpose || agent.purpose || current.purpose || "").trim(),
+      agency_overlay: agent.agency_role_overlay || agent.agencyRoleOverlay || current.agency_overlay || undefined,
+      agency_overlay_id: String(agent.agency_role_overlay_id || agent.agencyRoleOverlayId || current.agency_overlay_id || "").trim() || undefined,
+    });
+  };
+  const collect = (source = null) => {
+    if (!source || typeof source !== "object") return;
+    const arrays = [
+      source.agents,
+      source.members,
+      source.runtime_team_snapshot?.agents,
+      source.runtimeTeamSnapshot?.agents,
+      source.runtime_team?.agents,
+      source.runtimeTeam?.agents,
+      source.team_config?.agents,
+      source.teamConfig?.agents,
+      source.active_team?.agents,
+      source.activeTeam?.agents,
+      source.pending_team?.agents,
+      source.pendingTeam?.agents,
+      source.team_plan?.agents,
+      source.teamPlan?.agents,
+      source.job_config?.team?.agents,
+      source.jobConfig?.team?.agents,
+    ];
+    for (const arr of arrays) {
+      if (!Array.isArray(arr)) continue;
+      for (const agent of arr) pushAgent(agent);
+    }
+  };
+  collect(runtime);
+  return index;
+}
+
+function continuousStopSignalsMatched(activeSignals = [], policy = {}) {
+  const configured = uniqueLowerList(policy?.stop_signals || policy?.stopSignals || []);
+  const signals = uniqueLowerList(activeSignals);
+  if (signals.length === 0) return [];
+  if (configured.length === 0) return signals;
+  return signals.filter((signal) => configured.includes(signal));
+}
+
+function buildTurnDeltaFingerprint(outputs = []) {
+  const rows = [];
+  for (const output of Array.isArray(outputs) ? outputs : []) {
+    if (!output || typeof output !== "object") continue;
+    rows.push(JSON.stringify({
+      type: String(output.type || "").trim().toLowerCase(),
+      role: String(output.role || output.role_id || output.roleId || "").trim().toLowerCase(),
+      summary: String(output.summary || "").trim(),
+      text: String(output.text || output.raw_text || output.rawText || "").trim().slice(0, 1000),
+      path: String(output.rel || output.path || output.uri || "").trim(),
+    }));
+  }
+  return rows.join("\n");
+}
 
 function deriveGocMemorySurfaceSpec(doc = {}) {
   return deriveKnowledgeBaseMemorySurfaceSpec(doc);
