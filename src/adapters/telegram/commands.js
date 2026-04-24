@@ -34,6 +34,7 @@ import { getCredentialBindingState } from '../../application/credential_binding.
 import { buildTeamSchemaOptionsText, buildTeamSchemaOptionsSummaryLines } from '../../shared/team_schema_catalog.js';
 import { buildBenchmarkTeamTemplate, buildBenchmarkTemplateCatalogText } from '../../application/benchmark_team_templates.js';
 import { syncRawHistoryToGoC } from '../../application/goc_raw_history_sync.js';
+import { inspectAndPrepareImprovementJob, loadImprovementExecutionContext, runImprovementAutomation, runImprovementCanary, runImprovementTests, markImprovementPromotion } from '../../application/improvement_orchestrator.js';
 
 const HELP_TEXT = [
   "Commands:",
@@ -70,6 +71,11 @@ const ADVANCED_HELP_TEXT = [
   "- /gptdone: GPT paste 대기 모드 종료",
   "- /goc history push: GoC Board용 raw history snapshot 동기화",
   "- /goc candidate approve <nodeId> [publish]: Board candidate 승격",
+  "- /improve <ddalggak|goc> <instruction>: forge 기준 self-improvement job 생성",
+  "- /improve status <jobId>: improvement job 상태 보기",
+  "- /improve test <jobId>: 테스트 재실행",
+  "- /improve canary <jobId>: canary 재실행",
+  "- /improve promote <jobId>: restart/promote hook 실행",
   "- /commit <jobId> <message>: 작업 결과 커밋",
   "",
   "Legacy aliases removed:",
@@ -340,6 +346,57 @@ export function createTelegramCommandHandler(deps = {}) {
 
   function getCurrentThreadId(runtime = null) {
     return String(runtime?.map?.threadId || runtime?.threadId || '').trim();
+  }
+
+  function formatImprovementJobStatus(jobResponse = {}) {
+    const job = jobResponse?.job && typeof jobResponse.job === 'object' ? jobResponse.job : {};
+    const payload = job.payload && typeof job.payload === 'object' ? job.payload : {};
+    const latestReports = payload.latest_reports && typeof payload.latest_reports === 'object' ? payload.latest_reports : {};
+    const lines = [
+      'Improvement job',
+      `- job_id: ${String(payload.job_id || payload.improvement_job_id || job.id || '-')}`,
+      `- target: ${String(payload.improvement_target || '-')}`,
+      `- runtime: ${String(payload.target_runtime || '-')}`,
+      `- phase: ${String(payload.phase || '-')}`,
+      `- status: ${String(payload.status || '-')}`,
+      `- requested_by: ${String(payload.requested_by || '-')}`,
+      `- workspace_root: ${String(payload.workspace_root || '-')}`,
+      `- instruction: ${String(payload.instruction || job.text || '-').slice(0, 240)}`,
+    ];
+    const counts = payload.report_counts && typeof payload.report_counts === 'object' ? payload.report_counts : {};
+    const countPairs = Object.entries(counts).map(([kind, count]) => `${kind}=${count}`);
+    if (countPairs.length) lines.push(`- report_counts: ${countPairs.join(', ')}`);
+    const latestPairs = Object.entries(latestReports).slice(0, 6).map(([kind, value]) => {
+      const row = value && typeof value === 'object' ? value : {};
+      return `- ${kind}: ${String(row.status || '-')}${row.phase ? ` @ ${String(row.phase)}` : ''}${row.summary ? ` · ${String(row.summary).slice(0, 120)}` : ''}`;
+    });
+    if (latestPairs.length) lines.push('', 'Latest reports', ...latestPairs);
+    return lines.join('\n');
+  }
+
+  function formatAutomationSummary(result = {}) {
+    const row = result && typeof result === 'object' ? result : {};
+    const lines = [
+      `- automation_status: ${String(row.status || '-')}`,
+    ];
+    if (row.patch) lines.push(`- patch: ${String(row.patch.status || '-')}`);
+    if (row.tests) lines.push(`- tests: ${String(row.tests.status || '-')}`);
+    if (row.canary) lines.push(`- canary: ${String(row.canary.status || '-')}`);
+    if (row.promotion) lines.push(`- promotion: ${String(row.promotion.status || '-')}`);
+    return lines.join('\n');
+  }
+
+  async function requireGocImprovementContext(chatId, userId) {
+    const runtimeForGoc = await requireCurrentRuntime(chatId, userId);
+    const threadId = getCurrentThreadId(runtimeForGoc);
+    if (!threadId || memoryModeWithFallback?.() !== 'goc' || typeof requireGocClient !== 'function') {
+      return null;
+    }
+    return {
+      runtime: runtimeForGoc,
+      threadId,
+      client: requireGocClient(),
+    };
   }
 
   return async function handleTelegramCommand({ msg, text, chatId, userId }) {
@@ -898,6 +955,176 @@ size=${formatByteSize(sentBundle.size)}`
       } catch (e) {
         const prefix = cmd === '/sendfile' ? '/sendfile' : '/send';
         await bot.sendMessage(chatId, `❌ ${prefix} 실패: ${clip(String(e?.message ?? e), 260)}`);
+      }
+      return true;
+    }
+
+    if (cmd === "/improve") {
+      const sub = String(rest[0] || '').trim().toLowerCase();
+      const context = await requireGocImprovementContext(chatId, userId);
+      if (!context) {
+        await bot.sendMessage(chatId, '현재 GoC thread에 연결된 runtime이 없어 improvement job을 만들 수 없습니다.');
+        return true;
+      }
+      const { runtime: runtimeForGoc, threadId, client } = context;
+      if (sub === 'status') {
+        const jobId = String(rest[1] || '').trim();
+        if (!jobId) {
+          await bot.sendMessage(chatId, 'Usage:\n/improve status <jobId>');
+          return true;
+        }
+        try {
+          const payload = await client.getImprovementJob(threadId, jobId);
+          await sendLong(bot, chatId, formatImprovementJobStatus(payload));
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ /improve status 실패: ${String(e?.message ?? e)}`);
+        }
+        return true;
+      }
+      if (sub === 'test' || sub === 'canary' || sub === 'promote') {
+        const jobId = String(rest[1] || '').trim();
+        if (!jobId) {
+          await bot.sendMessage(chatId, `Usage:\n/improve ${sub} <jobId>`);
+          return true;
+        }
+        try {
+          const loaded = await loadImprovementExecutionContext({ client, threadId, jobId });
+          let stageResult = null;
+          if (sub === 'test') stageResult = await runImprovementTests({ client, threadId, jobId, targetConfig: loaded.targetConfig });
+          if (sub === 'canary') stageResult = await runImprovementCanary({ client, threadId, jobId, targetConfig: loaded.targetConfig });
+          if (sub === 'promote') stageResult = await markImprovementPromotion({ client, threadId, jobId, targetConfig: loaded.targetConfig });
+          const refreshed = await client.getImprovementJob(threadId, jobId);
+          await sendLong(bot, chatId, [
+            `✅ /improve ${sub} 완료`,
+            `- job_id: ${jobId}`,
+            `- status: ${String(stageResult?.status || '-')}`,
+            `- duration_ms: ${String(stageResult?.duration_ms || '-')}`,
+            '',
+            formatImprovementJobStatus(refreshed),
+          ].join('\n'));
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ /improve ${sub} 실패: ${String(e?.message ?? e)}`);
+        }
+        return true;
+      }
+      if (sub === 'execute' || sub === 'run') {
+        const jobId = String(rest[1] || '').trim();
+        const mode = String(rest[2] || '').trim().toLowerCase();
+        if (!jobId) {
+          await bot.sendMessage(chatId, 'Usage:\n/improve execute <jobId> [full]');
+          return true;
+        }
+        try {
+          const teamState = getSessionTeamState(chatSessionStore, chatId);
+          await syncRawHistoryToGoC({ client, threadId, chatId, chatSessionStore, runtime: runtimeForGoc, teamState }).catch(() => null);
+          const board = await client.getThreadBoard(threadId).catch(() => ({ lanes: [], counts: {} }));
+          const loaded = await loadImprovementExecutionContext({ client, threadId, jobId });
+          const automation = await runImprovementAutomation({
+            client,
+            threadId,
+            jobId,
+            targetConfig: loaded.targetConfig,
+            autoPromote: mode === 'full',
+            board,
+          });
+          const refreshed = await client.getImprovementJob(threadId, jobId);
+          await sendLong(bot, chatId, [
+            `✅ /improve execute 완료`,
+            `- job_id: ${jobId}`,
+            formatAutomationSummary(automation),
+            '',
+            formatImprovementJobStatus(refreshed),
+          ].join('\n'));
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ /improve execute 실패: ${String(e?.message ?? e)}`);
+        }
+        return true;
+      }
+      if (sub === 'auto' || sub === 'full') {
+        const targetRepo = String(rest[1] || '').trim().toLowerCase();
+        const instruction = rawArgs.split(/\s+/).slice(2).join(' ').trim();
+        if (targetRepo !== 'ddalggak' && targetRepo !== 'goc') {
+          await bot.sendMessage(chatId, `Usage:\n/improve ${sub} <ddalggak|goc> <instruction>`);
+          return true;
+        }
+        if (!instruction) {
+          await bot.sendMessage(chatId, `Usage:\n/improve ${sub} <ddalggak|goc> <instruction>`);
+          return true;
+        }
+        try {
+          const teamState = getSessionTeamState(chatSessionStore, chatId);
+          await syncRawHistoryToGoC({ client, threadId, chatId, chatSessionStore, runtime: runtimeForGoc, teamState }).catch(() => null);
+          const board = await client.getThreadBoard(threadId).catch(() => ({ lanes: [], counts: {} }));
+          const prepared = await inspectAndPrepareImprovementJob({
+            client,
+            threadId,
+            targetRepo,
+            instruction,
+            requestedBy: `telegram:${userId}` ,
+            board,
+            autoMode: true,
+            autoPromote: sub === 'full',
+          });
+          const automation = await runImprovementAutomation({
+            client,
+            threadId,
+            jobId: prepared.jobId,
+            targetConfig: prepared.targetConfig,
+            autoPromote: sub === 'full',
+            board,
+          });
+          const refreshed = await client.getImprovementJob(threadId, prepared.jobId);
+          await sendLong(bot, chatId, [
+            `✅ /improve ${sub} 완료`,
+            `- job_id: ${prepared.jobId}`,
+            `- target: ${targetRepo}`,
+            `- workspace_root: ${String(prepared.targetConfig.workspace_root || '-')}`,
+            `- target_runtime: ${String(prepared.targetConfig.target_runtime || '-')}`,
+            formatAutomationSummary(automation),
+            '',
+            formatImprovementJobStatus(refreshed),
+          ].join('\n'));
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ /improve ${sub} 실패: ${String(e?.message ?? e)}`);
+        }
+        return true;
+      }
+      if (sub !== 'ddalggak' && sub !== 'goc') {
+        await bot.sendMessage(chatId, 'Usage:\n/improve <ddalggak|goc> <instruction>\n/improve auto <ddalggak|goc> <instruction>\n/improve full <ddalggak|goc> <instruction>\n/improve execute <jobId> [full]\n/improve status <jobId>\n/improve test <jobId>\n/improve canary <jobId>\n/improve promote <jobId>');
+        return true;
+      }
+      const instruction = rawArgs.slice(sub.length).trim();
+      if (!instruction) {
+        await bot.sendMessage(chatId, `Usage:\n/improve ${sub} <instruction>`);
+        return true;
+      }
+      try {
+        const teamState = getSessionTeamState(chatSessionStore, chatId);
+        await syncRawHistoryToGoC({ client, threadId, chatId, chatSessionStore, runtime: runtimeForGoc, teamState }).catch(() => null);
+        const board = await client.getThreadBoard(threadId).catch(() => ({ lanes: [], counts: {} }));
+        const prepared = await inspectAndPrepareImprovementJob({
+          client,
+          threadId,
+          targetRepo: sub,
+          instruction,
+          requestedBy: `telegram:${userId}`,
+          board,
+        });
+        const testResult = await runImprovementTests({ client, threadId, jobId: prepared.jobId, targetConfig: prepared.targetConfig });
+        const canaryResult = await runImprovementCanary({ client, threadId, jobId: prepared.jobId, targetConfig: prepared.targetConfig });
+        const refreshed = await client.getImprovementJob(threadId, prepared.jobId);
+        await sendLong(bot, chatId, [
+          `✅ improvement job 생성: ${prepared.jobId}`,
+          `- target: ${sub}`,
+          `- workspace_root: ${String(prepared.targetConfig.workspace_root || '-')}`,
+          `- target_runtime: ${String(prepared.targetConfig.target_runtime || '-')}`,
+          `- tests: ${String(testResult?.status || '-')}`,
+          `- canary: ${String(canaryResult?.status || '-')}`,
+          '',
+          formatImprovementJobStatus(refreshed),
+        ].join('\n'));
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ /improve 실패: ${String(e?.message ?? e)}`);
       }
       return true;
     }

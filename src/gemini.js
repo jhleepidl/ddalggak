@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { runCommand } from "./proc.js";
+import { recordLlmTrace } from "./application/llm_trace_recorder.js";
 
 const VALID_APPROVAL_MODES = new Set(["default", "auto_edit", "yolo", "plan"]);
 const PLAN_DISABLED_RE = /Approval mode "plan" is only available when experimental\.plan is enabled\./i;
@@ -682,7 +683,24 @@ function withGeminiMeta(result, {
   return out;
 }
 
-export async function runGeminiPrompt({
+function attachGeminiTrace({ result, jobId, surface, agentId, roleId, model, prompt, cwd, workspaceRoot, metadata }) {
+  const trace = recordLlmTrace({
+    jobId,
+    provider: "gemini",
+    surface,
+    agentId,
+    roleId,
+    model,
+    prompt,
+    result,
+    cwd,
+    workspaceRoot,
+    metadata,
+  });
+  return trace ? { ...result, llm_trace_id: trace.trace_id, llm_trace_dir: trace.trace_dir } : result;
+}
+
+async function runGeminiPromptInternal({
   workspaceRoot,
   prompt,
   signal,
@@ -964,4 +982,29 @@ export async function runGeminiPrompt({
       });
     }
   }
+}
+
+
+export async function runGeminiPrompt(options = {}) {
+  const result = await runGeminiPromptInternal(options);
+  const promptText = String(options?.prompt ?? "");
+  const commandCwd = path.resolve(String(options?.cwd || options?.workspaceRoot || process.cwd()).trim() || process.cwd());
+  const traceModel = String(result?.used_model || options?.model || process.env.GEMINI_MODEL_PRIMARY || process.env.GEMINI_MODEL || "auto").trim() || "auto";
+  return attachGeminiTrace({
+    result,
+    jobId: options?.jobId || (String(options?.concurrencyKey || "").startsWith("job:") ? String(options?.concurrencyKey || "").slice(4).trim() : ""),
+    surface: options?.surface || "gemini_prompt",
+    agentId: options?.agentId || "",
+    roleId: options?.roleId || "",
+    model: traceModel,
+    prompt: promptText,
+    cwd: commandCwd,
+    workspaceRoot: commandCwd,
+    metadata: {
+      approval_mode: options?.approvalMode || process.env.GEMINI_APPROVAL_MODE || "default",
+      concurrency_key: options?.concurrencyKey || null,
+      settings_overwrite: options?.settingsOverwrite || null,
+      ...asObject(options?.traceMetadata),
+    },
+  });
 }

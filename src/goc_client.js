@@ -1209,6 +1209,58 @@ export class GocClient {
     });
   }
 
+  async listImprovementJobs(threadId) {
+    const cleanThreadId = String(threadId || '').trim();
+    if (!cleanThreadId) throw new Error('listImprovementJobs requires threadId');
+    return await this._requestAny({
+      method: 'GET',
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/improvement_jobs` },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/improvement_jobs` },
+      ],
+    });
+  }
+
+  async createImprovementJob(threadId, body = {}) {
+    const cleanThreadId = String(threadId || '').trim();
+    if (!cleanThreadId) throw new Error('createImprovementJob requires threadId');
+    return await this._requestAny({
+      method: 'POST',
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/improvement_jobs`, body: asObject(body) },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/improvement_jobs`, body: asObject(body) },
+      ],
+    });
+  }
+
+  async getImprovementJob(threadId, jobId) {
+    const cleanThreadId = String(threadId || '').trim();
+    const cleanJobId = String(jobId || '').trim();
+    if (!cleanThreadId) throw new Error('getImprovementJob requires threadId');
+    if (!cleanJobId) throw new Error('getImprovementJob requires jobId');
+    return await this._requestAny({
+      method: 'GET',
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/improvement_jobs/${encodeURIComponent(cleanJobId)}` },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/improvement_jobs/${encodeURIComponent(cleanJobId)}` },
+      ],
+    });
+  }
+
+  async reportImprovementJob(threadId, jobId, body = {}) {
+    const cleanThreadId = String(threadId || '').trim();
+    const cleanJobId = String(jobId || '').trim();
+    if (!cleanThreadId) throw new Error('reportImprovementJob requires threadId');
+    if (!cleanJobId) throw new Error('reportImprovementJob requires jobId');
+    return await this._requestAny({
+      method: 'POST',
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/improvement_jobs/${encodeURIComponent(cleanJobId)}/report`, body: asObject(body) },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/improvement_jobs/${encodeURIComponent(cleanJobId)}/report`, body: asObject(body) },
+      ],
+    });
+  }
+
   async upsertRawHistory(threadId, body = {}) {
     const cleanThreadId = String(threadId || '').trim();
     if (!cleanThreadId) throw new Error('upsertRawHistory requires threadId');
