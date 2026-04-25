@@ -477,7 +477,7 @@ sudo systemctl status telegram-orchestrator
 - `/files [uploads|workspace|all] [limit]` : workspace 파일 목록 조회
 - `/artifacts [limit]` : 최근 산출물 후보 목록 조회
 - `/send <번호|path>` : 요청한 파일 1개를 Telegram 첨부로 전송
-- `/outputs [limit]`, `/sendfile <relative_path>` : legacy alias
+- `/outputs`, `/sendfile` : 제거된 legacy alias입니다. 봇은 `/artifacts`, `/send` 사용 안내만 반환합니다.
 
 ### 6) GoC 명령
 - `/agents` : 현재 preset catalog / team view / preference 상태 출력

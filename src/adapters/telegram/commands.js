@@ -34,7 +34,7 @@ import { getCredentialBindingState } from '../../application/credential_binding.
 import { buildTeamSchemaOptionsText, buildTeamSchemaOptionsSummaryLines } from '../../shared/team_schema_catalog.js';
 import { buildBenchmarkTeamTemplate, buildBenchmarkTemplateCatalogText } from '../../application/benchmark_team_templates.js';
 import { syncRawHistoryToGoC } from '../../application/goc_raw_history_sync.js';
-import { inspectAndPrepareImprovementJob, loadImprovementExecutionContext, runImprovementAutomation, runImprovementCanary, runImprovementTests, markImprovementPromotion } from '../../application/improvement_orchestrator.js';
+import { inspectAndPrepareImprovementJob, loadImprovementExecutionContext, runImprovementAutomation, runImprovementCanary, runImprovementEvalGate, runImprovementReview, runImprovementRollback, runImprovementTests, markImprovementPromotion } from '../../application/improvement_orchestrator.js';
 
 const HELP_TEXT = [
   "Commands:",
@@ -869,12 +869,6 @@ ${formatWorkspaceFileListText(currentJobId, entries, { scope, limit })}`
         await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어요. 먼저 /chat 또는 /run으로 job을 시작해 주세요.");
         return true;
       }
-      const legacyMode = false;
-      const first = String(rest[0] || '').trim().toLowerCase();
-      if (legacyMode && first === 'send') {
-        await bot.sendMessage(chatId, '이제 자동 첨부 전송은 사용하지 않아요. /artifacts 로 후보를 본 뒤 /send <번호|path> 를 사용해 주세요.');
-        return true;
-      }
       const limit = parseClampedInt(rest[0], 12, { min: 1, max: 24 });
       const artifactIndex = refreshArtifactIndex(currentJobId, { maxFiles: limit });
       let runtime = null;
@@ -884,8 +878,7 @@ ${formatWorkspaceFileListText(currentJobId, entries, { scope, limit })}`
         } catch {}
       }
       const contract = resolveArtifactDeliveryContract(currentJobId, runtime);
-      const prefix = legacyMode ? '📎 artifacts (legacy /outputs alias)' : '📎 artifacts';
-      const sections = [`${prefix}
+      const sections = [`📎 artifacts
 ${formatArtifactIndexText(currentJobId, artifactIndex, { limit })}`];
       const contractLines = formatArtifactDeliveryContractLines(contract);
       if (contractLines.length > 0) sections.push(`publish contract
@@ -907,7 +900,7 @@ ${contractLines.join('\n')}`);
       }
       const selection = String(args || '').trim();
       if (!selection) {
-        await bot.sendMessage(chatId, cmd === '/sendfile' ? 'Usage: /sendfile <relative_path>' : 'Usage: /send <번호|path>\n또는 /send bundle <번호,번호|path,...>');
+        await bot.sendMessage(chatId, 'Usage: /send <번호|path>\n또는 /send bundle <번호,번호|path,...>');
         return true;
       }
       try {
@@ -919,7 +912,7 @@ ${contractLines.join('\n')}`);
           } catch {}
         }
         const contract = resolveArtifactDeliveryContract(currentJobId, runtime);
-        const bundle = cmd === '/send' ? parseArtifactBundleSelection(selection) : null;
+        const bundle = parseArtifactBundleSelection(selection);
         if (bundle) {
           if (!sendArtifactBundle) throw new Error('bundle send is not available');
           const sentBundle = await sendArtifactBundle(bot, chatId, currentJobId, bundle.items, {
@@ -953,8 +946,7 @@ size=${formatByteSize(sentBundle.size)}`
         }
         await bot.sendMessage(chatId, messageLines.join('\n'));
       } catch (e) {
-        const prefix = cmd === '/sendfile' ? '/sendfile' : '/send';
-        await bot.sendMessage(chatId, `❌ ${prefix} 실패: ${clip(String(e?.message ?? e), 260)}`);
+        await bot.sendMessage(chatId, `❌ /send 실패: ${clip(String(e?.message ?? e), 260)}`);
       }
       return true;
     }
@@ -981,7 +973,7 @@ size=${formatByteSize(sentBundle.size)}`
         }
         return true;
       }
-      if (sub === 'test' || sub === 'canary' || sub === 'promote') {
+      if (sub === 'test' || sub === 'canary' || sub === 'review' || sub === 'gate' || sub === 'promote' || sub === 'rollback') {
         const jobId = String(rest[1] || '').trim();
         if (!jobId) {
           await bot.sendMessage(chatId, `Usage:\n/improve ${sub} <jobId>`);
@@ -992,7 +984,10 @@ size=${formatByteSize(sentBundle.size)}`
           let stageResult = null;
           if (sub === 'test') stageResult = await runImprovementTests({ client, threadId, jobId, targetConfig: loaded.targetConfig });
           if (sub === 'canary') stageResult = await runImprovementCanary({ client, threadId, jobId, targetConfig: loaded.targetConfig });
+          if (sub === 'review') stageResult = await runImprovementReview({ client, threadId, jobId, targetConfig: loaded.targetConfig });
+          if (sub === 'gate') stageResult = await runImprovementEvalGate({ client, threadId, jobId, targetConfig: loaded.targetConfig });
           if (sub === 'promote') stageResult = await markImprovementPromotion({ client, threadId, jobId, targetConfig: loaded.targetConfig });
+          if (sub === 'rollback') stageResult = await runImprovementRollback({ client, threadId, jobId, targetConfig: loaded.targetConfig });
           const refreshed = await client.getImprovementJob(threadId, jobId);
           await sendLong(bot, chatId, [
             `✅ /improve ${sub} 완료`,
@@ -1090,7 +1085,7 @@ size=${formatByteSize(sentBundle.size)}`
         return true;
       }
       if (sub !== 'ddalggak' && sub !== 'goc') {
-        await bot.sendMessage(chatId, 'Usage:\n/improve <ddalggak|goc> <instruction>\n/improve auto <ddalggak|goc> <instruction>\n/improve full <ddalggak|goc> <instruction>\n/improve execute <jobId> [full]\n/improve status <jobId>\n/improve test <jobId>\n/improve canary <jobId>\n/improve promote <jobId>');
+        await bot.sendMessage(chatId, 'Usage:\n/improve <ddalggak|goc> <instruction>\n/improve auto <ddalggak|goc> <instruction>\n/improve full <ddalggak|goc> <instruction>\n/improve execute <jobId> [full]\n/improve status <jobId>\n/improve test <jobId>\n/improve canary <jobId>\n/improve review <jobId>\n/improve gate <jobId>\n/improve promote <jobId>\n/improve rollback <jobId>');
         return true;
       }
       const instruction = rawArgs.slice(sub.length).trim();

@@ -1,4 +1,5 @@
 import { clip } from '../../textutil.js';
+import { buildAgencyFocusSummary } from '../../application/agency_focus.js';
 import { formatSkillLabels, humanizeModel } from '../../application/team_presentation.js';
 import { buildTeamInstallProposal } from '../../application/install_proposal.js';
 import {
@@ -239,6 +240,7 @@ export function buildRoutedDashboardText({ actions = [], agentStatus = {}, actio
 
 export function buildCompactRoutedDashboardText({ actions = [], agentStatus = {}, agentIndex = new Map(), routeReadiness = "", routeReason = "" } = {}) {
   const index = asMap(agentIndex);
+  const agencySummary = buildAgencyFocusSummary({ actions, agentIndex: index, routeReadiness, routeReason });
   const agentLabels = [];
   const seen = new Set();
   let backendOnlyCount = 0;
@@ -278,19 +280,22 @@ export function buildCompactRoutedDashboardText({ actions = [], agentStatus = {}
   if (runningCount > 0) statusSummaryParts.push(`running ${runningCount}`);
   if (queuedCount > 0) statusSummaryParts.push(`queued ${queuedCount}`);
   if (doneCount > 0) statusSummaryParts.push(`done ${doneCount}`);
+  const agencyLines = Array.isArray(agencySummary.lines) ? agencySummary.lines : [];
   const lines = [
     '🧭 이번 턴 계획',
     `- 핵심 agent: ${compactAgents || '(none)'}${overflow > 0 ? ` 외 ${overflow}` : ''}`,
     `- 실행 방식: ${pattern}`,
     `- 단계 수: ${asArray(actions).length}`,
     `- 상태: ${statusSummaryParts.join(' · ') || 'queued'}`,
+    '',
+    '🧩 Agent 협업 관찰',
+    ...agencyLines.slice(0, 5),
   ];
-  if (backendOnlyCount > 0) lines.push(`- 내부 준비 단계: ${backendOnlyCount}`);
-  if (String(routeReadiness || '').trim()) lines.push(`- 라우팅 준비: ${String(routeReadiness || '').trim()}`);
-  if (String(routeReason || '').trim()) lines.push(`- 선택 근거: ${String(routeReason || '').trim()}`);
-  lines.push('- 세부 단계는 버튼 또는 /status full');
+  if (backendOnlyCount > 0 && !agencyLines.some((line) => String(line || '').includes('숨긴 내부 단계'))) lines.push(`- 숨긴 내부 단계: ${backendOnlyCount}`);
+  lines.push('- GoC Run Studio에서 agent 간 handoff/review 흐름 확인');
   return lines.join('\n');
 }
+
 
 export function buildPreviewAgentIndex(options = {}) {
   return buildPreviewAgentDisplayIndex(options);

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 
 function clean(value = '') {
   return String(value || '').trim();
@@ -139,7 +139,9 @@ export function resolveImprovementTargetConfig(target = '', overrides = {}) {
   const promoteCommand = clean(overrides.promoteCommand)
     || envFirst(envKeyList(cleanTarget, 'PROMOTE_CMD'))
     || restartCommand;
+  const rollbackCommand = clean(overrides.rollbackCommand) || envFirst(envKeyList(cleanTarget, 'ROLLBACK_CMD'));
   const patchCommand = clean(overrides.patchCommand) || envFirst(envKeyList(cleanTarget, 'PATCH_CMD'));
+  const reviewCommand = clean(overrides.reviewCommand) || envFirst(envKeyList(cleanTarget, 'REVIEW_CMD'));
   const autoPromote = typeof overrides.autoPromote === 'boolean'
     ? overrides.autoPromote
     : parseBooleanLike(envFirst(envKeyList(cleanTarget, 'AUTO_PROMOTE')), false);
@@ -147,6 +149,26 @@ export function resolveImprovementTargetConfig(target = '', overrides = {}) {
     clean(overrides.patchTimeoutMs) || envFirst(envKeyList(cleanTarget, 'PATCH_TIMEOUT_MS')),
     600000,
     { min: 5000, max: 3600000 },
+  );
+  const reviewTimeoutMs = parsePositiveInteger(
+    clean(overrides.reviewTimeoutMs) || envFirst(envKeyList(cleanTarget, 'REVIEW_TIMEOUT_MS')),
+    300000,
+    { min: 5000, max: 1800000 },
+  );
+  const maxChangedFiles = parsePositiveInteger(
+    clean(overrides.maxChangedFiles) || envFirst(envKeyList(cleanTarget, 'MAX_CHANGED_FILES')),
+    40,
+    { min: 1, max: 1000 },
+  );
+  const requireReview = typeof overrides.requireReview === 'boolean'
+    ? overrides.requireReview
+    : parseBooleanLike(envFirst(envKeyList(cleanTarget, 'REQUIRE_REVIEW')), false);
+  const promoteAllowNeedsReview = typeof overrides.promoteAllowNeedsReview === 'boolean'
+    ? overrides.promoteAllowNeedsReview
+    : parseBooleanLike(envFirst(envKeyList(cleanTarget, 'PROMOTE_ALLOW_NEEDS_REVIEW')), false);
+  const forbiddenPathPatterns = parseCommandList(
+    clean(overrides.forbiddenPathPatterns) || envFirst(envKeyList(cleanTarget, 'FORBIDDEN_PATHS')) || envFirst(['SELF_IMPROVE_FORBIDDEN_PATHS']),
+    [],
   );
   const inspectPaths = parseCommandList(
     clean(overrides.inspectPaths) || envFirst(envKeyList(cleanTarget, 'INSPECT_PATHS')),
@@ -162,8 +184,15 @@ export function resolveImprovementTargetConfig(target = '', overrides = {}) {
     canary_commands: canaryCommands,
     restart_command: restartCommand,
     promote_command: promoteCommand,
+    rollback_command: rollbackCommand,
     patch_command: patchCommand,
+    review_command: reviewCommand,
     patch_timeout_ms: patchTimeoutMs,
+    review_timeout_ms: reviewTimeoutMs,
+    max_changed_files: maxChangedFiles,
+    require_review: requireReview === true,
+    promote_allow_needs_review: promoteAllowNeedsReview === true,
+    forbidden_path_patterns: forbiddenPathPatterns,
     auto_promote: autoPromote === true,
     inspect_paths: inspectPaths,
   };
@@ -236,58 +265,33 @@ export async function runShellCommand(command = '', { cwd = '', timeoutMs = 3000
     };
   }
   const started = Date.now();
-  return await new Promise((resolve) => {
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    const child = spawn('/bin/bash', ['-lc', cleanCommand], {
-      cwd: clean(cwd) || undefined,
-      env: { ...process.env, ...env },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const timer = setTimeout(() => {
-      if (settled) return;
-      child.kill('SIGTERM');
-      stderr += `${stderr ? '\n' : ''}timeout after ${timeoutMs}ms`;
-    }, Math.max(500, Number(timeoutMs || 300000)));
-    child.stdout.on('data', (chunk) => {
-      stdout += String(chunk || '');
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += String(chunk || '');
-    });
-    child.on('error', (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({
-        ok: false,
-        command: cleanCommand,
-        cwd: clean(cwd) || undefined,
-        exit_code: null,
-        signal: null,
-        duration_ms: Date.now() - started,
-        stdout: clip(stdout, 12000),
-        stderr: clip(`${stderr ? `${stderr}\n` : ''}${error?.message || String(error)}`, 12000),
-      });
-    });
-    child.on('close', (code, signal) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({
-        ok: Number(code) === 0,
-        command: cleanCommand,
-        cwd: clean(cwd) || undefined,
-        exit_code: Number.isInteger(code) ? Number(code) : null,
-        signal: clean(signal) || null,
-        duration_ms: Date.now() - started,
-        stdout: clip(stdout, 12000),
-        stderr: clip(stderr, 12000),
-      });
-    });
+  const effectiveTimeoutMs = Math.max(500, Number(timeoutMs || 300000));
+  const result = spawnSync('/bin/bash', ['-lc', cleanCommand], {
+    cwd: clean(cwd) || undefined,
+    env: { ...process.env, GIT_PAGER: 'cat', PAGER: 'cat', ...env },
+    encoding: 'utf8',
+    timeout: effectiveTimeoutMs,
+    maxBuffer: 1024 * 1024 * 16,
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
+  const timedOut = result.error?.code === 'ETIMEDOUT';
+  const stderrText = [
+    String(result.stderr || ''),
+    timedOut ? `timeout after ${effectiveTimeoutMs}ms` : '',
+    result.error && !timedOut && !result.stderr ? clean(result.error.message) : '',
+  ].filter(Boolean).join('\n');
+  return {
+    ok: !result.error && Number(result.status || 0) === 0,
+    command: cleanCommand,
+    cwd: clean(cwd) || undefined,
+    exit_code: Number.isInteger(result.status) ? Number(result.status) : null,
+    signal: clean(result.signal) || (timedOut ? 'SIGTERM' : null),
+    duration_ms: Date.now() - started,
+    stdout: clip(String(result.stdout || ''), 12000),
+    stderr: clip(stderrText, 12000),
+  };
 }
+
 
 export async function runCommandSequence(commands = [], options = {}) {
   const list = asArray(commands).map((entry) => clean(entry)).filter(Boolean);
@@ -341,6 +345,8 @@ function normalizeReportRows(reports = []) {
       status: clean(payload.status),
       summary: clip(payload.summary, 400),
       preview_text: clip(row.text || '', 4000),
+      payload: asObject(payload.payload),
+      metrics: asObject(payload.metrics),
       created_at: clean(row.created_at),
     };
   });
@@ -420,55 +426,48 @@ async function readGitOutput(workspaceRoot = '', command = '') {
 
 export async function collectWorkspaceDiff({ workspaceRoot = '' } = {}) {
   const root = clean(workspaceRoot);
-  if (!root) {
-    return {
-      ok: false,
-      workspace_root: root,
-      git_available: false,
-      branch: '',
-      head: '',
-      status_text: '',
-      diff_stat: '',
-      diff_patch: '',
-      changed_files: [],
-      changed_file_count: 0,
-    };
-  }
-  const gitProbe = await runShellCommand('git rev-parse --is-inside-work-tree', { cwd: root });
-  if (!gitProbe.ok || clean(gitProbe.stdout).toLowerCase() !== 'true') {
-    return {
-      ok: false,
-      workspace_root: root,
-      git_available: false,
-      branch: '',
-      head: '',
-      status_text: '',
-      diff_stat: '',
-      diff_patch: '',
-      changed_files: [],
-      changed_file_count: 0,
-    };
-  }
-  const branch = await readGitOutput(root, 'git rev-parse --abbrev-ref HEAD');
-  const head = await readGitOutput(root, 'git rev-parse HEAD');
-  const statusText = await readGitOutput(root, 'git status --short');
-  const diffStat = await readGitOutput(root, 'git diff --stat --no-ext-diff');
-  const diffPatch = await readGitOutput(root, 'git diff --no-ext-diff --unified=1');
+  const empty = {
+    ok: false,
+    workspace_root: root,
+    git_available: false,
+    branch: '',
+    head: '',
+    status_text: '',
+    diff_stat: '',
+    diff_patch: '',
+    changed_files: [],
+    changed_file_count: 0,
+  };
+  if (!root) return empty;
+
+  // Keep this probe intentionally single-process. Some forge/container environments
+  // have shown flaky hangs when multiple git child processes are spawned in quick
+  // succession from the long-running Telegram runtime. The status output is enough
+  // for promotion gates, changed-file detection, and reviewer scoping.
+  const statusResult = await runShellCommand('git status --short --branch', { cwd: root });
+  if (!statusResult.ok) return { ...empty, status_text: clip(statusResult.stderr || statusResult.stdout, 12000) };
+
+  const statusText = clean(statusResult.stdout);
+  const lines = statusText.split(/\r?\n/).filter(Boolean);
+  const branchLine = lines.find((line) => line.startsWith('## ')) || '';
+  const branch = clean(branchLine.replace(/^##\s*/, '').split('...')[0]);
   const changedFiles = Array.from(new Set(
-    statusText
-      .split(/\r?\n/)
+    lines
+      .filter((line) => !line.startsWith('## '))
       .map((line) => line.slice(3).trim())
+      .map((file) => file.includes(' -> ') ? file.split(' -> ').pop().trim() : file)
       .filter(Boolean),
   ));
+  const changedSummary = lines.filter((line) => !line.startsWith('## ')).join('\n');
   return {
     ok: true,
     workspace_root: root,
     git_available: true,
     branch,
-    head,
+    head: '',
     status_text: clip(statusText, 12000),
-    diff_stat: clip(diffStat, 12000),
-    diff_patch: clip(diffPatch, 12000),
+    diff_stat: clip(changedSummary, 12000),
+    diff_patch: '',
     changed_files: changedFiles.slice(0, 256),
     changed_file_count: changedFiles.length,
   };

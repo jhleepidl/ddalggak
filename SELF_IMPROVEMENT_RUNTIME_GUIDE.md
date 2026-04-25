@@ -2,6 +2,21 @@
 
 This runtime can now run a **fully automated forge loop** from Telegram.
 
+
+## Recommended current operating mode
+
+If the runtime is still being stabilized, prefer **trace-first manual improvement** instead of fully automated self-improvement.
+
+Recommended flow:
+
+1. Keep `LLM_TRACE_ENABLED=true` in the stable Telegram runtime.
+2. Use the Telegram bot normally and reproduce the problem.
+3. Create a trace handoff bundle with `node scripts/trace_handoff_bundle.js --job-id <jobId>`.
+4. Upload the bundle to ChatGPT and patch the code manually.
+5. Run tests/canary manually before promoting.
+
+See `TRACE_HANDOFF_GUIDE.md` for the exact files to share and the files that must never be uploaded.
+
 ## Flow
 
 1. `/improve auto ddalggak <instruction>` or `/improve auto goc <instruction>`
@@ -92,3 +107,49 @@ Each `*_CMD` can contain multiple shell commands separated by `;;`.
 - `auto` stops after patch/test/canary and leaves the job in `ready_for_promote` unless auto-promote is enabled.
 - `full` runs the same loop and then executes the configured promote command.
 - Raw history remains visible in GoC, but improvement artifacts are marked `learning_excluded` and `promotion_blocked` so they do not contaminate skill/team learning layers.
+
+## Codex model policy
+
+For manual trace-first development, keep `SELF_IMPROVE_*_PATCH_CMD` disabled. If
+you later enable Codex patching, the patch script now supports model routing via
+these environment variables:
+
+```bash
+SELF_IMPROVE_CODEX_MODEL_POLICY=balanced
+SELF_IMPROVE_CODEX_AUTH_MODE=auto
+SELF_IMPROVE_CODEX_FRONTIER_MODEL=gpt-5.5
+SELF_IMPROVE_CODEX_API_MODEL=gpt-5.4
+SELF_IMPROVE_CODEX_MINI_MODEL=gpt-5.4-mini
+SELF_IMPROVE_CODEX_FALLBACK_MODEL=gpt-5.4
+SELF_IMPROVE_CODEX_FALLBACK_ON_MODEL_ERROR=true
+```
+
+Recommended usage:
+
+- `balanced` for normal use. It routes documentation/wording-only work to
+  `gpt-5.4-mini` and normal/complex code patches to `gpt-5.5` when available.
+- `quality` for difficult debugging, runtime, Telegram, GoC, rollback, auth, or
+  integration work.
+- `economy` for cheap documentation/comment/test-name changes.
+- `api_key` or `SELF_IMPROVE_CODEX_AUTH_MODE=api_key` for CI/shared servers that
+  authenticate Codex with an API key.
+- `SELF_IMPROVE_CODEX_MODEL=<model>` when you want a hard model pin for
+  reproducibility.
+
+Use dry-run mode to check selection without running Codex:
+
+```bash
+SELF_IMPROVE_CODEX_DRY_RUN=true \
+SELF_IMPROVE_JOB_ID=dryrun \
+SELF_IMPROVE_WORKSPACE_ROOT=/srv/ddalggak-forge \
+SELF_IMPROVE_INSTRUCTION_PATH=/tmp/instruction.txt \
+SELF_IMPROVE_MANIFEST_PATH=/tmp/manifest.json \
+SELF_IMPROVE_REPORTS_PATH=/tmp/reports.json \
+./scripts/self_improve/patch-with-codex.sh ddalggak
+```
+
+The decision is also written to:
+
+```text
+.self_improve/jobs/<jobId>/codex-model-decision.json
+```

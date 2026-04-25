@@ -11,6 +11,12 @@ import {
   runShellCommand,
 } from './improvement_runtime.js';
 import { summarizeLlmTraceIndex } from './llm_trace_recorder.js';
+import {
+  createImprovementDebugBundle,
+  evaluateImprovementGate,
+  formatEvalGatePreview,
+  inferReviewRisk,
+} from './improvement_debug_bundle.js';
 
 function clean(value = '') {
   return String(value || '').trim();
@@ -41,6 +47,8 @@ function summarizeReportList(reports = []) {
       status: clean(payload.status),
       summary: clip(payload.summary, 240),
       preview_text: clip(row.text || '', 1600),
+      payload: asObject(payload.payload),
+      metrics: asObject(payload.metrics),
       created_at: clean(row.created_at),
     };
   });
@@ -190,6 +198,174 @@ export async function runImprovementCanary({ client, threadId = '', jobId = '', 
   return result;
 }
 
+function latestReportByKind(reports = [], kind = '') {
+  const cleanKind = clean(kind);
+  return asArray(reports).find((entry) => clean(asObject(entry).payload?.resource_kind) === cleanKind) || null;
+}
+
+function nestedReportPayload(report = {}) {
+  return asObject(asObject(report).payload?.payload || asObject(report).payload);
+}
+
+function findLatestBundleRoot(reports = []) {
+  for (const kind of ['code_diff', 'patch_plan', 'review_report', 'eval_gate']) {
+    const reportRow = latestReportByKind(reports, kind);
+    const payload = nestedReportPayload(reportRow || {});
+    const bundleRoot = clean(payload.bundle_root || payload.bundleRoot);
+    if (bundleRoot) return bundleRoot;
+  }
+  return '';
+}
+
+async function ensureImprovementDebugBundleForReview({ workspaceRoot = '', jobId = '', targetConfig = {}, jobPayload = {}, reports = [] } = {}) {
+  const existingRoot = findLatestBundleRoot(reports);
+  if (existingRoot) {
+    return {
+      bundle_root: existingRoot,
+      debug_dir: `${existingRoot}/debug`,
+      review_input_path: `${existingRoot}/debug/review_input.md`,
+      created: false,
+    };
+  }
+  const root = clean(workspaceRoot || targetConfig.workspace_root);
+  if (!root) {
+    return { bundle_root: '', debug_dir: '', review_input_path: '', created: false };
+  }
+  const bundle = createImprovementContextBundle({
+    workspaceRoot: root,
+    jobId,
+    target: clean(targetConfig.target || jobPayload.improvement_target),
+    instruction: clean(jobPayload.instruction),
+    jobPayload,
+    reports,
+    boardSummary: {},
+  });
+  const debugBundle = createImprovementDebugBundle({
+    bundle,
+    workspaceRoot: root,
+    jobId,
+    targetConfig,
+    jobPayload,
+    reports,
+    diff: await collectWorkspaceDiff({ workspaceRoot: root }),
+  });
+  return {
+    bundle_root: bundle.bundle_root,
+    debug_dir: debugBundle.debug_dir,
+    review_input_path: debugBundle.review_input_path,
+    created: true,
+  };
+}
+
+export async function runImprovementReview({ client, threadId = '', jobId = '', targetConfig = {}, jobPayload = null, reports = null } = {}) {
+  const loaded = reports && jobPayload ? { jobPayload, reports, targetConfig } : await loadImprovementExecutionContext({ client, threadId, jobId });
+  const resolvedTargetConfig = { ...loaded.targetConfig, ...asObject(targetConfig) };
+  const reviewCommand = clean(resolvedTargetConfig.review_command);
+  const workspaceRoot = clean(resolvedTargetConfig.workspace_root);
+  const reviewBundle = await ensureImprovementDebugBundleForReview({
+    workspaceRoot,
+    jobId,
+    targetConfig: resolvedTargetConfig,
+    jobPayload: loaded.jobPayload,
+    reports: loaded.reports,
+  });
+  const bundleRoot = clean(reviewBundle.bundle_root);
+  const debugDir = clean(reviewBundle.debug_dir);
+  const reviewInputPath = clean(reviewBundle.review_input_path);
+  const reviewReportPath = debugDir ? `${debugDir}/review_report.md` : '';
+  if (!reviewCommand) {
+    const skipped = {
+      ok: true,
+      status: 'skipped',
+      risk: 'unknown',
+      duration_ms: 0,
+      stdout: '',
+      stderr: 'missing review command',
+    };
+    await report(client, threadId, jobId, {
+      kind: 'review_report',
+      phase: 'review_skipped',
+      status: 'skipped',
+      summary: 'no review command configured',
+      preview_text: 'configure SELF_IMPROVE_<TARGET>_REVIEW_CMD to enable Gemini or external review',
+      payload: { risk: 'unknown', bundle_root: bundleRoot || null, debug_dir: debugDir || null, review_input_path: reviewInputPath || null, debug_bundle_created: reviewBundle.created === true },
+      metrics: { duration_ms: 0 },
+      labels: ['review'],
+    });
+    return skipped;
+  }
+  const result = await runShellCommand(reviewCommand, {
+    cwd: workspaceRoot || undefined,
+    timeoutMs: Number(resolvedTargetConfig.review_timeout_ms || 300000),
+    env: {
+      SELF_IMPROVE_JOB_ID: clean(jobId),
+      SELF_IMPROVE_TARGET: clean(resolvedTargetConfig.target || loaded.jobPayload.improvement_target),
+      SELF_IMPROVE_THREAD_ID: clean(threadId),
+      SELF_IMPROVE_WORKSPACE_ROOT: workspaceRoot,
+      SELF_IMPROVE_BUNDLE_ROOT: bundleRoot,
+      SELF_IMPROVE_DEBUG_DIR: debugDir,
+      SELF_IMPROVE_REVIEW_INPUT_PATH: reviewInputPath,
+      SELF_IMPROVE_REVIEW_REPORT_PATH: reviewReportPath,
+    },
+  });
+  const risk = inferReviewRisk({ stdout: result.stdout, stderr: result.stderr });
+  const status = result.ok ? 'completed' : 'failed';
+  await report(client, threadId, jobId, {
+    kind: 'review_report',
+    phase: result.ok ? 'review_completed' : 'review_failed',
+    status,
+    summary: result.ok ? `review completed (risk=${risk})` : 'review command failed',
+    preview_text: [result.stdout, result.stderr].filter(Boolean).join('\n\n') || 'no output',
+    payload: {
+      command: reviewCommand,
+      exit_code: result.exit_code,
+      signal: result.signal,
+      risk,
+      bundle_root: bundleRoot || null,
+      debug_dir: debugDir || null,
+      review_input_path: reviewInputPath || null,
+      review_report_path: reviewReportPath || null,
+      debug_bundle_created: reviewBundle.created === true,
+    },
+    metrics: { duration_ms: Number(result.duration_ms || 0) },
+    labels: ['review', risk].filter(Boolean),
+  });
+  return { ...result, status, risk };
+}
+
+export async function runImprovementEvalGate({ client, threadId = '', jobId = '', targetConfig = {}, jobPayload = null, reports = null, reviewResult = null } = {}) {
+  const loaded = reports && jobPayload ? { jobPayload, reports, targetConfig } : await loadImprovementExecutionContext({ client, threadId, jobId });
+  const resolvedTargetConfig = { ...loaded.targetConfig, ...asObject(targetConfig) };
+  const diff = await collectWorkspaceDiff({ workspaceRoot: resolvedTargetConfig.workspace_root });
+  const gate = evaluateImprovementGate({
+    reports: loaded.reports,
+    diff,
+    targetConfig: resolvedTargetConfig,
+    jobPayload: loaded.jobPayload,
+    reviewResult,
+  });
+  await report(client, threadId, jobId, {
+    kind: 'eval_gate',
+    phase: gate.status === 'passed' ? 'gate_passed' : gate.status === 'blocked' ? 'gate_blocked' : 'gate_needs_review',
+    status: gate.status,
+    summary: gate.status === 'passed'
+      ? 'promotion gate passed'
+      : gate.status === 'blocked'
+        ? `promotion gate blocked: ${asArray(gate.reasons)[0] || 'see report'}`
+        : `promotion gate needs review: ${asArray(gate.warnings)[0] || 'see report'}`,
+    preview_text: formatEvalGatePreview(gate),
+    payload: gate,
+    metrics: {
+      changed_file_count: Number(gate.changed_file_count || 0),
+      max_changed_files: Number(gate.max_changed_files || 0),
+      blocking_reason_count: asArray(gate.reasons).length,
+      warning_count: asArray(gate.warnings).length,
+    },
+    labels: ['eval-gate', gate.status],
+  });
+  return { ok: gate.status === 'passed', status: gate.status, gate, diff };
+}
+
 export async function markImprovementPromotion({ client, threadId = '', jobId = '', targetConfig = {} } = {}) {
   const promoteCommand = clean(targetConfig.promote_command || targetConfig.restart_command);
   if (!promoteCommand) {
@@ -212,6 +388,31 @@ export async function markImprovementPromotion({ client, threadId = '', jobId = 
     });
     return result;
   }
+
+  const gateResult = await runImprovementEvalGate({ client, threadId, jobId, targetConfig });
+  const allowNeedsReview = targetConfig.promote_allow_needs_review === true;
+  if (gateResult.status !== 'passed' && !(allowNeedsReview && gateResult.status === 'needs_review')) {
+    const blocked = {
+      ok: false,
+      status: 'blocked_by_gate',
+      duration_ms: 0,
+      stdout: '',
+      stderr: formatEvalGatePreview(gateResult.gate),
+      gate: gateResult.gate,
+    };
+    await report(client, threadId, jobId, {
+      kind: 'promotion_decision',
+      phase: 'promotion_blocked',
+      status: 'blocked',
+      summary: `promote blocked by eval gate (${gateResult.status})`,
+      preview_text: formatEvalGatePreview(gateResult.gate),
+      payload: { gate: gateResult.gate },
+      metrics: { duration_ms: 0 },
+      labels: ['promote', 'gate', 'blocked'],
+    });
+    return blocked;
+  }
+
   const result = await runShellCommand(promoteCommand, {
     cwd: clean(targetConfig.workspace_root) || undefined,
   });
@@ -221,12 +422,57 @@ export async function markImprovementPromotion({ client, threadId = '', jobId = 
     status: result.ok ? 'promoted' : 'failed',
     summary: result.ok ? 'promote command finished' : 'promote command failed',
     preview_text: [result.stdout, result.stderr].filter(Boolean).join('\n\n') || 'no output',
-    payload: { command: promoteCommand, exit_code: result.exit_code, signal: result.signal },
+    payload: { command: promoteCommand, exit_code: result.exit_code, signal: result.signal, gate: gateResult.gate },
     metrics: { duration_ms: Number(result.duration_ms || 0) },
     labels: ['promote'],
   });
   return result;
 }
+
+export async function runImprovementRollback({ client, threadId = '', jobId = '', targetConfig = {} } = {}) {
+  const rollbackCommand = clean(targetConfig.rollback_command);
+  if (!rollbackCommand) {
+    const result = {
+      ok: false,
+      status: 'blocked',
+      duration_ms: 0,
+      stdout: '',
+      stderr: 'missing rollback command',
+    };
+    await report(client, threadId, jobId, {
+      kind: 'rollback_report',
+      phase: 'rollback_blocked',
+      status: 'blocked',
+      summary: 'rollback command missing; configure SELF_IMPROVE_<TARGET>_ROLLBACK_CMD',
+      preview_text: result.stderr,
+      payload: {},
+      metrics: { duration_ms: 0 },
+      labels: ['rollback'],
+    });
+    return result;
+  }
+  const result = await runShellCommand(rollbackCommand, {
+    cwd: clean(targetConfig.workspace_root) || undefined,
+    env: {
+      SELF_IMPROVE_JOB_ID: clean(jobId),
+      SELF_IMPROVE_THREAD_ID: clean(threadId),
+      SELF_IMPROVE_TARGET: clean(targetConfig.target),
+      SELF_IMPROVE_WORKSPACE_ROOT: clean(targetConfig.workspace_root),
+    },
+  });
+  await report(client, threadId, jobId, {
+    kind: 'rollback_report',
+    phase: result.ok ? 'rolled_back' : 'rollback_failed',
+    status: result.ok ? 'rolled_back' : 'failed',
+    summary: result.ok ? 'rollback command finished' : 'rollback command failed',
+    preview_text: [result.stdout, result.stderr].filter(Boolean).join('\n\n') || 'no output',
+    payload: { command: rollbackCommand, exit_code: result.exit_code, signal: result.signal },
+    metrics: { duration_ms: Number(result.duration_ms || 0) },
+    labels: ['rollback'],
+  });
+  return { ...result, status: result.ok ? 'rolled_back' : 'failed' };
+}
+
 
 export async function inspectAndPrepareImprovementJob({
   client,
@@ -328,6 +574,15 @@ export async function runImprovementPatch({
     reports,
     boardSummary,
   });
+  const initialDebugBundle = createImprovementDebugBundle({
+    bundle,
+    workspaceRoot,
+    jobId: cleanJobId,
+    targetConfig,
+    jobPayload,
+    reports,
+    diff: await collectWorkspaceDiff({ workspaceRoot }),
+  });
 
   await report(client, threadId, cleanJobId, {
     kind: 'patch_plan',
@@ -343,6 +598,11 @@ export async function runImprovementPatch({
       reports_path: bundle.reports_path,
       llm_trace_dir: bundle.llm_trace_dir,
       llm_trace_index_path: bundle.llm_trace_index_path,
+      debug_dir: initialDebugBundle.debug_dir,
+      failure_summary_path: initialDebugBundle.failure_summary_path,
+      reproduction_path: initialDebugBundle.reproduction_path,
+      artifact_index_path: initialDebugBundle.artifact_index_path,
+      review_input_path: initialDebugBundle.review_input_path,
       auto_promote: targetConfig.auto_promote === true,
     }, null, 2),
     payload: {
@@ -353,6 +613,11 @@ export async function runImprovementPatch({
       patch_plan_path: bundle.patch_plan_path,
       llm_trace_dir: bundle.llm_trace_dir,
       llm_trace_index_path: bundle.llm_trace_index_path,
+      debug_dir: initialDebugBundle.debug_dir,
+      failure_summary_path: initialDebugBundle.failure_summary_path,
+      reproduction_path: initialDebugBundle.reproduction_path,
+      artifact_index_path: initialDebugBundle.artifact_index_path,
+      review_input_path: initialDebugBundle.review_input_path,
       auto_promote: targetConfig.auto_promote === true,
     },
     labels: ['patch', 'plan'],
@@ -387,6 +652,14 @@ export async function runImprovementPatch({
     SELF_IMPROVE_LLM_TRACE_DIR: bundle.llm_trace_dir,
     SELF_IMPROVE_LLM_TRACE_INDEX_PATH: bundle.llm_trace_index_path,
     SELF_IMPROVE_DEBUG_LLM_TRACE_DIR: bundle.llm_trace_dir,
+    SELF_IMPROVE_DEBUG_DIR: initialDebugBundle.debug_dir,
+    SELF_IMPROVE_FAILURE_SUMMARY_PATH: initialDebugBundle.failure_summary_path,
+    SELF_IMPROVE_REPRODUCTION_PATH: initialDebugBundle.reproduction_path,
+    SELF_IMPROVE_ARTIFACT_INDEX_PATH: initialDebugBundle.artifact_index_path,
+    SELF_IMPROVE_REVIEW_INPUT_PATH: initialDebugBundle.review_input_path,
+    SELF_IMPROVE_ENVIRONMENT_SANITIZED_PATH: initialDebugBundle.environment_sanitized_path,
+    SELF_IMPROVE_FORBIDDEN_PATHS_PATH: initialDebugBundle.forbidden_paths_path,
+    SELF_IMPROVE_SECRETS_REDACTION_REPORT_PATH: initialDebugBundle.secrets_redaction_report_path,
     SELF_IMPROVE_INSTRUCTION: clean(jobPayload.instruction),
   };
 
@@ -399,6 +672,16 @@ export async function runImprovementPatch({
   const diff = await collectWorkspaceDiff({ workspaceRoot });
   const changed = Number(diff.changed_file_count || 0) > 0;
   await persistDiffBundle(bundle, diff);
+  const debugBundle = createImprovementDebugBundle({
+    bundle,
+    workspaceRoot,
+    jobId: cleanJobId,
+    targetConfig,
+    jobPayload,
+    reports,
+    diff,
+    patchResult,
+  });
 
   const traceSummary = summarizeLlmTraceIndex({ traceDir: bundle.llm_trace_dir, limit: 12 });
   if (Number(traceSummary.total_traces || 0) > 0) {
@@ -438,6 +721,10 @@ export async function runImprovementPatch({
       exit_code: patchResult.exit_code,
       signal: patchResult.signal,
       bundle_root: bundle.bundle_root,
+      debug_dir: debugBundle.debug_dir,
+      failure_summary_path: debugBundle.failure_summary_path,
+      artifact_index_path: debugBundle.artifact_index_path,
+      review_input_path: debugBundle.review_input_path,
       changed_files: diff.changed_files || [],
       diff_stat_path: bundle.diff_stat_path,
       diff_patch_path: bundle.diff_patch_path,
@@ -609,6 +896,37 @@ export async function runImprovementAutomation({
     };
   }
 
+  let reviewResult = null;
+  if (clean(resolvedTargetConfig.review_command)) {
+    reviewResult = await runImprovementReview({ client, threadId, jobId, targetConfig: resolvedTargetConfig });
+  }
+
+  const gateResult = await runImprovementEvalGate({ client, threadId, jobId, targetConfig: resolvedTargetConfig, reviewResult });
+  if (!gateResult.ok) {
+    await report(client, threadId, jobId, {
+      kind: 'runtime_event',
+      phase: gateResult.status === 'blocked' ? 'automation_blocked' : 'needs_review',
+      status: gateResult.status,
+      summary: gateResult.status === 'blocked'
+        ? 'automation stopped because the eval gate blocked promotion'
+        : 'automation completed but needs review before promotion',
+      preview_text: formatEvalGatePreview(gateResult.gate),
+      payload: { gate: gateResult.gate },
+      metrics: {},
+      labels: ['automation', 'eval-gate'],
+    });
+    return {
+      ok: false,
+      status: gateResult.status,
+      patch: patchResult,
+      tests: testResult,
+      canary: canaryResult,
+      review: reviewResult,
+      gate: gateResult,
+      promotion: null,
+    };
+  }
+
   let promotionResult = null;
   if (effectiveAutoPromote) {
     promotionResult = await markImprovementPromotion({ client, threadId, jobId, targetConfig: resolvedTargetConfig });
@@ -618,6 +936,8 @@ export async function runImprovementAutomation({
       patch: patchResult,
       tests: testResult,
       canary: canaryResult,
+      review: reviewResult,
+      gate: gateResult,
       promotion: promotionResult,
     };
   }
@@ -626,9 +946,9 @@ export async function runImprovementAutomation({
     kind: 'runtime_event',
     phase: 'awaiting_approval',
     status: 'ready_for_promote',
-    summary: 'automation finished; waiting for manual promote approval',
+    summary: 'automation finished; eval gate passed; waiting for manual promote approval',
     preview_text: 'use /improve promote <jobId> to run the configured promotion command',
-    payload: {},
+    payload: { gate: gateResult.gate },
     metrics: {},
     labels: ['automation', 'approval'],
   });
@@ -638,6 +958,8 @@ export async function runImprovementAutomation({
     patch: patchResult,
     tests: testResult,
     canary: canaryResult,
+    review: reviewResult,
+    gate: gateResult,
     promotion: null,
   };
 }

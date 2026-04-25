@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 import {
   buildRepoSnapshot,
@@ -65,19 +66,23 @@ test('createImprovementContextBundle writes manifest and instruction files', () 
 
 test('collectWorkspaceDiff returns changed files for git workspace', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'improve-git-'));
-  await runCommandSequence([
-    'git init',
-    'git config user.email test@example.com',
-    'git config user.name test',
-    "printf 'one\n' > demo.txt",
-    'git add demo.txt',
-    'git commit -m init',
-    "printf 'two\n' >> demo.txt",
-  ], { cwd: tmp });
+  spawnSync('/bin/bash', ['-lc', 'git init -q && git config user.email test@example.com && git config user.name test && printf "one\n" > demo.txt && git add demo.txt && git commit -q -m init && printf "two\n" >> demo.txt'], { cwd: tmp });
   const diff = await collectWorkspaceDiff({ workspaceRoot: tmp });
   assert.equal(diff.git_available, true);
   assert.equal(diff.changed_file_count, 1);
   assert.match(formatWorkspaceDiffPreview(diff), /changed_file_count: 1/);
+});
+
+
+
+test('collectWorkspaceDiff includes staged diff stat and patch', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'improve-git-staged-'));
+  spawnSync('/bin/bash', ['-lc', 'git init -q && git config user.email test@example.com && git config user.name test && printf "one\n" > staged.txt && git add staged.txt && git commit -q -m init && printf "two\n" >> staged.txt && git add staged.txt'], { cwd: tmp });
+  const diff = await collectWorkspaceDiff({ workspaceRoot: tmp });
+  assert.equal(diff.git_available, true);
+  assert.equal(diff.changed_file_count, 1);
+  assert.match(diff.diff_stat, /staged\.txt/);
+  assert.equal(diff.changed_files.includes('staged.txt'), true);
 });
 
 test('runCommandSequence returns failure summary when one command fails', async () => {

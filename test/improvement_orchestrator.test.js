@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 import {
   inspectAndPrepareImprovementJob,
@@ -11,6 +12,7 @@ import {
   runImprovementAutomation,
   runImprovementCanary,
   runImprovementPatch,
+  runImprovementReview,
   runImprovementTests,
   summarizeBoardForImprovement,
 } from '../src/application/improvement_orchestrator.js';
@@ -161,9 +163,7 @@ test('runImprovementPatch applies configured patch command and reports code diff
   }).catch(() => null);
   const client = new StubClient();
   await client.createImprovementJob('thread_1', { target_repo: 'ddalggak', instruction: 'patch demo', target_runtime: 'forge', workspace_root: tmp });
-  await import('node:child_process').then(async ({ spawnSync }) => {
-    spawnSync('/bin/bash', ['-lc', 'git init && git config user.email test@example.com && git config user.name test && printf "base\n" > demo.txt && git add demo.txt && git commit -m init'], { cwd: tmp });
-  });
+  spawnSync('/bin/bash', ['-lc', 'git init -q && git config user.email test@example.com && git config user.name test && printf "base\n" > demo.txt && git add demo.txt && git commit -q -m init'], { cwd: tmp, encoding: 'utf8', timeout: 5000 });
   const loaded = await loadImprovementExecutionContext({ client, threadId: 'thread_1', jobId: 'job_1' });
   const patchResult = await runImprovementPatch({
     client,
@@ -184,11 +184,39 @@ test('runImprovementPatch applies configured patch command and reports code diff
   assert.match(fs.readFileSync(path.join(tmp, 'demo.txt'), 'utf8'), /patched/);
 });
 
+
+
+test('runImprovementReview creates a scoped debug bundle when no patch bundle exists', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'improve-review-'));
+  spawnSync('/bin/bash', ['-lc', 'git init -q && git config user.email test@example.com && git config user.name test && printf "base\n" > demo.txt && git add demo.txt && git commit -q -m init && printf "review\n" >> demo.txt'], { cwd: tmp, encoding: 'utf8', timeout: 5000 });
+  const client = new StubClient();
+  await client.createImprovementJob('thread_1', {
+    target_repo: 'ddalggak',
+    instruction: 'review fallback bundle',
+    target_runtime: 'forge',
+    workspace_root: tmp,
+  });
+  const review = await runImprovementReview({
+    client,
+    threadId: 'thread_1',
+    jobId: 'job_1',
+    targetConfig: {
+      target: 'ddalggak',
+      workspace_root: tmp,
+      review_command: "printf 'Risk: low\nRecommend promote.\n'",
+    },
+  });
+  assert.equal(review.ok, true);
+  assert.equal(review.risk, 'low');
+  const reviewReport = client.reported.find((entry) => entry.body.kind === 'review_report');
+  assert.ok(reviewReport);
+  assert.equal(reviewReport.body.payload.debug_bundle_created, true);
+  assert.equal(fs.existsSync(reviewReport.body.payload.review_input_path), true);
+});
+
 test('runImprovementAutomation runs patch, tests, canary and leaves job ready for promote', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'improve-auto-'));
-  await import('node:child_process').then(async ({ spawnSync }) => {
-    spawnSync('/bin/bash', ['-lc', 'git init && git config user.email test@example.com && git config user.name test && printf "start\n" > demo.txt && git add demo.txt && git commit -m init'], { cwd: tmp });
-  });
+  spawnSync('/bin/bash', ['-lc', 'git init -q && git config user.email test@example.com && git config user.name test && printf "start\n" > demo.txt && git add demo.txt && git commit -q -m init'], { cwd: tmp, encoding: 'utf8', timeout: 5000 });
   const client = new StubClient();
   await client.createImprovementJob('thread_1', {
     target_repo: 'ddalggak',

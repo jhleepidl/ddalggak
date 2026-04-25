@@ -141,3 +141,6 @@ vite.config.ts.timestamp-*
 .env
 .orchestrator/
 runs/
+
+# Self-improvement local job bundles
+.self_improve/
