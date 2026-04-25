@@ -810,6 +810,12 @@ function compactTaskText(value = '', { maxChars = 2400 } = {}) {
   return `${compacted.slice(0, hardLimit)}${truncationMarker}`;
 }
 
+function clampInteger(value, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(num)));
+}
+
 function buildRoleAwareContextDocList(jobId, { provider = '', roleId = '', fallbackDocIds = ['plan', 'research'] } = {}) {
   try {
     const profile = tracking.loadProfile(jobId);

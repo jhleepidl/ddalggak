@@ -1,4 +1,21 @@
 export function buildSupervisorActionSchemaLines({ teamLocked = false, parallelSpawnAllowed = false } = {}) {
+  if (teamLocked) {
+    const lockedLines = [
+      `    {"type":"run_agent","agent_id":"...","goal":"...","scope":{"mode":"shared_only","budget_tokens":1000},"risk":"L0|L1|L2"},`,
+      `    {"type":"need_more_detail","query":"...","max_chars":3000},`,
+      `    {"type":"get_status","detail":"summary|full"},`,
+      `    {"type":"interrupt","mode":"cancel|replan","note":"..."},`,
+      `    {"type":"open_context","scope":"current|global"},`,
+      `    {"type":"summarize","hint":"..."}`,
+    ];
+    if (!parallelSpawnAllowed) return lockedLines;
+    return [
+      lockedLines[0],
+      `    {"type":"spawn_agents","summary":"...","agents":[{"agent_id":"...","goal":"...","scope":{"mode":"shared_only"},"risk":"L1"}],"max_parallel":2},`,
+      ...lockedLines.slice(1),
+    ];
+  }
+
   const sharedLines = [
     `    {"type":"run_agent","agent_id":"...","goal":"...","inputs":{},"scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes","query":"optional","add_node_ids":["..."],"remove_node_ids":["..."],"budget_tokens":1200,"closure_edge_types":["..."],"closure_direction":"both|forward|backward","max_closure_nodes":180},"risk":"L0|L1|L2|L3"},`,
     `    {"type":"need_more_detail","context_set_id":"...","node_ids":["..."],"depth":1,"max_chars":7000},`,
@@ -12,7 +29,6 @@ export function buildSupervisorActionSchemaLines({ teamLocked = false, parallelS
     `    {"type":"open_context","scope":"current|global"},`,
     `    {"type":"summarize","hint":"..."}`,
   ];
-  if (teamLocked) return [...sharedLines, ...spawnLines, ...tailLines];
   return [
     sharedLines[0],
     `    {"type":"propose_agent","agent_id":"...","name":"...","description":"...","provider":"gemini|codex|chatgpt","model":"...","prompt":"...","meta":{},"risk":"L2|L3"},`,
@@ -59,15 +75,20 @@ export function buildSupervisorOutputSchemaLines({ teamLocked = false, parallelS
 }
 
 export function buildSupervisorRuleLines({ teamLocked = false, parallelSpawnAllowed = false, allowChatGPTPlanner = false } = {}) {
+  if (teamLocked) {
+    return [
+      '- locked team: 팀 변경 action 금지. 허용: run_agent, need_more_detail, summarize, get_status, interrupt, open_context' + (parallelSpawnAllowed ? ', spawn_agents.' : '.'),
+      '- 일반 요청은 enabled agent 중 가장 적합한 1명에게 run_agent 1개로 보낸다.',
+      '- agent_id는 enabled_agents_for_this_conversation 안에서만 고른다.',
+      '- goal에는 최신 user_message의 실제 요청을 그대로 반영하고 stale context가 충돌하면 무시한다.',
+      '- 컨텍스트가 꼭 부족할 때만 need_more_detail을 먼저 둔다.',
+      '- user_message가 상태/중단/컨텍스트 요청이면 각각 get_status/interrupt/open_context를 사용한다.',
+      '- 파일 변경/외부 side effect가 필요하면 risk를 올리고, max risk L2를 넘기지 않는다.',
+      '- JSON 객체 1개만 출력한다.',
+    ];
+  }
+
   return [
-    ...(teamLocked
-      ? [
-          '- 현재 /chat 은 locked team 모드다. add/remove/enable/disable/create/propose/fork/publish/install/search_public_agents 같은 팀 변경 action 을 절대 내지 마라.',
-          '- 반드시 현재 활성 팀 안에서만 실행 순서와 handoff 를 결정한다.',
-          '- 사용자가 팀 변경을 요청해도 이 plan 안에서는 절대 mutation action으로 답하지 말고, summarize 또는 get_status로 현재 팀 한계를 설명하라.',
-          '- team_locked=yes 이면 run_agent / need_more_detail / spawn_agents / summarize / get_status / interrupt / open_context 만 사용하라.',
-        ]
-      : []),
     '- action은 필요한 최소만 선택한다 (최대 4개).',
     '- run_agent/spawn_agents에서 agent_id는 enabled_agents_for_this_conversation 목록 안에서만 선택한다.',
     '- 일반 요청은 run_agent 1개로 우선 처리한다.',
