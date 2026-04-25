@@ -66,16 +66,12 @@ export async function runAgentProviderExecution({
       sectionTitle: `${agentId} notes`,
       agentId,
       roleId,
+      roleMemo: String(prompts.roleMemo || prompts.role_memo || '').trim(),
+      userRequest: String(prompts.userRequest || prompts.user_request || act?.inputs?.user_request || act?.inputs?.userRequest || '').trim(),
       preparedContextInfo: act?.inputs?._prompt_context_info && typeof act.inputs._prompt_context_info === 'object'
         ? act.inputs._prompt_context_info
         : {},
-      outputGuide: [
-        '출력:',
-        '- 핵심 요약',
-        '- 구현 전 확인사항',
-        '- 리스크와 완화책',
-        '- 검증 체크리스트',
-      ].join('\n'),
+      outputGuide: String(prompts.outputGuide || prompts.output_guide || act?.inputs?.output_guide || act?.inputs?.outputGuide || '').trim(),
       model,
       concurrencyKey: geminiConcurrencyKey || `job:${String(jobId || '').trim()}`,
       onGeminiRetry,

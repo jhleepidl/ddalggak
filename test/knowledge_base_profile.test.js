@@ -116,3 +116,27 @@ test('Tracking.reconcileProfile migrates semantic slot content to renamed KB fil
     fs.rmSync(runsDir, { recursive: true, force: true });
   }
 });
+
+
+test('deriveKnowledgeBaseDesign collapses repeated memory plan display-name suffixes', async () => {
+  const { deriveKnowledgeBaseDesign } = await import('../src/knowledge_base/profile.js');
+  const design = deriveKnowledgeBaseDesign({
+    goal: '내일 아침 메뉴 추천해줘.',
+    teamConfig: {
+      memory_plan: {
+        plan_id: 'general_execution',
+        display_name: 'Compact execution KB memory plan memory plan memory plan',
+        strategy: 'goal_adaptive',
+        surfaces: [
+          { surface_id: 'plan', file_name: 'mission_brief.md', semantic_slots: ['plan'], load_policy: 'always' },
+          { surface_id: 'research', file_name: 'working_memory.md', semantic_slots: ['research', 'progress'], load_policy: 'always' },
+          { surface_id: 'decisions', file_name: 'final_answer.md', semantic_slots: ['decisions', 'final_answer'], write_policy: 'final' },
+          { surface_id: 'artifacts', file_name: 'artifact_index.md', semantic_slots: ['artifacts', 'artifact_index'], write_policy: 'index' },
+        ],
+      },
+    },
+  });
+
+  assert.equal(design.profile.display_name, 'Compact execution KB');
+  assert.equal(design.memory_plan.display_name, 'Compact execution KB memory plan');
+});

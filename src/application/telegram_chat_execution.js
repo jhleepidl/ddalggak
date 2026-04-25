@@ -839,14 +839,71 @@ function buildRoleAwareContextDocList(jobId, { provider = '', roleId = '', fallb
   }
 }
 
+
+function extractLatestUserRequestFromTaskText(value = '') {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const patterns = [
+    /Latest user request:\s*["“]([^"”\n]{1,500})["”]/i,
+    /Baseline objective:\s*["“]([^"”\n]{1,500})["”]/i,
+    /Goal:\s*([^\n]{1,500})/i,
+  ];
+  for (const re of patterns) {
+    const match = text.match(re);
+    const candidate = String(match?.[1] || '').trim();
+    if (candidate) return candidate;
+  }
+  const messageMatch = text.match(/\[Message [^\n\]]+\]\s*role=user\s*\n([\s\S]{1,700}?)(?=\n\n\[[A-Z][A-Z_ ]*\]|\n\[[A-Z][^\]]+\]|$)/i);
+  const messageCandidate = String(messageMatch?.[1] || '').trim();
+  if (messageCandidate) return messageCandidate.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join('\n').slice(0, 500);
+  const assignedMatch = text.match(/\[ASSIGNED TASK\]\s*\n([\s\S]{1,700}?)(?=\n\n\[[A-Z][A-Z_ ]*\]|$)/i);
+  const assignedCandidate = String(assignedMatch?.[1] || '').trim();
+  if (assignedCandidate && !/^\[KNOWLEDGE BASE CONTRACT\]/i.test(assignedCandidate)) {
+    return assignedCandidate.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join('\n').slice(0, 500);
+  }
+  return '';
+}
+
+function buildDirectAnswerOutputGuide(rawGuide = '') {
+  const explicit = String(rawGuide || '').trim();
+  if (explicit) return explicit;
+  return [
+    '출력 지침:',
+    '- 사용자의 최신 요청에 직접 답하라.',
+    '- 추천/질문 요청이면 바로 추천/답변을 제공하라.',
+    '- 구현 전 확인사항/리스크/검증 체크리스트 같은 고정 템플릿은 사용하지 마라.',
+    '- 내부 KB, tracking file, route, provider, run_dir 정보는 사용자에게 노출하지 마라.',
+    '- 한국어로 간결하게 답하되, 필요한 근거는 짧게 붙여라.',
+  ].join('\n');
+}
+
 async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const runtimeExecutionPolicy = normalizeRuntimeExecutionPolicy(opts.runtimeExecutionPolicy || {});
   const sectionTitle = String(opts.sectionTitle || "Gemini notes");
-  const outputGuide = String(opts.outputGuide || "").trim();
+  const outputGuide = buildDirectAnswerOutputGuide(opts.outputGuide || opts.output_guide || '');
   const concurrencyKey = String(opts.concurrencyKey || "").trim() || `job:${String(jobId || "").trim()}`;
   const preferredModel = String(opts.model || "").trim();
-  const roleMemo = memory.getAgentRole("gemini");
-  const ctx = await runtimeIo.loadRoleScopedContextDocs(jobId, { provider: 'gemini', roleId: String(opts.roleId || 'researcher').trim().toLowerCase(), fallbackDocIds: ['plan', 'research', 'progress'], maxCharsPerDoc: 2600, audienceLabel: 'agent run', runtimePolicy: opts.runtime?.harnessRuntimePolicy || opts.runtime?.openharnessInstallState?.runtime_policy || null });
+  const providedRoleMemo = String(opts.roleMemo || opts.role_memo || '').trim();
+  const roleMemo = providedRoleMemo || memory.getAgentRole("gemini");
+  const roleKey = String(opts.roleId || 'researcher').trim().toLowerCase();
+  const agentKey = String(opts.agentId || 'gemini').trim().toLowerCase() || 'gemini';
+  const cleanUserRequest = String(opts.userRequest || opts.user_request || extractLatestUserRequestFromTaskText(goal) || '').trim();
+  const rawGoal = String(goal || '').trim();
+  const compactGoal = compactTaskText(rawGoal, { maxChars: 1400 });
+  const taskContext = cleanUserRequest && compactGoal.includes(cleanUserRequest) && compactGoal.length <= cleanUserRequest.length + 80
+    ? ''
+    : compactGoal;
+  const ctxMaxChars = clampInteger(process.env.CHAT_GEMINI_CONTEXT_DOC_MAX_CHARS, 900, { min: 0, max: 2600 });
+  const ctx = ctxMaxChars > 0
+    ? await runtimeIo.loadRoleScopedContextDocs(jobId, {
+      provider: 'gemini',
+      roleId: roleKey,
+      fallbackDocIds: ['plan', 'research'],
+      maxCharsPerDoc: ctxMaxChars,
+      audienceLabel: 'agent run',
+      runtimePolicy: opts.runtime?.harnessRuntimePolicy || opts.runtime?.openharnessInstallState?.runtime_policy || null,
+    })
+    : '';
   const workspacePath = runWorkspaceDir(jobId);
   const providerOptions = opts.providerOptions && typeof opts.providerOptions === 'object'
     ? opts.providerOptions
@@ -855,36 +912,30 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
       provider: "gemini",
       workspaceRoot: workspacePath,
     });
-  const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 5 });
-  const kbContract = buildAgentKnowledgeBaseBlock(jobId, { provider: "gemini", roleId: String(opts.roleId || 'researcher').trim().toLowerCase(), agentId: String(opts.agentId || 'gemini').trim().toLowerCase() || 'gemini', detailLevel: "compact" });
-  ensureCliWorkspaceSupportFiles(jobId, { provider: "gemini", roleMemo, kbContract, goal, runtimeExecutionPolicy, providerOptions });
-  const compactGoal = compactTaskText(goal, { maxChars: 2600 });
+  const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 3 });
+  const kbContract = buildAgentKnowledgeBaseBlock(jobId, {
+    provider: "gemini",
+    roleId: roleKey,
+    agentId: agentKey,
+    detailLevel: "minimal",
+  });
+  ensureCliWorkspaceSupportFiles(jobId, { provider: "gemini", roleMemo, kbContract, goal: cleanUserRequest || rawGoal, runtimeExecutionPolicy, providerOptions });
   const prompt = [
-    ctx,
-    "",
-    "Gemini workspace context is preloaded via GEMINI.md.",
+    '너는 Telegram /chat에서 호출된 agent다.',
+    '가장 중요한 기준은 [USER REQUEST]이며, 오래된 memory/context가 충돌하면 [USER REQUEST]를 따른다.',
+    roleMemo ? `[ROLE]\n${clip(roleMemo, 900)}` : '',
     kbContract,
-    `run workspace: ${workspacePath}`,
-    workspaceFilesText,
-    "",
-    "제약:",
-    "- 코드 작성/수정/패치 제안 금지",
-    "- 터미널 명령 제안 최소화",
-    "- 설계/리스크/검증 관점으로만 답변",
-    "- 필요하면 uploads/ 경로의 파일 내용을 참고해라.",
-    "",
-    "다음 목표를 달성하기 위한 구현 단계와 리스크를 한국어로 간결하게 작성해줘.",
-    "",
-    `목표: ${compactGoal}`,
-    "",
-    outputGuide || [
-      "출력:",
-      "- 요약",
-      "- 구현 단계(번호)",
-      "- 리스크/주의",
-      "- 검증(테스트/체크)",
-    ].join("\n"),
-  ].join("\n");
+    ctx ? `[AVAILABLE MEMORY — optional]\n${ctx}` : '',
+    workspaceFilesText ? `[WORKSPACE FILES — optional]\n${workspaceFilesText}` : '',
+    '',
+    '[USER REQUEST]',
+    cleanUserRequest || rawGoal,
+    taskContext ? `[TASK CONTEXT]\n${taskContext}` : '',
+    '',
+    outputGuide,
+    '',
+    '최종 답변:',
+  ].filter(Boolean).join('\n\n');
   appendPromptTelemetry({
     jobDir: runDir(jobId),
     sharedDir: runSharedDir(jobId),
@@ -892,27 +943,22 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
       kind: 'provider_prompt',
       provider: 'gemini',
       model: preferredModel || '',
-      agent_id: String(opts.agentId || 'gemini').trim().toLowerCase(),
-      role_id: String(opts.roleId || 'researcher').trim().toLowerCase(),
+      agent_id: agentKey,
+      role_id: roleKey,
       prompt_text: prompt,
       prepared_context_tokens: opts.preparedContextInfo?.compiled_tokens_estimate,
       prepared_context_chars: opts.preparedContextInfo?.compiled_chars,
       components: {
+        user_request: cleanUserRequest || rawGoal,
+        task_context: taskContext,
         local_context: ctx,
         kb_contract: kbContract,
-        workspace_memory_file: 'GEMINI.md',
         workspace_files: workspaceFilesText,
-        task_goal: compactGoal,
-        output_guide: outputGuide || [
-          "출력:",
-          "- 요약",
-          "- 구현 단계(번호)",
-          "- 리스크/주의",
-          "- 검증(테스트/체크)",
-        ].join("\n"),
+        output_guide: outputGuide,
       },
       metadata: {
         concurrency_key: concurrencyKey,
+        prompt_mode: 'direct_answer',
       },
     },
   });
@@ -936,10 +982,10 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     },
   });
   const out = (r.stdout || r.stderr || "");
-  const researchPurpose = ['reviewer', 'critic'].includes(String(opts.roleId || '').trim().toLowerCase()) ? 'review' : 'research';
+  const researchPurpose = ['reviewer', 'critic'].includes(roleKey) ? 'review' : 'research';
   appendRoleAwareTracking(jobId, `## ${sectionTitle}\n\n${out}\n`, {
     provider: 'gemini',
-    roleId: String(opts.roleId || 'researcher').trim().toLowerCase(),
+    roleId: roleKey,
     purpose: researchPurpose,
     fallbackDoc: 'research',
     requestedDoc: researchPurpose === "review" ? "critic_log" : "research",
@@ -2008,7 +2054,7 @@ function buildSupervisorExecutionCallbacks({
       if (executionGraph && cleanAgentId && stepNodeId && String(result?.output || "").trim()) {
         await executionGraph.attachArtifact(String(stepNodeId || "").trim(), {
           name: `artifact:${cleanAgentId}@${new Date().toISOString()}`,
-          summary: clip(`${formatChatAgentDisplayName(cleanAgentId, buildTelegramAgentIndex({ runtime, routePlan: plan, actions: plan?.actions || [] }))} output`, 220),
+          summary: clip(`${formatChatAgentDisplayName(cleanAgentId, buildTelegramAgentIndex({ runtime, routePlan, actions: routePlan?.actions || [] }))} output`, 220),
           text: String(result.output || ""),
           uri: `ddalggak://jobs/${jobId}/agents/${cleanAgentId}/output`,
           payload: {
@@ -2242,7 +2288,7 @@ function buildSupervisorExecutionCallbacks({
         const childToolCall = executionGraph
           ? await executionGraph.startToolCall(childStepNodeId, {
             toolName: "run_agent",
-            inputPreview: clip(`${formatChatAgentDisplayName(agentId, buildTelegramAgentIndex({ runtime, routePlan: plan, actions: plan?.actions || [], extraSources: [{ actions: children }] }))} ${goal}`, 900),
+            inputPreview: clip(`${formatChatAgentDisplayName(agentId, buildTelegramAgentIndex({ runtime, routePlan, actions: routePlan?.actions || [], extraSources: [{ actions: children }] }))} ${goal}`, 900),
             status: "running",
           })
           : null;
@@ -4922,11 +4968,19 @@ ${output}
       onGeminiRetry,
       onGeminiModelSwitch,
       onGeminiGiveUp,
-      prompts: {
-        instruction: combinedInstruction,
-        goal: combinedGoal,
-        chatQuestion: combinedChatQuestion,
-      },
+      prompts: provider === 'gemini'
+        ? {
+          instruction: combinedInstruction,
+          goal: taskPrompt,
+          chatQuestion: combinedChatQuestion,
+          roleMemo: combinedRoleMemo,
+          userRequest: String(act?.inputs?.user_request || act?.inputs?.userRequest || extractLatestUserRequestFromTaskText(taskPrompt) || taskPrompt).trim(),
+        }
+        : {
+          instruction: combinedInstruction,
+          goal: combinedGoal,
+          chatQuestion: combinedChatQuestion,
+        },
       callbacks: {
         codexImplement,
         geminiResearch,

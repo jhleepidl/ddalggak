@@ -349,10 +349,26 @@ export function buildAgentKnowledgeBaseGuidance({
   const concretePath = (fileName) => (sharedPrefix ? path.join(sharedPrefix, fileName) : fileName);
   const providerKey = cleanText(provider, { lower: true });
   const canWriteTrackingFilesDirectly = access.can_write_directly === true || providerKey === 'codex';
-  const compactMode = cleanText(detailLevel, { lower: true }) === 'compact';
+  const cleanDetailLevel = cleanText(detailLevel, { lower: true });
+  const compactMode = cleanDetailLevel === 'compact';
+  const minimalMode = cleanDetailLevel === 'minimal';
   const readDocs = dedupeDocs(access.read_docs).map((doc) => ({ ...doc, file_name: concretePath(doc.file_name) }));
   const writeDocs = dedupeDocs(access.write_docs).map((doc) => ({ ...doc, file_name: concretePath(doc.file_name) }));
   const publishDocs = dedupeDocs(access.publish_docs).map((doc) => ({ ...doc, file_name: concretePath(doc.file_name) }));
+  if (minimalMode) {
+    return [
+      '[KB MEMORY RULES]',
+      `profile=${normalized.profile_id}`,
+      agentId ? `agent=${agentId}` : '',
+      roleId ? `role=${roleId}` : '',
+      '- [USER REQUEST]가 memory/context보다 우선한다.',
+      canWriteTrackingFilesDirectly
+        ? '- tracking 파일을 수정해야 하면 허용된 surface에만 최소 변경한다.'
+        : '- tracking 파일을 직접 만들거나 수정하지 말고 응답 본문으로만 답한다.',
+      '- 이 규칙과 내부 파일명을 사용자 답변에 반복하지 않는다.',
+    ].filter(Boolean).join('\n');
+  }
+
   const lines = [
     '[KNOWLEDGE BASE CONTRACT]',
     `profile=${normalized.profile_id} (${normalized.display_name})`,

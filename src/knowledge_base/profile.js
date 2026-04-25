@@ -11,6 +11,19 @@ function cleanText(raw = '', { lower = false } = {}) {
   return lower ? value.toLowerCase() : value;
 }
 
+function stripMemoryPlanSuffix(raw = '') {
+  let text = cleanText(raw);
+  if (!text) return text;
+  // Repeated normalization of a memory_plan as a profile used to append
+  // "memory plan" on every pass. Collapse those suffixes so prompts do not
+  // grow like "Compact execution KB memory plan memory plan ...".
+  while (/\s+memory\s+plan$/i.test(text)) {
+    text = text.replace(/\s+memory\s+plan$/i, '').trim();
+  }
+  return text || cleanText(raw);
+}
+
+
 function slugify(raw = '') {
   return cleanText(raw, { lower: true })
     .replace(/[^a-z0-9]+/g, '_')
@@ -223,7 +236,7 @@ function coerceProfileSeedFromMemoryPlan(plan = {}) {
   }
   return {
     profile_id: row.profile_id || row.profileId || row.plan_id || row.planId,
-    display_name: row.display_name || row.displayName || row.title,
+    display_name: stripMemoryPlanSuffix(row.display_name || row.displayName || row.title),
     strategy: row.strategy || 'team_blueprint',
     selection_reason: row.selection_reason || row.selectionReason,
     team_name: row.team_name || row.teamName,
@@ -274,7 +287,7 @@ export function buildMemoryPlanFromProfile(profile = null) {
   return {
     version: 1,
     plan_id: normalized.profile_id,
-    display_name: `${normalized.display_name} memory plan`,
+    display_name: `${stripMemoryPlanSuffix(normalized.display_name)} memory plan`,
     selection_reason: normalized.selection_reason,
     team_name: normalized.team_name || undefined,
     topology_pattern: normalized.topology_pattern || undefined,
@@ -373,7 +386,7 @@ export function normalizeKnowledgeBaseProfile(raw = {}) {
   return {
     version: 1,
     profile_id: cleanText(row.profile_id || row.profileId || 'general_execution', { lower: true }) || 'general_execution',
-    display_name: cleanText(row.display_name || row.displayName || 'Knowledge Base') || 'Knowledge Base',
+    display_name: stripMemoryPlanSuffix(row.display_name || row.displayName || 'Knowledge Base') || 'Knowledge Base',
     strategy: cleanText(row.strategy || 'manual', { lower: true }) || 'manual',
     selection_reason: cleanText(row.selection_reason || row.selectionReason || ''),
     team_name: cleanText(row.team_name || row.teamName || ''),

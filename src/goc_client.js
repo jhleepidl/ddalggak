@@ -154,36 +154,16 @@ function clampInteger(value, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER 
   return Math.max(min, Math.min(max, Math.floor(num)));
 }
 
-function normalizeApiBaseUrl(rawBase) {
-  const clean = String(rawBase || "").trim().replace(/\/+$/, "");
-  if (!clean) return "";
-  let parsed;
+function normalizeApiBaseUrl(rawBase = '') {
+  const trimmed = String(rawBase || '').trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
   try {
-    parsed = new URL(clean);
+    const parsed = new URL(trimmed);
+    parsed.pathname = parsed.pathname.replace(/\/+$/, '').replace(/\/api$/i, '');
+    return parsed.toString().replace(/\/+$/, '');
   } catch {
-    return clean;
+    return trimmed.replace(/\/api$/i, '');
   }
-  // Operators often paste a URL with a trailing /api. GocClient
-  // request paths already include /api, so strip that suffix to avoid
-  // accidental /api/api/... requests.
-  if (parsed.pathname === "/api" || parsed.pathname.endsWith("/api")) {
-    parsed.pathname = parsed.pathname.replace(/\/api$/, "") || "/";
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString().replace(/\/+$/, "");
-  }
-  return clean;
-}
-
-function summarizeAttemptErrors(method, errors = []) {
-  return errors
-    .map((error, index) => {
-      const status = Number(error?.status);
-      const path = String(error?.gocPath || error?.path || error?.url || "unknown");
-      const statusText = Number.isFinite(status) ? String(status) : "error";
-      return `${index + 1}) ${method} ${path} -> ${statusText}`;
-    })
-    .join("; ");
 }
 
 function sanitizeScopeMaterializationSnapshot(snapshot = {}) {
@@ -816,8 +796,6 @@ export class GocClient {
         const err = new Error(`GoC API ${method} ${url} failed (${response.status})`);
         err.status = response.status;
         err.data = data;
-        err.url = url;
-        err.method = method;
         throw err;
       }
       return data;
@@ -825,8 +803,6 @@ export class GocClient {
       if (error?.name === 'AbortError') {
         const err = new Error(`GoC API ${method} ${url} timed out`);
         err.status = 504;
-        err.url = url;
-        err.method = method;
         throw err;
       }
       throw error;
@@ -846,30 +822,29 @@ export class GocClient {
           body: attempt.body,
         });
       } catch (e) {
-        e.gocPath = attempt.path;
-        e.gocQuery = attempt.query;
-        errors.push(e);
+        errors.push({ error: e, attempt });
         const status = Number(e?.status);
         if (!isRetryableStatus(status)) break;
       }
     }
     if (errors.length) {
-      const primary = errors.find((error) => {
-        const status = Number(error?.status);
-        return Number.isFinite(status) && status !== 404;
-      }) || errors[0] || errors[errors.length - 1];
-      if (errors.length === 1) throw primary;
-      const summary = summarizeAttemptErrors(method, errors);
-      const err = new Error(`${primary.message}; attempted fallback routes: ${summary}`);
-      err.status = primary.status;
-      err.data = primary.data;
-      err.url = primary.url;
-      err.method = method;
-      err.gocAttempts = errors.map((error) => ({
-        path: error.gocPath || error.path || "",
-        url: error.url || "",
-        status: error.status,
-        data: error.data,
+      const last = errors[errors.length - 1]?.error || new Error("GoC API call failed");
+      const attempted = errors
+        .map((entry, index) => {
+          const path = String(entry?.attempt?.path || '').trim() || '(unknown path)';
+          const status = Number(entry?.error?.status);
+          return `${index + 1}) ${method} ${path} -> ${Number.isFinite(status) ? status : 'error'}`;
+        })
+        .join('; ');
+      const message = `${String(last?.message || 'GoC API call failed')}; attempted fallback routes: ${attempted}`;
+      const err = new Error(message);
+      err.status = last.status;
+      err.data = last.data;
+      err.cause = last;
+      err.attempts = errors.map((entry) => ({
+        path: entry?.attempt?.path,
+        status: entry?.error?.status,
+        message: entry?.error?.message,
       }));
       throw err;
     }

@@ -275,7 +275,7 @@ function bindGocActor(telegramUserId = "") {
   }
 }
 
-const loadSupervisorRuntimeFromSources = createSupervisorRuntimeLoader({
+const loadSupervisorRuntime = createSupervisorRuntimeLoader({
   composeCapabilitiesForRun,
   bindActor: bindGocActor,
   requireGocClient,
@@ -300,45 +300,6 @@ const loadSupervisorRuntimeFromSources = createSupervisorRuntimeLoader({
   runDir,
   jobs,
 });
-
-function isRecoverableGocRuntimeLoadError(error) {
-  const message = String(error?.message ?? error ?? "");
-  if (!message) return false;
-  return /\bGoC API\b|\bGOC_API_BASE\b|\bfetch failed\b|\btimed out\b|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(message);
-}
-
-async function loadSupervisorRuntime(jobId, options = {}) {
-  try {
-    return await loadSupervisorRuntimeFromSources(jobId, options);
-  } catch (error) {
-    if (MEMORY_MODE !== "goc" || !isRecoverableGocRuntimeLoadError(error)) {
-      throw error;
-    }
-
-    const reason = String(error?.message ?? error);
-    const cleanJobId = String(jobId || "").trim();
-    if (cleanJobId && jobs && typeof jobs.log === "function") {
-      jobs.log(cleanJobId, `GoC runtime loading failed; using local fallback for this turn: ${reason}`);
-    }
-
-    const previousReady = gocReady;
-    const previousError = gocInitError;
-    gocReady = false;
-    gocInitError = reason;
-    try {
-      const runtime = await loadSupervisorRuntimeFromSources(jobId, options);
-      return {
-        ...runtime,
-        degraded_mode: true,
-        goc_fallback_reason: reason,
-      };
-    } finally {
-      // Keep future turns able to retry GoC after an operator fixes the API/proxy.
-      gocReady = previousReady;
-      gocInitError = previousError || reason;
-    }
-  }
-}
 
 
 function deriveTrackingMemorySurfaceSpec(jobId, docName = '') {
