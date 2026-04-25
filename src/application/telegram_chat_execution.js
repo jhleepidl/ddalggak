@@ -1243,6 +1243,7 @@ function buildSupervisorExecutionCallbacks({
   executionGraph = null,
   contextEngine = null,
   runEventSink = null,
+  getRoutePlan = null,
 }) {
   const sharedContextSetId = String(runtime?.map?.ctxSharedId || "").trim();
   const threadId = String(runtime?.map?.threadId || "").trim();
@@ -1252,6 +1253,14 @@ function buildSupervisorExecutionCallbacks({
     ? runtime.contextMeta
     : null;
   const hasContextEngine = !!(contextEngine && typeof contextEngine.prepareStepContext === "function");
+  const resolveCurrentRoutePlan = () => {
+    try {
+      const current = typeof getRoutePlan === "function" ? getRoutePlan() : null;
+      return current && typeof current === "object" ? current : null;
+    } catch {
+      return null;
+    }
+  };
   let threadNodeMapCache = null;
 
   const withBoundGocActor = async (work) => {
@@ -2058,9 +2067,10 @@ function buildSupervisorExecutionCallbacks({
         }
       }
       if (executionGraph && cleanAgentId && stepNodeId && String(result?.output || "").trim()) {
+        const currentRoutePlan = resolveCurrentRoutePlan();
         await executionGraph.attachArtifact(String(stepNodeId || "").trim(), {
           name: `artifact:${cleanAgentId}@${new Date().toISOString()}`,
-          summary: clip(`${formatChatAgentDisplayName(cleanAgentId, buildTelegramAgentIndex({ runtime, routePlan, actions: routePlan?.actions || [] }))} output`, 220),
+          summary: clip(`${formatChatAgentDisplayName(cleanAgentId, buildTelegramAgentIndex({ runtime, routePlan: currentRoutePlan, actions: currentRoutePlan?.actions || [] }))} output`, 220),
           text: String(result.output || ""),
           uri: `ddalggak://jobs/${jobId}/agents/${cleanAgentId}/output`,
           payload: {
@@ -2291,10 +2301,11 @@ function buildSupervisorExecutionCallbacks({
             extra: preparedContext?.context_info || {},
           });
         }
+        const currentRoutePlan = resolveCurrentRoutePlan();
         const childToolCall = executionGraph
           ? await executionGraph.startToolCall(childStepNodeId, {
             toolName: "run_agent",
-            inputPreview: clip(`${formatChatAgentDisplayName(agentId, buildTelegramAgentIndex({ runtime, routePlan, actions: routePlan?.actions || [], extraSources: [{ actions: children }] }))} ${goal}`, 900),
+            inputPreview: clip(`${formatChatAgentDisplayName(agentId, buildTelegramAgentIndex({ runtime, routePlan: currentRoutePlan, actions: currentRoutePlan?.actions || [], extraSources: [{ actions: children }] }))} ${goal}`, 900),
             status: "running",
           })
           : null;
@@ -3382,6 +3393,7 @@ async function runSupervisorChat(
       },
       executionGraph,
       runEventSink,
+      getRoutePlan: () => routePlan,
     });
 
     let turn = 0;
