@@ -154,6 +154,38 @@ function clampInteger(value, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER 
   return Math.max(min, Math.min(max, Math.floor(num)));
 }
 
+function normalizeApiBaseUrl(rawBase) {
+  const clean = String(rawBase || "").trim().replace(/\/+$/, "");
+  if (!clean) return "";
+  let parsed;
+  try {
+    parsed = new URL(clean);
+  } catch {
+    return clean;
+  }
+  // Operators often paste a URL with a trailing /api. GocClient
+  // request paths already include /api, so strip that suffix to avoid
+  // accidental /api/api/... requests.
+  if (parsed.pathname === "/api" || parsed.pathname.endsWith("/api")) {
+    parsed.pathname = parsed.pathname.replace(/\/api$/, "") || "/";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/+$/, "");
+  }
+  return clean;
+}
+
+function summarizeAttemptErrors(method, errors = []) {
+  return errors
+    .map((error, index) => {
+      const status = Number(error?.status);
+      const path = String(error?.gocPath || error?.path || error?.url || "unknown");
+      const statusText = Number.isFinite(status) ? String(status) : "error";
+      return `${index + 1}) ${method} ${path} -> ${statusText}`;
+    })
+    .join("; ");
+}
+
 function sanitizeScopeMaterializationSnapshot(snapshot = {}) {
   const row = asObject(snapshot);
   const cleanScopeSpecs = asArray(row.scope_specs ?? row.scopeSpecs).slice(0, 64).map((entry, index) => {
@@ -739,7 +771,7 @@ export class GocClient {
     if (!["http:", "https:"].includes(parsedBase.protocol)) {
       throw new Error("GOC_API_BASE must use http or https");
     }
-    this.apiBase = base.replace(/\/+$/, "");
+    this.apiBase = normalizeApiBaseUrl(base);
     this.serviceKey = key;
     this.actorTelegramUserId = String(actorTelegramUserId || "").trim();
     this.requestTimeoutMs = clampInteger(requestTimeoutMs || process.env.GOC_REQUEST_TIMEOUT_MS, 15000, { min: 1000, max: 120000 });
@@ -784,6 +816,8 @@ export class GocClient {
         const err = new Error(`GoC API ${method} ${url} failed (${response.status})`);
         err.status = response.status;
         err.data = data;
+        err.url = url;
+        err.method = method;
         throw err;
       }
       return data;
@@ -791,6 +825,8 @@ export class GocClient {
       if (error?.name === 'AbortError') {
         const err = new Error(`GoC API ${method} ${url} timed out`);
         err.status = 504;
+        err.url = url;
+        err.method = method;
         throw err;
       }
       throw error;
@@ -810,12 +846,33 @@ export class GocClient {
           body: attempt.body,
         });
       } catch (e) {
+        e.gocPath = attempt.path;
+        e.gocQuery = attempt.query;
         errors.push(e);
         const status = Number(e?.status);
         if (!isRetryableStatus(status)) break;
       }
     }
-    if (errors.length) throw errors[errors.length - 1];
+    if (errors.length) {
+      const primary = errors.find((error) => {
+        const status = Number(error?.status);
+        return Number.isFinite(status) && status !== 404;
+      }) || errors[0] || errors[errors.length - 1];
+      if (errors.length === 1) throw primary;
+      const summary = summarizeAttemptErrors(method, errors);
+      const err = new Error(`${primary.message}; attempted fallback routes: ${summary}`);
+      err.status = primary.status;
+      err.data = primary.data;
+      err.url = primary.url;
+      err.method = method;
+      err.gocAttempts = errors.map((error) => ({
+        path: error.gocPath || error.path || "",
+        url: error.url || "",
+        status: error.status,
+        data: error.data,
+      }));
+      throw err;
+    }
     throw new Error("GoC API call failed: no attempts");
   }
 
