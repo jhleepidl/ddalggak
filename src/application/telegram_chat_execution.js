@@ -76,6 +76,7 @@ import { recordChannelExperimentVerification } from "./channel_experiment_verifi
 import { recordChannelPromotion } from "./channel_promotion_manager.js";
 import { recordAdaptiveExecutionOutcome } from "./execution_mode_adaptation.js";
 import { buildExecutionQualitySignals } from './execution_quality_signals.js';
+import { formatActiveArtifactContext, recordArtifactObservationFromAgentOutput } from "./artifact_context.js";
 import { buildScopedPromptAssembly, hydrateRuntimeScopesViaGoC, resolveScopeExecutionState } from "./goc_scope_runtime.js";
 import { markActionsSkipped, wasInterruptedByReplan } from "./run_status_cleanup.js";
 import {
@@ -920,6 +921,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
       workspaceRoot: workspacePath,
     });
   const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 3 });
+  const activeArtifactContext = formatActiveArtifactContext(runDir(jobId), { maxChars: 1800, limit: 4 });
   const kbContract = buildAgentKnowledgeBaseBlock(jobId, {
     provider: "gemini",
     roleId: roleKey,
@@ -932,6 +934,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     '가장 중요한 기준은 [USER REQUEST]이며, 오래된 memory/context가 충돌하면 [USER REQUEST]를 따른다.',
     roleMemo ? `[ROLE]\n${clip(roleMemo, 900)}` : '',
     kbContract,
+    activeArtifactContext ? activeArtifactContext : '',
     ctx ? `[AVAILABLE MEMORY — optional]\n${ctx}` : '',
     workspaceFilesText ? `[WORKSPACE FILES — optional]\n${workspaceFilesText}` : '',
     '',
@@ -958,6 +961,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
       components: {
         user_request: cleanUserRequest || rawGoal,
         task_context: taskContext,
+        active_artifact_context: activeArtifactContext,
         local_context: ctx,
         kb_contract: kbContract,
         workspace_files: workspaceFilesText,
@@ -989,6 +993,9 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     },
   });
   const out = (r.stdout || r.stderr || "");
+  try {
+    recordArtifactObservationFromAgentOutput(runDir(jobId), out, { source: `gemini:${agentKey}` });
+  } catch {}
   const researchPurpose = ['reviewer', 'critic'].includes(roleKey) ? 'review' : 'research';
   appendRoleAwareTracking(jobId, `## ${sectionTitle}\n\n${out}\n`, {
     provider: 'gemini',

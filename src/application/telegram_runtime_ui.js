@@ -558,6 +558,7 @@ export function formatMemorySummary() {
     "/memory agents",
     "/memory note <메모>",
     "/memory lesson <교훈>",
+    "/memory compact",
     "/memory reset",
     "",
     "호환 alias:",

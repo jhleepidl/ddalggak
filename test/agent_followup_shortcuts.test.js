@@ -105,3 +105,29 @@ test("planAgentFollowupShortcut now requires an explicit Telegram reply target",
   assert.equal(shortcut.matched, false);
   assert.equal(shortcut.reason, "reply_required");
 });
+
+test("planAgentFollowupShortcut avoids shortcut when user is correcting image/file analysis", () => {
+  const shortcut = planAgentFollowupShortcut({
+    message: "너 눈에는 저게 된장찌개로 보여? 어떤 이미지 파일을 읽었는지 말해봐.",
+    session: {
+      recent_agent_turns: [
+        {
+          agent_id: "researcher",
+          role: "researcher",
+          provider: "gemini",
+          goal: "이미지 분석",
+          output: "사진은 된장찌개로 보입니다.",
+        },
+      ],
+    },
+    runtime: {
+      agentsCatalog: [{ id: "researcher", name: "Researcher", role: "researcher", provider: "gemini" }],
+    },
+    teamConfig: { shortcut_policy: { enabled: true } },
+    replyToMessageId: 123,
+  });
+
+  assert.equal(shortcut.matched, false);
+  assert.equal(shortcut.reason, "correction_or_verification_requires_router");
+  assert.equal(shortcut.intent.correction_or_verification, true);
+});

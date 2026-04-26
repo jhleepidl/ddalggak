@@ -35,6 +35,7 @@ import { buildTeamSchemaOptionsText, buildTeamSchemaOptionsSummaryLines } from '
 import { buildBenchmarkTeamTemplate, buildBenchmarkTemplateCatalogText } from '../../application/benchmark_team_templates.js';
 import { syncRawHistoryToGoC } from '../../application/goc_raw_history_sync.js';
 import { inspectAndPrepareImprovementJob, loadImprovementExecutionContext, runImprovementAutomation, runImprovementCanary, runImprovementEvalGate, runImprovementReview, runImprovementRollback, runImprovementTests, markImprovementPromotion } from '../../application/improvement_orchestrator.js';
+import { writeIdleCompactionCandidate, formatIdleCompactionCandidateForTelegram } from '../../application/idle_compaction.js';
 
 const HELP_TEXT = [
   "Commands:",
@@ -495,6 +496,21 @@ export function createTelegramCommandHandler(deps = {}) {
         return true;
       }
 
+      if (sub === "compact" || sub === "compaction") {
+        const currentJobId = resolveLiveJobIdForChat(chatId);
+        if (!currentJobId) {
+          await bot.sendMessage(chatId, "현재 job이 없어 compaction candidate를 생성할 수 없습니다. /chat 또는 /run 으로 job을 먼저 시작하세요.");
+          return true;
+        }
+        try {
+          const candidate = writeIdleCompactionCandidate({ jobDir: jobs.jobDir(currentJobId) });
+          await sendLong(bot, chatId, formatIdleCompactionCandidateForTelegram(candidate));
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ compaction candidate 생성 실패: ${String(e?.message ?? e)}`);
+        }
+        return true;
+      }
+
       if (sub === "reset") {
         memory.reset();
         await sendLong(bot, chatId, `✅ 메모리를 기본값으로 되돌렸습니다.\n\n${formatMemorySummary()}`);
@@ -582,7 +598,7 @@ export function createTelegramCommandHandler(deps = {}) {
         return true;
       }
 
-      await bot.sendMessage(chatId, "Usage:\n/memory show\n/memory md\n/memory kb\n/memory policy <자연어 프롬프트>\n/memory routing <자연어 프롬프트>\n/memory role <gemini|codex|chatgpt> <자연어 역할>\n/memory agents\n/memory note <메모>\n/memory lesson <교훈>\n/memory reset");
+      await bot.sendMessage(chatId, "Usage:\n/memory show\n/memory md\n/memory kb\n/memory policy <자연어 프롬프트>\n/memory routing <자연어 프롬프트>\n/memory role <gemini|codex|chatgpt> <자연어 역할>\n/memory agents\n/memory note <메모>\n/memory lesson <교훈>\n/memory compact\n/memory reset");
       return true;
     }
 

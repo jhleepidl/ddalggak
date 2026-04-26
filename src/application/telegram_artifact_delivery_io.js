@@ -7,6 +7,7 @@ import { createZipBundle } from './telegram_zip_bundle_io.js';
 import { WORKSPACE_ARTIFACT_PUBLISH_MANIFEST } from './cli_workspace_contract.js';
 import { summarizeRoleMemoryEnforcement } from '../knowledge_base/runtime.js';
 import * as runtimeState from './telegram_runtime_state.js';
+import { formatActiveArtifactContext } from './artifact_context.js';
 
 const {
   TELEGRAM_SEND_MAX_BYTES,
@@ -178,12 +179,14 @@ function buildWorkspaceFilesPromptSection(jobId, { limitPerBucket = 5 } = {}) {
     : 5;
   const uploads = collectWorkspaceFileEntries(jobId, { scope: 'uploads' }).slice(0, limit);
   const workspaceFiles = collectWorkspaceFileEntries(jobId, { scope: 'workspace' }).slice(0, limit);
+  const activeArtifactContext = formatActiveArtifactContext(runDir(jobId), { maxChars: 1600, limit });
   const render = (rows) => (
     rows.length > 0
       ? rows.map((row) => `- ${row.rel} (${formatByteSize(row.size)})`).join('\n')
       : '- (none)'
   );
   return [
+    activeArtifactContext,
     'workspace 파일 목록(최근):',
     'uploads:',
     render(uploads),
@@ -194,7 +197,7 @@ function buildWorkspaceFilesPromptSection(jobId, { limitPerBucket = 5 } = {}) {
     '- 최종 산출물은 원래 workspace 경로에 유지된다. outputs/ 복사본을 만들지 마라.',
     '- 내부 지원 파일(GEMINI.md, .codex/*, .orchestrator/*)은 사용자 산출물 후보에서 제외된다.',
     '- 매우 큰 파일은 목록만 참고하고 필요한 부분만 선택해 사용해라.',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 function artifactIndexPath(jobId) {

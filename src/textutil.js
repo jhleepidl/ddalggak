@@ -42,6 +42,69 @@ export function chunk(s, size = 3800, { preserveLines = true } = {}) {
 
 export const splitLongText = chunk;
 
+function normalizePinPatterns(patterns = []) {
+  return (Array.isArray(patterns) ? patterns : [])
+    .map((pattern) => {
+      if (pattern instanceof RegExp) return pattern;
+      const raw = String(pattern || '').trim();
+      if (!raw) return null;
+      const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      try { return new RegExp(escaped, 'i'); } catch { return null; }
+    })
+    .filter(Boolean);
+}
+
+function uniqueLines(lines = []) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of Array.isArray(lines) ? lines : []) {
+    const line = String(raw || '').trim();
+    if (!line) continue;
+    const key = line.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(line);
+  }
+  return out;
+}
+
+export function compactWithPinnedContext(value = '', max = 3500, options = {}) {
+  const raw = String(value || '').trim();
+  const limit = Number.isFinite(Number(max)) ? Math.max(400, Math.floor(Number(max))) : 3500;
+  if (!raw || raw.length <= limit) return raw;
+
+  const defaultPinPatterns = [
+    /\buploads\//i,
+    /\bworkspace_path\b/i,
+    /\bsha256\b/i,
+    /이미지|사진|파일|첨부|업로드|해당\s*음식|해당\s*이미지/i,
+    /아니라|정정|잘못|틀렸|혼동|retract|correction|verified|rejected/i,
+    /PINNED FACTS|ACTIVE ARTIFACT CONTEXT|artifact_observation/i,
+  ];
+  const pinPatterns = [...defaultPinPatterns, ...normalizePinPatterns(options.pinPatterns || [])];
+  const maxPinLines = Math.max(2, Math.floor(Number(options.maxPinLines || 10)));
+  const pinnedLines = uniqueLines(
+    raw.split(/\r?\n/).filter((line) => pinPatterns.some((pattern) => pattern.test(line)))
+  ).slice(-maxPinLines);
+
+  const headBudget = Math.max(120, Math.floor(limit * 0.18));
+  const tailBudget = Math.max(180, Math.floor(limit * 0.42));
+  const pinBudget = Math.max(160, limit - headBudget - tailBudget - 220);
+  const pinnedBlock = pinnedLines.length > 0
+    ? `[PINNED EXCERPTS PRESERVED DURING COMPACTION]\n${clip(pinnedLines.map((line) => `- ${line}`).join('\n'), pinBudget, { mode: 'middle' })}`
+    : '';
+  const head = clip(raw.slice(0, Math.max(headBudget * 2, headBudget)).trim(), headBudget, { mode: 'head' });
+  const tail = clip(raw.slice(Math.max(0, raw.length - Math.max(tailBudget * 2, tailBudget))).trim(), tailBudget, { mode: 'tail' });
+  const note = [
+    '[COMPACTION NOTE]',
+    '- This context was compacted by budget, not deleted.',
+    '- Pinned excerpts and recent tail are preserved; prefer ACTIVE ARTIFACT CONTEXT when available.',
+  ].join('\n');
+  const compacted = [head, pinnedBlock, note, tail].filter(Boolean).join('\n\n---\n\n');
+  if (compacted.length <= limit) return compacted;
+  return clip(compacted, limit, { mode: 'middle' });
+}
+
 // Prefer last "Codex instruction" section from plan.md
 export function extractCodexInstruction(planText) {
   if (!planText) return null;

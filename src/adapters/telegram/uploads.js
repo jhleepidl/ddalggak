@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { recordUploadedArtifactContext } from "../../application/artifact_context.js";
+
 const BYTES_PER_MB = 1024 * 1024;
 const DEFAULT_UPLOAD_MAX_BYTES = 20 * BYTES_PER_MB;
 
@@ -266,6 +268,9 @@ export function createTelegramUploadService(deps = {}) {
       upload_note: cleanUploadNote || undefined,
     };
     fs.appendFileSync(manifestPath, `${JSON.stringify(record)}\n`, "utf8");
+    try {
+      recordUploadedArtifactContext(jobs.jobDir(jobId), record);
+    } catch {}
 
     const uploadSummary = cleanUploadNote
       ? `uploaded file: ${cleanName} (${cleanUploadNote})`

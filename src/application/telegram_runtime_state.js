@@ -1,6 +1,9 @@
 import path from "node:path";
 import process from "node:process";
 
+import { compactWithPinnedContext } from "../textutil.js";
+import { formatActiveArtifactContext } from "./artifact_context.js";
+
 import { Jobs } from "../jobs.js";
 import { Tracking } from "../tracking.js";
 import { Approvals } from "../approvals.js";
@@ -272,6 +275,8 @@ function runSharedDir(jobId) {
 
 function loadLocalContextDocs(jobId, docNames, maxCharsPerDoc = 3500) {
   const sections = [];
+  const activeArtifactContext = formatActiveArtifactContext(runDir(jobId), { maxChars: Math.max(900, Math.floor(maxCharsPerDoc * 0.9)) });
+  if (activeArtifactContext) sections.push(activeArtifactContext);
   const profile = tracking.loadProfile(jobId);
   if (profile) {
     const summaryLimit = Math.max(900, Math.floor(maxCharsPerDoc / 2));
@@ -287,7 +292,9 @@ function loadLocalContextDocs(jobId, docNames, maxCharsPerDoc = 3500) {
     seenDocNames.add(resolvedKey);
     try {
       const text = tracking.read(jobId, name);
-      const clipped = text.length > maxCharsPerDoc ? text.slice(-maxCharsPerDoc) : text;
+      const clipped = text.length > maxCharsPerDoc
+        ? compactWithPinnedContext(text, maxCharsPerDoc, { maxPinLines: 12 })
+        : text;
       sections.push(`### ${path.join(runSharedDir(jobId), resolvedName)}\n\n${clipped}`);
     } catch (error) {
       sections.push(`### ${path.join(runSharedDir(jobId), resolvedName)}\n\n[read failed: ${String(error?.message ?? error)}]`);

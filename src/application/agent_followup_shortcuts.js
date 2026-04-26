@@ -32,6 +32,17 @@ const FOLLOWUP_REFERENTS = [
   /previous\s+answer/i, /last\s+answer/i, /that\s+answer/i,
 ];
 
+const CORRECTION_OR_VERIFICATION_PATTERNS = [
+  /너\s*눈에는/i,
+  /그게\s*(?:맞아|맞니|보여)/i,
+  /어떤\s*(?:이미지|사진|파일)/i,
+  /무슨\s*(?:이미지|사진|파일)/i,
+  /다시\s*(?:확인|봐|읽어)/i,
+  /왜\s+.*(?:알려주는|말하는|나오는)/i,
+  /아니(?:야|요)?|틀렸|잘못|정정|혼동/i,
+  /not\s+what|wrong|incorrect|recheck|which\s+file|what\s+image/i,
+];
+
 const NEW_TASK_KEYWORDS = [
   /구현/, /수정/, /패치/, /작성/, /생성/, /만들/, /리팩토/, /검색/, /조사/, /분석/, /정리해줘/, /계획/, /설계안/,
   /implement/i, /patch/i, /write/i, /create/i, /search/i, /research/i, /analy[sz]e/i, /plan/i,
@@ -82,6 +93,12 @@ export function appendRecentAgentTurn(existing = [], entry = {}) {
 
 function estimateTokenCount(text = "") {
   return (String(text || "").match(/[a-zA-Z0-9가-힣_]+/g) || []).length;
+}
+
+export function isCorrectionOrVerificationMessage(message = "") {
+  const text = clean(message);
+  if (!text) return false;
+  return CORRECTION_OR_VERIFICATION_PATTERNS.some((regex) => regex.test(text));
 }
 
 function isLikelyNewTask(message = "") {
@@ -220,6 +237,17 @@ export function planAgentFollowupShortcut({ message = "", session = null, runtim
   }
   if (session?.pending_approval && shortcutPolicy.disallow_when_pending_approval !== false) {
     return { matched: false, reason: "pending_approval", intent };
+  }
+
+  if (isCorrectionOrVerificationMessage(message) && shortcutPolicy.allow_correction_shortcut !== true) {
+    return {
+      matched: false,
+      reason: "correction_or_verification_requires_router",
+      intent: {
+        ...intent,
+        correction_or_verification: true,
+      },
+    };
   }
 
   if (!cleanReplyToMessageId) {
