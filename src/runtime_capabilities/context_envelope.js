@@ -24,6 +24,17 @@ function normalizeKey(value = '') {
   return clean(value).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
 
+function clipMiddle(value = '', maxChars = 0) {
+  const raw = String(value || '');
+  const limit = Number(maxChars || 0);
+  if (!(limit > 0) || raw.length <= limit) return raw;
+  const marker = '\n…(truncated; latest context preserved below)…\n';
+  const available = Math.max(20, limit - marker.length);
+  const head = Math.max(10, Math.floor(available * 0.35));
+  const tail = Math.max(10, available - head);
+  return `${raw.slice(0, head)}${marker}${raw.slice(-tail)}`;
+}
+
 function labelForKey(key = '') {
   const cleanKey = normalizeKey(key);
   switch (cleanKey) {
@@ -81,7 +92,7 @@ export function buildContextEnvelope(sections = [], { maxChars = 0 } = {}) {
     ? Math.max(400, Math.floor(Number(maxChars)))
     : 0;
   if (limit && text.length > limit) {
-    text = `${text.slice(0, Math.max(120, limit - 18))}\n…(truncated)…`;
+    text = clipMiddle(text, limit);
   }
   return {
     text,

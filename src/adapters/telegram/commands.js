@@ -829,7 +829,8 @@ ${buildTeamListMessage({ active_team: applied }, { runtime: runtimeForTeam })}`)
     }
 
     if (cmd === "/skills") {
-      await sendAgentOrToolListQuick(bot, chatId, "agent", "skills", { telegramUserId: userId });
+      const skillsArgs = ["skills", ...rest].join(" ").trim();
+      await sendAgentOrToolListQuick(bot, chatId, "agent", skillsArgs, { telegramUserId: userId });
       return true;
     }
 

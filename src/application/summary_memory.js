@@ -198,10 +198,8 @@ export function updateRoleSummary({
   const cleanGoal = clip(safe(goal), 240);
   const cleanOutput = clip(safe(output).replace(/\s+/g, ' '), 480);
   if (!cleanJobDir || !cleanOutput) return null;
-  const keys = Array.from(new Set([
-    normalizeRoleKey(roleId),
-    normalizeRoleKey(agentId),
-  ].filter(Boolean)));
+  const primaryKey = normalizeRoleKey(roleId) || normalizeRoleKey(agentId);
+  const keys = primaryKey ? [primaryKey] : [];
   if (keys.length === 0) return null;
   const ts = new Date().toISOString();
   const heading = `${ts} · ${safe(roleId || agentId || 'agent')}`;

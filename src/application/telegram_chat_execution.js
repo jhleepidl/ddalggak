@@ -176,6 +176,7 @@ import { summarizeProviderInteractionCapabilities } from "./provider_interaction
 import { summarizeRuntimeCheckpointRef, writeRuntimeCheckpointBundle } from "./runtime_checkpointing.js";
 import { appendPromptTelemetry, estimateTextTokens as estimatePromptTelemetryTokens } from "./prompt_telemetry.js";
 import { readIterationDelta, readRoleSummary, updateRoleSummary } from "./summary_memory.js";
+import { scoreTaskAutonomy, inferTypedMemoryNeeds } from "./autonomy_policy.js";
 
 import * as runtimeState from "./telegram_runtime_state.js";
 import * as runtimeIo from "./telegram_runtime_io.js";
@@ -3693,6 +3694,42 @@ async function runSupervisorChat(
           runtime_authority: buildRunAuthority(runtime),
         },
       });
+      const attachedSkillIds = [];
+      for (const agent of Array.isArray(turnAgentsCatalog) ? turnAgentsCatalog : []) {
+        for (const skillId of [
+          ...(Array.isArray(agent?.attached_skill_ids) ? agent.attached_skill_ids : []),
+          ...(Array.isArray(agent?.skills) ? agent.skills : []),
+        ]) {
+          const cleanSkillId = String(skillId || '').trim();
+          if (cleanSkillId && !attachedSkillIds.includes(cleanSkillId)) attachedSkillIds.push(cleanSkillId);
+        }
+      }
+      const autonomyDecision = scoreTaskAutonomy({
+        userText: lastUserText,
+        availableAgents: Math.max(1, (Array.isArray(turnEnabledAgentIds) && turnEnabledAgentIds.length > 0 ? turnEnabledAgentIds.length : (Array.isArray(turnAgentsCatalog) ? turnAgentsCatalog.length : 1))),
+        attachedSkills: attachedSkillIds,
+        traceStats: {
+          prompt_chars: String(routerCtx.contextText || runtime.contextSummary || '').length,
+          trace_count: Array.isArray(mergedOutputs) ? mergedOutputs.length : 0,
+        },
+        recentFailures: (Array.isArray(mergedResults) ? mergedResults : []).filter((row) => String(row?.status || '').toLowerCase() === 'error').length,
+        memoryStats: {
+          bytes: String(runtime.contextSummary || '').length + String(routerCtx.contextText || '').length,
+          files: Array.isArray(runtime.contextDocs) ? runtime.contextDocs.length : 0,
+        },
+      });
+      const typedMemoryNeeds = inferTypedMemoryNeeds({
+        userText: lastUserText,
+        currentTaskKind: String(interpretedTask?.task_kind || interpretedTask?.kind || '').trim(),
+      });
+      const autonomyPolicyHint = [
+        'Autonomy decision:',
+        `- score=${autonomyDecision.score}`,
+        `- mode=${autonomyDecision.mode}`,
+        `- reasons=${autonomyDecision.reasons.join(', ') || '(none)'}`,
+        `- typed_memory=${typedMemoryNeeds.slots.map((slot) => `${slot.slot}:${slot.operation}`).join(', ') || '(none)'}`,
+        'Use this as a quantitative hint, not as a hard override. Prefer single-agent unless score crosses threshold and enabled agents/skills exist.',
+      ].join('\n');
       const rawRoutePlan = await routeWithSupervisor(lastUserText, {
         agents: turnAgentsCatalog,
         agentsCatalog: runtime.agentsCatalog,
@@ -3713,7 +3750,9 @@ async function runSupervisorChat(
         cwd: runWorkspaceDir(currentJobId),
         signal: controller.signal,
         locale: "ko-KR",
-        routerPolicy: memory.getRouterPrompt(),
+        routerPolicy: `${memory.getRouterPrompt()}\n\n${autonomyPolicyHint}`,
+        autonomyDecision,
+        typedMemoryNeeds,
         contextSummary: routerCtx.contextText || runtime.contextSummary,
         geminiConcurrencyKey: `job:${String(currentJobId || "").trim()}`,
         onGeminiRetry: async ({ retryCount = 0, maxRetries = 0 } = {}) => {
@@ -3751,6 +3790,8 @@ async function runSupervisorChat(
         forceMode: cleanForceMode,
       });
       routePlan.team_locked = runtime.teamLocked === true;
+      routePlan.autonomy_decision = autonomyDecision;
+      routePlan.typed_memory_needs = typedMemoryNeeds;
       routePlan.interaction_spec = runtime.teamInteractionSpec || runtime.activeTeamConfig?.interaction_spec || null;
       let usedSuggestedActionsFallback = false;
       if (

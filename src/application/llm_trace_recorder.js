@@ -30,7 +30,11 @@ function clipText(value = '', maxChars = 0) {
   const max = Number(maxChars || 0);
   if (!(max > 0)) return raw;
   if (raw.length <= max) return raw;
-  return `${raw.slice(0, Math.max(0, max - 1))}…`;
+  const marker = '\n…(truncated; latest context preserved below)…\n';
+  const available = Math.max(20, max - marker.length);
+  const head = Math.max(10, Math.floor(available * 0.35));
+  const tail = Math.max(10, available - head);
+  return `${raw.slice(0, head)}${marker}${raw.slice(-tail)}`;
 }
 
 function asObject(value) {

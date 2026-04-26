@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import { getPendingInstallProposal, archivePendingInstallProposal, buildInstallProposalPrompt } from '../../application/install_proposal_state.js';
 import { handleTelegramInstallProposalCallback } from './install_proposal_callbacks.js';
 import { buildChatStatusCard } from '../../application/telegram_runtime_ui.js';
+import { isSkillDraftApprovalCallbackData, parseSkillDraftApprovalCallbackData } from '../../application/skill_draft_approval.js';
 import { loadArtifactIndex, formatArtifactIndexText, resolveArtifactDeliveryContract, formatArtifactDeliveryContractLines } from '../../application/telegram_runtime_io.js';
 import { buildPreviewAgentIndex, buildQueuedAgentStatusFromActions, buildRoutedDashboardText } from './preview_formatting.js';
 
@@ -127,6 +128,81 @@ export function createTelegramCallbackQueryHandler(deps = {}) {
         });
         if (handledInstallProposal) {
           return;
+        }
+
+        if (isSkillDraftApprovalCallbackData(data)) {
+          const parsed = parseSkillDraftApprovalCallbackData(data);
+          const session = chatSessionStore?.get?.(chatId) || {};
+          const pending = session.pending_skill_draft && typeof session.pending_skill_draft === 'object'
+            ? session.pending_skill_draft
+            : null;
+          if (!pending || String(pending.token || '') !== String(parsed.token || '')) {
+            await bot.answerCallbackQuery(q.id, { text: 'skill draft not found or expired' });
+            await bot.sendMessage(chatId, '❌ 승인할 skill draft를 찾지 못했습니다. 다시 /skills propose <설명> 으로 생성해 주세요.');
+            return;
+          }
+          if (parsed.action === 'reject') {
+            chatSessionStore?.upsert?.(chatId, { pending_skill_draft: null });
+            await bot.answerCallbackQuery(q.id, { text: 'skill draft rejected' });
+            await bot.sendMessage(chatId, `🗑️ skill draft를 거절했습니다.
+skill_id=${pending?.draft?.id || '(unknown)'}`);
+            return;
+          }
+          let runtime = null;
+          const currentJobId = resolveCurrentJobIdForChat?.(chatId);
+          if (currentJobId && typeof loadSupervisorRuntime === 'function') {
+            try {
+              runtime = await loadSupervisorRuntime(currentJobId, { telegramUserId: userId, includeContext: false, includeGlobal: false });
+            } catch {}
+          }
+          const threadId = String(runtime?.threadId || runtime?.thread_id || runtime?.map?.threadId || '').trim();
+          const contextSetId = String(runtime?.contextSetId || runtime?.context_set_id || runtime?.map?.ctxSharedId || '').trim();
+          try {
+            const client = requireGocClient();
+            let publishResult = null;
+            try {
+              publishResult = await client.publishSkillPackage({ package: pending.draft, threadId });
+            } catch (publishError) {
+              publishResult = { ok: false, error: String(publishError?.message ?? publishError) };
+            }
+            let installResult = null;
+            if (threadId) {
+              try {
+                installResult = await client.installSkillPackage({
+                  threadId,
+                  package: pending.draft,
+                  contextSetId,
+                  sourceThreadId: threadId,
+                });
+              } catch (installError) {
+                installResult = { ok: false, error: String(installError?.message ?? installError) };
+              }
+            }
+            chatSessionStore?.upsert?.(chatId, {
+              pending_skill_draft: null,
+              last_skill_draft: {
+                ...pending,
+                status: 'approved',
+                approved_at: new Date().toISOString(),
+                publish_result: publishResult,
+                install_result: installResult,
+              },
+            });
+            await bot.answerCallbackQuery(q.id, { text: 'skill approved' });
+            await sendLong(bot, chatId, [
+              '✅ skill draft 승인 완료',
+              `skill_id=${pending?.draft?.id || '(unknown)'}`,
+              publishResult?.ok === false ? `publish_warning=${publishResult.error}` : 'publish=ok',
+              threadId ? (installResult?.ok === false ? `install_warning=${installResult.error}` : 'install=ok') : 'install=skipped(no active thread)',
+              '',
+              'GoC Library/Skills에서 확인할 수 있습니다. side_effect가 requires_confirmation이면 실제 실행 전 추가 확인을 유지하세요.',
+            ].join('\n'));
+            return;
+          } catch (error) {
+            await bot.answerCallbackQuery(q.id, { text: 'skill approval failed' });
+            await bot.sendMessage(chatId, `❌ skill draft 승인 실패: ${String(error?.message ?? error)}`);
+            return;
+          }
         }
 
         if (data === 'plan_preview:details') {

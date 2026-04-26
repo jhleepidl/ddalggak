@@ -58,6 +58,11 @@ import { summarizeRuntimeTeamSnapshotLines } from "./runtime_snapshot_display.js
 import { formatSkillLabels, formatRoleOverlayProfile, humanizeModel, resolveAgencyOverlayMeta, roleLabel } from "./team_presentation.js";
 import { summarizeRoleMemoryEnforcement } from "../knowledge_base/runtime.js";
 import { resolveRoutingContractSummary, formatRouteReadiness } from "./route_contract.js";
+import {
+  buildSkillDraftFromRequest,
+  buildSkillDraftApprovalState,
+  formatSkillDraftApprovalMessage,
+} from "./skill_draft_approval.js";
 
 async function sendTextWithOptionalGocButton(
   bot,
@@ -455,6 +460,67 @@ function formatRosterRow(row = {}) {
   return parts.join(' · ');
 }
 
+function formatRosterRowVerbose(row = {}) {
+  if (row?.__summary_only) return `  • ${String(row.display_label || '').trim()}`;
+  const line = formatRosterRow(row);
+  return `  • ${line.replace(/ · /g, '\n    ')}`;
+}
+
+function skillListFromResponse(response) {
+  if (Array.isArray(response)) return response;
+  if (Array.isArray(response?.items)) return response.items;
+  if (Array.isArray(response?.skills)) return response.skills;
+  if (Array.isArray(response?.rows)) return response.rows;
+  return [];
+}
+
+function formatSkillCatalogRows(rows = [], { query = '', limit = 40 } = {}) {
+  const q = String(query || '').trim().toLowerCase();
+  const filtered = q
+    ? rows.filter((row) => [
+        row?.id,
+        row?.skill_id,
+        row?.name,
+        row?.title,
+        row?.description,
+        ...(Array.isArray(row?.tags) ? row.tags : []),
+        ...(Array.isArray(row?.capability_tags) ? row.capability_tags : []),
+      ].some((v) => String(v || '').toLowerCase().includes(q)))
+    : rows;
+  const lines = ['Skill catalog', `- count: ${filtered.length}${q ? ` (filter: ${q})` : ''}`];
+  for (const row of filtered.slice(0, limit)) {
+    const id = String(row?.id || row?.skill_id || row?.skillId || '').trim();
+    const name = String(row?.name || row?.title || id || 'skill').trim();
+    const sideEffect = String(row?.side_effect_level || row?.sideEffectLevel || row?.side_effect || '').trim();
+    const trust = String(row?.trust_level || row?.trustLevel || '').trim();
+    const desc = String(row?.description || row?.summary || '').replace(/\s+/g, ' ').trim();
+    lines.push(`- ${name}${id ? ` [${id}]` : ''}${sideEffect ? ` · side_effect=${sideEffect}` : ''}${trust ? ` · trust=${trust}` : ''}`);
+    if (desc) lines.push(`  ${clip(desc, 260)}`);
+  }
+  if (filtered.length === 0) lines.push('- (none)');
+  lines.push('', '명령:', '/skills catalog [검색어]', '/skills show <skill_id>', '/skills install <skill_id>', '/skills propose <원하는 skill 설명>');
+  return lines.join('\n');
+}
+
+function formatSkillDetail(pkg = {}) {
+  const row = pkg?.package && typeof pkg.package === 'object' ? pkg.package : (pkg?.item && typeof pkg.item === 'object' ? pkg.item : pkg);
+  const id = String(row?.id || row?.skill_id || row?.skillId || '').trim();
+  const name = String(row?.name || row?.title || id || 'skill').trim();
+  const desc = String(row?.description || row?.summary || '').trim();
+  const requirements = Array.isArray(row?.credential_requirements || row?.credentialRequirements) ? (row?.credential_requirements || row?.credentialRequirements) : [];
+  const adapters = row?.execution_adapter || row?.executionAdapter || row?.adapter || {};
+  return [
+    `Skill: ${name}`,
+    id ? `id=${id}` : '',
+    desc ? `description=${clip(desc, 1200)}` : '',
+    `side_effect=${String(row?.side_effect_level || row?.sideEffectLevel || 'unknown')}`,
+    `trust=${String(row?.trust_level || row?.trustLevel || 'unknown')}`,
+    requirements.length ? `credentials=${requirements.map((r) => String(r?.id || r?.key || r?.name || r)).join(', ')}` : 'credentials=(none declared)',
+    Object.keys(adapters || {}).length ? `adapter=${JSON.stringify(adapters).slice(0, 900)}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+
 export function formatMemorySummary() {
   const s = memory.getSummary();
   const role = memory.getAgentRoleSummary();
@@ -468,10 +534,10 @@ export function formatMemorySummary() {
     "Auto-Suggest Reflection Prompt (preview):",
     s.policyPreview || "(empty)",
     "",
-    "Multi-Agent Router Prompt (preview):",
+    "Agent Routing Prompt (preview):",
     s.routerPreview || "(empty)",
     "",
-    "Agent Roles (preview):",
+    "Default Agent Roles (preview):",
     `[Gemini]\n${role.geminiPreview}`,
     "",
     `[Codex]\n${role.codexPreview}`,
@@ -1355,6 +1421,64 @@ export async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawA
     }
 
     if (cleanKind === "agent" && sub === "skills") {
+      const action = String(tokens[1] || '').trim().toLowerCase();
+      const arg = String(tokens.slice(2).join(' ') || '').trim();
+      if (["catalog", "list", "search", "defaults"].includes(action)) {
+        try {
+          const response = await requireGocClient().listSkills({ threadId: runtime?.threadId || runtime?.thread_id || runtime?.map?.threadId || '', includeDefaults: true });
+          await sendLong(bot, chatId, formatSkillCatalogRows(skillListFromResponse(response), { query: arg, limit: 50 }));
+        } catch (error) {
+          await bot.sendMessage(chatId, `❌ skill catalog 조회 실패: ${String(error?.message ?? error)}`);
+        }
+        return;
+      }
+      if (["show", "detail", "details", "export"].includes(action)) {
+        if (!arg) {
+          await bot.sendMessage(chatId, "Usage: /skills show <skill_id>");
+          return;
+        }
+        try {
+          const response = await requireGocClient().getSkillPackage(arg, { threadId: runtime?.threadId || runtime?.thread_id || runtime?.map?.threadId || '', includeDefaults: true });
+          await sendLong(bot, chatId, formatSkillDetail(response));
+        } catch (error) {
+          await bot.sendMessage(chatId, `❌ skill detail 조회 실패: ${String(error?.message ?? error)}`);
+        }
+        return;
+      }
+      if (["install", "add"].includes(action)) {
+        if (!arg) {
+          await bot.sendMessage(chatId, "Usage: /skills install <skill_id>");
+          return;
+        }
+        try {
+          const response = await requireGocClient().installSkillPackage({
+            threadId: runtime?.threadId || runtime?.thread_id || runtime?.map?.threadId || '',
+            skillId: arg,
+            sourceThreadId: runtime?.threadId || runtime?.thread_id || runtime?.map?.threadId || '',
+            contextSetId: runtime?.contextSetId || runtime?.context_set_id || runtime?.map?.ctxSharedId || '',
+          });
+          await sendLong(bot, chatId, [`✅ skill installed`, `skill_id=${arg}`, response?.node?.id ? `node=${response.node.id}` : ''].filter(Boolean).join('\n'));
+        } catch (error) {
+          await bot.sendMessage(chatId, `❌ skill install 실패: ${String(error?.message ?? error)}`);
+        }
+        return;
+      }
+      if (["propose", "draft", "create"].includes(action)) {
+        if (!arg) {
+          await bot.sendMessage(chatId, "Usage: /skills propose <원하는 skill 설명>");
+          return;
+        }
+        const draft = buildSkillDraftFromRequest({ request: arg, source: 'telegram', createdBy: telegramUserId ? `telegram:${telegramUserId}` : 'telegram' });
+        const state = buildSkillDraftApprovalState({ draft, chatId, userId: telegramUserId });
+        chatSessionStore.upsert(chatId, { pending_skill_draft: state });
+        await bot.sendMessage(chatId, formatSkillDraftApprovalMessage(state), {
+          reply_markup: { inline_keyboard: [[
+            { text: '✅ Approve skill', callback_data: `approve_skill:${state.token}` },
+            { text: '❌ Reject', callback_data: `reject_skill:${state.token}` },
+          ]] },
+        });
+        return;
+      }
       const rosterRows = summarizeAgentRoster(runtime, {
         actions: runtime?.chatSession?.last_route?.actions || runtime?.last_route?.actions || chatSessionStore.get(chatId)?.last_route?.actions || [],
         limit: 12,
@@ -1367,8 +1491,9 @@ export async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawA
         textLines.push('- 아직 계획된 runtime agent가 없습니다.')
       } else {
         textLines.push('- agents:')
-        for (const row of rosterRows.slice(0, 12)) textLines.push(`  • ${formatRosterRow(row)}`)
+        for (const row of rosterRows.slice(0, 12)) textLines.push(formatRosterRowVerbose(row))
       }
+      textLines.push('', 'skill 명령:', '/skills catalog [검색어]', '/skills show <skill_id>', '/skills install <skill_id>', '/skills propose <원하는 skill 설명>');
       await sendLong(bot, chatId, textLines.join('\n'));
       return;
     }

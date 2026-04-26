@@ -1,6 +1,19 @@
-export function clip(s, max = 3500) {
+export function clip(s, max = 3500, { mode = "middle" } = {}) {
   if (!s) return "";
-  return s.length <= max ? s : s.slice(0, max) + "\n…(truncated)…";
+  const raw = String(s);
+  const limit = Number(max || 0);
+  if (!(limit > 0) || raw.length <= limit) return raw;
+  const marker = "\n…(truncated; latest context preserved below)…\n";
+  const available = Math.max(20, limit - marker.length);
+  if (mode === "tail") return `${marker}${raw.slice(-available)}`;
+  if (mode === "head") return `${raw.slice(0, available)}${marker}`;
+  const head = Math.max(10, Math.floor(available * 0.35));
+  const tail = Math.max(10, available - head);
+  return `${raw.slice(0, head)}${marker}${raw.slice(-tail)}`;
+}
+
+export function clipTail(s, max = 3500) {
+  return clip(s, max, { mode: "tail" });
 }
 
 export function chunk(s, size = 3800) {

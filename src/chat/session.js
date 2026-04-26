@@ -582,6 +582,9 @@ function normalizeSession(chatId, raw = {}) {
     awaiting_install_approval: row.awaiting_install_approval === true,
     pending_install_proposal: normalizeInstallProposalState(row.pending_install_proposal || row.pendingInstallProposal),
     last_install_proposal: normalizeInstallProposalState(row.last_install_proposal || row.lastInstallProposal),
+    pending_skill_draft: row.pending_skill_draft && typeof row.pending_skill_draft === 'object'
+      ? row.pending_skill_draft
+      : (row.pendingSkillDraft && typeof row.pendingSkillDraft === 'object' ? row.pendingSkillDraft : null),
     credential_binding_state: normalizeCredentialBindingState(row.credential_binding_state || row.credentialBindingState || {}),
     pattern_conflict: normalizePatternConflictState(row.pattern_conflict || row.patternConflict),
     temporary_execution_override: normalizeTemporaryExecutionOverride(row.temporary_execution_override || row.temporaryExecutionOverride),

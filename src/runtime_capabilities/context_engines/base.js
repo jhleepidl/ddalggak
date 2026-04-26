@@ -15,6 +15,20 @@ function normalizeRoleId(value) {
   return String(value || "").trim().toLowerCase();
 }
 
+function boolEnv(name, fallback = false) {
+  const raw = String(process.env[name] || "").trim().toLowerCase();
+  if (!raw) return fallback;
+  if (["1", "true", "yes", "on"].includes(raw)) return true;
+  if (["0", "false", "no", "off"].includes(raw)) return false;
+  return fallback;
+}
+
+function shouldWriteLocalLog(fileName = "") {
+  const name = String(fileName || "").trim().toLowerCase();
+  if (name === "context_meta.jsonl") return boolEnv("RUN_VERBOSE_CONTEXT_META", false);
+  return true;
+}
+
 function matchesAny(value, candidates = []) {
   const clean = normalizeRoleId(value);
   if (!clean) return false;
@@ -110,6 +124,7 @@ export class ContextEngineBase {
     const dir = this.ensureLocalMemoryDir(jobId);
     if (!dir) return;
     const name = String(fileName || "").trim() || "context_meta.jsonl";
+    if (!shouldWriteLocalLog(name)) return;
     const p = path.join(dir, name);
     const row = {
       ts: new Date().toISOString(),

@@ -16,30 +16,30 @@ const DEFAULT_POLICY_PROMPT = [
 ].join("\n");
 
 const DEFAULT_ROUTER_PROMPT = [
-  "아래 목표/상황을 보고 필요한 에이전트만 최소로 호출하는 실행 순서를 결정한다.",
+  "최신 사용자 요청을 먼저 처리하고, 기본은 single-agent fast path로 둔다.",
+  "- 단순 질의/추천/요약은 현재 활성 agent 1명에게 직접 맡긴다.",
+  "- multi-agent는 정량 autonomy score가 threshold를 넘거나, 명확한 병렬 하위작업/구현+검토/외부 skill 조합/반복 실패가 있을 때만 사용한다.",
   "- 중복 작업 금지: 같은 분석/계획/코딩을 여러 에이전트에게 반복시키지 않는다.",
-  "- Gemini는 리서치/리스크/검증 전략 중심으로만 사용한다.",
-  "- Codex는 실제 코드 변경이 필요할 때만 사용한다.",
-  "- ChatGPT는 상위 의사결정(복잡도 상승, 루프, 큰 방향 전환)이 필요할 때만 호출한다.",
-  "- 불확실성이 낮고 바로 구현 가능하면 Codex 중심으로 진행한다.",
-  "- 변경 후 요약이 필요하면 git_summary 단계를 포함한다.",
+  "- stale memory/template보다 최신 user_message를 우선한다.",
+  "- skill이 필요하면 현재 catalog/attached skills를 먼저 확인하고, 없으면 사용자 승인용 skill draft를 제안한다.",
+  "- typed memory는 task domain에 맞게 event_log, user_preferences, project_state, decisions, capability_registry 등으로 분류한다.",
 ].join("\n");
 
 const DEFAULT_AGENT_ROLES = {
   gemini: [
-    "역할: 기술 리서처/검토자",
-    "- 코드 작성/수정 대신, 구현 전략·리스크·검증 체크리스트를 제시한다.",
-    "- 불확실한 지점을 줄이고 의사결정 근거를 정리한다.",
+    "역할: 기본 실행/리서치 agent",
+    "- 최신 사용자 요청에 직접 답하고, 필요한 경우 짧은 근거와 다음 선택지를 제시한다.",
+    "- 기술 검토가 아닌 일반 요청에서는 구현 리스크 템플릿을 출력하지 않는다.",
   ].join("\n"),
   codex: [
-    "역할: 구현 담당",
-    "- 코드 변경을 수행하고, 변경 이유/영향을 간결히 보고한다.",
-    "- 테스트는 직접 실행하지 말고 필요한 테스트를 제안한다.",
+    "역할: 코드 변경 agent",
+    "- 사용자가 코드 수정/패치를 원하거나 self-improvement job에서만 호출한다.",
+    "- 변경 이유, 영향, 검증 명령을 간결히 보고한다.",
   ].join("\n"),
   chatgpt: [
-    "역할: 상위 플래너/조정자",
-    "- 에이전트 간 역할 충돌을 줄이고 다음 단계 action plan을 결정한다.",
-    "- 복잡도 상승, 반복 실패, 방향 전환 시 우선 호출한다.",
+    "역할: 상위 조정/리뷰 agent",
+    "- multi-agent 분해, 반복 실패, 큰 방향 전환, 최종 synthesis가 필요할 때만 호출한다.",
+    "- 단순 요청에는 끼어들지 않는다.",
   ].join("\n"),
 };
 
@@ -131,7 +131,7 @@ export class OrchestratorMemory {
       "## Auto-Suggest Reflection Prompt",
       s.policyPrompt,
       "",
-      "## Multi-Agent Router Prompt",
+      "## Agent Routing Prompt",
       s.routerPrompt,
       "",
       "## Agent Roles",
@@ -155,7 +155,7 @@ export class OrchestratorMemory {
 
   _parse(text) {
     const policyPrompt = parseSection(text, "Auto-Suggest Reflection Prompt");
-    const routerPrompt = parseSection(text, "Multi-Agent Router Prompt");
+    const routerPrompt = parseSection(text, "Agent Routing Prompt") || parseSection(text, "Multi-Agent Router Prompt");
     const roleSection = parseSection(text, "Agent Roles");
     const geminiRole = parseSubSection(roleSection, "Gemini");
     const codexRole = parseSubSection(roleSection, "Codex");
