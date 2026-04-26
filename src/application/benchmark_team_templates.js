@@ -116,7 +116,7 @@ export function buildBenchmarkTeamTemplate(templateId = '', overrides = {}) {
 export function buildBenchmarkTemplateCatalogText() {
   const lines = [
     'Benchmark team templates',
-    '- /team template benchmark <id> 로 pending team으로 불러올 수 있습니다.',
+    '- /team debug template benchmark <id> 로 pending team으로 불러올 수 있습니다.',
   ];
   for (const row of listBenchmarkTeamTemplates()) {
     lines.push(`- ${row.template_id}: ${row.title} · ${row.benchmark_source}`);

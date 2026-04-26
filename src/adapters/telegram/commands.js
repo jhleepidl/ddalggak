@@ -41,7 +41,7 @@ const HELP_TEXT = [
   "Commands:",
   "- /chat <text>: 질문/작업 시작",
   "- /team: 현재 team 상태 보기",
-  "- /team suggest <목적>: 필요한 team 초안 만들기",
+  "- /team suggest <목적>: LLM planner로 필요한 team 초안 만들기",
   "- /team create <설명>: 원하는 team 직접 설명해서 만들기",
   "- /team refine <수정>: 현재/대기 team 수정하기",
   "- /team apply: 대기 team 적용",
@@ -89,7 +89,7 @@ const ADVANCED_HELP_TEXT = [
 const TEAM_CORE_HELP_TEXT = [
   "Team commands:",
   "- /team: 현재 team 상태 보기",
-  "- /team suggest <목적>: 목적 기반으로 team 제안 받기",
+  "- /team suggest <목적>: LLM planner로 목적 기반 team 제안 받기",
   "- /team create <설명>: 자연어로 team 만들기",
   "- /team refine <수정>: 현재/대기 team 수정하기",
   "- /team apply: 대기 team 적용",
@@ -105,11 +105,35 @@ const TEAM_ADVANCED_HELP_TEXT = [
   "- /team install <JSON>",
   "- /team pull",
   "- /team push",
-  "- /team template",
+  "- /team debug templates: 개발자용 benchmark template 목록 보기",
   "- /team validate <JSON>",
   "- /team options",
   "- /team modes",
   ...buildTeamSchemaOptionsSummaryLines(),
+].join("\n");
+
+
+const TEAM_TEMPLATE_DEPRECATED_TEXT = [
+  "/team template은 더 이상 일반 사용 흐름에서 권장되지 않습니다.",
+  "",
+  "목적 기반 팀 구성은 LLM planner가 처리합니다.",
+  "- /team suggest <목적>",
+  "- /team create <설명>",
+  "- /team refine <수정>",
+  "- /team apply",
+  "",
+  "현재/pending 팀의 structured manifest가 필요하면:",
+  "- /team export",
+  "",
+  "개발자용 benchmark template 목록은:",
+  "- /team debug templates",
+].join("\n");
+
+const TEAM_DEBUG_HELP_TEXT = [
+  "Team debug commands:",
+  "- /team debug templates: benchmark template catalog 보기",
+  "- /team debug template benchmark <id>: benchmark template을 pending team으로 불러오기",
+  "- /team debug template current: 현재 pending/active team의 legacy JSON template 출력",
 ].join("\n");
 
 export function createTelegramCommandHandler(deps = {}) {
@@ -659,14 +683,22 @@ ${TEAM_CORE_HELP_TEXT}`);
       if (sub === 'suggest') {
         const goal = String(rawArgs.replace(/^suggest\s+/i, '') || '').trim();
         if (!goal) {
-          await bot.sendMessage(chatId, 'Usage: /team suggest <목적>');
+          await bot.sendMessage(chatId, 'Usage: /team suggest [--fast|--template|--mode freeform] <목적>');
           return true;
         }
         const freeformMatch = goal.match(/^--mode\s+freeform\s+([\s\S]+)$/i);
-        const effectiveGoal = String(freeformMatch?.[1] || goal).trim();
-        const proposal = freeformMatch
-          ? await createFreeformTeamConfigurationAdvanced({ description: effectiveGoal, runtime: runtimeForTeam, jobId: currentJobId })
-          : suggestTeamConfiguration({ taskText: effectiveGoal, runtime: runtimeForTeam });
+        const fastMatch = goal.match(/^--(?:fast|template|heuristic)\s+([\s\S]+)$/i);
+        const effectiveGoal = String(freeformMatch?.[1] || fastMatch?.[1] || goal).trim();
+        const useHeuristicTemplate = Boolean(fastMatch);
+        if (!useHeuristicTemplate) {
+          await bot.sendMessage(chatId, 'LLM planner로 team 초안을 구성하겠습니다. 잠시만 기다려주세요. 빠른 템플릿 모드는 /team suggest --fast <목적> 을 사용하세요.');
+        }
+        const proposal = useHeuristicTemplate
+          ? suggestTeamConfiguration({ taskText: effectiveGoal, runtime: runtimeForTeam })
+          : {
+              ...(await createFreeformTeamConfigurationAdvanced({ description: effectiveGoal, runtime: runtimeForTeam, jobId: currentJobId })),
+              proposal_mode: 'suggest',
+            };
         storePendingTeam(chatSessionStore, chatId, proposal);
         await sendLong(bot, chatId, formatTeamProposalMessage(proposal, { runtime: runtimeForTeam }));
         return true;
@@ -727,35 +759,43 @@ ${TEAM_CORE_HELP_TEXT}`);
       // legacy team blueprint subcommand handlers were removed.
       // /team proposal|install-plan|requirements|export|install|import|pull|push are handled only by handleTelegramTeamBlueprintSubcommand.
       if (sub === 'template') {
-        const templateArg = String(rawArgs.replace(/^template\s*/i, '') || '').trim();
-        if (!templateArg || templateArg === 'current') {
+        await bot.sendMessage(chatId, TEAM_TEMPLATE_DEPRECATED_TEXT);
+        return true;
+      }
+      if (sub === 'debug') {
+        const debugArg = String(rawArgs.replace(/^debug\s*/i, '') || '').trim();
+        if (!debugArg) {
+          await bot.sendMessage(chatId, TEAM_DEBUG_HELP_TEXT);
+          return true;
+        }
+        if (/^(templates?|template\s+(?:catalog|benchmarks?))$/i.test(debugArg)) {
+          await sendLong(bot, chatId, buildBenchmarkTemplateCatalogText());
+          return true;
+        }
+        if (/^template\s+current$/i.test(debugArg)) {
           const baseTeam = teamState.pending_team || teamState.active_team;
           if (!baseTeam) {
-            await bot.sendMessage(chatId, '먼저 /team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 팀을 제안받아 주세요. 또는 /team template catalog 로 benchmark 템플릿을 볼 수 있습니다.');
+            await bot.sendMessage(chatId, '출력할 team이 없습니다. 먼저 /team suggest <목적> 또는 /team create <설명> 으로 pending team을 만든 뒤 다시 시도하세요.');
             return true;
           }
           await sendLong(bot, chatId, buildTeamConfigurationTemplate(baseTeam));
           return true;
         }
-        if (/^(catalog|benchmarks?)$/i.test(templateArg)) {
-          await sendLong(bot, chatId, buildBenchmarkTemplateCatalogText());
-          return true;
-        }
-        const match = templateArg.match(/^(?:benchmark|bench)\s+([a-z0-9_.-]+)$/i);
+        const match = debugArg.match(/^template\s+(?:benchmark|bench)\s+([a-z0-9_.-]+)$/i);
         if (match) {
           const bench = buildBenchmarkTeamTemplate(match[1], {});
           if (!bench) {
-            await bot.sendMessage(chatId, `알 수 없는 benchmark template: ${String(match[1] || '')}. /team template catalog 로 목록을 확인하세요.`);
+            await bot.sendMessage(chatId, `알 수 없는 benchmark template: ${String(match[1] || '')}. /team debug templates 로 목록을 확인하세요.`);
             return true;
           }
           const validated = validateTeamConfiguration({ ...bench, proposal_mode: 'suggest' }, { runtime: runtimeForTeam });
           storePendingTeam(chatSessionStore, chatId, validated);
-          await sendLong(bot, chatId, `✅ benchmark template을 pending team으로 불러왔습니다.
+          await sendLong(bot, chatId, `✅ debug benchmark template을 pending team으로 불러왔습니다.
 
 ${formatTeamProposalMessage(validated, { runtime: runtimeForTeam })}`);
           return true;
         }
-        await bot.sendMessage(chatId, 'Usage: /team template | /team template catalog | /team template benchmark <id>');
+        await bot.sendMessage(chatId, TEAM_DEBUG_HELP_TEXT);
         return true;
       }
       if (sub === 'validate') {
@@ -810,11 +850,11 @@ ${buildTeamListMessage({ active_team: applied }, { runtime: runtimeForTeam })}`)
       if (sub === 'modes') {
         await sendLong(bot, chatId, [
           'Team composition modes:',
-          '- structured: /team suggest <목적>',
+          '- LLM planner: /team suggest <목적>',
           '  canonical role/skill/model 후보를 안전하게 조합합니다.',
           '- freeform: /team create <자연어 팀 설명>',
           '  더 자유로운 agent 이름/책임/상호작용을 제안한 뒤 structured contract로 정규화합니다.',
-          '- freeform shortcut: /team suggest --mode freeform <설명>',
+          '- fast template: /team suggest --fast <목적>',
         ].join('\n'));
         return true;
       }

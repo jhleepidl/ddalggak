@@ -1,6 +1,8 @@
 import process from "node:process";
 import TelegramBot from "node-telegram-bot-api";
 
+import { installTelegramRateLimitRetry } from "./rate_limit.js";
+
 import { ChatRunManager } from "../../chat/run_manager.js";
 import { createTelegramCommandHandler } from "./commands.js";
 import { createTelegramCallbackQueryHandler } from "./callbacks.js";
@@ -198,7 +200,7 @@ export async function startTelegramApp({ token = runtimeCore.TOKEN } = {}) {
     throw new Error("Missing TELEGRAM_BOT_TOKEN");
   }
 
-  const bot = new TelegramBot(String(token).trim(), buildTelegramBotOptions());
+  const bot = installTelegramRateLimitRetry(new TelegramBot(String(token).trim(), buildTelegramBotOptions()));
   const chatRunManager = createAppChatRunManager(bot);
   let botUsername = "";
 
@@ -266,8 +268,26 @@ export async function startTelegramApp({ token = runtimeCore.TOKEN } = {}) {
     },
   });
 
-  bot.on("callback_query", onCallbackQuery);
-  bot.on("message", onMessage);
+  bot.on("callback_query", async (query) => {
+    try {
+      await onCallbackQuery(query);
+    } catch (error) {
+      console.error(`[telegram] callback_query handler error: ${String(error?.stack || error?.message || error)}`);
+    }
+  });
+  bot.on("message", async (msg) => {
+    try {
+      await onMessage(msg);
+    } catch (error) {
+      console.error(`[telegram] message handler error: ${String(error?.stack || error?.message || error)}`);
+      const chatId = msg?.chat?.id;
+      if (chatId) {
+        try {
+          await bot.sendMessage(chatId, `⚠️ 요청 처리 중 오류가 났지만 서비스는 계속 실행 중입니다: ${String(error?.message ?? error).slice(0, 300)}`);
+        } catch {}
+      }
+    }
+  });
 
   console.log("Telegram orchestrator v2.1 started (polling).");
   console.log(`Job workspace root: ${runtimeCore.jobs.runsDir}/<jobId>/workspace`);
