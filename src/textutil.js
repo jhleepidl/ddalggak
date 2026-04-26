@@ -16,11 +16,31 @@ export function clipTail(s, max = 3500) {
   return clip(s, max, { mode: "tail" });
 }
 
-export function chunk(s, size = 3800) {
+export function chunk(s, size = 3800, { preserveLines = true } = {}) {
+  const raw = String(s || "");
+  const limit = Math.max(200, Math.floor(Number(size || 3800)));
+  if (raw.length <= limit) return [raw];
+  if (!preserveLines) {
+    const out = [];
+    for (let i = 0; i < raw.length; i += limit) out.push(raw.slice(i, i + limit));
+    return out;
+  }
   const out = [];
-  for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size));
+  let remaining = raw;
+  while (remaining.length > limit) {
+    let cut = remaining.lastIndexOf("\n", limit);
+    if (cut < Math.floor(limit * 0.45)) {
+      cut = remaining.lastIndexOf(" ", limit);
+    }
+    if (cut < Math.floor(limit * 0.35)) cut = limit;
+    out.push(remaining.slice(0, cut).trimEnd());
+    remaining = remaining.slice(cut).trimStart();
+  }
+  if (remaining) out.push(remaining);
   return out;
 }
+
+export const splitLongText = chunk;
 
 // Prefer last "Codex instruction" section from plan.md
 export function extractCodexInstruction(planText) {

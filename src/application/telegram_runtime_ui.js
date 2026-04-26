@@ -63,6 +63,7 @@ import {
   buildSkillDraftApprovalState,
   formatSkillDraftApprovalMessage,
 } from "./skill_draft_approval.js";
+import { listLocalSkillPackages, getLocalSkillPackage } from "./local_skill_catalog.js";
 
 async function sendTextWithOptionalGocButton(
   bot,
@@ -1428,7 +1429,12 @@ export async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawA
           const response = await requireGocClient().listSkills({ threadId: runtime?.threadId || runtime?.thread_id || runtime?.map?.threadId || '', includeDefaults: true });
           await sendLong(bot, chatId, formatSkillCatalogRows(skillListFromResponse(response), { query: arg, limit: 50 }));
         } catch (error) {
-          await bot.sendMessage(chatId, `❌ skill catalog 조회 실패: ${String(error?.message ?? error)}`);
+          const localRows = listLocalSkillPackages();
+          if (localRows.length > 0) {
+            await sendLong(bot, chatId, `${formatSkillCatalogRows(localRows, { query: arg, limit: 50 })}\n\n(source=local skills fallback; GoC error=${String(error?.message ?? error)})`);
+          } else {
+            await bot.sendMessage(chatId, `❌ skill catalog 조회 실패: ${String(error?.message ?? error)}`);
+          }
         }
         return;
       }
@@ -1441,7 +1447,12 @@ export async function sendAgentOrToolListQuick(bot, chatId, kind = "agent", rawA
           const response = await requireGocClient().getSkillPackage(arg, { threadId: runtime?.threadId || runtime?.thread_id || runtime?.map?.threadId || '', includeDefaults: true });
           await sendLong(bot, chatId, formatSkillDetail(response));
         } catch (error) {
-          await bot.sendMessage(chatId, `❌ skill detail 조회 실패: ${String(error?.message ?? error)}`);
+          const local = getLocalSkillPackage(arg);
+          if (local) {
+            await sendLong(bot, chatId, `${formatSkillDetail(local)}\n\n(source=local skills fallback; GoC error=${String(error?.message ?? error)})`);
+          } else {
+            await bot.sendMessage(chatId, `❌ skill detail 조회 실패: ${String(error?.message ?? error)}`);
+          }
         }
         return;
       }

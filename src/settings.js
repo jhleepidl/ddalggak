@@ -84,6 +84,39 @@ function tryParseLegacyNotes(text) {
   return notes;
 }
 
+function looksLikeLegacyRouterPrompt(text = "") {
+  const raw = String(text || "");
+  return /Gemini는 리서치\/리스크\/검증 전략 중심|Codex는 실제 코드 변경|ChatGPT는 상위 의사결정|같은 분석\/계획\/코딩을 여러 에이전트/i.test(raw);
+}
+
+function looksLikeLegacyAgentRole(text = "") {
+  const raw = String(text || "");
+  return /기술 리서처\/검토자|코드 작성\/수정 대신|테스트는 직접 실행하지 말고 필요한 테스트를 제안/i.test(raw);
+}
+
+function maybeMigrateLegacyMemoryState(state = {}, raw = "") {
+  const next = { ...state, agentRoles: { ...(state.agentRoles || {}) } };
+  const migrated = [];
+  const rawText = String(raw || "");
+  if (looksLikeLegacyRouterPrompt(next.routerPrompt) || /##\s+Multi-Agent Router Prompt/.test(rawText)) {
+    next.routerPrompt = DEFAULT_ROUTER_PROMPT;
+    migrated.push("router_prompt: legacy multi-agent template replaced with single-first autonomy policy");
+  }
+  for (const key of ["gemini", "codex", "chatgpt"]) {
+    if (looksLikeLegacyAgentRole(next.agentRoles[key])) {
+      next.agentRoles[key] = DEFAULT_AGENT_ROLES[key];
+      migrated.push(`agent_role.${key}: legacy role template replaced`);
+    }
+  }
+  if (migrated.length > 0) {
+    next.operatorNotes = ensureBulletList([
+      ...(Array.isArray(next.operatorNotes) ? next.operatorNotes : []),
+      `Auto-migrated legacy memory template at ${new Date().toISOString()}: ${migrated.join("; ")}`,
+    ], ["Legacy memory template auto-migrated."]);
+  }
+  return next;
+}
+
 function normalizeAgentName(name) {
   const key = String(name || "").trim().toLowerCase();
   if (["gemini", "g"].includes(key)) return "gemini";
@@ -184,11 +217,12 @@ export class OrchestratorMemory {
     }
 
     const raw = fs.readFileSync(this.filePath, "utf8");
-    const parsed = this._parse(raw);
+    let parsed = this._parse(raw);
     const legacyNotes = tryParseLegacyNotes(raw);
     if (legacyNotes.length > 0) {
       parsed.operatorNotes = ensureBulletList([...parsed.operatorNotes, ...legacyNotes], parsed.operatorNotes);
     }
+    parsed = this._normalize(maybeMigrateLegacyMemoryState(parsed, raw));
     this._save(parsed);
     return parsed;
   }
