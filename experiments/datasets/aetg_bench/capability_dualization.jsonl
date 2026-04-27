@@ -1,0 +1,3 @@
+{"id":"cap_food_001","task_family":"food_assistant","capability":"nutrition_estimation","stress_bucket":"low","expected_best_mode":"single_with_skill","rationale":"clear artifact, no correction, no search"}
+{"id":"cap_food_002","task_family":"food_assistant","capability":"nutrition_estimation","stress_bucket":"medium","expected_best_mode":"hybrid","rationale":"recent correction and rejected labels require verifier sidecar"}
+{"id":"cap_food_003","task_family":"food_assistant","capability":"nutrition_estimation_and_search","stress_bucket":"high","expected_best_mode":"multi","rationale":"artifact correction, external search, multiple deliverables, verification"}

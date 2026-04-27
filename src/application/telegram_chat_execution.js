@@ -77,6 +77,7 @@ import { recordChannelPromotion } from "./channel_promotion_manager.js";
 import { recordAdaptiveExecutionOutcome } from "./execution_mode_adaptation.js";
 import { buildExecutionQualitySignals } from './execution_quality_signals.js';
 import { formatActiveArtifactContext, recordArtifactObservationFromAgentOutput } from "./artifact_context.js";
+import { formatActiveUserFactContext, recordUserFactEvents } from "./user_fact_context.js";
 import { buildScopedPromptAssembly, hydrateRuntimeScopesViaGoC, resolveScopeExecutionState } from "./goc_scope_runtime.js";
 import { markActionsSkipped, wasInterruptedByReplan } from "./run_status_cleanup.js";
 import {
@@ -872,6 +873,11 @@ function extractLatestUserRequestFromTaskText(value = '') {
   return '';
 }
 
+function isStaleBuilderHandoffTaskContext(text = '') {
+  const src = String(text || '');
+  return /구현을\s*바로\s*진행|builder에게\s*handoff|핵심\s*요구사항|제품\s*흐름|외부\s*제약\/?리스크/i.test(src);
+}
+
 function buildDirectAnswerOutputGuide(rawGuide = '') {
   const explicit = String(rawGuide || '').trim();
   if (explicit) return explicit;
@@ -898,9 +904,11 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const cleanUserRequest = String(opts.userRequest || opts.user_request || extractLatestUserRequestFromTaskText(goal) || '').trim();
   const rawGoal = String(goal || '').trim();
   const compactGoal = compactTaskText(rawGoal, { maxChars: 1400 });
-  const taskContext = cleanUserRequest && compactGoal.includes(cleanUserRequest) && compactGoal.length <= cleanUserRequest.length + 80
+  const taskContext = isStaleBuilderHandoffTaskContext(compactGoal)
     ? ''
-    : compactGoal;
+    : (cleanUserRequest && compactGoal.includes(cleanUserRequest) && compactGoal.length <= cleanUserRequest.length + 80
+      ? ''
+      : compactGoal);
   const ctxMaxChars = clampInteger(process.env.CHAT_GEMINI_CONTEXT_DOC_MAX_CHARS, 900, { min: 0, max: 2600 });
   const ctx = ctxMaxChars > 0
     ? await runtimeIo.loadRoleScopedContextDocs(jobId, {
@@ -922,6 +930,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     });
   const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 3 });
   const activeArtifactContext = formatActiveArtifactContext(runDir(jobId), { maxChars: 1800, limit: 4 });
+  const activeUserFactContext = formatActiveUserFactContext(runDir(jobId), { maxChars: 2200 });
   const kbContract = buildAgentKnowledgeBaseBlock(jobId, {
     provider: "gemini",
     roleId: roleKey,
@@ -935,6 +944,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     roleMemo ? `[ROLE]\n${clip(roleMemo, 900)}` : '',
     kbContract,
     activeArtifactContext ? activeArtifactContext : '',
+    activeUserFactContext ? activeUserFactContext : '',
     ctx ? `[AVAILABLE MEMORY — optional]\n${ctx}` : '',
     workspaceFilesText ? `[WORKSPACE FILES — optional]\n${workspaceFilesText}` : '',
     '',
@@ -962,6 +972,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
         user_request: cleanUserRequest || rawGoal,
         task_context: taskContext,
         active_artifact_context: activeArtifactContext,
+        active_user_fact_context: activeUserFactContext,
         local_context: ctx,
         kb_contract: kbContract,
         workspace_files: workspaceFilesText,
@@ -973,6 +984,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
       },
     },
   });
+  const agentTimeoutMs = clampInteger(process.env.CHAT_GEMINI_AGENT_TIMEOUT_MS, 90000, { min: 15000, max: 240000 });
   const r = await runGeminiPrompt({
     workspaceRoot: workspacePath,
     cwd: workspacePath,
@@ -987,11 +999,13 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     approvalMode: providerOptions.approvalMode,
     settingsOverwrite: providerOptions.settingsOverwrite,
     workspaceSettingsPatch: providerOptions.workspaceSettings,
+    timeoutMs: Number(opts.timeoutMs || opts.timeout_ms || 0) > 0 ? Number(opts.timeoutMs || opts.timeout_ms) : agentTimeoutMs,
     extraEnv: {
       ...(providerOptions.extraEnv || {}),
       ...resolveCredentialEnvForChat(chatSessionStore, opts.chatId || ''),
     },
   });
+  const effectiveGeminiResult = r;
   const out = (r.stdout || r.stderr || "");
   try {
     recordArtifactObservationFromAgentOutput(runDir(jobId), out, { source: `gemini:${agentKey}` });
@@ -1005,7 +1019,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     requestedDoc: researchPurpose === "review" ? "critic_log" : "research",
   });
   jobs.appendConversation(jobId, "gemini", out, { kind: "research" });
-  ensureCommandOk("Gemini", r);
+  ensureCommandOk("Gemini", effectiveGeminiResult);
   return out;
 }
 
@@ -3190,6 +3204,15 @@ async function runSupervisorChat(
       telegram_message_id: telegramMessageId || undefined,
     });
   }
+  try {
+    recordUserFactEvents(runDir(currentJobId), message, {
+      source: inputKind || "chat_message",
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e) {
+    jobs.log(currentJobId, `user fact extraction skipped: ${String(e?.message ?? e)}`);
+  }
+
   const userMessageGoc = await appendChatMessageToGoc(currentJobId, {
     role: "user",
     text: message,

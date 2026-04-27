@@ -1,3 +1,5 @@
+import { computeProjectionStress } from './projection_stress.js';
+
 function cleanText(value = '') {
   return String(value || '').trim();
 }
@@ -27,6 +29,7 @@ export function scoreTaskAutonomy({
   traceStats = {},
   recentFailures = 0,
   memoryStats = {},
+  projectionContext = {},
 } = {}) {
   const text = cleanText(userText);
   const lower = text.toLowerCase();
@@ -66,18 +69,37 @@ export function scoreTaskAutonomy({
   const memoryFiles = Number(memoryStats.files || memoryStats.file_count || 0);
   if (memoryBytes > 250000 || memoryFiles > 40) { score += 1; reasons.push('memory_pressure'); }
 
+  const projectionStress = computeProjectionStress({
+    ...projectionContext,
+    promptChars: projectionContext.promptChars || projectionContext.prompt_chars || promptChars,
+  });
+  const projectionScore = Number(projectionStress.score || 0);
+  const projectionScoreBoost = projectionScore >= 8.5 ? 5
+    : projectionScore >= 5 ? 5
+      : projectionScore >= 3 ? 3
+        : projectionScore >= 1.5 ? 4
+          : 0;
+  if (projectionScoreBoost > 0) {
+    score += projectionScoreBoost;
+    reasons.push('projection_stress');
+    for (const reason of projectionStress.reasons || []) reasons.push(`psi_${reason}`);
+  }
+
   const agentCount = Math.max(1, Math.floor(Number(availableAgents || 1)));
   const skillCount = asArray(attachedSkills).length;
+  const projectionSkillNeed = (projectionStress.reasons || []).includes('missing_skill_pressure')
+    || (projectionStress.reasons || []).includes('active_artifact_context');
   let mode = 'single';
   if (score >= 7 && agentCount >= 3) mode = 'multi';
   else if (score >= 5 && agentCount >= 2) mode = 'hybrid';
-  else if (score >= 4 && (skillNeed || skillCount > 0)) mode = 'single_with_skill';
+  else if (score >= 4 && (skillNeed || projectionSkillNeed || skillCount > 0)) mode = 'single_with_skill';
   else mode = 'single';
 
   return {
     score: clamp(score, 0, 12),
     mode,
     reasons: [...new Set(reasons)],
+    projection_stress: projectionStress,
     thresholds: {
       single_with_skill: 4,
       hybrid: 5,

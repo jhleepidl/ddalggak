@@ -656,6 +656,34 @@ function fallbackPlan(message, { agents = [], tools = [], jobConfig = {}, parall
   };
 }
 
+function envFlagEnabled(name, defaultValue = true) {
+  const raw = String(process.env[name] || '').trim().toLowerCase();
+  if (!raw) return defaultValue;
+  if (['0', 'false', 'no', 'off'].includes(raw)) return false;
+  if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
+  return defaultValue;
+}
+
+function positiveInt(value, fallback, { min = 1000, max = 240000 } = {}) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+function shouldUseLocalFastRoute(message, { agents = [], enabledAgentIds = [], allowChatGPTPlanner = false } = {}) {
+  if (!envFlagEnabled('CHAT_SUPERVISOR_LOCAL_FAST_PATH', false)) return false;
+  if (allowChatGPTPlanner) return false;
+  const msg = String(message || '').trim();
+  if (!msg) return true;
+  const enabled = Array.isArray(enabledAgentIds) ? enabledAgentIds.filter(Boolean) : [];
+  const rows = Array.isArray(agents) ? agents : [];
+  const nonChatGptAgents = rows.filter((agent) => normalizeProvider(agent?.provider) !== 'chatgpt');
+  const singleExecutableAgent = enabled.length <= 1 || nonChatGptAgents.length <= 1;
+  if (singleExecutableAgent) return true;
+  if (isStatusRequest(msg) || isOpenContextRequest(msg) || isInterruptRequest(msg) || isListAgentsRequest(msg) || isListToolsRequest(msg)) return true;
+  return false;
+}
+
 function buildRouterPrompt(message, context = {}) {
   const row = asObject(context);
   const agents = Array.isArray(row.agents) ? row.agents : [];
@@ -896,6 +924,14 @@ export async function routeWithSupervisor(message, {
     route_contract: routeHeuristic.summary || undefined,
   };
 
+  if (shouldUseLocalFastRoute(msg, { agents, enabledAgentIds, allowChatGPTPlanner })) {
+    return {
+      ...fallback,
+      reason: ['fast_local_route', fallback.reason].filter(Boolean).join('; '),
+      route_contract: fallback.route_contract || routeHeuristic.summary || undefined,
+    };
+  }
+
   const prompt = buildRouterPrompt(msg, {
     agents,
     agentsCatalog,
@@ -955,6 +991,7 @@ export async function routeWithSupervisor(message, {
   }
 
   try {
+    const routerTimeoutMs = positiveInt(process.env.CHAT_SUPERVISOR_GEMINI_TIMEOUT_MS, 30000, { min: 2000, max: 60000 });
     const r = await runGeminiPrompt({
       workspaceRoot,
       cwd: path.resolve(cwd || workspaceRoot || process.cwd()),
@@ -966,6 +1003,8 @@ export async function routeWithSupervisor(message, {
       onRetry: onGeminiRetry,
       onModelSwitch: onGeminiModelSwitch,
       onGiveUp: onGeminiGiveUp,
+      timeoutMs: routerTimeoutMs,
+      traceMetadata: { surface_role: 'supervisor_router', timeout_ms: routerTimeoutMs },
     });
     if (!r?.ok) {
       if (signal?.aborted) {

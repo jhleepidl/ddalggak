@@ -5,6 +5,7 @@ import { recordLlmTrace } from "./application/llm_trace_recorder.js";
 
 const VALID_APPROVAL_MODES = new Set(["default", "auto_edit", "yolo", "plan"]);
 const PLAN_DISABLED_RE = /Approval mode "plan" is only available when experimental\.plan is enabled\./i;
+const TIMEOUT_RE = /\[timeout\]|killed after|timed?\s*out|ETIMEDOUT/i;
 const MODEL_CAPACITY_EXHAUSTED_RE = /MODEL_CAPACITY_EXHAUSTED/i;
 const NO_CAPACITY_RE = /No capacity available for model/i;
 const RESOURCE_EXHAUSTED_RE = /RESOURCE_EXHAUSTED/i;
@@ -387,6 +388,7 @@ function classifyGeminiError(result = {}) {
   if (!text.trim()) return "unknown_error";
 
   if (/\[aborted\]/i.test(text)) return "aborted";
+  if (TIMEOUT_RE.test(text)) return "timeout";
 
   const isCapacityExhausted = NO_CAPACITY_RE.test(text)
     || MODEL_CAPACITY_EXHAUSTED_RE.test(text)
@@ -461,6 +463,21 @@ function makeFailureResult(stderr, { exitCode = -1, stdout = "" } = {}) {
   };
 }
 
+function isTimeoutResult(result = {}) {
+  const text = [String(result?.stdout || ""), String(result?.stderr || "")].join("\\n");
+  return TIMEOUT_RE.test(text);
+}
+
+function shouldRetryInlineAfterStdinFailure(result = {}) {
+  if (result?.ok) return false;
+  if (isTimeoutResult(result)) return false;
+  if (/\[aborted\]/i.test(String(result?.stderr || ""))) return false;
+  // Inline retry is a transport fallback for rare CLI/stdin parser issues.
+  // It must not double timeout/capacity/model failures.
+  const flag = String(process.env.GEMINI_INLINE_RETRY_ON_STDIN_FAILURE || "").trim().toLowerCase();
+  return ["1", "true", "yes", "on"].includes(flag);
+}
+
 function makeCombinedStderr(parts = []) {
   return parts.map((part) => String(part || "").trim()).filter(Boolean).join("\n\n");
 }
@@ -509,8 +526,11 @@ async function runGeminiOnce({
     abortSignal: signal,
     env: modelEnv,
   });
-  if (stdinRun.ok) return stdinRun;
+  if (stdinRun.ok) return { ...stdinRun, attempt_count: 1, transport: "stdin" };
   if (signal?.aborted) return makeAbortedResult();
+  if (!shouldRetryInlineAfterStdinFailure(stdinRun)) {
+    return { ...stdinRun, attempt_count: 1, transport: "stdin" };
+  }
 
   const inlineArgs = buildGeminiArgs({
     promptText,
@@ -525,10 +545,12 @@ async function runGeminiOnce({
     abortSignal: signal,
     env: modelEnv,
   });
-  if (inlineRun.ok) return inlineRun;
+  if (inlineRun.ok) return { ...inlineRun, attempt_count: 2, transport: "inline" };
 
   return {
     ...inlineRun,
+    attempt_count: 2,
+    transport: "inline",
     stderr: makeCombinedStderr([stdinRun.stderr, inlineRun.stderr]),
   };
 }
@@ -634,19 +656,63 @@ function releaseGeminiGlobalSlot() {
   }
 }
 
-async function acquireGeminiGlobalSlot() {
+function getGeminiQueueWaitTimeoutMs() {
+  const n = Number(process.env.GEMINI_QUEUE_WAIT_TIMEOUT_MS || 0);
+  return Number.isFinite(n) && n > 0 ? Math.max(1000, Math.floor(n)) : 15000;
+}
+
+async function acquireGeminiGlobalSlot(signal = null) {
   const limit = getGeminiConcurrencyLimit();
   if (geminiGlobalLimiter.running < limit) {
     geminiGlobalLimiter.running += 1;
-    return;
+    return true;
   }
-  await new Promise((resolve) => {
-    geminiGlobalLimiter.waiters.push(resolve);
+  const timeoutMs = getGeminiQueueWaitTimeoutMs();
+  return await new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    let onAbort = null;
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+    };
+    const waiter = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(true);
+    };
+    const removeWaiter = () => {
+      const idx = geminiGlobalLimiter.waiters.indexOf(waiter);
+      if (idx >= 0) geminiGlobalLimiter.waiters.splice(idx, 1);
+    };
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      removeWaiter();
+      cleanup();
+      resolve(false);
+    }, timeoutMs);
+    if (signal) {
+      onAbort = () => {
+        if (settled) return;
+        settled = true;
+        removeWaiter();
+        cleanup();
+        resolve(false);
+      };
+      if (signal.aborted) return onAbort();
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    geminiGlobalLimiter.waiters.push(waiter);
   });
 }
 
-async function withGeminiGlobalLimiter(fn) {
-  await acquireGeminiGlobalSlot();
+async function withGeminiGlobalLimiter(fn, { signal = null } = {}) {
+  const acquired = await acquireGeminiGlobalSlot(signal);
+  if (!acquired) {
+    return makeFailureResult('[gemini] queue wait timeout after ' + getGeminiQueueWaitTimeoutMs() + 'ms');
+  }
   try {
     return await fn();
   } finally {
@@ -715,6 +781,7 @@ async function runGeminiPromptInternal({
   settingsOverwrite = "",
   workspaceSettingsPatch = {},
   extraEnv = {},
+  timeoutMs: requestedTimeoutMs = 0,
 }) {
   // Keep CLI prompt argument simple and stream the real prompt via stdin.
   // This avoids parser issues when prompt text starts with "-" or markdown fences.
@@ -723,9 +790,12 @@ async function runGeminiPromptInternal({
     return { ok: false, exitCode: -1, stdout: "", stderr: "[gemini] empty prompt", durationMs: 0 };
   }
 
-  const timeoutMs = Number(process.env.GEMINI_TIMEOUT_MS || 0) > 0
-    ? Number(process.env.GEMINI_TIMEOUT_MS)
-    : 4 * 60 * 1000;
+  const explicitTimeoutMs = Number(requestedTimeoutMs || 0);
+  const timeoutMs = Number.isFinite(explicitTimeoutMs) && explicitTimeoutMs > 0
+    ? Math.max(1000, Math.floor(explicitTimeoutMs))
+    : (Number(process.env.GEMINI_TIMEOUT_MS || 0) > 0
+      ? Number(process.env.GEMINI_TIMEOUT_MS)
+      : 4 * 60 * 1000);
   const commandCwd = path.resolve(String(cwd || workspaceRoot || process.cwd()).trim() || process.cwd());
   const workspacePath = commandCwd;
   ensureGeminiWorkspaceConfig(workspacePath, { overwritePolicy: settingsOverwrite, patchSettings: workspaceSettingsPatch });
@@ -817,7 +887,7 @@ async function runGeminiPromptInternal({
         modelName: currentModelName,
         extraEnv: baseEnv,
       });
-    });
+    }, { signal });
     if (signal?.aborted) {
       return withGeminiMeta(makeAbortedResult(), {
         modelName: currentModelName,
@@ -986,12 +1056,23 @@ async function runGeminiPromptInternal({
 
 
 export async function runGeminiPrompt(options = {}) {
+  const traceStartedAtMs = Date.now();
+  const traceStartedAt = new Date(traceStartedAtMs).toISOString();
   const result = await runGeminiPromptInternal(options);
+  const traceEndedAtMs = Date.now();
+  const traceEndedAt = new Date(traceEndedAtMs).toISOString();
+  const wallDurationMs = Math.max(0, traceEndedAtMs - traceStartedAtMs);
+  const tracedResult = {
+    ...(result || {}),
+    wallDurationMs,
+    startedAt: traceStartedAt,
+    endedAt: traceEndedAt,
+  };
   const promptText = String(options?.prompt ?? "");
   const commandCwd = path.resolve(String(options?.cwd || options?.workspaceRoot || process.cwd()).trim() || process.cwd());
-  const traceModel = String(result?.used_model || options?.model || process.env.GEMINI_MODEL_PRIMARY || process.env.GEMINI_MODEL || "auto").trim() || "auto";
+  const traceModel = String(tracedResult?.used_model || options?.model || process.env.GEMINI_MODEL_PRIMARY || process.env.GEMINI_MODEL || "auto").trim() || "auto";
   return attachGeminiTrace({
-    result,
+    result: tracedResult,
     jobId: options?.jobId || (String(options?.concurrencyKey || "").startsWith("job:") ? String(options?.concurrencyKey || "").slice(4).trim() : ""),
     surface: options?.surface || "gemini_prompt",
     agentId: options?.agentId || "",

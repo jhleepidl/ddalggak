@@ -52,33 +52,93 @@ function normalizeWorkspacePath(value = '') {
   return clean(value).replace(/\\/g, '/');
 }
 
+function trimLabelNoise(value = '') {
+  return clean(value)
+    .replace(/^[-–—•\s]+/, '')
+    .replace(/["“”'`*]+/g, '')
+    .replace(/^(?:네|아니요|아니오|죄송하지만|제가 보기에는|제가 확인한 결과|보내주신|첨부된|해당|이|그)\s*/g, '')
+    .replace(/(?:사진|이미지|음식|메뉴|파일|상차림|영양성분|영양 정보|기준|으로 보입니다|로 보입니다|입니다|같습니다)$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function labelKey(value = '') {
+  return trimLabelNoise(value).toLowerCase();
+}
+
 function splitLabels(value = '') {
-  const src = clean(value)
+  let src = clean(value);
+  if (!src) return [];
+
+  // For phrases like "된장찌개가 아니라 햄버거", callers that are extracting a
+  // positive label should keep only the replacement portion. The rejected part
+  // is captured separately by correctionRe.
+  const notIndex = src.search(/\s*아니라\s*/);
+  if (notIndex >= 0) {
+    src = src.slice(notIndex).replace(/^\s*아니라\s*/, '');
+  }
+
+  src = src
     .replace(/["“”'`*]+/g, '')
     .replace(/사진|이미지|음식|메뉴|파일|상차림|영양성분|영양 정보|기준|으로 보입니다|로 보입니다|입니다|같습니다/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   if (!src) return [];
+
   return src
-    .split(/[,/＋+]|\s+(?:그리고|및|또는|or|and)\s+|와\s+|과\s+/i)
-    .map((item) => item.trim().replace(/^(?:몇 가지|기본|일반적인)\s+/, '').trim())
+    .split(/[,/＋+]\s*|\s+(?:그리고|및|또는|or|and)\s+|\s*와\s+|\s*과\s+/i)
+    .map((item) => trimLabelNoise(item).replace(/^(?:몇 가지|기본|일반적인|대략적인)\s+/, '').trim())
     .filter((item) => item.length >= 2 && item.length <= 40)
-    .filter((item) => !/^(네|아니요|제가|분석한|보내주신|해당|일반적인|대략적인)$/.test(item));
+    .filter((item) => !/(?:아니라|잘못|틀렸|혼동)/.test(item))
+    .filter((item) => !/^(네|아니요|아니오|제가|분석한|보내주신|첨부된|해당|일반적인|대략적인|정정|결과)$/.test(item));
 }
 
-function uniqueStrings(values = [], { max = 12 } = {}) {
-  const seen = new Set();
+function uniqueStrings(values = [], { max = 12, exclude = [] } = {}) {
+  const seen = new Set((Array.isArray(exclude) ? exclude : []).map(labelKey).filter(Boolean));
   const out = [];
   for (const raw of Array.isArray(values) ? values : []) {
-    const value = clean(raw);
+    const value = trimLabelNoise(raw);
     if (!value) continue;
-    const key = value.toLowerCase();
-    if (seen.has(key)) continue;
+    const key = labelKey(value);
+    if (!key || seen.has(key)) continue;
     seen.add(key);
     out.push(value);
     if (out.length >= max) break;
   }
   return out;
+}
+
+function observationStatusPriority(status = '') {
+  const normalized = clean(status).toLowerCase();
+  if (/verified_after_user_challenge|user_confirmed|human_confirmed|corrected|retraction/.test(normalized)) return 40;
+  if (/verified|confirmed/.test(normalized)) return 30;
+  if (/candidate_observation|candidate|agent_output/.test(normalized)) return 10;
+  return 0;
+}
+
+function timestampMs(value = '') {
+  const ms = Date.parse(clean(value));
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function numericConfidence(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function chooseBetterObservationRow(current, candidate) {
+  if (!current) return candidate;
+  const currentPriority = observationStatusPriority(current.status);
+  const candidatePriority = observationStatusPriority(candidate.status);
+  if (candidatePriority !== currentPriority) {
+    return candidatePriority > currentPriority ? candidate : current;
+  }
+  const currentConfidence = numericConfidence(current.confidence, 0);
+  const candidateConfidence = numericConfidence(candidate.confidence, 0);
+  if (candidateConfidence !== currentConfidence) {
+    return candidateConfidence > currentConfidence ? candidate : current;
+  }
+  return timestampMs(candidate.ts) >= timestampMs(current.ts) ? candidate : current;
 }
 
 export function loadUploadedArtifacts(jobDir = '', { limit = 12 } = {}) {
@@ -147,9 +207,11 @@ function extractObservationLabels(output = '') {
     positive.push(...splitLabels(match[1]));
   }
 
+  const negativeUnique = uniqueStrings(negative, { max: 8 });
+  const positiveUnique = uniqueStrings(positive, { max: 8, exclude: negativeUnique });
   return {
-    positive: uniqueStrings(positive, { max: 8 }),
-    negative: uniqueStrings(negative, { max: 8 }),
+    positive: positiveUnique,
+    negative: negativeUnique,
   };
 }
 
@@ -176,7 +238,7 @@ export function recordArtifactObservationFromAgentOutput(jobDir = '', output = '
     upload_kind: artifact.upload_kind || artifact.kind || 'artifact',
     observed_labels: positive,
     rejected_labels: negative,
-    confidence: Number(options.confidence || (challenged ? 0.72 : OBSERVATION_CONFIDENCE_DEFAULT)),
+    confidence: numericConfidence(options.confidence, challenged ? 0.72 : OBSERVATION_CONFIDENCE_DEFAULT),
     status: challenged ? 'verified_after_user_challenge' : 'candidate_observation',
     source: clean(options.source || 'agent_output'),
   };
@@ -184,14 +246,54 @@ export function recordArtifactObservationFromAgentOutput(jobDir = '', output = '
   return payload;
 }
 
+function mergeObservationRowsForArtifact(rows = []) {
+  const observationRows = rows.filter((row) => row.event === 'artifact_observation');
+  if (observationRows.length === 0) return null;
+
+  let best = null;
+  const rejected = [];
+  for (const row of observationRows) {
+    rejected.push(...(Array.isArray(row.rejected_labels) ? row.rejected_labels : []));
+    best = chooseBetterObservationRow(best, row);
+  }
+  if (!best) return null;
+
+  const rejectedLabels = uniqueStrings(rejected, { max: 12 });
+  const bestPriority = observationStatusPriority(best.status);
+  const observedCandidates = [];
+  for (const row of observationRows) {
+    const rowPriority = observationStatusPriority(row.status);
+    // Once a verified correction exists, do not let later lower-trust candidates
+    // reintroduce a previous wrong label. Same-priority verified rows are merged.
+    if (rowPriority === bestPriority) {
+      observedCandidates.push(...(Array.isArray(row.observed_labels) ? row.observed_labels : []));
+    }
+  }
+
+  return {
+    ...best,
+    observed_labels: uniqueStrings(observedCandidates.length ? observedCandidates : best.observed_labels, {
+      max: 12,
+      exclude: rejectedLabels,
+    }),
+    rejected_labels: rejectedLabels,
+    confidence: numericConfidence(best.confidence, OBSERVATION_CONFIDENCE_DEFAULT),
+    status: best.status || 'candidate_observation',
+  };
+}
+
 export function latestObservationByArtifact(jobDir = '') {
   const uploads = loadUploadedArtifacts(jobDir, { limit: 12 });
-  const observations = loadArtifactObservations(jobDir, { limit: 80 });
+  const observations = loadArtifactObservations(jobDir, { limit: 120 });
   const byPath = new Map();
   for (const row of observations) {
-    if (row.event === 'artifact_observation') byPath.set(row.workspace_path, row);
+    if (row.event !== 'artifact_observation') continue;
+    const key = normalizeWorkspacePath(row.workspace_path);
+    if (!key) continue;
+    if (!byPath.has(key)) byPath.set(key, []);
+    byPath.get(key).push(row);
   }
-  return uploads.map((upload) => ({ upload, observation: byPath.get(upload.workspace_path) || null }));
+  return uploads.map((upload) => ({ upload, observation: mergeObservationRowsForArtifact(byPath.get(upload.workspace_path) || []) }));
 }
 
 export function formatActiveArtifactContext(jobDir = '', { maxChars = 2200, limit = 5 } = {}) {

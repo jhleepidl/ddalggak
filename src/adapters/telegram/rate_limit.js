@@ -1,6 +1,8 @@
 const DEFAULT_RETRY_BUFFER_MS = 1_000;
 const DEFAULT_METHOD_GAP_MS = 250;
 const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_QUEUED_METHODS = ['sendMessage', 'editMessageText', 'sendDocument', 'sendPhoto'];
+const DEFAULT_FAST_METHODS = ['answerCallbackQuery'];
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
@@ -27,7 +29,7 @@ export function extractTelegramRetryAfter(error) {
     error?.message,
     String(error || ''),
   ].filter(Boolean).join('\n');
-  const match = text.match(/retry\s+after\s+(\d+)/i);
+  const match = text.match(/retry\s+after\s+(\d+(?:\.\d+)?)/i);
   if (!match) return 0;
   const parsed = Number(match[1]);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
@@ -73,9 +75,27 @@ export function createTelegramMethodRetrier({
   };
 }
 
+function makeSerialQueue() {
+  let queue = Promise.resolve();
+  return function enqueue(run) {
+    const next = queue.then(run, run);
+    queue = next.catch(() => undefined);
+    return next;
+  };
+}
+
+function uniqueMethodNames(values = []) {
+  return [...new Set((Array.isArray(values) ? values : []).map((value) => String(value || '').trim()).filter(Boolean))];
+}
+
 export function installTelegramRateLimitRetry(bot, {
-  methods = ['sendMessage', 'editMessageText', 'sendDocument', 'sendPhoto', 'answerCallbackQuery'],
+  methods,
+  queuedMethods = DEFAULT_QUEUED_METHODS,
+  fastMethods = DEFAULT_FAST_METHODS,
   methodGapMs = parsePositiveInteger(process.env.TELEGRAM_SEND_METHOD_GAP_MS, DEFAULT_METHOD_GAP_MS),
+  fastMethodGapMs = 0,
+  maxRetries = parsePositiveInteger(process.env.TELEGRAM_SEND_MAX_RETRIES, DEFAULT_MAX_RETRIES),
+  retryBufferMs = parsePositiveInteger(process.env.TELEGRAM_429_RETRY_BUFFER_MS, DEFAULT_RETRY_BUFFER_MS),
   logger = console.warn,
 } = {}) {
   if (!bot || typeof bot !== 'object') return bot;
@@ -86,23 +106,29 @@ export function installTelegramRateLimitRetry(bot, {
     configurable: false,
   });
 
-  let queue = Promise.resolve();
-  for (const methodName of methods) {
+  const allMethods = uniqueMethodNames(methods || [...queuedMethods, ...fastMethods]);
+  const queuedSet = new Set(uniqueMethodNames(queuedMethods));
+  const fastSet = new Set(uniqueMethodNames(fastMethods));
+  const enqueueSend = makeSerialQueue();
+
+  for (const methodName of allMethods) {
     const original = bot[methodName];
     if (typeof original !== 'function') continue;
     const retrying = createTelegramMethodRetrier({
       methodName,
       call: (...args) => original.apply(bot, args),
+      maxRetries,
+      retryBufferMs,
       logger,
     });
     bot[methodName] = (...args) => {
+      const isFast = fastSet.has(methodName) && !queuedSet.has(methodName);
+      const gapMs = isFast ? fastMethodGapMs : methodGapMs;
       const run = async () => {
-        if (methodGapMs > 0) await sleep(methodGapMs);
+        if (gapMs > 0) await sleep(gapMs);
         return retrying(...args);
       };
-      const next = queue.then(run, run);
-      queue = next.catch(() => undefined);
-      return next;
+      return isFast ? run() : enqueueSend(run);
     };
   }
   return bot;
