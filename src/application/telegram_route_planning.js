@@ -766,19 +766,30 @@ function getCurrentTurnReplyMessageId(chatId) {
 }
 
 async function sendRouterAckMessage(bot, chatId, { replyToMessageId = null } = {}) {
-  const sent = await bot.sendMessage(
-    chatId,
-    "👀 접수했어요. 라우팅/분담 중…",
-    Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
-      ? { reply_to_message_id: Number(replyToMessageId) }
-      : undefined
-  );
-  const messageId = Number(sent?.message_id || 0);
-  chatSessionStore.upsert(chatId, {
-    current_turn_ack_message_id: messageId > 0 ? messageId : null,
-    current_turn_plan_message_id: null,
-  });
-  return messageId > 0 ? messageId : null;
+  try {
+    const sent = await bot.sendMessage(
+      chatId,
+      "👀 접수했어요. 라우팅/분담 중…",
+      Number.isFinite(Number(replyToMessageId)) && Number(replyToMessageId) > 0
+        ? { reply_to_message_id: Number(replyToMessageId) }
+        : undefined
+    );
+    const messageId = Number(sent?.message_id || 0);
+    chatSessionStore.upsert(chatId, {
+      current_turn_ack_message_id: messageId > 0 ? messageId : null,
+      current_turn_plan_message_id: null,
+    });
+    return messageId > 0 ? messageId : null;
+  } catch (error) {
+    try {
+      console.warn(`[telegram] router ack send failed; continuing without ack: ${String(error?.message || error)}`);
+    } catch {}
+    chatSessionStore.upsert(chatId, {
+      current_turn_ack_message_id: null,
+      current_turn_plan_message_id: null,
+    });
+    return null;
+  }
 }
 
 async function sendPlanPreviewMessage(bot, chatId, { actions = [], replyToMessageId = null, activeTeam = null, runtimeTeamSnapshot = null, routeReason = "" } = {}) {

@@ -6,7 +6,15 @@ import {
   extractTelegramRetryAfter,
   installTelegramRateLimitRetry,
   isTelegramRateLimitError,
+  isTelegramNetworkError,
 } from '../src/adapters/telegram/rate_limit.js';
+
+
+function telegramTimeout() {
+  const error = new Error('EFATAL: Error: connect ETIMEDOUT 149.154.166.110:443');
+  error.code = 'EFATAL';
+  return error;
+}
 
 function telegram429(retryAfter = 0.001) {
   const error = new Error(`ETELEGRAM: 429 Too Many Requests: retry after ${retryAfter}`);
@@ -89,4 +97,25 @@ test('installTelegramRateLimitRetry keeps callback acknowledgements off the send
 
   assert.equal(await sendPromise, 'sent');
   assert.deepEqual(events, ['send:1', 'answer', 'send:2', 'send:resolved']);
+});
+
+
+test('createTelegramMethodRetrier retries transient Telegram network errors', async () => {
+  let attempts = 0;
+  const retrying = createTelegramMethodRetrier({
+    methodName: 'sendMessage',
+    call: async () => {
+      attempts += 1;
+      if (attempts === 1) throw telegramTimeout();
+      return 'ok';
+    },
+    maxRetries: 1,
+    networkRetryBaseMs: 0,
+    networkRetryMaxMs: 0,
+    logger: () => {},
+  });
+
+  assert.equal(isTelegramNetworkError(telegramTimeout()), true);
+  assert.equal(await retrying(), 'ok');
+  assert.equal(attempts, 2);
 });

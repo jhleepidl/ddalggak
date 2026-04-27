@@ -52,7 +52,11 @@ function createAppChatRunManager(bot) {
     },
     onRunError: async ({ chatId, error }) => {
       if (runtimeCore.isCancelledError(error)) return;
-      await bot.sendMessage(chatId, `❌ /chat 실패: ${String(error?.message ?? error)}`);
+      try {
+        await bot.sendMessage(chatId, `❌ /chat 실패: ${String(error?.message ?? error)}`);
+      } catch (sendError) {
+        console.error(`[telegram] failed to send /chat error message: ${String(sendError?.message || sendError)}`);
+      }
     },
     runChat: async ({ chatId, userId, message, inputKind, pendingCount, telegramMessageId, userReplyToMessageId, forceMode, chatInfo }) => {
       await runtimeCore.runSupervisorChat(
