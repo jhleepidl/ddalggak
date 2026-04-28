@@ -29,6 +29,8 @@ const DEFAULT_GEMINI_RETRY_TIMEBOX_MS = 180000;
 const DEFAULT_GEMINI_CAPACITY_COOLDOWN_MS = 60000;
 const DEFAULT_GEMINI_SETTINGS_OVERWRITE = "merge";
 const DEFAULT_GEMINI_DEBUG_LOG = "gemini_debug.log";
+const DEFAULT_GEMINI_FORCE_FILE_STORAGE = "true";
+const DEFAULT_GEMINI_CLI_TRUST_WORKSPACE = "true";
 
 let planModeAvailability = null;
 let modelFlagAvailability = null;
@@ -482,6 +484,27 @@ function makeCombinedStderr(parts = []) {
   return parts.map((part) => String(part || "").trim()).filter(Boolean).join("\n\n");
 }
 
+function envValueOrDefault(key, fallback) {
+  const raw = process.env[key];
+  if (typeof raw === "undefined") return String(fallback);
+  const value = String(raw).trim();
+  return value || String(fallback);
+}
+
+function buildGeminiCliRuntimeEnv({ model = "", extraEnv = {} } = {}) {
+  return {
+    GEMINI_FORCE_FILE_STORAGE: envValueOrDefault("GEMINI_FORCE_FILE_STORAGE", DEFAULT_GEMINI_FORCE_FILE_STORAGE),
+    GEMINI_CLI_TRUST_WORKSPACE: envValueOrDefault("GEMINI_CLI_TRUST_WORKSPACE", DEFAULT_GEMINI_CLI_TRUST_WORKSPACE),
+    ...(model ? { GEMINI_MODEL: model } : {}),
+    GEMINI_DISABLE_DIRTREE: String(process.env.GEMINI_DISABLE_DIRTREE || "1").trim() || "1",
+    ...asObject(extraEnv),
+  };
+}
+
+export function getGeminiCliRuntimeEnvDefaults(extraEnv = {}) {
+  return buildGeminiCliRuntimeEnv({ extraEnv });
+}
+
 function buildGeminiArgs({ promptText, approvalMode, inline, model, includeModelArg }) {
   const args = [
     "--prompt",
@@ -507,11 +530,7 @@ async function runGeminiOnce({
   includeModelArg,
   extraEnv = {},
 }) {
-  const modelEnv = {
-    ...(model ? { GEMINI_MODEL: model } : {}),
-    GEMINI_DISABLE_DIRTREE: String(process.env.GEMINI_DISABLE_DIRTREE || "1").trim() || "1",
-    ...asObject(extraEnv),
-  };
+  const modelEnv = buildGeminiCliRuntimeEnv({ model, extraEnv });
   const stdinArgs = buildGeminiArgs({
     promptText,
     approvalMode,
@@ -875,7 +894,7 @@ async function runGeminiPromptInternal({
 
     const currentModelName = modelCandidates[modelIndex] || "auto";
     appendGeminiDebugLog(
-      `[gemini] job=${cleanJobId || "-"} cwd=${workspacePath} model=${displayModelName(currentModelName)} retry=${retryCount}`
+      `[gemini] job=${cleanJobId || "-"} cwd=${workspacePath} model=${displayModelName(currentModelName)} retry=${retryCount} file_storage=${envValueOrDefault("GEMINI_FORCE_FILE_STORAGE", DEFAULT_GEMINI_FORCE_FILE_STORAGE)} trust_workspace=${envValueOrDefault("GEMINI_CLI_TRUST_WORKSPACE", DEFAULT_GEMINI_CLI_TRUST_WORKSPACE)}`
     );
     const result = await withGeminiGlobalLimiter(async () => {
       return await invokeGeminiWithPlanFallback({
