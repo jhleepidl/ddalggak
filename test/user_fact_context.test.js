@@ -7,7 +7,9 @@ import path from 'node:path';
 import {
   extractUserFactEvents,
   formatActiveUserFactContext,
+  readUserFacts,
   recordUserFactEvents,
+  resolveActiveUserFacts,
 } from '../src/application/user_fact_context.js';
 
 test('extracts profile, preferences, meal records, and no-intake facts', () => {
@@ -35,4 +37,40 @@ test('renders active user fact context for LLM prompt projection without local f
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('anchors relative meal facts to absolute target_date in the observed timezone', () => {
+  const facts = extractUserFactEvents('어제 점심에는 아무것도 먹지 않았어. 오늘 저녁은 김밥을 먹었어.', {
+    timestamp: '2026-04-27T01:00:00.000Z',
+    timezone: 'Asia/Seoul',
+  });
+  assert.ok(facts.some((f) => f.type === 'meal' && f.relative_day === 'yesterday' && f.target_date === '2026-04-26'));
+  assert.ok(facts.some((f) => f.type === 'meal' && f.relative_day === 'today' && f.target_date === '2026-04-27'));
+});
+
+test('verified no-intake fact is not overwritten by a lower-priority later candidate for the same meal slot', () => {
+  const verified = {
+    type: 'meal',
+    key: 'meal:2026-04-26:lunch',
+    relative_day: 'yesterday',
+    target_date: '2026-04-26',
+    meal_slot: 'lunch',
+    value: 'no_intake',
+    status: 'verified_no_intake',
+    created_at: '2026-04-27T01:00:00.000Z',
+  };
+  const candidate = {
+    type: 'meal',
+    key: 'meal:2026-04-26:lunch',
+    relative_day: 'yesterday',
+    target_date: '2026-04-26',
+    meal_slot: 'lunch',
+    value: '김밥',
+    status: 'candidate',
+    created_at: '2026-04-27T02:00:00.000Z',
+    confidence: 0.99,
+  };
+  const [active] = resolveActiveUserFacts([verified, candidate]);
+  assert.equal(active.value, 'no_intake');
+  assert.equal(active.status, 'verified_no_intake');
 });

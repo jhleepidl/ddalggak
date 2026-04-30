@@ -41,7 +41,7 @@ import { buildTeamSeedFromTaskArchetype } from './team_blueprint_templates.js';
 import { normalizeParticipantExecutionSchema, splitToolishIds, getParticipantLegacyRequiredToolIds, getParticipantLegacyOptionalToolIds, getParticipantLegacyRecommendedToolIds } from '../shared/participant_schema.js';
 import { collectEffectiveAvailableToolIds } from './runtime_tool_availability.js';
 import { buildTeamCapabilityContract, formatTeamCapabilityContractLines } from './team_capability_contract.js';
-import { hasImplementationLikeIntent, hasSoftwareDeliveryIntent, inferExecutionRoleFromText } from '../shared/work_intent.js';
+import { hasImplementationLikeIntent, hasWorkspaceDeliveryIntent, hasSoftwareDeliveryIntent, inferExecutionRoleFromText } from '../shared/work_intent.js';
 import {
   buildTeamTransitionGuardrailsImpl,
   canRolePublishSurfaceFromStructure as canRolePublishSurfaceFromStructureImpl,
@@ -918,7 +918,7 @@ function inferTaskStructureHints(taskText = '') {
     discussion: /서로\s*(토의|논의|질의응답)|back[- ]?and[- ]?forth|토의하듯|discuss with each other|debate each other/i.test(text),
     review: /review|검토|검수|반박|critic|judge|검증|verify|fact check|red[ -]?team/i.test(text),
     synthesize: /요약|정리|synth|summary|memo|보고서|final/i.test(text),
-    build: /코드|구현|build|builder|coder|coding|programming|notebook|ipython|jupyter|refactor|리팩토|patch|fix|web\s*service|web\s*app|frontend|backend|api|server|client|full[- ]?stack|react|next(?:\.js)?|node|express|fastapi|flask|django|spring|웹\s*서비스|웹앱|프론트엔드|백엔드|서버|클라이언트|서비스\s*개발/i.test(text),
+    build: /codex|코덱스|코드|코딩|구현|파일|ipynb|build|builder|coder|coding|programming|notebook|ipython|jupyter|refactor|리팩토|patch|fix|web\s*service|web\s*app|frontend|backend|api|server|client|full[- ]?stack|react|next(?:\.js)?|node|express|fastapi|flask|django|spring|웹\s*서비스|웹앱|프론트엔드|백엔드|서버|클라이언트|서비스\s*개발/i.test(text),
     news: /뉴스|news|이벤트|발표|headline/i.test(text),
     filings: /공시|filing|dart|financial|실적|10-k|10q/i.test(text),
     parallel: /각각|나눠서|분담|병렬|parallel/i.test(text),
@@ -1334,18 +1334,21 @@ function inferFreeformAgentBlueprints(description = '') {
   const hints = inferTaskStructureHints(text);
   const blueprints = [];
   const seenLabels = new Set();
-  function pushIfMissing(label, role, purpose) {
+  function pushIfMissing(label, role, purpose, extra = {}) {
     const key = cleanId(label);
     if (!key || seenLabels.has(key)) return;
     seenLabels.add(key);
-    blueprints.push({ name: label, role, purpose, model: parseNaturalLanguageModelPreference(text, role) });
+    blueprints.push({ name: label, role, purpose, model: clean(extra.model || parseNaturalLanguageModelPreference(text, role)), provider: cleanId(extra.provider || '') });
   }
 
   if (/낙관|bull|optimis/i.test(text)) pushIfMissing('Bull Analyst', 'researcher', '낙관적 시나리오와 성장 근거를 수집한다');
   if (/비관|bear|pessimis/i.test(text)) pushIfMissing('Bear Analyst', 'researcher', '비관적 시나리오와 리스크 근거를 수집한다');
   if (/뉴스|news/i.test(text)) pushIfMissing('News Researcher', 'researcher', '최근 뉴스와 이벤트를 수집한다');
   if (/공시|filing|dart|financial/i.test(text)) pushIfMissing('Filings Analyst', 'researcher', '공시와 수치 근거를 확인한다');
-  if (hasImplementationLikeIntent(text)) pushIfMissing('Builder', 'builder', '구현과 수정 초안을 만든다');
+  if (hasWorkspaceDeliveryIntent(text)) {
+    const explicitCodex = /(codex|코덱스)/i.test(text);
+    pushIfMissing(explicitCodex ? 'Codex Builder' : 'Workspace Builder', 'builder', 'workspace에서 필요한 코드·문서·파일 산출물을 구현한다', { model: 'gpt-5-codex', provider: 'codex' });
+  } else if (hasImplementationLikeIntent(text)) pushIfMissing('Builder', 'builder', '구현과 수정 초안을 만든다');
   if (/red[ -]?team|반박|adversarial|critic/i.test(text)) pushIfMissing('Red-Team Reviewer', 'reviewer', '약한 주장과 반례를 지적한다');
   if (/review|검토|reviewer|검수|adjudicat|judge|조정/i.test(text)) pushIfMissing('Reviewer', 'reviewer', '결과를 검토하고 모순을 정리한다');
   if (/요약|정리|synth|summary|memo|보고서|final/i.test(text)) pushIfMissing('Synthesizer', 'synthesizer', '최종 답변과 요약을 작성한다');
@@ -2194,10 +2197,42 @@ export async function buildAutoRefineDraftFromStructureConflict({ team = {}, ins
   }, { runtime: baseRuntime });
 }
 
+function shouldUseControlPlaneHeuristicForTeamCreate(taskText = '') {
+  const text = clean(taskText);
+  if (!text) return true;
+  const workspaceDelivery = hasWorkspaceDeliveryIntent(text);
+  const needsPlannerTopology = /(debate|토론|비교|parallel|병렬|review committee|위원회|multi[- ]?agent|여러\s*agent|복잡한\s*워크플로|handoff|검토자.*합성|synthesizer.*reviewer)/i.test(text);
+  return workspaceDelivery && !needsPlannerTopology;
+}
+
+function buildControlPlaneWorkspaceBuilderTeam({ taskText = '', runtime = null, initialSelection = {} } = {}) {
+  const suggestedName = clean(taskText).slice(0, 36).replace(/\s+/g, '_') || 'workspace_builder_team';
+  const explicitCodex = /(codex|코덱스)/i.test(taskText);
+  const builderName = explicitCodex ? 'Codex Builder' : 'Workspace Builder';
+  const agents = [
+    { agent_id: 'workspace_builder', name: builderName, role: 'builder', model: 'gpt-5-codex', provider: 'codex', purpose: 'workspace에서 요청된 코드·문서·파일 산출물을 구현한다', capabilities: ['workspace_fs', 'code_patch', 'artifact_build', 'artifact_materialization'], runtime_capabilities_required: ['filesystem_read', 'filesystem_write'], runtime_capabilities_optional: ['shell_exec'] },
+    { agent_id: 'implementation_reviewer', name: 'Implementation Reviewer', role: 'reviewer', model: 'gpt-5.4', provider: 'chatgpt', purpose: 'Builder의 변경 사항과 산출물 누락 여부를 검토한다', capabilities: ['review', 'artifact_check'], runtime_capabilities_required: ['filesystem_read'] },
+    { agent_id: 'delivery_synthesizer', name: 'Delivery Synthesizer', role: 'synthesizer', model: 'gpt-5.4', provider: 'chatgpt', purpose: '구현 결과와 검토 결과를 사용자에게 전달한다', capabilities: ['synthesis', 'handoff'], runtime_capabilities_required: ['filesystem_read'] },
+  ];
+  return normalizeTeamConfig({
+    team_name: suggestedName, mode: 'scoped_context', composition_mode: 'freeform', proposal_mode: 'create', lock_after_apply: true,
+    agents, interaction_spec: buildDefaultInteractionSpec(agents, { task: taskText }), shortcut_policy: normalizeShortcutPolicy(buildDefaultShortcutPolicy()),
+    status: 'suggested', task_brief: taskText, design_prompt: taskText, task_archetype: initialSelection.archetype || 'implementation',
+    runtime_execution: { providers: { codex: { sandbox_mode: 'workspace-write', approval_policy: 'never' } } },
+    capability_gaps: [],
+    planner_metadata: normalizePlannerMetadata({
+      planner_type: 'heuristic_rule_based', planner_model: '', planning_source: 'control_plane_workspace_delivery_fast_path',
+      reasoning_summary: extendPlannerReasoningSummary({ reasoning_summary: ['workspace/file/artifact delivery intent is represented by a deterministic workspace-write builder team without invoking an external planner'] }, initialSelection),
+    }),
+  }, { runtime });
+}
 export async function createFreeformTeamConfigurationAdvanced({ description = '', runtime = null, planner = null, jobId = '' } = {}) {
   const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
   const taskText = clean(description);
   const initialSelection = selectTaskArchetypeTemplate({ taskText });
+  if (shouldUseControlPlaneHeuristicForTeamCreate(taskText)) {
+    return buildControlPlaneWorkspaceBuilderTeam({ taskText, runtime: effectiveRuntime, initialSelection });
+  }
   const structuredFallback = suggestTeamConfiguration({ taskText, runtime: effectiveRuntime, preferredTaskArchetype: initialSelection.archetype });
   const heuristicTeam = createFreeformTeamConfiguration({ description: taskText, runtime: effectiveRuntime, preferredTaskArchetype: initialSelection.archetype });
   const activePlanner = typeof planner === 'function' ? planner : planFreeformTeamWithCodex;

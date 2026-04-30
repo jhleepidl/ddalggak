@@ -419,6 +419,7 @@ export async function planFreeformTeamWithCodex({
       prompt,
       jobId: 'team-create-planner',
       model: process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4',
+      timeoutMs: Number(process.env.TEAM_CREATE_PLANNER_TIMEOUT_MS || 0) > 0 ? Number(process.env.TEAM_CREATE_PLANNER_TIMEOUT_MS) : 30000,
     });
   } catch (error) {
     return { ok: false, reason: `planner_exec_exception:${String(error?.message || error)}` };
@@ -494,6 +495,7 @@ export async function planTeamRefinementWithCodex({
       prompt,
       jobId: 'team-refine-planner',
       model: process.env.TEAM_REFINE_PLANNER_MODEL || process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4',
+      timeoutMs: Number(process.env.TEAM_REFINE_PLANNER_TIMEOUT_MS || process.env.TEAM_CREATE_PLANNER_TIMEOUT_MS || 0) > 0 ? Number(process.env.TEAM_REFINE_PLANNER_TIMEOUT_MS || process.env.TEAM_CREATE_PLANNER_TIMEOUT_MS) : 30000,
     });
   } catch (error) {
     return { ok: false, reason: `planner_exec_exception:${String(error?.message || error)}` };

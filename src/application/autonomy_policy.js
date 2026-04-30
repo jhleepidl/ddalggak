@@ -75,9 +75,9 @@ export function scoreTaskAutonomy({
   });
   const projectionScore = Number(projectionStress.score || 0);
   const projectionScoreBoost = projectionScore >= 8.5 ? 5
-    : projectionScore >= 5 ? 5
+    : projectionScore >= 5 ? 4
       : projectionScore >= 3 ? 3
-        : projectionScore >= 1.5 ? 4
+        : projectionScore >= 1.5 ? 2
           : 0;
   if (projectionScoreBoost > 0) {
     score += projectionScoreBoost;

@@ -3,6 +3,13 @@ import path from 'node:path';
 
 const USER_FACTS_FILE = 'user_facts.jsonl';
 const MAX_VALUE_LEN = 220;
+const DEFAULT_USER_FACT_TIMEZONE = 'Asia/Seoul';
+const RELATIVE_DAY_OFFSETS = {
+  day_before_yesterday: -2,
+  yesterday: -1,
+  today: 0,
+  tomorrow: 1,
+};
 
 function cleanText(value = '') {
   return String(value || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -10,6 +17,45 @@ function cleanText(value = '') {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function cleanTimezone(value = '') {
+  const clean = String(value || '').trim();
+  return clean || DEFAULT_USER_FACT_TIMEZONE;
+}
+
+function datePartsInTimezone(value = '', timezone = DEFAULT_USER_FACT_TIMEZONE) {
+  const date = new Date(value || nowIso());
+  if (!Number.isFinite(date.getTime())) return null;
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: cleanTimezone(timezone),
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date);
+    const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return {
+      year: Number(byType.year),
+      month: Number(byType.month),
+      day: Number(byType.day),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isoDateFromParts(parts, offsetDays = 0) {
+  if (!parts || !Number.isFinite(parts.year) || !Number.isFinite(parts.month) || !Number.isFinite(parts.day)) return '';
+  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + offsetDays));
+  return date.toISOString().slice(0, 10);
+}
+
+function inferTargetDate(relativeDay = '', observedAt = '', timezone = DEFAULT_USER_FACT_TIMEZONE) {
+  const normalized = String(relativeDay || '').trim();
+  if (!Object.prototype.hasOwnProperty.call(RELATIVE_DAY_OFFSETS, normalized)) return '';
+  const parts = datePartsInTimezone(observedAt || nowIso(), timezone);
+  return isoDateFromParts(parts, RELATIVE_DAY_OFFSETS[normalized]);
 }
 
 function safeMkdir(dir) {
@@ -53,12 +99,14 @@ function inferFactKey(fact = {}) {
   const type = String(fact.type || '').trim();
   if (type === 'profile') return `profile:${fact.field || 'unknown'}`;
   if (type === 'preference') return `preference:${fact.field || String(fact.value || '').slice(0, 40)}`;
-  if (type === 'meal') return `meal:${fact.relative_day || 'unknown'}:${fact.meal_slot || fact.time_hint || 'unspecified'}`;
+  if (type === 'meal') return `meal:${fact.target_date || fact.relative_day || 'unknown'}:${fact.meal_slot || fact.time_hint || 'unspecified'}`;
   if (type === 'retraction') return `retraction:${fact.scope || 'global'}:${String(fact.retracted || '').slice(0, 60)}`;
   return `${type || 'fact'}:${String(fact.field || fact.value || fact.scope || '').slice(0, 80)}`;
 }
 
 function makeFact(partial = {}, meta = {}) {
+  const observedAt = String(meta.observedAt || meta.timestamp || partial.observed_at || partial.created_at || nowIso());
+  const observedTimezone = cleanTimezone(meta.timezone || meta.observedTimezone || partial.observed_timezone || process.env.USER_FACT_TIMEZONE || process.env.TZ || DEFAULT_USER_FACT_TIMEZONE);
   const fact = {
     schema_version: 1,
     id: `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
@@ -66,10 +114,15 @@ function makeFact(partial = {}, meta = {}) {
     status: String(partial.status || 'active').trim(),
     source: String(meta.source || partial.source || 'user_message').trim(),
     confidence: Number.isFinite(Number(partial.confidence)) ? Number(partial.confidence) : 1,
-    created_at: String(meta.timestamp || partial.created_at || nowIso()),
+    created_at: String(meta.timestamp || partial.created_at || observedAt),
+    observed_at: observedAt,
+    observed_timezone: observedTimezone,
     observed_text: cleanText(meta.observedText || partial.observed_text || '').slice(0, 500),
     ...partial,
   };
+  if (fact.type === 'meal' && !fact.target_date) {
+    fact.target_date = inferTargetDate(fact.relative_day, fact.observed_at || fact.created_at, fact.observed_timezone);
+  }
   fact.key = String(partial.key || inferFactKey(fact)).trim();
   return fact;
 }
@@ -98,16 +151,39 @@ export function readUserFacts(runDir = '') {
   return out;
 }
 
+function userFactStatusPriority(status = '') {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (['retracted', 'superseded', 'archived'].includes(normalized)) return 100;
+  if (/verified_no_intake|user_confirmed|human_confirmed|verified|corrected/.test(normalized)) return 80;
+  if (/active|recorded/.test(normalized)) return 50;
+  if (/candidate|inferred|agent_output/.test(normalized)) return 20;
+  return 0;
+}
+
+function chooseBetterUserFact(current, candidate) {
+  if (!current) return candidate;
+  const currentPriority = userFactStatusPriority(current.status);
+  const candidatePriority = userFactStatusPriority(candidate.status);
+  if (candidatePriority !== currentPriority) return candidatePriority > currentPriority ? candidate : current;
+  const currentTs = Date.parse(current.created_at || current.observed_at || '') || 0;
+  const candidateTs = Date.parse(candidate.created_at || candidate.observed_at || '') || 0;
+  if (candidateTs !== currentTs) return candidateTs > currentTs ? candidate : current;
+  const currentConfidence = Number(current.confidence || 0);
+  const candidateConfidence = Number(candidate.confidence || 0);
+  return candidateConfidence >= currentConfidence ? candidate : current;
+}
+
 export function resolveActiveUserFacts(facts = []) {
   const byKey = new Map();
   for (const fact of Array.isArray(facts) ? facts : []) {
     if (!fact || typeof fact !== 'object') continue;
-    const key = String(fact.key || inferFactKey(fact)).trim();
+    const normalized = { ...fact };
+    if (normalized.type === 'meal' && !normalized.target_date) {
+      normalized.target_date = inferTargetDate(normalized.relative_day, normalized.observed_at || normalized.created_at, normalized.observed_timezone);
+    }
+    const key = String(normalized.key || inferFactKey(normalized)).trim();
     if (!key) continue;
-    const prev = byKey.get(key);
-    const ts = Date.parse(fact.created_at || '') || 0;
-    const prevTs = Date.parse(prev?.created_at || '') || 0;
-    if (!prev || ts >= prevTs) byKey.set(key, { ...fact, key });
+    byKey.set(key, { ...chooseBetterUserFact(byKey.get(key), { ...normalized, key }), key });
   }
   return [...byKey.values()].filter((fact) => !['retracted', 'superseded', 'archived'].includes(String(fact.status || '').toLowerCase()));
 }
@@ -206,6 +282,7 @@ export function extractUserFactEvents(text = '', options = {}) {
   const meta = {
     source: options.source || 'user_message',
     timestamp: options.timestamp || nowIso(),
+    timezone: cleanTimezone(options.timezone || options.observedTimezone || process.env.USER_FACT_TIMEZONE || process.env.TZ || DEFAULT_USER_FACT_TIMEZONE),
     observedText: clean,
   };
   return [
@@ -249,7 +326,7 @@ export function summarizeActiveUserFacts(runDir = '') {
     else if (fact.type === 'preference') preferences.push(fact);
     else if (fact.type === 'meal') meals.push(fact);
   }
-  meals.sort((a, b) => String(a.relative_day || '').localeCompare(String(b.relative_day || '')) || String(a.meal_slot || '').localeCompare(String(b.meal_slot || '')));
+  meals.sort((a, b) => String(a.target_date || a.relative_day || '').localeCompare(String(b.target_date || b.relative_day || '')) || String(a.meal_slot || '').localeCompare(String(b.meal_slot || '')));
   return { profile, preferences, meals, facts };
 }
 
@@ -268,7 +345,8 @@ export function formatActiveUserFactContext(runDir = '', { maxChars = 1800 } = {
   for (const meal of meals.slice(-12)) {
     const status = String(meal.status || 'active');
     const value = String(meal.value || '').trim() || '(unknown)';
-    lines.push(`- meal: ${labelDay(meal.relative_day)} ${labelSlot(meal.meal_slot)} = ${value} (status=${status})`);
+    const dateSuffix = meal.target_date ? `, date=${meal.target_date}` : '';
+    lines.push(`- meal: ${labelDay(meal.relative_day)} ${labelSlot(meal.meal_slot)} = ${value} (status=${status}${dateSuffix})`);
   }
   if (lines.length === 0) return '';
   lines.push('- governance: do not infer unrecorded meals; answer unknown/insufficient record when absent.');

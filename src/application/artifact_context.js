@@ -133,12 +133,17 @@ function chooseBetterObservationRow(current, candidate) {
   if (candidatePriority !== currentPriority) {
     return candidatePriority > currentPriority ? candidate : current;
   }
+  const currentTs = timestampMs(current.ts);
+  const candidateTs = timestampMs(candidate.ts);
+  if (candidatePriority >= observationStatusPriority('verified') && candidateTs !== currentTs) {
+    return candidateTs > currentTs ? candidate : current;
+  }
   const currentConfidence = numericConfidence(current.confidence, 0);
   const candidateConfidence = numericConfidence(candidate.confidence, 0);
   if (candidateConfidence !== currentConfidence) {
     return candidateConfidence > currentConfidence ? candidate : current;
   }
-  return timestampMs(candidate.ts) >= timestampMs(current.ts) ? candidate : current;
+  return candidateTs >= currentTs ? candidate : current;
 }
 
 export function loadUploadedArtifacts(jobDir = '', { limit = 12 } = {}) {
@@ -260,14 +265,13 @@ function mergeObservationRowsForArtifact(rows = []) {
 
   const rejectedLabels = uniqueStrings(rejected, { max: 12 });
   const bestPriority = observationStatusPriority(best.status);
+  const primaryOnly = bestPriority >= observationStatusPriority('verified');
   const observedCandidates = [];
-  for (const row of observationRows) {
-    const rowPriority = observationStatusPriority(row.status);
-    // Once a verified correction exists, do not let later lower-trust candidates
-    // reintroduce a previous wrong label. Same-priority verified rows are merged.
-    if (rowPriority === bestPriority) {
-      observedCandidates.push(...(Array.isArray(row.observed_labels) ? row.observed_labels : []));
-    }
+  const sourceRows = primaryOnly
+    ? [best]
+    : observationRows.filter((row) => observationStatusPriority(row.status) === bestPriority);
+  for (const row of sourceRows) {
+    observedCandidates.push(...(Array.isArray(row.observed_labels) ? row.observed_labels : []));
   }
 
   return {

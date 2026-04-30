@@ -693,12 +693,24 @@ ${TEAM_CORE_HELP_TEXT}`);
         if (!useHeuristicTemplate) {
           await bot.sendMessage(chatId, 'LLM planner를 우선 시도하고, 사용할 수 없으면 heuristic fallback으로 team 초안을 구성합니다. 빠른 템플릿 모드는 /team suggest --fast <목적> 을 사용하세요.');
         }
-        const proposal = useHeuristicTemplate
-          ? suggestTeamConfiguration({ taskText: effectiveGoal, runtime: runtimeForTeam })
-          : {
-              ...(await createFreeformTeamConfigurationAdvanced({ description: effectiveGoal, runtime: runtimeForTeam, jobId: currentJobId })),
-              proposal_mode: 'suggest',
-            };
+        let proposal;
+        try {
+          proposal = useHeuristicTemplate
+            ? suggestTeamConfiguration({ taskText: effectiveGoal, runtime: runtimeForTeam })
+            : {
+                ...(await createFreeformTeamConfigurationAdvanced({ description: effectiveGoal, runtime: runtimeForTeam, jobId: currentJobId })),
+                proposal_mode: 'suggest',
+              };
+        } catch (error) {
+          proposal = {
+            ...suggestTeamConfiguration({ taskText: effectiveGoal, runtime: runtimeForTeam }),
+            planner_metadata: {
+              planner_type: 'heuristic_rule_based',
+              planning_source: 'telegram_suggest_exception_fallback',
+              reasoning_summary: [String(error?.message || error || 'LLM planner failed').slice(0, 180)],
+            },
+          };
+        }
         storePendingTeam(chatSessionStore, chatId, proposal);
         await sendLong(bot, chatId, formatTeamProposalMessage(proposal, { runtime: runtimeForTeam }));
         return true;
@@ -710,7 +722,19 @@ ${TEAM_CORE_HELP_TEXT}`);
           return true;
         }
         await bot.sendMessage(chatId, '해당 요청에 맞는 팀 구성을 진행합니다. LLM planner를 사용할 수 없으면 fallback 경로를 사용합니다.');
-        const proposal = await createFreeformTeamConfigurationAdvanced({ description, runtime: runtimeForTeam, jobId: currentJobId });
+        let proposal;
+        try {
+          proposal = await createFreeformTeamConfigurationAdvanced({ description, runtime: runtimeForTeam, jobId: currentJobId });
+        } catch (error) {
+          proposal = {
+            ...createFreeformTeamConfiguration({ description, runtime: runtimeForTeam }),
+            planner_metadata: {
+              planner_type: 'heuristic_rule_based',
+              planning_source: 'telegram_create_exception_fallback',
+              reasoning_summary: [String(error?.message || error || 'LLM planner failed').slice(0, 180)],
+            },
+          };
+        }
         storePendingTeam(chatSessionStore, chatId, proposal);
         await sendLong(bot, chatId, formatTeamProposalMessage(proposal, { runtime: runtimeForTeam }));
         return true;
@@ -727,7 +751,19 @@ ${TEAM_CORE_HELP_TEXT}`);
           return true;
         }
         await bot.sendMessage(chatId, '기존 팀 구성을 바탕으로 수정안을 다시 설계합니다. LLM planner를 사용할 수 없으면 fallback 경로를 사용합니다.');
-        const next = await refineTeamConfigurationAdvanced({ team: baseTeam, instruction, runtime: runtimeForTeam, jobId: currentJobId });
+        let next;
+        try {
+          next = await refineTeamConfigurationAdvanced({ team: baseTeam, instruction, runtime: runtimeForTeam, jobId: currentJobId });
+        } catch (error) {
+          next = {
+            ...refineTeamConfiguration(baseTeam, instruction, { runtime: runtimeForTeam }),
+            planner_metadata: {
+              planner_type: 'heuristic_rule_based',
+              planning_source: 'telegram_refine_exception_fallback',
+              reasoning_summary: [String(error?.message || error || 'LLM planner failed').slice(0, 180)],
+            },
+          };
+        }
         storePendingTeam(chatSessionStore, chatId, next);
         await sendLong(bot, chatId, formatTeamProposalMessage(next, { runtime: runtimeForTeam }));
         return true;

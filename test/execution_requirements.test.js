@@ -41,3 +41,16 @@ test('detectUnmetExecutionRequirements catches skipped build and missing exe art
   assert.ok(unmet.some((row) => row.code === 'artifact_build_not_verified'));
   assert.ok(unmet.some((row) => row.code === 'missing_exe_artifact'));
 });
+
+
+test('extractExecutionRequirements captures notebook file delivery requests', () => {
+  const req = extractExecutionRequirements('CE2026S_Assignment_5.ipynb 노트북 파일을 만들어줘.');
+  assert.equal(req.artifact_delivery_requested, true);
+  assert.ok(req.expected_artifact_kinds.includes('ipynb'));
+});
+
+test('extractExecutionRequirements captures general file delivery requests', () => {
+  const req = extractExecutionRequirements('분석 결과를 reports/summary.md 파일로 저장해서 전달해줘.');
+  assert.equal(req.artifact_delivery_requested, true);
+  assert.ok(req.expected_artifact_kinds.includes('markdown'));
+});

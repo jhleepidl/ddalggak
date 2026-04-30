@@ -7,25 +7,26 @@ function normalizeLower(value = '') {
 }
 
 export const CODE_REQUEST_TERMS = [
-  'code', 'implement', 'fix', 'bug', 'patch', 'refactor', 'ipynb', 'notebook', 'script',
+  'code', 'codex', 'implement', 'fix', 'bug', 'patch', 'refactor', 'notebook', 'script',
   'repository', 'repo', 'workspace', 'python', 'javascript', 'typescript', 'sql', 'bash',
   'shell', 'commit', 'pull request', 'web service', 'web app', 'frontend', 'backend',
   'full stack', 'fullstack', 'api', 'server', 'client', 'ui', 'ux', 'react', 'next.js',
-  'nextjs', 'node', 'express', 'fastapi', 'flask', 'django', 'spring', '코드', '구현',
-  '리팩터', '패치', '노트북', '스크립트', '파이썬', '자바스크립트', '타입스크립트',
+  'nextjs', 'node', 'express', 'fastapi', 'flask', 'django', 'spring', '코드', '구현', '코딩', '코덱스',
+  '리팩터', '패치', '스크립트', '파이썬', '자바스크립트', '타입스크립트',
   '레포', '웹 서비스', '웹앱', '프론트엔드', '백엔드', '서버', '클라이언트', '서비스 개발',
 ];
 
 export const CODE_ARTIFACT_TERMS = [
-  'ipynb', 'notebook', 'jupyter', 'script', 'patch', 'commit', 'workspace', 'repo',
+  'notebook', 'jupyter', 'codex', 'script', 'patch', 'commit', 'workspace', 'repo',
   'repository', 'python', 'javascript', 'typescript', 'sql', 'bash', 'shell', 'pr',
   'pull request', 'web service', 'web app', 'frontend', 'backend', 'api', 'server', 'react',
   'nextjs', 'node', 'express', 'fastapi', 'flask', 'django', '주피터', '노트북', '스크립트',
-  '패치', '커밋', '파이썬', '자바스크립트', '타입스크립트', '레포', '웹 서비스', '웹앱',
+  '패치', '커밋', '코딩', '파일', '문서', '산출물', '결과물', '코덱스', '파이썬', '자바스크립트', '타입스크립트', '레포', '웹 서비스', '웹앱',
   '프론트엔드', '백엔드', '서버', 'api', '서비스 개발',
 ];
 
-const IMPLEMENTATION_LIKE_RE = /(implement|patch|refactor|code|repo|repository|workspace|script|prototype|web\s*service|web\s*app|frontend|backend|api|server|client|full[- ]?stack|react|next(?:\.js)?|node|express|fastapi|flask|django|spring|서비스\s*이름|서비스\s*구현|프로그램\s*개발|앱\s*개발|구현|개발|코드|노트북|ipynb|jupyter|주피터|python|스크립트|웹\s*서비스|웹앱|프론트엔드|백엔드|서버|클라이언트|서비스\s*개발)/i;
+const IMPLEMENTATION_LIKE_RE = /(codex|코덱스|implement|patch|refactor|code|코딩|repo|repository|workspace|script|prototype|web\s*service|web\s*app|frontend|backend|api|server|client|full[- ]?stack|react|next(?:\.js)?|node|express|fastapi|flask|django|spring|서비스\s*이름|서비스\s*구현|프로그램\s*개발|앱\s*개발|구현|개발|코드|notebook|jupyter|주피터|python|스크립트|웹\s*서비스|웹앱|프론트엔드|백엔드|서버|클라이언트|서비스\s*개발)/i;
+const WORKSPACE_DELIVERY_RE = /(파일|문서|노트북|리포트|보고서|산출물|결과물|압축본|압축\s*파일).{0,30}(만들|생성|작성|저장|전달|보내|줘)|\.[a-z0-9]{1,8}\b|create.{0,50}(file|document|report|artifact|deliverable)|generate.{0,50}(file|document|report|artifact|deliverable)|save.{0,50}(file|document|artifact)|deliverable|artifact|workspace/i;
 const SOFTWARE_DELIVERY_RE = /(web\s*service|web\s*app|frontend|backend|api|server|client|full[- ]?stack|react|next(?:\.js)?|node|express|fastapi|flask|django|spring|웹\s*서비스|웹앱|프론트엔드|백엔드|서버|클라이언트|서비스\s*개발)/i;
 const BUILDER_ROLE_RE = /(^|[^a-z])(builder|coder|developer|implementer|frontend|backend|fullstack|engineer)([^a-z]|$)|구현|코더|개발자|빌더/i;
 const REVIEWER_ROLE_RE = /(^|[^a-z])(reviewer|review|critic|verifier|quality|qa)([^a-z]|$)|리뷰어|검토|검수|비평|품질/i;
@@ -35,6 +36,10 @@ const RESEARCHER_ROLE_RE = /(^|[^a-z])(researcher|scout|analyst|investigator|pla
 
 export function hasImplementationLikeIntent(text = '') {
   return IMPLEMENTATION_LIKE_RE.test(normalizeText(text));
+}
+
+export function hasWorkspaceDeliveryIntent(text = '') {
+  return WORKSPACE_DELIVERY_RE.test(normalizeText(text)) || hasImplementationLikeIntent(text);
 }
 
 export function hasSoftwareDeliveryIntent(text = '') {

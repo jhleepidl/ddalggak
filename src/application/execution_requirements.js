@@ -22,16 +22,40 @@ function has(text = '', re) {
   return re.test(String(text || ''));
 }
 
+function extractMentionedArtifactKinds(raw = '') {
+  const text = String(raw || '');
+  const kinds = [];
+  const extToKind = {
+    exe: 'exe', zip: 'zip', tar: 'archive', tgz: 'archive', gz: 'archive',
+    ipynb: 'ipynb', md: 'markdown', txt: 'text', json: 'json', csv: 'csv',
+    py: 'python', js: 'javascript', ts: 'typescript', tsx: 'typescript', jsx: 'javascript',
+    html: 'html', css: 'css', pdf: 'pdf', docx: 'docx', xlsx: 'xlsx', sql: 'sql', yaml: 'yaml', yml: 'yaml', sh: 'shell',
+  };
+  const extRe = /\.([A-Za-z0-9]{1,8})\b/g;
+  let match;
+  while ((match = extRe.exec(text))) {
+    const kind = extToKind[match[1].toLowerCase()] || match[1].toLowerCase();
+    kinds.push(kind);
+  }
+  if (has(text, /windows installer|nsis|설치\s*파일|설치파일/i)) kinds.push('exe');
+  if (has(text, /압축\s*파일|압축본|bundle|archive/i)) kinds.push('archive');
+  if (has(text, /jupyter|notebook|노트북|주피터/i)) kinds.push('ipynb');
+  if (has(text, /보고서|문서|리포트|report|document/i)) kinds.push('document');
+  return uniq(kinds);
+}
+
 export function extractExecutionRequirements(text = '') {
   const raw = clean(text);
   const mentionsDirectness = has(raw, /(네가|니가|너가|직접|직접적으로|직접 해|직접 실행|yourself|you should run|run it yourself)/i);
   const mentionsShell = has(raw, /(npm\s+(install|run|ci)|pnpm\s|yarn\s|pip\s+install|cargo\s+build|gradle\s|dotnet\s+build|make\s|cmake\s|electron-builder|pkg\s)/i);
   const mentionsBuild = has(raw, /(빌드|패키징|패키지|패키징해서|dist\b|installer|설치 파일|설치파일|exe\b|\.exe\b|패키지 파일|산출물.*(파일|줘)|generate.*installer|build.*installer)/i);
-  const wantsArtifactDelivery = has(raw, /(산출물.*줘|파일.*줘|첨부|전달해|보내줘|bundle|deliver|artifact|설치 파일까지 생성해서|exe 파일까지 생성해서)/i);
+  const explicitFileName = /(?:^|[\s`"'“”‘’()[\]{}])[^\s`"'“”‘’()[\]{}]{2,100}\.[A-Za-z0-9]{1,8}\b/.test(raw);
+  const wantsArtifactDelivery = explicitFileName
+    || has(raw, /(파일|문서|노트북|리포트|보고서|산출물|결과물|압축본|압축\s*파일).{0,30}(줘|만들|생성|작성|저장|전달|보내|export|내보내)/i)
+    || has(raw, /(create|make|generate|write|save|export|deliver|attach|bundle).{0,60}(file|document|notebook|report|artifact|deliverable|archive)/i)
+    || has(raw, /(bundle|deliverable|artifact|attachment|첨부|전달해|보내줘)/i);
 
-  const expectedArtifactKinds = [];
-  if (has(raw, /(\.exe\b|\bexe\b|windows installer|nsis|설치 파일|설치파일)/i)) expectedArtifactKinds.push('exe');
-  if (has(raw, /(zip\b|압축)/i)) expectedArtifactKinds.push('zip');
+  const expectedArtifactKinds = extractMentionedArtifactKinds(raw);
 
   return {
     direct_execution_requested: mentionsDirectness && (mentionsShell || mentionsBuild || wantsArtifactDelivery),
@@ -44,7 +68,7 @@ export function extractExecutionRequirements(text = '') {
       mentionsDirectness && (mentionsShell || mentionsBuild || wantsArtifactDelivery) ? '사용자가 직접 실행을 요청함' : '',
       mentionsShell ? 'shell command 실행 필요' : '',
       mentionsBuild ? '빌드/설치 산출 필요' : '',
-      wantsArtifactDelivery ? '파일 전달 기대' : '',
+      wantsArtifactDelivery ? '파일/산출물 전달 기대' : '',
     ].filter(Boolean).join(' · '),
   };
 }
@@ -105,7 +129,11 @@ function hasArtifactKind(paths = [], kind = '') {
   const rows = normalizeArtifactPaths(paths);
   if (key === 'exe') return rows.some((entry) => /\.exe$/i.test(path.basename(entry)));
   if (key === 'zip') return rows.some((entry) => /\.zip$/i.test(path.basename(entry)));
-  return rows.some((entry) => entry.toLowerCase().includes(`.${key}`));
+  if (key === 'archive') return rows.some((entry) => /\.(zip|tar|tgz|gz)$/i.test(path.basename(entry)));
+  if (key === 'ipynb' || key === 'notebook') return rows.some((entry) => /\.ipynb$/i.test(path.basename(entry)));
+  if (key === 'markdown') return rows.some((entry) => /\.(md|markdown)$/i.test(path.basename(entry)));
+  if (key === 'document') return rows.some((entry) => /\.(md|txt|pdf|docx|doc)$/i.test(path.basename(entry)));
+  return rows.some((entry) => entry.toLowerCase().endsWith(`.${key}`) || entry.toLowerCase().includes(`.${key}`));
 }
 
 export function detectUnmetExecutionRequirements({ requirements = {}, output = '', artifactPaths = [] } = {}) {

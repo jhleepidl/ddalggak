@@ -9,13 +9,23 @@ function isInsideRoot(rootAbs, fullAbs) {
 }
 
 export class Jobs {
-  constructor() {
+  constructor({ eagerInit = false } = {}) {
     const base = process.env.RUNS_DIR
       ? path.resolve(process.env.RUNS_DIR)
       : path.resolve("runs");
     this.baseDir = base;
     this.runsDir = base;
+    this._runsDirReady = false;
+    if (eagerInit || /^(1|true|yes|on)$/i.test(String(process.env.JOBS_EAGER_INIT || ""))) {
+      this._ensureRunsDir();
+    }
+  }
+
+  _ensureRunsDir() {
+    if (this._runsDirReady) return this.runsDir;
     fs.mkdirSync(this.runsDir, { recursive: true });
+    this._runsDirReady = true;
+    return this.runsDir;
   }
 
   _workspaceDirByJobDir(jobDir) {
@@ -72,6 +82,7 @@ export class Jobs {
   }
 
   createJob({ title, ownerUserId = null, ownerChatId = null }) {
+    this._ensureRunsDir();
     const jobId = crypto.randomUUID();
     const dir = path.join(this.runsDir, jobId);
     fs.mkdirSync(dir, { recursive: true });
@@ -91,6 +102,7 @@ export class Jobs {
   }
 
   jobDir(jobId) {
+    this._ensureRunsDir();
     const dir = path.join(this.runsDir, jobId);
     if (!fs.existsSync(dir)) throw new Error(`Unknown jobId: ${jobId}`);
     this._ensureWorkspaceTreeByJobDir(dir);

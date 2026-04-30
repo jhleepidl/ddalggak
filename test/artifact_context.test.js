@@ -92,3 +92,53 @@ test('verified artifact correction is not overwritten by later candidate observa
     fs.rmSync(jobDir, { recursive: true, force: true });
   }
 });
+
+test('latest same-priority verified artifact correction replaces stale verified label instead of merging it', () => {
+  const jobDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ddalggak-artifact-context-same-priority-'));
+  try {
+    const uploadsDir = path.join(jobDir, 'workspace', 'uploads');
+    fs.mkdirSync(uploadsDir, { recursive: true });
+    const upload = {
+      ts: '2026-04-26T07:03:41.000Z',
+      upload_kind: 'photo',
+      filename: 'photo_food.jpg',
+      workspace_path: 'uploads/photo_food.jpg',
+      sha256: 'abc123',
+      upload_note: '음식사진 인식 테스트용 이미지',
+    };
+    fs.writeFileSync(path.join(uploadsDir, 'manifest.jsonl'), `${JSON.stringify(upload)}\n`, 'utf8');
+    recordUploadedArtifactContext(jobDir, upload);
+
+    const obsFile = path.join(jobDir, 'artifact_observations.jsonl');
+    fs.appendFileSync(obsFile, `${JSON.stringify({
+      ts: '2026-04-27T01:00:00.000Z',
+      event: 'artifact_observation',
+      workspace_path: 'uploads/photo_food.jpg',
+      filename: 'photo_food.jpg',
+      upload_kind: 'photo',
+      observed_labels: ['된장찌개'],
+      rejected_labels: [],
+      confidence: 0.99,
+      status: 'verified_after_user_challenge',
+      source: 'test',
+    })}\n`, 'utf8');
+    fs.appendFileSync(obsFile, `${JSON.stringify({
+      ts: '2026-04-27T02:00:00.000Z',
+      event: 'artifact_observation',
+      workspace_path: 'uploads/photo_food.jpg',
+      filename: 'photo_food.jpg',
+      upload_kind: 'photo',
+      observed_labels: ['햄버거'],
+      rejected_labels: [],
+      confidence: 0.72,
+      status: 'verified_after_user_challenge',
+      source: 'test',
+    })}\n`, 'utf8');
+
+    const context = formatActiveArtifactContext(jobDir);
+    assert.match(context, /verified_or_latest_labels: .*햄버거/);
+    assert.doesNotMatch(context, /verified_or_latest_labels: .*된장찌개/);
+  } finally {
+    fs.rmSync(jobDir, { recursive: true, force: true });
+  }
+});

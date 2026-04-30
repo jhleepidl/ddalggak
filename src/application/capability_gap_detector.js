@@ -102,14 +102,20 @@ export function detectCapabilityGapsFromText(text = '', { label = 'agent' } = {}
   const toolMatch = raw.match(/Tool ['"]?([a-zA-Z0-9_.-]+)['"]? not found/i);
   if (toolMatch) {
     const classified = classifyToolishId(toolMatch[1]);
+    const rawTool = cleanId(classified.raw);
+    const providerFileToolLimitation = rawTool === 'write_file' && /error executing tool write_file|tool ['"]?write_file['"]? not found/i.test(raw);
     push({
-      kind: classified.kind === 'capability' ? 'missing_capability' : 'missing_external_tool',
+      kind: providerFileToolLimitation ? 'missing_capability' : (classified.kind === 'capability' ? 'missing_capability' : 'missing_external_tool'),
       severity: 'blocking',
-      capability_id: classified.kind === 'capability' ? classified.canonical_id : undefined,
-      external_tool_id: classified.kind === 'external_tool' ? classified.canonical_id : undefined,
-      tool_id: classified.raw,
-      detail: `${classified.raw} 실행 조건이 없어 작업을 완료하지 못했습니다.`,
-      suggested_action: inferToolSuggestion(classified.raw, classified.canonical_id),
+      capability_id: providerFileToolLimitation ? 'filesystem_write' : (classified.kind === 'capability' ? classified.canonical_id : undefined),
+      external_tool_id: providerFileToolLimitation ? undefined : (classified.kind === 'external_tool' ? classified.canonical_id : undefined),
+      tool_id: providerFileToolLimitation ? 'write_file' : classified.raw,
+      detail: providerFileToolLimitation
+        ? 'provider CLI에 write_file tool이 없어 직접 파일 쓰기는 완료되지 않았습니다. 모델 출력물을 runtime이 workspace에 materialize해야 합니다.'
+        : `${classified.raw} 실행 조건이 없어 작업을 완료하지 못했습니다.`,
+      suggested_action: providerFileToolLimitation
+        ? 'Gemini는 파일 내용을 fenced code block으로 출력하고 runtime materialization 또는 Codex workspace-write 경로를 사용하세요.'
+        : inferToolSuggestion(classified.raw, classified.canonical_id),
     });
   }
 

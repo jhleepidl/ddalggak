@@ -77,6 +77,7 @@ import { recordChannelPromotion } from "./channel_promotion_manager.js";
 import { recordAdaptiveExecutionOutcome } from "./execution_mode_adaptation.js";
 import { buildExecutionQualitySignals } from './execution_quality_signals.js';
 import { formatActiveArtifactContext, recordArtifactObservationFromAgentOutput } from "./artifact_context.js";
+import { hasProviderFileToolLimitation, materializeArtifactsFromLlmOutput } from "./llm_output_artifact_materializer.js";
 import { formatActiveUserFactContext, recordUserFactEvents } from "./user_fact_context.js";
 import { buildScopedPromptAssembly, hydrateRuntimeScopesViaGoC, resolveScopeExecutionState } from "./goc_scope_runtime.js";
 import { markActionsSkipped, wasInterruptedByReplan } from "./run_status_cleanup.js";
@@ -931,6 +932,26 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 3 });
   const activeArtifactContext = formatActiveArtifactContext(runDir(jobId), { maxChars: 1800, limit: 4 });
   const activeUserFactContext = formatActiveUserFactContext(runDir(jobId), { maxChars: 2200 });
+  const artifactOutputRequirements = mergeExecutionRequirements(
+    extractExecutionRequirements(cleanUserRequest),
+    extractExecutionRequirements(rawGoal),
+  );
+  const artifactMaterializationGuide = artifactOutputRequirements.artifact_delivery_requested
+    ? [
+      "[FILE ARTIFACT OUTPUT CONTRACT]",
+      "- When the user expects a file deliverable, produce each file through an explicit artifact block instead of relying on provider-specific write_file/write_todos tools.",
+      "- Use this exact shape for each deliverable:",
+      "  [ARTIFACT]",
+      "  path: relative/path/to/file.ext",
+      "  ```language",
+      "  complete file contents",
+      "  ```",
+      "  [/ARTIFACT]",
+      "- Choose natural filenames and relative paths from the user request and task context; do not write outside the workspace or into hidden runtime directories.",
+      "- The runtime will materialize explicit artifact blocks into workspace files and publish the artifact index.",
+      "- If direct provider file-writing is unavailable or denied, continue by emitting artifact blocks rather than failing the task.",
+    ].join("\n")
+    : "";
   const kbContract = buildAgentKnowledgeBaseBlock(jobId, {
     provider: "gemini",
     roleId: roleKey,
@@ -947,6 +968,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     activeUserFactContext ? activeUserFactContext : '',
     ctx ? `[AVAILABLE MEMORY — optional]\n${ctx}` : '',
     workspaceFilesText ? `[WORKSPACE FILES — optional]\n${workspaceFilesText}` : '',
+    artifactMaterializationGuide,
     '',
     '[USER REQUEST]',
     cleanUserRequest || rawGoal,
@@ -1007,6 +1029,16 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   });
   const effectiveGeminiResult = r;
   const out = (r.stdout || r.stderr || "");
+  const materialization = artifactOutputRequirements.artifact_delivery_requested
+    ? materializeArtifactsFromLlmOutput({
+      output: out,
+      workspaceRoot: workspacePath,
+      userRequest: cleanUserRequest || rawGoal,
+    })
+    : { materialized: [] };
+  if (materialization.materialized?.length) {
+    try { runtimeIo.refreshArtifactIndex(jobId, { maxFiles: 12 }); } catch {}
+  }
   try {
     recordArtifactObservationFromAgentOutput(runDir(jobId), out, { source: `gemini:${agentKey}` });
   } catch {}
@@ -1018,9 +1050,24 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     fallbackDoc: 'research',
     requestedDoc: researchPurpose === "review" ? "critic_log" : "research",
   });
-  jobs.appendConversation(jobId, "gemini", out, { kind: "research" });
-  ensureCommandOk("Gemini", effectiveGeminiResult);
-  return out;
+  const materializedArtifacts = Array.isArray(materialization.materialized) ? materialization.materialized : [];
+  const acceptedProviderFileLimitation = materializedArtifacts.length > 0 && !effectiveGeminiResult.ok && hasProviderFileToolLimitation(`${effectiveGeminiResult.stderr || ""}\n${effectiveGeminiResult.stdout || ""}`);
+  const acceptedTimedPartial = materializedArtifacts.length > 0 && !effectiveGeminiResult.ok && /timeout/i.test(String(effectiveGeminiResult.error_type || effectiveGeminiResult.stderr || ""));
+  const userFacingOut = materializedArtifacts.length > 0
+    ? [
+      '요청한 파일 산출물을 생성했습니다.',
+      '',
+      '생성된 파일:',
+      ...materializedArtifacts.map((entry) => `- ${entry.path}`),
+      '',
+      effectiveGeminiResult.ok
+        ? '검증: LLM이 생성한 파일 내용을 파싱해 workspace에 저장했습니다.'
+        : '검증: provider-side 파일쓰기 제한 이후 LLM 출력물을 파싱해 workspace에 저장했습니다.',
+    ].join('\n')
+    : out;
+  jobs.appendConversation(jobId, "gemini", userFacingOut, { kind: "research" });
+  if (!acceptedProviderFileLimitation && !acceptedTimedPartial) ensureCommandOk("Gemini", effectiveGeminiResult);
+  return userFacingOut;
 }
 
 async function codexImplement(jobId, instruction, signal = null, opts = {}) {

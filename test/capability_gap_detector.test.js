@@ -212,3 +212,17 @@ test('detectTeamCapabilityGaps surfaces structured skill package credentials and
   assert.ok(gaps.some((gap) => gap.kind === 'missing_credential' && gap.credential_key === 'KSKILL_SRT_ID'));
   assert.ok(gaps.some((gap) => gap.kind === 'missing_credential' && gap.credential_key === 'KSKILL_SRT_PASSWORD'));
 });
+
+
+test('detectCapabilityGapsFromExecution explains provider CLI write_file limitation as runtime materialization issue', () => {
+  const gaps = detectCapabilityGapsFromExecution({
+    outputs: [
+      { agentId: 'Notebook Builder', output: 'Error executing tool write_file: Tool "write_file" not found. Did you mean one of: "read_file", "write_todos", "cli_help"?' },
+    ],
+  });
+  const gap = gaps.find((row) => row.tool_id === 'write_file');
+  assert.equal(gap?.canonical_kind, 'missing_capability');
+  assert.equal(gap?.capability_id, 'filesystem_write');
+  assert.match(gap?.detail || '', /provider CLI/);
+  assert.match(gap?.suggested_action || '', /runtime materialization|Codex/);
+});
