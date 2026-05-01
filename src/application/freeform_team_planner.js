@@ -3,6 +3,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { runCodexExec } from '../codex.js';
+import { runGeminiPrompt } from '../gemini.js';
 import { parseJsonObjectFromText } from '../shared/json_extract.js';
 import { listSupportedModels } from '../catalog/model_catalog.js';
 import { normalizeTeamStructureV2, deriveTeamConfigFromStructureV2 } from '../shared/team_structure_v2.js';
@@ -30,17 +31,17 @@ function cleanId(value = '') {
   return clean(value).toLowerCase();
 }
 
-let codexAvailabilityCache = null;
+let plannerAvailabilityCache = new Map();
 
-function codexCandidateNames() {
-  if (process.platform !== 'win32') return ['codex'];
+function executableCandidateNames(baseName = '') {
+  const root = clean(baseName);
+  if (!root) return [];
+  if (process.platform !== 'win32') return [root];
   const exts = clean(process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM')
     .split(';')
     .map((entry) => clean(entry).toLowerCase())
     .filter(Boolean);
-  const out = ['codex'];
-  for (const ext of exts) out.push(`codex${ext}`);
-  return out;
+  return [root, ...exts.map((ext) => root + ext)];
 }
 
 function isExecutableFile(target) {
@@ -55,11 +56,11 @@ function isExecutableFile(target) {
   }
 }
 
-function hasCodexBinaryOnPath() {
+function hasExecutableOnPath(binaryName = '') {
   const pathValue = clean(process.env.PATH);
   if (!pathValue) return false;
   const entries = pathValue.split(path.delimiter).map((entry) => clean(entry)).filter(Boolean);
-  const candidates = codexCandidateNames();
+  const candidates = executableCandidateNames(binaryName);
   for (const entry of entries) {
     for (const candidate of candidates) {
       if (isExecutableFile(path.join(entry, candidate))) return true;
@@ -69,16 +70,50 @@ function hasCodexBinaryOnPath() {
 }
 
 export function resetFreeformPlannerAvailabilityCache() {
-  codexAvailabilityCache = null;
+  plannerAvailabilityCache = new Map();
+}
+
+function normalizedPlannerMode() {
+  const value = cleanId(process.env.TEAM_CREATE_PLANNER_MODE || process.env.TEAM_PLANNER_MODE || 'auto');
+  if (value === 'off' || value === 'disabled' || value === 'false' || value === '0' || value === 'none') return 'off';
+  if (value === 'on' || value === 'enabled' || value === 'true' || value === '1') return 'auto';
+  if (['auto', 'codex', 'gemini', 'llm'].includes(value)) return value;
+  return 'auto';
+}
+
+function plannerProviderPreference(kind = 'create') {
+  const specific = kind === 'refine' ? process.env.TEAM_REFINE_PLANNER_PROVIDER : process.env.TEAM_CREATE_PLANNER_PROVIDER;
+  const raw = cleanId(specific || process.env.TEAM_PLANNER_PROVIDER || 'auto');
+  if (raw === 'off' || raw === 'disabled' || raw === 'none') return [];
+  if (raw === 'gemini') return ['gemini'];
+  if (raw === 'codex' || raw === 'chatgpt' || raw === 'openai') return ['codex'];
+  // Team design is a reasoning task, not a code-writing task. Prefer Gemini when
+  // available so /team suggest does not silently degrade to static templates on
+  // servers where Codex is only installed for workspace execution or is absent.
+  return ['gemini', 'codex'];
+}
+
+function isPlannerProviderAvailable(provider = '') {
+  const key = cleanId(provider);
+  if (!key) return false;
+  const mode = normalizedPlannerMode();
+  if (mode === 'off') return false;
+  if (mode === 'codex' && key !== 'codex') return false;
+  if (mode === 'gemini' && key !== 'gemini') return false;
+  const cacheKey = mode + ':' + key + ':' + (process.env.PATH || '');
+  if (plannerAvailabilityCache.has(cacheKey)) return plannerAvailabilityCache.get(cacheKey);
+  const binary = key === 'gemini' ? 'gemini' : key === 'codex' ? 'codex' : '';
+  const available = Boolean(binary && hasExecutableOnPath(binary));
+  plannerAvailabilityCache.set(cacheKey, available);
+  return available;
+}
+
+export function isLlmTeamPlannerEnabled(kind = 'create') {
+  return plannerProviderPreference(kind).some((provider) => isPlannerProviderAvailable(provider));
 }
 
 export function isCodexPlannerEnabled() {
-  const mode = cleanId(process.env.TEAM_CREATE_PLANNER_MODE || 'auto');
-  if (mode === 'off' || mode === 'disabled' || mode === 'false' || mode === '0') return false;
-  if (mode === 'on' || mode === 'enabled' || mode === 'true' || mode === '1' || mode === 'codex') return true;
-  if (codexAvailabilityCache !== null) return codexAvailabilityCache;
-  codexAvailabilityCache = hasCodexBinaryOnPath();
-  return codexAvailabilityCache;
+  return isPlannerProviderAvailable('codex');
 }
 
 function summarizeRuntimeAgents(runtime = null) {
@@ -375,6 +410,154 @@ function normalizePlannerPlan(raw = {}) {
   };
 }
 
+
+function plannerModelForProvider(provider = '', kind = 'create') {
+  const key = cleanId(provider);
+  const specific = kind === 'refine'
+    ? process.env.TEAM_REFINE_PLANNER_MODEL
+    : process.env.TEAM_CREATE_PLANNER_MODEL;
+  if (key === 'gemini') {
+    return clean((kind === 'refine' ? process.env.TEAM_REFINE_GEMINI_PLANNER_MODEL : process.env.TEAM_CREATE_GEMINI_PLANNER_MODEL)
+      || process.env.TEAM_GEMINI_PLANNER_MODEL
+      || (/^gemini/i.test(clean(specific)) ? specific : '')
+      || process.env.GEMINI_MODEL
+      || 'gemini-3-flash-preview');
+  }
+  if (key === 'codex') {
+    return clean((kind === 'refine' ? process.env.TEAM_REFINE_CODEX_PLANNER_MODEL : process.env.TEAM_CREATE_CODEX_PLANNER_MODEL)
+      || process.env.TEAM_CODEX_PLANNER_MODEL
+      || specific
+      || 'gpt-5.4');
+  }
+  return clean(specific || '');
+}
+
+function plannerTimeoutMs(kind = 'create') {
+  const raw = kind === 'refine'
+    ? (process.env.TEAM_REFINE_PLANNER_TIMEOUT_MS || process.env.TEAM_CREATE_PLANNER_TIMEOUT_MS)
+    : process.env.TEAM_CREATE_PLANNER_TIMEOUT_MS;
+  const value = Number(raw || 0);
+  return Number.isFinite(value) && value > 0 ? value : 30000;
+}
+
+function plannerSourceForProvider(provider = '', kind = 'create') {
+  const key = cleanId(provider);
+  const suffix = kind === 'refine' ? '_refine' : '';
+  if (key === 'gemini') return 'gemini_cli_team_planner' + suffix;
+  if (key === 'codex') return 'codex_cli_team_planner' + suffix;
+  return 'llm_team_planner' + suffix;
+}
+
+function appendPlannerPromptTelemetry({ kind = 'create', provider = '', model = '', prompt = '', jobId = '', taskText = '', instruction = '', currentTeam = null, runtime = null, availableToolIds = [], skillRegistry = null } = {}) {
+  const cleanJobId = clean(jobId);
+  if (!cleanJobId) return;
+  const isRefine = kind === 'refine';
+  appendPromptTelemetry({
+    jobDir: runDir(cleanJobId),
+    sharedDir: runSharedDir(cleanJobId),
+    row: {
+      kind: 'planner_prompt',
+      surface_id: isRefine ? 'team_refine_planner' : 'team_create_planner',
+      surface_label: isRefine ? 'team_refine_planner' : 'team_create_planner',
+      provider: cleanId(provider),
+      model: clean(model),
+      agent_id: isRefine ? 'team_refine_planner' : 'team_create_planner',
+      role_id: 'planner',
+      prompt_text: prompt,
+      components: isRefine ? {
+        refinement_instruction: clean(instruction),
+        current_team: compactPromptJson(summarizeTeamForPlanner(currentTeam), { maxDepth: 3, maxItems: 10, maxStringChars: 100 }),
+        current_roster_lines: buildCurrentRosterSummaryLines(currentTeam),
+        runtime_catalog: compactPromptJson(summarizeRuntimeAgents(runtime), { maxDepth: 2, maxItems: 6, maxStringChars: 72 }),
+        skill_registry: compactPromptJson(summarizeSkills(skillRegistry), { maxDepth: 2, maxItems: 6, maxStringChars: 72 }),
+        available_tools: asArray(availableToolIds).slice(0, 10).join(', '),
+      } : {
+        user_request: clean(taskText),
+        runtime_catalog: compactPromptJson(summarizeRuntimeAgents(runtime), { maxDepth: 2, maxItems: 6, maxStringChars: 72 }),
+        skill_registry: compactPromptJson(summarizeSkills(skillRegistry), { maxDepth: 2, maxItems: 6, maxStringChars: 72 }),
+        available_tools: asArray(availableToolIds).slice(0, 10).join(', '),
+      },
+    },
+  });
+}
+
+async function runPlannerProvider({ provider = '', kind = 'create', prompt = '', workspaceRoot = process.cwd(), jobId = '' } = {}) {
+  const key = cleanId(provider);
+  const model = plannerModelForProvider(key, kind);
+  const timeoutMs = plannerTimeoutMs(kind);
+  if (key === 'gemini') {
+    return await runGeminiPrompt({
+      workspaceRoot,
+      cwd: workspaceRoot,
+      prompt,
+      jobId: kind === 'refine' ? 'team-refine-planner' : 'team-create-planner',
+      model,
+      timeoutMs,
+      surface: kind === 'refine' ? 'team_refine_planner' : 'team_create_planner',
+      agentId: kind === 'refine' ? 'team_refine_planner' : 'team_create_planner',
+      roleId: 'planner',
+      approvalMode: 'default',
+      traceMetadata: { planner_provider: key, requested_job_id: clean(jobId) || null },
+    });
+  }
+  if (key === 'codex') {
+    return await runCodexExec({
+      workspaceRoot,
+      cwd: workspaceRoot,
+      prompt,
+      jobId: kind === 'refine' ? 'team-refine-planner' : 'team-create-planner',
+      model,
+      timeoutMs,
+      surface: kind === 'refine' ? 'team_refine_planner' : 'team_create_planner',
+      agentId: kind === 'refine' ? 'team_refine_planner' : 'team_create_planner',
+      roleId: 'planner',
+    });
+  }
+  return { ok: false, stdout: '', stderr: 'unsupported planner provider: ' + key };
+}
+
+async function planTeamWithLlm({ kind = 'create', prompt = '', taskText = '', instruction = '', currentTeam = null, runtime = null, availableToolIds = [], skillRegistry = null, workspaceRoot = process.cwd(), jobId = '' } = {}) {
+  const providers = plannerProviderPreference(kind).filter((provider) => isPlannerProviderAvailable(provider));
+  if (providers.length === 0) return { ok: false, reason: 'llm_planner_unavailable' };
+  const errors = [];
+  for (const provider of providers) {
+    const model = plannerModelForProvider(provider, kind);
+    appendPlannerPromptTelemetry({ kind, provider, model, prompt, jobId, taskText, instruction, currentTeam, runtime, availableToolIds, skillRegistry });
+    let result;
+    try {
+      result = await runPlannerProvider({ provider, kind, prompt, workspaceRoot, jobId });
+    } catch (error) {
+      errors.push(provider + ':planner_exec_exception:' + String(error?.message || error));
+      continue;
+    }
+    if (!result?.ok) {
+      errors.push(provider + ':planner_exec_failed:' + clean(result?.stderr || result?.stdout || 'unknown').slice(0, 240));
+      continue;
+    }
+    const parsed = parseJsonObjectFromText(result.stdout || result.stderr || '');
+    if (!parsed || typeof parsed !== 'object') {
+      errors.push(provider + ':planner_parse_failed');
+      continue;
+    }
+    const normalized = normalizePlannerPlan(parsed);
+    if (!normalized.agents.length) {
+      errors.push(provider + ':planner_returned_no_agents');
+      continue;
+    }
+    return {
+      ok: true,
+      plan: normalized,
+      planner_metadata: {
+        planner_type: cleanId(provider) + '_cli',
+        planner_model: model,
+        planning_source: plannerSourceForProvider(provider, kind),
+        reasoning_summary: normalized.reasoning_summary,
+      },
+    };
+  }
+  return { ok: false, reason: errors.join('; ') || 'llm_planner_failed' };
+}
+
 export async function planFreeformTeamWithCodex({
   taskText = '',
   runtime = null,
@@ -384,69 +567,9 @@ export async function planFreeformTeamWithCodex({
   workspaceRoot = process.cwd(),
   jobId = '',
 } = {}) {
-  if (!isCodexPlannerEnabled()) {
-    return { ok: false, reason: 'planner_disabled_or_codex_unavailable' };
-  }
   const prompt = buildPlannerPrompt({ taskText, runtime, availableToolIds, skillRegistry, preferredTaskArchetype });
-  const cleanJobId = clean(jobId);
-  if (cleanJobId) {
-    appendPromptTelemetry({
-      jobDir: runDir(cleanJobId),
-      sharedDir: runSharedDir(cleanJobId),
-      row: {
-        kind: 'planner_prompt',
-        surface_id: 'team_create_planner',
-        surface_label: 'team_create_planner',
-        provider: 'codex',
-        model: process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4',
-        agent_id: 'team_create_planner',
-        role_id: 'planner',
-        prompt_text: prompt,
-        components: {
-          user_request: clean(taskText),
-          runtime_catalog: compactPromptJson(summarizeRuntimeAgents(runtime), { maxDepth: 2, maxItems: 6, maxStringChars: 72 }),
-          skill_registry: compactPromptJson(summarizeSkills(skillRegistry), { maxDepth: 2, maxItems: 6, maxStringChars: 72 }),
-          available_tools: asArray(availableToolIds).slice(0, 10).join(', '),
-        },
-      },
-    });
-  }
-  let result;
-  try {
-    result = await runCodexExec({
-      workspaceRoot,
-      cwd: workspaceRoot,
-      prompt,
-      jobId: 'team-create-planner',
-      model: process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4',
-      timeoutMs: Number(process.env.TEAM_CREATE_PLANNER_TIMEOUT_MS || 0) > 0 ? Number(process.env.TEAM_CREATE_PLANNER_TIMEOUT_MS) : 30000,
-    });
-  } catch (error) {
-    return { ok: false, reason: `planner_exec_exception:${String(error?.message || error)}` };
-  }
-  if (!result?.ok) {
-    return { ok: false, reason: `planner_exec_failed:${clean(result?.stderr || result?.stdout || 'unknown')}` };
-  }
-  const parsed = parseJsonObjectFromText(result.stdout || result.stderr || '');
-  if (!parsed || typeof parsed !== 'object') {
-    return { ok: false, reason: 'planner_parse_failed', raw_output: clean(result.stdout || result.stderr || '') };
-  }
-  const normalized = normalizePlannerPlan(parsed);
-  if (!normalized.agents.length) {
-    return { ok: false, reason: 'planner_returned_no_agents', raw_output: clean(result.stdout || result.stderr || '') };
-  }
-  return {
-    ok: true,
-    plan: normalized,
-    planner_metadata: {
-      planner_type: 'codex_cli',
-      planner_model: clean(process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4') || 'gpt-5.4',
-      planning_source: 'codex_gpt_5_4',
-      reasoning_summary: normalized.reasoning_summary,
-    },
-  };
+  return await planTeamWithLlm({ kind: 'create', prompt, taskText, runtime, availableToolIds, skillRegistry, workspaceRoot, jobId });
 }
-
 
 export async function planTeamRefinementWithCodex({
   currentTeam = null,
@@ -458,67 +581,6 @@ export async function planTeamRefinementWithCodex({
   workspaceRoot = process.cwd(),
   jobId = '',
 } = {}) {
-  if (!isCodexPlannerEnabled()) {
-    return { ok: false, reason: 'planner_disabled_or_codex_unavailable' };
-  }
   const prompt = buildRefinementPlannerPrompt({ currentTeam, instruction, runtime, availableToolIds, skillRegistry, preferredTaskArchetype });
-  const cleanJobId = clean(jobId);
-  if (cleanJobId) {
-    appendPromptTelemetry({
-      jobDir: runDir(cleanJobId),
-      sharedDir: runSharedDir(cleanJobId),
-      row: {
-        kind: 'planner_prompt',
-        surface_id: 'team_refine_planner',
-        surface_label: 'team_refine_planner',
-        provider: 'codex',
-        model: process.env.TEAM_REFINE_PLANNER_MODEL || process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4',
-        agent_id: 'team_refine_planner',
-        role_id: 'planner',
-        prompt_text: prompt,
-        components: {
-          refinement_instruction: clean(instruction),
-          current_team: compactPromptJson(summarizeTeamForPlanner(currentTeam), { maxDepth: 3, maxItems: 10, maxStringChars: 100 }),
-          current_roster_lines: buildCurrentRosterSummaryLines(currentTeam),
-          runtime_catalog: compactPromptJson(summarizeRuntimeAgents(runtime), { maxDepth: 2, maxItems: 6, maxStringChars: 72 }),
-          skill_registry: compactPromptJson(summarizeSkills(skillRegistry), { maxDepth: 2, maxItems: 6, maxStringChars: 72 }),
-          available_tools: asArray(availableToolIds).slice(0, 10).join(', '),
-        },
-      },
-    });
-  }
-  let result;
-  try {
-    result = await runCodexExec({
-      workspaceRoot,
-      cwd: workspaceRoot,
-      prompt,
-      jobId: 'team-refine-planner',
-      model: process.env.TEAM_REFINE_PLANNER_MODEL || process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4',
-      timeoutMs: Number(process.env.TEAM_REFINE_PLANNER_TIMEOUT_MS || process.env.TEAM_CREATE_PLANNER_TIMEOUT_MS || 0) > 0 ? Number(process.env.TEAM_REFINE_PLANNER_TIMEOUT_MS || process.env.TEAM_CREATE_PLANNER_TIMEOUT_MS) : 30000,
-    });
-  } catch (error) {
-    return { ok: false, reason: `planner_exec_exception:${String(error?.message || error)}` };
-  }
-  if (!result?.ok) {
-    return { ok: false, reason: `planner_exec_failed:${clean(result?.stderr || result?.stdout || 'unknown')}` };
-  }
-  const parsed = parseJsonObjectFromText(result.stdout || result.stderr || '');
-  if (!parsed || typeof parsed !== 'object') {
-    return { ok: false, reason: 'planner_parse_failed', raw_output: clean(result.stdout || result.stderr || '') };
-  }
-  const normalized = normalizePlannerPlan(parsed);
-  if (!normalized.agents.length) {
-    return { ok: false, reason: 'planner_returned_no_agents', raw_output: clean(result.stdout || result.stderr || '') };
-  }
-  return {
-    ok: true,
-    plan: normalized,
-    planner_metadata: {
-      planner_type: 'codex_cli',
-      planner_model: clean(process.env.TEAM_REFINE_PLANNER_MODEL || process.env.TEAM_CREATE_PLANNER_MODEL || 'gpt-5.4') || 'gpt-5.4',
-      planning_source: 'codex_gpt_5_4_refine',
-      reasoning_summary: normalized.reasoning_summary,
-    },
-  };
+  return await planTeamWithLlm({ kind: 'refine', prompt, instruction, currentTeam, runtime, availableToolIds, skillRegistry, workspaceRoot, jobId });
 }

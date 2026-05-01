@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import {
   isCodexPlannerEnabled,
+  isLlmTeamPlannerEnabled,
   resetFreeformPlannerAvailabilityCache,
 } from '../src/application/freeform_team_planner.js';
 
@@ -43,5 +44,31 @@ test('isCodexPlannerEnabled returns false in auto mode when PATH has no codex bi
     if (prevMode === undefined) delete process.env.TEAM_CREATE_PLANNER_MODE;
     else process.env.TEAM_CREATE_PLANNER_MODE = prevMode;
     resetFreeformPlannerAvailabilityCache();
+  }
+});
+
+
+test('isLlmTeamPlannerEnabled detects Gemini planner binary in auto mode', () => {
+  const prevPath = process.env.PATH;
+  const prevMode = process.env.TEAM_CREATE_PLANNER_MODE;
+  const prevProvider = process.env.TEAM_PLANNER_PROVIDER;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ddalggak-gemini-path-'));
+  const bin = path.join(dir, 'gemini');
+  fs.writeFileSync(bin, '#!/bin/sh\necho gemini\n', 'utf8');
+  fs.chmodSync(bin, 0o755);
+  process.env.PATH = dir;
+  process.env.TEAM_CREATE_PLANNER_MODE = 'auto';
+  delete process.env.TEAM_PLANNER_PROVIDER;
+  resetFreeformPlannerAvailabilityCache();
+  try {
+    assert.equal(isLlmTeamPlannerEnabled('create'), true);
+  } finally {
+    process.env.PATH = prevPath;
+    if (prevMode === undefined) delete process.env.TEAM_CREATE_PLANNER_MODE;
+    else process.env.TEAM_CREATE_PLANNER_MODE = prevMode;
+    if (prevProvider === undefined) delete process.env.TEAM_PLANNER_PROVIDER;
+    else process.env.TEAM_PLANNER_PROVIDER = prevProvider;
+    resetFreeformPlannerAvailabilityCache();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });

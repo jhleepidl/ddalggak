@@ -763,6 +763,8 @@ function buildKnowledgeBaseMemoryMapLines(profileOrPlan = null, { maxLines = 7 }
 function defaultModelForRole(role = '', provider = '') {
   const roleId = cleanId(role);
   const providerId = cleanId(provider);
+  if (providerId === 'gemini') return 'gemini-3-flash-preview';
+  if ((providerId === 'openai' || providerId === 'chatgpt') && roleId === 'builder') return 'gpt-5.5';
   if ((providerId === 'openai' || providerId === 'codex') && roleId === 'builder') return 'gpt-5-codex';
   if (roleId === 'builder') return 'gpt-5-codex';
   if (roleId === 'reviewer' || roleId === 'synthesizer') return 'gpt-5.4';
@@ -1548,6 +1550,41 @@ function findInstructionTargetAgents(team = {}, instruction = '') {
   return uniqueBy(hits, (agent) => cleanId(agent?.agent_id || agent?.name));
 }
 
+function targetMentionAliases(agent = {}) {
+  const role = normalizeTeamRole(agent?.role);
+  const aliases = [clean(agent?.name), clean(agent?.agent_id || '')];
+  if (role === 'builder') aliases.push('builder', 'workspace builder', 'coder', 'developer', '빌더', '구현자', '코더');
+  if (role === 'reviewer') aliases.push('reviewer', 'implementation reviewer', '검토자', '리뷰어', '검수자');
+  if (role === 'synthesizer') aliases.push('synthesizer', 'delivery synthesizer', '최종 정리', '합성자', '요약자');
+  if (role === 'researcher') aliases.push('researcher', 'scout', '조사자', '연구자');
+  if (role === 'operator') aliases.push('operator', '오퍼레이터', '운영자');
+  return uniqueIds(aliases.map((entry) => clean(entry)).filter(Boolean), { max: 12 });
+}
+
+function splitRefinementClauses(instruction = '') {
+  const text = clean(instruction);
+  if (!text) return [];
+  const parts = text
+    .split(/[,，;；。\n]+|(?:\s+and\s+)|(?:\s+but\s+)|(?:\s+그리고\s+)|(?:\s+다만\s+)/i)
+    .map((entry) => clean(entry))
+    .filter(Boolean);
+  return uniqueIds([text, ...parts], { max: 12 });
+}
+
+function clauseMentionsAgent(clause = '', agent = {}) {
+  const lower = clean(clause).toLowerCase();
+  return targetMentionAliases(agent).some((alias) => alias && lower.includes(alias.toLowerCase()));
+}
+
+function extractRequestedSettingsForAgent(agent = {}, instruction = '', { targetCount = 1 } = {}) {
+  const clauses = splitRefinementClauses(instruction);
+  const mentionedClauses = clauses.filter((clause) => clauseMentionsAgent(clause, agent));
+  const scope = clean((mentionedClauses.sort((x, y) => x.length - y.length)[0]) || (targetCount <= 1 ? instruction : ''));
+  const model = extractRequestedSupportedModel(scope);
+  const provider = normalizeRefinementProvider(extractRequestedProvider(scope) || inferProviderForModel(model || ''));
+  return { model, provider, scope };
+}
+
 function isMinorAgentSettingsRefinement(team = {}, instruction = '') {
   const text = clean(instruction);
   if (!text) return false;
@@ -1568,8 +1605,6 @@ function applyMinorAgentSettingsRefinement({ currentTeam = {}, instruction = '',
   const targets = findInstructionTargetAgents(currentTeam, instruction);
   if (targets.length === 0) return null;
   const targetKeys = new Set(targets.map((agent) => cleanId(agent?.agent_id || agent?.name)).filter(Boolean));
-  const explicitModel = extractRequestedSupportedModel(instruction);
-  const explicitProvider = normalizeRefinementProvider(extractRequestedProvider(instruction) || inferProviderForModel(explicitModel || ''));
   const plannerAgents = asArray(plannerPlan?.agents).map((agent) => asObject(agent));
   const targetRoles = new Set(targets.map((agent) => normalizeTeamRole(agent?.role)).filter(Boolean));
   const nextAgents = asArray(currentTeam?.agents).map((agent) => {
@@ -1578,8 +1613,22 @@ function applyMinorAgentSettingsRefinement({ currentTeam = {}, instruction = '',
     const exactPlanner = plannerAgents.find((row) => cleanId(row?.name) === cleanId(agent?.name));
     const roleMatches = plannerAgents.filter((row) => normalizeTeamRole(row?.role) === normalizeTeamRole(agent?.role));
     const matchedPlanner = exactPlanner || (roleMatches.length === 1 && targetRoles.has(normalizeTeamRole(agent?.role)) ? roleMatches[0] : null);
-    const nextModel = explicitModel || resolveSupportedModel(matchedPlanner?.model || '') || clean(agent?.model);
-    const nextProvider = explicitProvider || normalizeRefinementProvider(matchedPlanner?.provider || '') || cleanId(agent?.provider || inferProviderForModel(nextModel || agent?.model || '') || '');
+    const localSettings = extractRequestedSettingsForAgent(agent, instruction, { targetCount: targets.length });
+    const plannerModel = resolveSupportedModel(matchedPlanner?.model || '');
+    const plannerProvider = normalizeRefinementProvider(matchedPlanner?.provider || '');
+    let nextModel = localSettings.model || plannerModel || clean(agent?.model);
+    let nextProvider = localSettings.provider || plannerProvider || cleanId(agent?.provider || inferProviderForModel(nextModel || agent?.model || '') || '');
+    if (localSettings.model && !localSettings.provider) {
+      nextProvider = normalizeRefinementProvider(inferProviderForModel(localSettings.model)) || nextProvider;
+    }
+    if (localSettings.provider && !localSettings.model) {
+      const currentProvider = normalizeRefinementProvider(inferProviderForModel(agent?.model || '') || agent?.provider || '');
+      if (currentProvider !== localSettings.provider) nextModel = defaultModelForRole(agent?.role, localSettings.provider);
+    }
+    if (nextProvider && nextModel && normalizeRefinementProvider(inferProviderForModel(nextModel)) && normalizeRefinementProvider(inferProviderForModel(nextModel)) !== nextProvider) {
+      if (localSettings.provider && !localSettings.model) nextModel = defaultModelForRole(agent?.role, nextProvider);
+      else nextProvider = normalizeRefinementProvider(inferProviderForModel(nextModel)) || nextProvider;
+    }
     return {
       ...agent,
       model: nextModel || clean(agent?.model),
@@ -2082,19 +2131,6 @@ export async function refineTeamConfigurationAdvanced({ team = {}, instruction =
   const current = buildRefinementBaseTeam(team, { runtime: fallbackRuntime });
   const instructionText = clean(instruction);
   const taskText = [clean(current.task_brief), instructionText].filter(Boolean).join('\nRefinement instruction: ');
-  const fastMinorSettingsRepair = applyMinorAgentSettingsRefinement({
-    currentTeam: current,
-    instruction: instructionText,
-    plannerPlan: null,
-    plannerMetadata: {
-      planner_type: 'heuristic_rule_based',
-      planner_model: '',
-      planning_source: 'minor_settings_fast_path',
-      reasoning_summary: ['minor agent settings edit preserved the full roster without invoking the external planner'],
-    },
-    runtime: fallbackRuntime,
-  });
-  if (fastMinorSettingsRepair) return fastMinorSettingsRepair;
   const activePlanner = typeof planner === 'function' ? planner : planTeamRefinementWithCodex;
   let plannerResult = null;
   try {
@@ -2111,13 +2147,22 @@ export async function refineTeamConfigurationAdvanced({ team = {}, instruction =
     plannerResult = { ok: false, reason: `planner_exception:${String(error?.message || error)}` };
   }
   if (!plannerResult?.ok || !plannerResult?.plan) {
-    const heuristic = refineTeamConfiguration(current, instructionText, { runtime: fallbackRuntime });
-    heuristic.planner_metadata = normalizePlannerMetadata({
+    const fallbackMetadata = normalizePlannerMetadata({
       planner_type: 'heuristic_rule_based',
       planner_model: '',
-      planning_source: 'heuristic_refine_fallback',
+      planning_source: 'heuristic_refine_fallback_after_llm_failure',
       reasoning_summary: [clean(plannerResult?.reason || 'refine heuristics applied') || 'refine heuristics applied'],
     });
+    const minorFallback = applyMinorAgentSettingsRefinement({
+      currentTeam: current,
+      instruction: instructionText,
+      plannerPlan: null,
+      plannerMetadata: fallbackMetadata,
+      runtime: fallbackRuntime,
+    });
+    if (minorFallback) return minorFallback;
+    const heuristic = refineTeamConfiguration(current, instructionText, { runtime: fallbackRuntime });
+    heuristic.planner_metadata = fallbackMetadata;
     return normalizeTeamConfig(heuristic, { runtime: fallbackRuntime });
   }
   const minorSettingsRepair = applyMinorAgentSettingsRefinement({
@@ -2230,9 +2275,6 @@ export async function createFreeformTeamConfigurationAdvanced({ description = ''
   const effectiveRuntime = runtime && typeof runtime === 'object' ? runtime : buildFallbackRuntime();
   const taskText = clean(description);
   const initialSelection = selectTaskArchetypeTemplate({ taskText });
-  if (shouldUseControlPlaneHeuristicForTeamCreate(taskText)) {
-    return buildControlPlaneWorkspaceBuilderTeam({ taskText, runtime: effectiveRuntime, initialSelection });
-  }
   const structuredFallback = suggestTeamConfiguration({ taskText, runtime: effectiveRuntime, preferredTaskArchetype: initialSelection.archetype });
   const heuristicTeam = createFreeformTeamConfiguration({ description: taskText, runtime: effectiveRuntime, preferredTaskArchetype: initialSelection.archetype });
   const activePlanner = typeof planner === 'function' ? planner : planFreeformTeamWithCodex;

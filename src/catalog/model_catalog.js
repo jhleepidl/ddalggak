@@ -14,6 +14,9 @@ const MODEL_ALIASES = new Map([
   ['gpt-5', 'gpt-5'],
   ['gpt 5.4', 'gpt-5.4'],
   ['gpt-5.4', 'gpt-5.4'],
+  ['gpt 5.5', 'gpt-5.5'],
+  ['gpt-5.5', 'gpt-5.5'],
+  ['gpt5.5', 'gpt-5.5'],
   ['codex 5.3', 'gpt-5-codex'],
   ['gpt-5-codex', 'gpt-5-codex'],
   ['codex', 'gpt-5-codex'],
@@ -25,6 +28,7 @@ export const SUPPORTED_MODELS = [
   { id: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview' },
   { id: 'gpt-5', label: 'GPT-5' },
   { id: 'gpt-5.4', label: 'GPT-5.4' },
+  { id: 'gpt-5.5', label: 'GPT-5.5' },
   { id: 'gpt-5-codex', label: 'GPT-5 Codex' },
 ];
 

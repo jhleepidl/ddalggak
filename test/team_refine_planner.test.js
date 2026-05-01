@@ -7,7 +7,7 @@ import {
   refineTeamConfigurationAdvanced,
 } from '../src/application/team_configuration.js';
 
-test('advanced refine short-circuits minor model/provider edits without invoking external planner', async () => {
+test('advanced refine tries LLM planner before minor model/provider fallback', async () => {
   const baseTeam = await createFreeformTeamConfigurationAdvanced({
     description: '웹 서비스를 개발하기 위한 팀.',
     planner: async () => ({
@@ -30,14 +30,49 @@ test('advanced refine short-circuits minor model/provider edits without invoking
     instruction: 'Service Builder의 model만 gpt-5-codex로 바꾸고 나머지 팀 구조는 그대로 유지해줘.',
     planner: async () => {
       plannerCalls += 1;
-      return { ok: false, reason: 'should_not_be_called' };
+      return { ok: false, reason: 'planner unavailable in test' };
     },
   });
 
-  assert.equal(plannerCalls, 0);
+  assert.equal(plannerCalls, 1);
   assert.equal(refined.agents.length, baseTeam.agents.length);
   assert.equal(refined.agents.find((agent) => agent.name === 'Service Builder')?.model, 'gpt-5-codex');
-  assert.equal(refined.planner_metadata?.planning_source, 'minor_settings_fast_path');
+  assert.equal(refined.planner_metadata?.planning_source, 'heuristic_refine_fallback_after_llm_failure');
+});
+
+
+test('minor refine fallback applies provider/model settings to the intended agents only', async () => {
+  const baseTeam = await createFreeformTeamConfigurationAdvanced({
+    description: '웹사이트 구현을 위한 팀을 만들어줘.',
+    planner: async () => ({
+      ok: true,
+      planner_metadata: { planner_type: 'gemini_cli', planner_model: 'gemini-3-flash-preview', planning_source: 'gemini_cli_team_planner' },
+      plan: {
+        team_name: 'website_team',
+        agents: [
+          { name: 'Workspace Builder', role: 'builder', purpose: '웹사이트를 구현한다', model: 'gpt-5-codex', provider: 'codex' },
+          { name: 'Implementation Reviewer', role: 'reviewer', purpose: '구현 결과를 검토한다', model: 'gpt-5.4', provider: 'chatgpt' },
+          { name: 'Delivery Synthesizer', role: 'synthesizer', purpose: '최종 전달을 정리한다', model: 'gpt-5.4', provider: 'chatgpt' },
+        ],
+      },
+    }),
+  });
+
+  const refined = await refineTeamConfigurationAdvanced({
+    team: baseTeam,
+    instruction: 'Implementation Reviewer와 Delivery synthesizer는 gemini를 사용해주고, Workspace builder는 ChatGPT의 GPT-5.5를 사용해줘.',
+    planner: async () => ({ ok: false, reason: 'planner unavailable in test' }),
+  });
+
+  const builder = refined.agents.find((agent) => agent.name === 'Workspace Builder');
+  const reviewer = refined.agents.find((agent) => agent.name === 'Implementation Reviewer');
+  const synthesizer = refined.agents.find((agent) => agent.name === 'Delivery Synthesizer');
+  assert.equal(builder?.provider, 'chatgpt');
+  assert.equal(builder?.model, 'gpt-5.5');
+  assert.equal(reviewer?.provider, 'gemini');
+  assert.equal(reviewer?.model, 'gemini-3-flash-preview');
+  assert.equal(synthesizer?.provider, 'gemini');
+  assert.equal(synthesizer?.model, 'gemini-3-flash-preview');
 });
 
 test('advanced freeform team creation filters irrelevant domain skills from planner output', async () => {
