@@ -15,7 +15,7 @@ const BENCHMARK_TEMPLATES = {
     seed: (() => {
       const seed = buildTeamSeedFromTaskArchetype('research', { title: 'Deep Research Trio' });
       seed.agents = [
-        { agent_id: 'deep_research_scout', name: 'Deep Research Scout', role: 'researcher', provider: 'gemini', model: 'gemini-2.5-pro', purpose: 'Expand the search space, cluster sources, and maintain an evidence ledger before synthesis.', runtime_capabilities_required: ['web_browse'], runtime_capabilities_optional: ['filesystem_read'], attached_skill_ids: ['skill.deep_research_workflow.v1', 'skill.claim_evidence_audit.v1'] },
+        { agent_id: 'deep_research_scout', name: 'Deep Research Scout', role: 'researcher', provider: 'gemini', model: 'gemini-3-flash-preview', purpose: 'Expand the search space, cluster sources, and maintain an evidence ledger before synthesis.', runtime_capabilities_required: ['web_browse'], runtime_capabilities_optional: ['filesystem_read'], attached_skill_ids: ['skill.deep_research_workflow.v1', 'skill.claim_evidence_audit.v1'] },
         { agent_id: 'evidence_gate_reviewer', name: 'Evidence Gate Reviewer', role: 'reviewer', provider: 'openai', model: 'gpt-5.4', purpose: 'Challenge unsupported claims, collapse duplicates, and mark unresolved contradictions.', runtime_capabilities_required: ['web_browse'], runtime_capabilities_optional: ['filesystem_read'], attached_skill_ids: ['skill.claim_evidence_audit.v1', 'skill.deep_research_workflow.v1'] },
         { agent_id: 'brief_synthesizer', name: 'Brief Synthesizer', role: 'synthesizer', provider: 'openai', model: 'gpt-5.4', purpose: 'Produce the final brief, open questions, and next actions in operator-friendly form.', runtime_capabilities_optional: ['filesystem_read'], external_tool_preferences: ['telegram'], attached_skill_ids: ['skill.telegram_briefing.v1', 'skill.deep_research_workflow.v1'] },
       ];
@@ -39,10 +39,10 @@ const BENCHMARK_TEMPLATES = {
     seed: (() => {
       const seed = buildTeamSeedFromTaskArchetype('iterative_improvement', { title: 'Repo Delivery Loop' });
       seed.agents = [
-        { agent_id: 'repo_scout', name: 'Repo Scout', role: 'researcher', provider: 'gemini', model: 'gemini-2.5-pro', purpose: 'Map the codebase, locate affected files, and prepare a bounded implementation brief.', runtime_capabilities_required: ['filesystem_read'], runtime_capabilities_optional: ['web_browse'], attached_skill_ids: ['skill.run_trace_debugging.v1', 'skill.context_selection_policy.v1'] },
+        { agent_id: 'repo_scout', name: 'Repo Scout', role: 'researcher', provider: 'gemini', model: 'gemini-3-flash-preview', purpose: 'Map the codebase, locate affected files, and prepare a bounded implementation brief.', runtime_capabilities_required: ['filesystem_read'], runtime_capabilities_optional: ['web_browse'], attached_skill_ids: ['skill.run_trace_debugging.v1', 'skill.context_selection_policy.v1'] },
         { agent_id: 'client_companion_builder', name: 'Client Companion Builder', role: 'builder', provider: 'codex', model: 'gpt-5-codex', purpose: 'Implement the scoped patch, run checks, and keep implementation notes precise.', runtime_capabilities_required: ['filesystem_write'], runtime_capabilities_optional: ['shell_exec'], attached_skill_ids: ['skill.run_trace_debugging.v1'] },
         { agent_id: 'safety_and_quality_reviewer', name: 'Safety And Quality Reviewer', role: 'reviewer', provider: 'openai', model: 'gpt-5.4', purpose: 'Review the patch for correctness, regressions, and delivery risks before finalization.', runtime_capabilities_required: ['filesystem_read'], runtime_capabilities_optional: ['web_browse'], attached_skill_ids: ['skill.claim_evidence_audit.v1', 'skill.run_trace_debugging.v1'] },
-        { agent_id: 'delivery_synthesizer', name: 'Delivery Synthesizer', role: 'synthesizer', provider: 'gemini', model: 'gemini-2.5-pro', purpose: 'Package the final answer, touched files, residual risks, and artifact index for the user.', attached_skill_ids: ['skill.telegram_briefing.v1'] },
+        { agent_id: 'delivery_synthesizer', name: 'Delivery Synthesizer', role: 'synthesizer', provider: 'gemini', model: 'gemini-3-flash-preview', purpose: 'Package the final answer, touched files, residual risks, and artifact index for the user.', attached_skill_ids: ['skill.telegram_briefing.v1'] },
       ];
       seed.interaction_spec.execution_pattern = 'builder_reviewer_loop';
       seed.interaction_spec.final_answer_owner = 'Delivery Synthesizer';
@@ -66,7 +66,7 @@ const BENCHMARK_TEMPLATES = {
     seed: (() => {
       const seed = buildTeamSeedFromTaskArchetype('research', { title: 'Skeptical Briefing Trio' });
       seed.agents = [
-        { agent_id: 'market_news_researcher', name: 'Market News Researcher', role: 'researcher', provider: 'gemini', model: 'gemini-2.5-pro', purpose: 'Find the strongest source-backed developments quickly and separate signal from noise.', attached_skill_ids: ['skill.deep_research_workflow.v1', 'skill.claim_evidence_audit.v1'] },
+        { agent_id: 'market_news_researcher', name: 'Market News Researcher', role: 'researcher', provider: 'gemini', model: 'gemini-3-flash-preview', purpose: 'Find the strongest source-backed developments quickly and separate signal from noise.', attached_skill_ids: ['skill.deep_research_workflow.v1', 'skill.claim_evidence_audit.v1'] },
         { agent_id: 'skeptical_claim_reviewer', name: 'Skeptical Claim Reviewer', role: 'reviewer', provider: 'openai', model: 'gpt-5.4', purpose: 'Challenge overreach, compress uncertainty, and keep the brief evidence-first.', attached_skill_ids: ['skill.claim_evidence_audit.v1'] },
         { agent_id: 'telegram_brief_owner', name: 'Telegram Brief Owner', role: 'synthesizer', provider: 'openai', model: 'gpt-5.4', purpose: 'Turn validated findings into an operator-friendly short brief with next actions.', attached_skill_ids: ['skill.telegram_briefing.v1'] },
       ];

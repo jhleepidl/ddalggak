@@ -10,6 +10,7 @@ const MODEL_CAPACITY_EXHAUSTED_RE = /MODEL_CAPACITY_EXHAUSTED/i;
 const NO_CAPACITY_RE = /No capacity available for model/i;
 const RESOURCE_EXHAUSTED_RE = /RESOURCE_EXHAUSTED/i;
 const STATUS_429_RE = /\b429\b|status[^0-9]{0,20}429|code[^0-9]{0,20}429/i;
+const GEMINI_CAPACITY_EARLY_EXIT_RE = /MODEL_CAPACITY_EXHAUSTED|No capacity available for model|RESOURCE_EXHAUSTED/i;
 const STATUS_404_RE = /\b404\b|status[^0-9]{0,20}404|code[^0-9]{0,20}404/i;
 const QUOTA_EXCEEDED_RE = /quota[_\s-]*exceeded|quota\b.*(exceed|exhaust|limit)|billing.*(limit|quota)/i;
 const REQUESTED_ENTITY_NOT_FOUND_RE = /Requested entity was not found/i;
@@ -17,15 +18,15 @@ const MODEL_NOT_FOUND_RE = /ModelNotFoundError/i;
 const GEMINI_25_MODEL_RE = /\bgemini-2\.5(?:-[a-z0-9._-]+)?\b/i;
 const MODEL_FLAG_UNSUPPORTED_RE = /(unknown|unrecognized|unexpected)\s+(option|argument|flag)[^-\n\r]*--model|unknown flag:\s*--model/i;
 const DEFAULT_GEMINI_MODEL_PRIMARY = "gemini-3-flash-preview";
-const DEFAULT_GEMINI_MODEL_FALLBACKS = "auto";
-const DEFAULT_CAPACITY_MAX_RETRIES = 8;
-const DEFAULT_CAPACITY_SWITCH_AFTER = 2;
+const DEFAULT_GEMINI_MODEL_FALLBACKS = "gemini-3-flash-preview,auto";
+const DEFAULT_CAPACITY_MAX_RETRIES = 2;
+const DEFAULT_CAPACITY_SWITCH_AFTER = 1;
 const DEFAULT_BACKOFF_BASE_MS = 1000;
 const DEFAULT_BACKOFF_MAX_DELAY_MS = 30000;
 const DEFAULT_BACKOFF_JITTER_MS = 500;
 const DEFAULT_MAX_CONCURRENT_GEMINI = 1;
 const DEFAULT_GEMINI_MIN_INTERVAL_MS = 2000;
-const DEFAULT_GEMINI_RETRY_TIMEBOX_MS = 180000;
+const DEFAULT_GEMINI_RETRY_TIMEBOX_MS = 90000;
 const DEFAULT_GEMINI_CAPACITY_COOLDOWN_MS = 60000;
 const DEFAULT_GEMINI_SETTINGS_OVERWRITE = "merge";
 const DEFAULT_GEMINI_DEBUG_LOG = "gemini_debug.log";
@@ -390,12 +391,17 @@ function classifyGeminiError(result = {}) {
   if (!text.trim()) return "unknown_error";
 
   if (/\[aborted\]/i.test(text)) return "aborted";
-  if (TIMEOUT_RE.test(text)) return "timeout";
 
   const isCapacityExhausted = NO_CAPACITY_RE.test(text)
     || MODEL_CAPACITY_EXHAUSTED_RE.test(text)
     || (RESOURCE_EXHAUSTED_RE.test(text) && STATUS_429_RE.test(text));
+  // Gemini CLI may keep retrying a capacity-exhausted model inside a single
+  // subprocess until the outer timeout kills it. Keep the more specific
+  // capacity signal so the wrapper can switch models/retry instead of reporting
+  // a generic timeout.
   if (isCapacityExhausted) return "capacity_exhausted";
+
+  if (TIMEOUT_RE.test(text)) return "timeout";
 
   const isModelNotFound = REQUESTED_ENTITY_NOT_FOUND_RE.test(text)
     || MODEL_NOT_FOUND_RE.test(text)
@@ -544,6 +550,10 @@ async function runGeminiOnce({
     input: promptText,
     abortSignal: signal,
     env: modelEnv,
+    maxStdoutChars: getGeminiMaxStdoutChars(),
+    maxStderrChars: getGeminiMaxStderrChars(),
+    earlyExitPattern: GEMINI_CAPACITY_EARLY_EXIT_RE,
+    earlyExitLabel: "gemini_capacity_exhausted",
   });
   if (stdinRun.ok) return { ...stdinRun, attempt_count: 1, transport: "stdin" };
   if (signal?.aborted) return makeAbortedResult();
@@ -563,6 +573,10 @@ async function runGeminiOnce({
     timeoutMs,
     abortSignal: signal,
     env: modelEnv,
+    maxStdoutChars: getGeminiMaxStdoutChars(),
+    maxStderrChars: getGeminiMaxStderrChars(),
+    earlyExitPattern: GEMINI_CAPACITY_EARLY_EXIT_RE,
+    earlyExitLabel: "gemini_capacity_exhausted",
   });
   if (inlineRun.ok) return { ...inlineRun, attempt_count: 2, transport: "inline" };
 
@@ -680,6 +694,30 @@ function getGeminiQueueWaitTimeoutMs() {
   return Number.isFinite(n) && n > 0 ? Math.max(1000, Math.floor(n)) : 15000;
 }
 
+function getGeminiMaxQueueWaiters() {
+  return toPositiveInt(
+    process.env.GEMINI_MAX_QUEUE_WAITERS,
+    16,
+    { min: 1, max: 256 }
+  );
+}
+
+function getGeminiMaxStdoutChars() {
+  return toPositiveInt(
+    process.env.GEMINI_MAX_STDOUT_CHARS,
+    2_000_000,
+    { min: 10_000, max: 20_000_000 }
+  );
+}
+
+function getGeminiMaxStderrChars() {
+  return toPositiveInt(
+    process.env.GEMINI_MAX_STDERR_CHARS,
+    1_000_000,
+    { min: 10_000, max: 20_000_000 }
+  );
+}
+
 async function acquireGeminiGlobalSlot(signal = null) {
   const limit = getGeminiConcurrencyLimit();
   if (geminiGlobalLimiter.running < limit) {
@@ -687,6 +725,10 @@ async function acquireGeminiGlobalSlot(signal = null) {
     return true;
   }
   const timeoutMs = getGeminiQueueWaitTimeoutMs();
+  const maxWaiters = getGeminiMaxQueueWaiters();
+  if (geminiGlobalLimiter.waiters.length >= maxWaiters) {
+    return false;
+  }
   return await new Promise((resolve) => {
     let settled = false;
     let timer = null;
@@ -722,6 +764,12 @@ async function acquireGeminiGlobalSlot(signal = null) {
       };
       if (signal.aborted) return onAbort();
       signal.addEventListener('abort', onAbort, { once: true });
+    }
+    if (geminiGlobalLimiter.waiters.length >= maxWaiters) {
+      cleanup();
+      settled = true;
+      resolve(false);
+      return;
     }
     geminiGlobalLimiter.waiters.push(waiter);
   });

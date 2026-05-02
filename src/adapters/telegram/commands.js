@@ -23,6 +23,9 @@ import {
   suggestTeamConfiguration,
   validateTeamConfiguration,
   teamConfigChangeRequiresApproval,
+  buildTeamSelectionPortfolio,
+  formatTeamCandidatePortfolioMessage,
+  selectPendingTeamCandidate,
 } from "../../application/team_configuration.js";
 import { buildTeamBlueprint, installTeamBlueprintToSession, normalizeTeamBlueprint } from '../../application/team_blueprint_runtime.js';
 import { buildTeamInstallProposal, formatTeamInstallProposalMessage } from '../../application/install_proposal.js';
@@ -36,6 +39,9 @@ import { buildBenchmarkTeamTemplate, buildBenchmarkTemplateCatalogText } from '.
 import { syncRawHistoryToGoC } from '../../application/goc_raw_history_sync.js';
 import { inspectAndPrepareImprovementJob, loadImprovementExecutionContext, runImprovementAutomation, runImprovementCanary, runImprovementEvalGate, runImprovementReview, runImprovementRollback, runImprovementTests, markImprovementPromotion } from '../../application/improvement_orchestrator.js';
 import { writeIdleCompactionCandidate, formatIdleCompactionCandidateForTelegram } from '../../application/idle_compaction.js';
+import { listModelNodes } from '../../application/model_node_registry.js';
+import { listModelNodesWithHealth } from '../../application/model_node_health.js';
+import { readRecentModelNodeUsage } from '../../application/model_node_usage_log.js';
 
 const HELP_TEXT = [
   "Commands:",
@@ -46,6 +52,7 @@ const HELP_TEXT = [
   "- /team refine <수정>: 현재/대기 team 수정하기",
   "- /team apply: 대기 team 적용",
   "- /status: 지금 진행 상황 보기",
+  "- /models: 연결된 로컬/API model node 보기",
   "- /context: 현재 작업과 GoC 링크 보기",
   "- /artifacts [limit]: 결과물 보기",
   "- /send <번호|path>: 결과물 전송",
@@ -61,6 +68,7 @@ const ADVANCED_HELP_TEXT = [
   "- /credential ...: credential 바인딩/확인",
   "- /memory ... 또는 /settings ...: 런타임 메모리/KB 조회·수정",
   "- /skills: 현재/예정 agent roster와 대표 skill 보기",
+  "- /models: 연결된 로컬/API model node 보기",
   "- /tools: 현재 job의 tool 상태 보기",
   "- /upload (+파일 첨부) [메모]: 실행 없이 업로드만 저장",
   "- /team more: team의 고급 명령 보기",
@@ -632,6 +640,61 @@ export function createTelegramCommandHandler(deps = {}) {
       return true;
     }
 
+    if (cmd === "/models" || cmd === "/modelnodes") {
+      const sub = String(rest[0] || '').trim().toLowerCase();
+      if (sub === 'health') {
+        const nodes = await listModelNodesWithHealth({ includeDisabled: true, timeoutMs: Number(process.env.MODEL_NODE_HEALTH_TIMEOUT_MS || 4000) || 4000 });
+        if (!nodes.length) {
+          await bot.sendMessage(chatId, "등록된 model node가 없습니다. config/model_nodes.json 또는 LOCAL_MODEL_BASE_URL + LOCAL_MODEL 환경변수로 추가할 수 있습니다.");
+          return true;
+        }
+        const lines = ["Model node health:"];
+        nodes.slice(0, 20).forEach((node, index) => {
+          const h = node.health || {};
+          lines.push(`${index + 1}. ${node.label || node.id} · ${node.provider}/${node.model} · ${h.ok ? "ok" : "not ready"} (${h.status || "-"})`);
+          if (h.http_status) lines.push(`   - http=${h.http_status}`);
+          if (h.error) lines.push(`   - error=${String(h.error).slice(0, 180)}`);
+        });
+        await sendLong(bot, chatId, lines.join("\n"));
+        return true;
+      }
+      if (sub === 'usage') {
+        const rows = readRecentModelNodeUsage({ limit: Number(rest[1] || 10) || 10 });
+        if (!rows.length) {
+          await bot.sendMessage(chatId, "최근 model node usage 기록이 없습니다.");
+          return true;
+        }
+        const lines = ["Recent model node usage:"];
+        rows.forEach((row, index) => {
+          const node = row.model_node || {};
+          lines.push(`${index + 1}. ${row.timestamp || "-"} · ${node.label || node.id || row.model || "-"} · ${row.ok ? "ok" : "fail"} · ${row.duration_ms || 0}ms`);
+          lines.push(`   - agent=${row.agent_id || "-"} model=${row.model || "-"} prompt=${row.prompt_chars || 0} output=${row.output_chars || 0} trace=${row.trace_id || "-"}`);
+          const access = row.context_access || {};
+          if (access.projection_id || access.snapshot_id || access.memory_mode) {
+            lines.push(`   - context projection=${access.projection_id || "-"} snapshot=${access.snapshot_id || "-"} memory=${access.memory_mode || "-"}`);
+          }
+        });
+        await sendLong(bot, chatId, lines.join("\n"));
+        return true;
+      }
+      const nodes = listModelNodes({ includeDisabled: true });
+      if (!nodes.length) {
+        await bot.sendMessage(chatId, "등록된 model node가 없습니다. config/model_nodes.json 또는 LOCAL_MODEL_BASE_URL + LOCAL_MODEL 환경변수로 추가할 수 있습니다.");
+        return true;
+      }
+      const lines = ["Model nodes:", "Usage: /models health · /models usage [limit]"];
+      nodes.slice(0, 20).forEach((node, index) => {
+        const caps = Object.entries(node.capabilities || {}).filter(([, enabled]) => enabled === true).map(([key]) => key).slice(0, 6).join(", ") || "chat";
+        const perms = [node.permissions?.memory_read ? "memory_read=" + node.permissions.memory_read : "", node.permissions?.memory_write ? "memory_write=" + node.permissions.memory_write : "", node.permissions?.workspace_read ? "workspace_read" : "", node.permissions?.workspace_write ? "workspace_write" : ""].filter(Boolean).join(", ") || "scoped_context";
+        lines.push(`${index + 1}. ${node.label || node.id} · ${node.provider}/${node.model} · ${node.enabled === false ? "disabled" : "enabled"}`);
+        lines.push(`   - node_id=${node.id} runtime=${node.runtime || "-"} location=${node.location || "-"}`);
+        lines.push(`   - capabilities=${caps}`);
+        lines.push(`   - permissions=${perms}`);
+      });
+      await sendLong(bot, chatId, lines.join("\n"));
+      return true;
+    }
+
     if (cmd === "/status") {
       const detailArg = String(rest[0] || '').trim().toLowerCase();
       const detail = ['full', 'detail', 'details', 'verbose'].includes(detailArg)
@@ -711,8 +774,13 @@ ${TEAM_CORE_HELP_TEXT}`);
             },
           };
         }
-        storePendingTeam(chatSessionStore, chatId, proposal);
-        await sendLong(bot, chatId, formatTeamProposalMessage(proposal, { runtime: runtimeForTeam }));
+        const fallbackProposal = suggestTeamConfiguration({ taskText: effectiveGoal, runtime: runtimeForTeam });
+        const portfolio = buildTeamSelectionPortfolio({ taskText: effectiveGoal, runtime: runtimeForTeam, primaryTeam: proposal, fallbackTeam: fallbackProposal, activeTeam: teamState.active_team });
+        proposal = portfolio.selected_team || proposal;
+        storePendingTeam(chatSessionStore, chatId, proposal, { portfolio });
+        await sendLong(bot, chatId, `${formatTeamProposalMessage(proposal, { runtime: runtimeForTeam })}
+
+${formatTeamCandidatePortfolioMessage(portfolio)}`);
         return true;
       }
       if (sub === 'create') {
@@ -735,8 +803,13 @@ ${TEAM_CORE_HELP_TEXT}`);
             },
           };
         }
-        storePendingTeam(chatSessionStore, chatId, proposal);
-        await sendLong(bot, chatId, formatTeamProposalMessage(proposal, { runtime: runtimeForTeam }));
+        const fallbackProposal = createFreeformTeamConfiguration({ description, runtime: runtimeForTeam });
+        const portfolio = buildTeamSelectionPortfolio({ taskText: description, runtime: runtimeForTeam, primaryTeam: proposal, fallbackTeam: fallbackProposal, activeTeam: teamState.active_team });
+        proposal = portfolio.selected_team || proposal;
+        storePendingTeam(chatSessionStore, chatId, proposal, { portfolio });
+        await sendLong(bot, chatId, `${formatTeamProposalMessage(proposal, { runtime: runtimeForTeam })}
+
+${formatTeamCandidatePortfolioMessage(portfolio)}`);
         return true;
       }
       if (sub === 'refine') {
@@ -764,8 +837,14 @@ ${TEAM_CORE_HELP_TEXT}`);
             },
           };
         }
-        storePendingTeam(chatSessionStore, chatId, next);
-        await sendLong(bot, chatId, formatTeamProposalMessage(next, { runtime: runtimeForTeam }));
+        const fallbackNext = refineTeamConfiguration(baseTeam, instruction, { runtime: runtimeForTeam });
+        const portfolio = buildTeamSelectionPortfolio({ taskText: `${baseTeam.task_brief || baseTeam.design_prompt || ''}
+Refine: ${instruction}`, runtime: runtimeForTeam, primaryTeam: next, fallbackTeam: fallbackNext, activeTeam: teamState.active_team });
+        next = portfolio.selected_team || next;
+        storePendingTeam(chatSessionStore, chatId, next, { portfolio });
+        await sendLong(bot, chatId, `${formatTeamProposalMessage(next, { runtime: runtimeForTeam })}
+
+${formatTeamCandidatePortfolioMessage(portfolio)}`);
         return true;
       }
 
@@ -855,6 +934,14 @@ ${formatTeamProposalMessage(validated, { runtime: runtimeForTeam })}`);
       if (sub === 'apply') {
         try {
           const confirmApply = /(?:^|\s)confirm(?:\s|$)/i.test(rest || '');
+          const applySelector = String(rest || '').replace(/confirm/i, '').trim();
+          if (applySelector) {
+            const selected = selectPendingTeamCandidate(chatSessionStore, chatId, applySelector, { runtime: runtimeForTeam });
+            teamState = getSessionTeamState(chatSessionStore, chatId);
+            await sendLong(bot, chatId, `✅ team candidate ${applySelector}를 pending team으로 선택했습니다.
+
+${formatTeamCandidatePortfolioMessage(selected.portfolio)}`);
+          }
           const activeTeam = teamState?.active_team || null;
           const pendingTeam = teamState?.pending_team || null;
           const requiresApproval = teamConfigChangeRequiresApproval(activeTeam, pendingTeam);
@@ -879,7 +966,16 @@ ${buildTeamListMessage({ active_team: applied }, { runtime: runtimeForTeam })}`)
         }
         return true;
       }
-      if (sub === 'options' || sub === 'roles' || sub === 'patterns' || sub === 'schema') {
+      if (sub === 'options') {
+        const portfolio = teamState?.pending_team_portfolio;
+        if (portfolio) {
+          await sendLong(bot, chatId, formatTeamCandidatePortfolioMessage(portfolio, { verbose: true }));
+        } else {
+          await sendLong(bot, chatId, buildTeamSchemaOptionsText());
+        }
+        return true;
+      }
+      if (sub === 'roles' || sub === 'patterns' || sub === 'schema') {
         await sendLong(bot, chatId, buildTeamSchemaOptionsText());
         return true;
       }

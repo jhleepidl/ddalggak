@@ -1,4 +1,6 @@
 import { notifyAndConsumeGocFallback } from './telegram_status_notifications.js';
+import { runOpenAICompatiblePrompt } from '../providers/openai_compatible.js';
+import { getModelNode } from './model_node_registry.js';
 
 export async function runAgentProviderExecution({
   provider = '',
@@ -81,6 +83,43 @@ export async function runAgentProviderExecution({
       providerOptions,
       chatId,
     });
+    return finalize(output);
+  }
+
+
+  if (cleanProvider === 'openai_compatible' || cleanProvider === 'ollama' || cleanProvider === 'local' || cleanProvider === 'local_model') {
+    const node = getModelNode(model) || getModelNode(providerOptions.modelNodeId || providerOptions.model_node_id || '');
+    const outputPrompt = String(prompts.instruction || prompts.goal || prompts.chatQuestion || '');
+    const result = await runOpenAICompatiblePrompt({
+      nodeId: node?.id || providerOptions.modelNodeId || providerOptions.model_node_id || '',
+      model: node?.model || model,
+      baseUrl: node?.base_url || providerOptions.baseUrl || providerOptions.base_url || '',
+      prompt: outputPrompt,
+      system: String(prompts.roleMemo || prompts.role_memo || ''),
+      signal,
+      timeoutMs: Number(providerOptions.timeoutMs || providerOptions.timeout_ms || node?.limits?.timeout_ms || 0),
+      temperature: providerOptions.temperature,
+      maxTokens: providerOptions.maxTokens || providerOptions.max_tokens,
+      apiKey: providerOptions.apiKey || providerOptions.api_key,
+      headers: providerOptions.headers,
+      jobId,
+      surface: 'model_node_prompt',
+      agentId,
+      roleId,
+      cwd: providerOptions.cwd || process.cwd(),
+      traceMetadata: {
+        provider: cleanProvider,
+        model_node_id: node?.id || null,
+        context_access: act?.inputs?._prompt_context_info && typeof act.inputs._prompt_context_info === 'object'
+          ? act.inputs._prompt_context_info
+          : {},
+      },
+    });
+    if (!result.ok) {
+      throw new Error(result.stderr || `OpenAI-compatible provider failed for agent ${agentId}`);
+    }
+    const output = result.stdout || '';
+    if (typeof appendLocalLogs === 'function') appendLocalLogs(output, typeof memoryModeWithFallback === 'function' ? memoryModeWithFallback() : 'default');
     return finalize(output);
   }
 

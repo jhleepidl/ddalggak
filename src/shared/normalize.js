@@ -4,6 +4,13 @@ const PROVIDER_ALIASES = {
   chatgpt: "chatgpt",
   codex: "codex",
   gemini: "gemini",
+  local: "openai_compatible",
+  local_model: "openai_compatible",
+  openai_compatible: "openai_compatible",
+  "openai-compatible": "openai_compatible",
+  ollama: "openai_compatible",
+  llamacpp: "openai_compatible",
+  "llama.cpp": "openai_compatible",
 };
 
 export function asObject(v) {

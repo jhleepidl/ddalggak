@@ -192,3 +192,25 @@ test('advanced freeform team creation preserves provider/tool metadata and repai
   assert.ok(artifactSurface);
   assert.ok((artifactSurface.target_roles || []).some((roleId) => ['builder', 'synthesizer', 'reviewer', 'researcher'].includes(roleId)));
 });
+
+
+test('advanced freeform team creation sanitizes planner-selected Gemini 2.5 Pro unless user explicitly requested it', async () => {
+  const team = await createFreeformTeamConfigurationAdvanced({
+    description: '웹사이트 구현을 위한 팀을 만들어줘.',
+    planner: async () => ({
+      ok: true,
+      planner_metadata: { planner_type: 'gemini_cli', planner_model: 'gemini-3-flash-preview', planning_source: 'gemini_cli_team_planner' },
+      plan: {
+        team_name: 'website_team',
+        agents: [
+          { name: 'Requirement UX Researcher', role: 'researcher', purpose: '요구사항을 정리한다', model: 'gemini-2.5-pro', provider: 'gemini' },
+          { name: 'Full Stack Builder', role: 'builder', purpose: '구현한다', model: 'gpt-5-codex', provider: 'codex' },
+          { name: 'Delivery Synthesizer', role: 'synthesizer', purpose: '최종 전달한다', model: 'gpt-5.4', provider: 'chatgpt' },
+        ],
+      },
+    }),
+  });
+  const researcher = team.agents.find((agent) => agent.name === 'Requirement UX Researcher');
+  assert.equal(researcher?.provider, 'gemini');
+  assert.equal(researcher?.model, 'gemini-3-flash-preview');
+});

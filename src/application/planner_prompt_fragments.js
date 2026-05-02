@@ -6,7 +6,9 @@ export function buildSharedPlannerConstraintLines() {
     '- if multiple upstream agents exist, include a synthesizer unless the user explicitly rejects it',
     '- final_answer_owner must be a real participant who can plausibly deliver the final answer',
     '- preserve execution metadata in structure_v2 participants: provider_spec, provider_runtime_config, runtime_capabilities_required, runtime_capabilities_optional, external_tool_requirements, external_tool_preferences, memory_contract, context_policy',
-    '- choose models only from the supported model list',
+    '- choose models only from the supported model list or the listed model node inventory',
+    '- mark runtime_capabilities_required only for capabilities that are actually available in the runtime/tool list; otherwise put them in runtime_capabilities_optional or external_tool_preferences and continue with a feasible team',
+    '- do not invent blocking Web/Shell requirements just because they would be useful; prefer optional preferences unless the runtime explicitly advertises web_browse or shell_exec',
   ];
 }
 
@@ -14,7 +16,7 @@ export function buildPlannerCreateConstraintLines() {
   return [
     ...buildSharedPlannerConstraintLines(),
     '- prefer existing executable skill ids from the registry for attached_skill_ids',
-    '- default model preference: researcher=gemini-2.5-pro, builder=gpt-5-codex, reviewer/synthesizer=gpt-5.4 unless the request strongly suggests otherwise',
+    '- default model preference: researcher=gemini-3-flash-preview, builder=gpt-5-codex, reviewer/synthesizer=gpt-5.4 unless the user explicitly requests a different model',
   ];
 }
 
@@ -26,7 +28,7 @@ export function buildPlannerRefinementRuleLines() {
     '- if the team still needs implementation coverage, preserve or add a builder; do not leave a research-only roster for build-heavy work',
     '- if multiple upstream agents remain, keep or add a synthesizer unless the user rejects it',
     '- preserve execution metadata in structure_v2 participants: provider_spec, provider_runtime_config, runtime_capabilities_required, runtime_capabilities_optional, external_tool_requirements, external_tool_preferences, memory_contract, context_policy',
-    '- choose models only from the supported model list',
+    '- choose models only from the supported model list or the listed model node inventory',
   ];
 }
 
@@ -34,7 +36,7 @@ export function buildPlannerOutputSchemaLines({ proposalMode = 'create', compact
   const metadataLine = `    "metadata": {"team_name": "...", "composition_mode": "freeform", "proposal_mode": "${proposalMode}"},`;
   const participantLines = compactParticipants
     ? [
-        '    "participants": [{"participant_id":"...","kind":"agent","name":"...","role":"researcher|builder|reviewer|synthesizer|operator","purpose":"...","provider_spec":{"provider":"gemini|codex|chatgpt","model":"..."},"runtime_capabilities_required":["filesystem_read|filesystem_write|shell_exec|web_browse"],"runtime_capabilities_optional":["..."],"external_tool_requirements":["..."],"external_tool_preferences":["..."],"attached_skill_ids":["skill...."],"generated_skill_briefs":[{"label":"...","goal":"...","checklist":["...","..."]}],"memory_contract":{"publish_surface_ids":["handoff_summary"]},"context_policy":{"reads":{"grants":["shared_summary"]},"writes":{"publish_targets":["handoff_summary"]}}}],',
+        '    "participants": [{"participant_id":"...","kind":"agent","name":"...","role":"researcher|builder|reviewer|synthesizer|operator","purpose":"...","provider_spec":{"provider":"gemini|codex|chatgpt|openai_compatible","model":"..."},"runtime_capabilities_required":["filesystem_read|filesystem_write|shell_exec|web_browse"],"runtime_capabilities_optional":["..."],"external_tool_requirements":["..."],"external_tool_preferences":["..."],"attached_skill_ids":["skill...."],"generated_skill_briefs":[{"label":"...","goal":"...","checklist":["...","..."]}],"memory_contract":{"publish_surface_ids":["handoff_summary"]},"context_policy":{"reads":{"grants":["shared_summary"]},"writes":{"publish_targets":["handoff_summary"]}}}],',
       ]
     : [
         '    "participants": [',
@@ -44,7 +46,7 @@ export function buildPlannerOutputSchemaLines({ proposalMode = 'create', compact
         '        "name": "...",',
         '        "role": "researcher|builder|reviewer|synthesizer|operator",',
         '        "purpose": "...",',
-        '        "provider_spec": {"provider": "gemini|codex|chatgpt", "model": "..."},',
+        '        "provider_spec": {"provider": "gemini|codex|chatgpt|openai_compatible", "model": "..."},',
         '        "runtime_capabilities_required": ["filesystem_read|filesystem_write|shell_exec|web_browse"],',
         '        "runtime_capabilities_optional": ["..."],',
         '        "external_tool_requirements": ["..."],',

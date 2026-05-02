@@ -40,6 +40,14 @@ function matchAny(text = '', patterns = []) {
   return patterns.some((pattern) => pattern.test(text));
 }
 
+const CAPACITY_EXHAUSTED_PATTERNS = [
+  /MODEL_CAPACITY_EXHAUSTED/i,
+  /No capacity available for model/i,
+  /capacity_exhausted/i,
+  /capacity circuit/i,
+  /RESOURCE_EXHAUSTED/i,
+];
+
 const TRANSIENT_PATTERNS = [
   /429/,
   /rate limit/,
@@ -59,7 +67,8 @@ const TRANSIENT_PATTERNS = [
 const CREDENTIAL_PATTERNS = [
   /api[_ -]?key/,
   /access token/,
-  /credential/,
+  /missing.*credential/,
+  /credential.*(?:missing|required|not set|invalid|expired|unavailable|denied)/,
   /unauthorized/,
   /forbidden/,
   /auth(?:entication|orization)? failed/,
@@ -166,6 +175,18 @@ export function classifyExecutionFailure({ error, action = {}, provider = '', ru
       ? '최종 답변 담당 또는 publish surface 선언을 조정해 주세요.'
       : '승인하거나 요청 범위를 낮춰 주세요.';
     userActionRequired = true;
+  } else if (matchAny(message, CAPACITY_EXHAUSTED_PATTERNS) || matchAny(lower, CAPACITY_EXHAUSTED_PATTERNS)) {
+    category = 'transient_infra';
+    recoveryStrategy = 'stop';
+    summary = 'Gemini 모델 capacity 부족 또는 429로 provider wrapper가 이미 모델 전환/재시도를 시도한 뒤 중단했습니다.';
+    userMessage = '잠시 후 다시 시도하거나 더 가벼운 모델로 바꿔 주세요.';
+    retryable = false;
+  } else if (matchAny(lower, TRANSIENT_PATTERNS)) {
+    category = 'transient_infra';
+    recoveryStrategy = 'retry_once';
+    summary = '일시적인 인프라/모델 호출 실패로 보입니다.';
+    userMessage = '잠시 후 자동 재시도를 진행합니다.';
+    retryable = true;
   } else if (matchAny(lower, CREDENTIAL_PATTERNS)) {
     category = 'credential_gap';
     recoveryStrategy = 'await_user';
@@ -191,12 +212,6 @@ export function classifyExecutionFailure({ error, action = {}, provider = '', ru
       ? '구현/검증 실패라서 다른 agent가 원인을 찾은 뒤 다시 시도할 수 있습니다.'
       : '구현/검증 실패라서 같은 작업을 한 번 더 시도할 수 있습니다.';
     userMessage = '자동 복구 후에도 계속 실패하면 유저 재지시가 필요합니다.';
-    retryable = true;
-  } else if (matchAny(lower, TRANSIENT_PATTERNS)) {
-    category = 'transient_infra';
-    recoveryStrategy = 'retry_once';
-    summary = '일시적인 인프라/모델 호출 실패로 보입니다.';
-    userMessage = '잠시 후 자동 재시도를 진행합니다.';
     retryable = true;
   } else if (continuousImprovementEnabled && hasScout && (actionType === 'run_agent' || actionType === 'spawn_agents')) {
     category = 'implementation_failure';

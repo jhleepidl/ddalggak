@@ -70,6 +70,25 @@ function buildSharedDocsSnapshot(sharedDir = '') {
 
 const baselineCache = new Map();
 
+function promptBaselineCacheMax() {
+  const raw = Number(process.env.PROMPT_BASELINE_CACHE_MAX || 512);
+  if (!Number.isFinite(raw)) return 512;
+  return Math.max(16, Math.min(5000, Math.floor(raw)));
+}
+
+function rememberPromptBaseline(cacheKey, baselines) {
+  if (!cacheKey) return baselines;
+  if (baselineCache.has(cacheKey)) baselineCache.delete(cacheKey);
+  baselineCache.set(cacheKey, baselines);
+  const max = promptBaselineCacheMax();
+  while (baselineCache.size > max) {
+    const oldest = baselineCache.keys().next().value;
+    if (!oldest) break;
+    baselineCache.delete(oldest);
+  }
+  return baselines;
+}
+
 function toFiniteNumber(value, fallback = 0) {
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
@@ -108,8 +127,7 @@ export function buildPromptBaselines({ jobDir = '', sharedDir = '' } = {}) {
     shared_docs_chars: sharedDocsSnapshot.length,
     shared_docs_tokens: estimateTextTokens(sharedDocsSnapshot),
   };
-  baselineCache.set(cacheKey, baselines);
-  return baselines;
+  return rememberPromptBaseline(cacheKey, baselines);
 }
 
 export function appendPromptTelemetry({

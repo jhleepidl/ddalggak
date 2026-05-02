@@ -9,6 +9,7 @@ import { PresetRegistry } from '../catalog/preset_registry.js';
 import { PresetResolver } from '../control_plane/preset_resolver.js';
 import { interpretTask } from '../control_plane/task_interpreter.js';
 import { planFreeformTeamWithCodex, planTeamRefinementWithCodex } from './freeform_team_planner.js';
+import { getModelNode, listModelNodes } from './model_node_registry.js';
 import {
   buildDefaultInteractionSpec,
   buildAgentLocalInteractionContract,
@@ -41,6 +42,11 @@ import { buildTeamSeedFromTaskArchetype } from './team_blueprint_templates.js';
 import { normalizeParticipantExecutionSchema, splitToolishIds, getParticipantLegacyRequiredToolIds, getParticipantLegacyOptionalToolIds, getParticipantLegacyRecommendedToolIds } from '../shared/participant_schema.js';
 import { collectEffectiveAvailableToolIds } from './runtime_tool_availability.js';
 import { buildTeamCapabilityContract, formatTeamCapabilityContractLines } from './team_capability_contract.js';
+import { estimateTeamStressVector, summarizeStressVector } from './team_stress_estimator.js';
+import { generateTeamCandidateBlueprints } from './team_candidate_generator.js';
+import { checkTeamCandidateContracts, summarizeCandidateGate } from './team_contract_gate.js';
+import { scoreTeamCandidate, selectTeamCandidate } from './team_candidate_scorer.js';
+import { buildTeamSelectionTrace, appendTeamSelectionTrace } from './team_selection_trace.js';
 import { hasImplementationLikeIntent, hasWorkspaceDeliveryIntent, hasSoftwareDeliveryIntent, inferExecutionRoleFromText } from '../shared/work_intent.js';
 import {
   buildTeamTransitionGuardrailsImpl,
@@ -67,6 +73,26 @@ let _skillRegistry = null;
 let _presetRegistry = null;
 let _skillResolver = null;
 let _presetResolver = null;
+
+function isLocalModelProvider(provider = '') {
+  return ['openai_compatible', 'ollama', 'local', 'local_model'].includes(cleanId(provider));
+}
+
+function resolveLocalModelName(model = '', provider = '') {
+  const node = getModelNode(model);
+  if (node && isLocalModelProvider(provider || node.provider)) return node.model;
+  const raw = clean(model);
+  if (raw && isLocalModelProvider(provider)) return raw;
+  return '';
+}
+
+function inferLocalProviderForModel(model = '') {
+  const node = getModelNode(model);
+  if (node) return node.provider || 'openai_compatible';
+  const raw = clean(model).toLowerCase();
+  if (/^(gemma|llama|qwen|mistral|deepseek|phi|mixtral)[\w:.-]*/i.test(raw)) return 'openai_compatible';
+  return '';
+}
 
 function uniqueIds(values = [], { max = 16 } = {}) {
   const out = [];
@@ -686,10 +712,14 @@ function normalizeStoredTeamEnvelope(raw = {}) {
   const row = asObject(raw);
   const active = row.active_team && typeof row.active_team === 'object' && Object.keys(row.active_team).length > 0 ? row.active_team : null;
   const pending = row.pending_team && typeof row.pending_team === 'object' && Object.keys(row.pending_team).length > 0 ? row.pending_team : null;
+  const pendingPortfolio = row.pending_team_portfolio && typeof row.pending_team_portfolio === 'object' && Object.keys(row.pending_team_portfolio).length > 0
+    ? row.pending_team_portfolio
+    : null;
   return {
     status: cleanId(row.status || (active ? 'active' : (pending ? 'suggested' : 'none'))) || 'none',
     active_team: active,
     pending_team: pending,
+    pending_team_portfolio: pendingPortfolio,
     composition_mode: normalizeCompositionMode(row.composition_mode || active?.composition_mode || pending?.composition_mode || 'structured'),
     proposal_mode: normalizeProposalMode(row.proposal_mode || active?.proposal_mode || pending?.proposal_mode || 'suggest'),
     updated_at: clean(row.updated_at || nowIso()),
@@ -764,12 +794,30 @@ function defaultModelForRole(role = '', provider = '') {
   const roleId = cleanId(role);
   const providerId = cleanId(provider);
   if (providerId === 'gemini') return 'gemini-3-flash-preview';
+  if (isLocalModelProvider(providerId)) return listModelNodes()[0]?.model || 'local-model';
   if ((providerId === 'openai' || providerId === 'chatgpt') && roleId === 'builder') return 'gpt-5.5';
   if ((providerId === 'openai' || providerId === 'codex') && roleId === 'builder') return 'gpt-5-codex';
   if (roleId === 'builder') return 'gpt-5-codex';
   if (roleId === 'reviewer' || roleId === 'synthesizer') return 'gpt-5.4';
-  return 'gemini-2.5-pro';
+  return 'gemini-3-flash-preview';
 }
+
+function userExplicitlyRequestedGeminiPro(text = '') {
+  return /(gemini\s*2\.?5\s*pro|gemini-2\.5-pro|2\.?5\s*pro|프로\s*모델|고성능\s*gemini)/i.test(clean(text));
+}
+
+function sanitizePlannerExecutableModel(model = '', provider = '', { taskText = '', role = '' } = {}) {
+  const providerId = cleanId(provider || inferProviderForModel(model || '') || inferLocalProviderForModel(model || ''));
+  const localModel = resolveLocalModelName(model, providerId);
+  if (localModel) return localModel;
+  const resolved = resolveSupportedModel(model || '') || clean(model);
+  const effectiveProvider = cleanId(providerId || inferProviderForModel(resolved || '') || inferLocalProviderForModel(resolved || ''));
+  if (effectiveProvider === 'gemini' && /^gemini-2\.5-pro$/i.test(resolved) && !userExplicitlyRequestedGeminiPro(taskText)) {
+    return 'gemini-3-flash-preview';
+  }
+  return resolved || defaultModelForRole(role, effectiveProvider);
+}
+
 
 function defaultContextPolicyForRole(role = '', { taskText = '', purpose = '' } = {}) {
   const roleId = normalizeTeamRole(role);
@@ -1028,8 +1076,9 @@ function agentDraft({ name = '', role = 'researcher', model = '', purpose = '', 
   const resolvedSkills = asArray(skills).map((skill) => cleanId(skill)).filter(Boolean).length > 0
     ? asArray(skills).map((skill) => cleanId(skill)).filter(Boolean)
     : skillsForRole(cleanRole, { taskText, agentName: displayName, purpose: resolvedPurpose });
-  const resolvedModel = resolveSupportedModel(model || '') || defaultModelForRole(cleanRole, provider);
-  const resolvedProvider = cleanId(provider || inferProviderForModel(resolvedModel) || '');
+  const requestedProvider = cleanId(provider || inferProviderForModel(model || '') || inferLocalProviderForModel(model || ''));
+  const resolvedModel = sanitizePlannerExecutableModel(model || '', requestedProvider, { taskText, role: cleanRole }) || defaultModelForRole(cleanRole, requestedProvider);
+  const resolvedProvider = cleanId(requestedProvider || inferProviderForModel(resolvedModel) || inferLocalProviderForModel(resolvedModel) || '');
   return {
     agent_id: uniqueSlug(displayName, seen),
     name: displayName,
@@ -1396,13 +1445,13 @@ function defaultAgentsFromCatalog(runtime = {}, taskText = '') {
     agent_id: cleanId(row.id || row.agent_id),
     name: clean(row.name || row.id),
     role: cleanId(row.role || row.system_key || row.id),
-    model: resolveSupportedModel(row.model || '') || defaultModelForRole(row.role, row.provider),
+    model: sanitizePlannerExecutableModel(row.model || '', row.provider, { taskText, role: row.role }) || defaultModelForRole(row.role, row.provider),
     purpose: clean(taskText),
     skills: asArray(row.skills).map((skill) => cleanId(skill?.id || skill)),
-    provider: cleanId(row.provider || inferProviderForModel(row.model || '') || ''),
+    provider: cleanId(row.provider || inferProviderForModel(row.model || '') || inferLocalProviderForModel(row.model || '') || ''),
   })).filter((row) => row.agent_id);
   if (picked.length > 0) return picked;
-  return [{ agent_id: 'researcher', name: 'Researcher', role: 'researcher', model: 'gemini-2.5-pro', purpose: clean(taskText), skills: [], provider: 'gemini' }];
+  return [{ agent_id: 'researcher', name: 'Researcher', role: 'researcher', model: 'gemini-3-flash-preview', purpose: clean(taskText), skills: [], provider: 'gemini' }];
 }
 
 export function getSessionTeamState(sessionStore, chatId) {
@@ -1419,6 +1468,7 @@ function saveSessionTeamState(sessionStore, chatId, state = {}) {
       status: normalized.status,
       active_team: normalized.active_team,
       pending_team: normalized.pending_team,
+      pending_team_portfolio: normalized.pending_team_portfolio,
       composition_mode: normalized.composition_mode,
       proposal_mode: normalized.proposal_mode,
       updated_at: nowIso(),
@@ -1974,7 +2024,7 @@ function overlayPlannerAgentDraft(base = {}, plannerAgent = {}, { taskText = '' 
   const role = normalizeTeamRole(plannerAgent.role || base.role);
   const name = clean(plannerAgent.name || base.name || 'Agent');
   const purpose = clean(plannerAgent.purpose || base.purpose);
-  const model = resolveSupportedModel(plannerAgent.model || '') || base.model || defaultModelForRole(role, plannerAgent.provider || base.provider);
+  const model = sanitizePlannerExecutableModel(plannerAgent.model || '', plannerAgent.provider || base.provider, { taskText, role }) || base.model || defaultModelForRole(role, plannerAgent.provider || base.provider);
   const capabilities = uniqueIds([
     ...asArray(plannerAgent.capabilities),
     ...asArray(base.capabilities || base.skills),
@@ -1992,7 +2042,7 @@ function overlayPlannerAgentDraft(base = {}, plannerAgent = {}, { taskText = '' 
     name,
     role,
     model,
-    provider: cleanId(plannerAgent.provider || base.provider || inferProviderForModel(model) || ''),
+    provider: cleanId(plannerAgent.provider || base.provider || inferProviderForModel(model) || inferLocalProviderForModel(model) || ''),
     purpose: autoPurposeForAgent({ role, purpose, taskText, name, skills: capabilities }),
     capabilities: capabilities.length > 0 ? capabilities : asArray(base.capabilities || base.skills),
     skills: capabilities.length > 0 ? capabilities : asArray(base.capabilities || base.skills),
@@ -2563,7 +2613,7 @@ export function validateTeamConfiguration(raw = {}, { runtime = null } = {}) {
   const seenNames = new Set();
   for (const agent of team.agents) {
     if (!agent.model) throw new Error(`unsupported or missing model for ${agent.name}`);
-    agent.provider = cleanId(agent.provider || inferProviderForModel(agent.model) || '');
+    agent.provider = cleanId(agent.provider || inferProviderForModel(agent.model) || inferLocalProviderForModel(agent.model) || '');
     if (!agent.provider) throw new Error(`unsupported provider for ${agent.name}`);
     const agentId = cleanId(agent.agent_id);
     if (!agentId) throw new Error('agent_id is required');
@@ -2913,14 +2963,256 @@ export function formatTeamTransitionGuardrailLines(guardrails = {}, options = {}
   return formatTeamTransitionGuardrailLinesImpl(guardrails, options);
 }
 
-export function storePendingTeam(sessionStore, chatId, team = {}) {
+
+function teamAgentRoles(team = {}) {
+  return uniqueIds(asArray(team?.agents).map((agent) => cleanId(agent?.role)).filter(Boolean), { max: 12 });
+}
+
+function deriveMotifIdFromTeam(team = {}, fallback = 'candidate.team') {
+  const roles = teamAgentRoles(team);
+  const pattern = cleanId(team?.interaction_spec?.execution_pattern || team?.structure_v2?.topology?.pattern || 'sequential') || 'sequential';
+  return roles.length > 0 ? `derived.${roles.join('-')}.${pattern}` : fallback;
+}
+
+function chooseLocalModelForRole(role = '') {
+  const roleId = cleanId(role);
+  const nodes = listModelNodes({ enabledOnly: true });
+  const local = asArray(nodes).find((node) => isLocalModelProvider(node?.provider || '') && node?.enabled !== false);
+  if (!local) return null;
+  return {
+    provider: cleanId(local.provider || 'openai_compatible') || 'openai_compatible',
+    model: clean(local.model || local.id || ''),
+    model_node_id: clean(local.id || ''),
+    role_bias: asArray(local.role_bias || local.roleBias).map(cleanId),
+    role_id: roleId,
+  };
+}
+
+function buildAgentDraftForMotifSlot({ slot = {}, taskText = '', index = 1, seen = new Set(), planning = null, motif = null } = {}) {
+  const roleId = normalizeTeamRole(slot?.role_id || slot?.roleId || slot?.role || 'researcher');
+  const tags = new Set(uniqueIds([...(motif?.coverage_tags || motif?.tags || []), ...(motif?.task_types || [])], { max: 24 }));
+  let provider = '';
+  let model = '';
+  if ((tags.has('local') || tags.has('private')) && ['reviewer', 'researcher'].includes(roleId)) {
+    const local = chooseLocalModelForRole(roleId);
+    if (local?.model) {
+      provider = local.provider;
+      model = local.model;
+    }
+  }
+  if (!provider && roleId === 'builder' && (hasSoftwareDeliveryIntent(taskText) || hasWorkspaceDeliveryIntent(taskText) || hasImplementationLikeIntent(taskText))) {
+    provider = 'codex';
+    model = 'gpt-5-codex';
+  }
+  const label = clean(slot?.purpose || roleId);
+  const nameHint = roleId === 'builder'
+    ? 'Workspace Builder'
+    : (roleId === 'reviewer' ? 'Implementation Reviewer' : (roleId === 'synthesizer' ? 'Delivery Synthesizer' : (roleId === 'operator' ? 'Workflow Operator' : 'Context Scout')));
+  const draft = agentDraft({
+    name: clean(slot?.name || slot?.label || nameHint),
+    role: roleId,
+    model,
+    provider,
+    purpose: label || taskText,
+    skills: asArray(slot?.preferred_skill_ids || slot?.preferredSkillIds),
+  }, { seen, taskText, index });
+  return enrichAgentDraft(draft, planning || buildPlanningContext(taskText));
+}
+
+function buildTeamFromMotifBlueprint(blueprint = {}, { taskText = '', runtime = null, proposalMode = 'suggest' } = {}) {
+  const planning = buildPlanningContext(taskText, runtime);
+  const seen = new Set();
+  const agents = asArray(blueprint.role_slots).map((slot, index) => buildAgentDraftForMotifSlot({ slot, taskText, index: index + 1, seen, planning, motif: blueprint })).filter(Boolean);
+  const teamName = clean(blueprint.label || blueprint.motif_id || 'team_candidate').slice(0, 48).replace(/\s+/g, '_') || 'team_candidate';
+  const runtimeExecution = agents.some((agent) => cleanId(agent.provider) === 'codex')
+    ? { providers: { codex: { sandbox_mode: 'workspace-write', approval_policy: 'never' } } }
+    : {};
+  return normalizeTeamConfig({
+    team_name: teamName,
+    mode: 'scoped_context',
+    composition_mode: 'structured',
+    proposal_mode: proposalMode,
+    lock_after_apply: true,
+    agents,
+    interaction_spec: buildInteractionSpecForTeam({ taskText, agents }),
+    shortcut_policy: normalizeShortcutPolicy(buildDefaultShortcutPolicy()),
+    status: 'suggested',
+    task_brief: taskText,
+    design_prompt: taskText,
+    task_archetype: normalizeTaskArchetype(asArray(blueprint.task_types)[0] || (hasImplementationLikeIntent(taskText) ? 'implementation' : 'research'), 'research'),
+    runtime_execution: runtimeExecution,
+    planner_metadata: normalizePlannerMetadata({
+      planner_type: 'team_motif_portfolio',
+      planner_model: '',
+      planning_source: 'motif_portfolio_candidate',
+      selected_motif_ids: [clean(blueprint.motif_id)].filter(Boolean),
+      reasoning_summary: [
+        `candidate motif: ${clean(blueprint.label || blueprint.motif_id)}`,
+        `roles: ${agents.map((agent) => roleLabel(agent.role)).join(' → ')}`,
+      ],
+    }),
+  }, { runtime });
+}
+
+function buildCandidateFromTeam(team = {}, { candidateId = '', source = 'team_candidate', stress = {}, runtime = null, modelNodes = [], selected = false, motifId = '' } = {}) {
+  const normalized = validateTeamConfiguration(team, { runtime });
+  const roles = teamAgentRoles(normalized);
+  const resolvedMotifId = clean(motifId || normalized?.planner_metadata?.selected_motif_ids?.[0] || deriveMotifIdFromTeam(normalized, candidateId || 'team_candidate'));
+  const candidate = {
+    candidate_id: candidateId || cleanId(`${source}:${motifId}`),
+    source,
+    motif_id: resolvedMotifId,
+    label: clean(normalized.team_name || resolvedMotifId),
+    pattern: cleanId(normalized.interaction_spec?.execution_pattern || normalized.structure_v2?.topology?.pattern || 'sequential') || 'sequential',
+    roles,
+    agent_count: asArray(normalized.agents).length,
+    coordination_cost: Math.max(0, asArray(normalized.agents).length - 1),
+    requires: {
+      workspace_write: roles.includes('builder') && Number(stress.workspace_mutation || 0) >= 0.45,
+      verifier: roles.includes('reviewer') || Number(stress.verification_need || 0) >= 0.65,
+      artifact_delivery: roles.includes('builder') || Number(stress.artifact_pressure || 0) >= 0.55,
+    },
+    team: normalized,
+    selected,
+    rationale: asArray(normalized?.planner_metadata?.reasoning_summary).slice(0, 4),
+  };
+  const gate = checkTeamCandidateContracts(candidate, { runtime, stress, modelNodes });
+  const score = scoreTeamCandidate({ ...candidate, gate }, { stress, gate });
+  return { ...candidate, gate, score };
+}
+
+export function buildTeamSelectionPortfolio({ taskText = '', runtime = null, primaryTeam = null, fallbackTeam = null, activeTeam = null, policy = 'cheapest_sufficient', maxCandidates = 6 } = {}) {
+  const request = clean(taskText || primaryTeam?.task_brief || fallbackTeam?.task_brief || '');
+  const modelNodes = listModelNodes({ enabledOnly: false });
+  const stress = estimateTeamStressVector({ request, runtime, modelNodes });
+  const candidateMap = new Map();
+  const add = (candidate) => {
+    if (!candidate) return;
+    const key = clean(candidate.candidate_id || candidate.motif_id || candidate.label);
+    if (!key || candidateMap.has(key)) return;
+    candidateMap.set(key, candidate);
+  };
+  if (primaryTeam) add(buildCandidateFromTeam(primaryTeam, { candidateId: 'candidate.llm_or_primary', source: cleanId(primaryTeam?.planner_metadata?.planner_type || 'llm_planner'), stress, runtime, modelNodes }));
+  if (fallbackTeam) add(buildCandidateFromTeam(fallbackTeam, { candidateId: 'candidate.heuristic_fallback', source: 'heuristic_fallback', stress, runtime, modelNodes }));
+  const blueprints = generateTeamCandidateBlueprints({ request, runtime, stress, activeTeam, limit: Math.max(6, maxCandidates + 2) });
+  for (const blueprint of blueprints) {
+    const team = buildTeamFromMotifBlueprint(blueprint, { taskText: request, runtime, proposalMode: primaryTeam?.proposal_mode || 'suggest' });
+    add(buildCandidateFromTeam(team, { candidateId: blueprint.candidate_id, source: `motif:${blueprint.source || 'registry'}`, stress, runtime, modelNodes, motifId: blueprint.motif_id }));
+  }
+  let candidates = [...candidateMap.values()];
+  const selected = selectTeamCandidate(candidates, { policy }) || candidates[0] || null;
+  candidates = candidates.map((candidate) => ({ ...candidate, selected: selected && candidate.candidate_id === selected.candidate_id }));
+  candidates.sort((a, b) => {
+    if (a.selected) return -1;
+    if (b.selected) return 1;
+    const au = Number(a.score?.utility || 0);
+    const bu = Number(b.score?.utility || 0);
+    if (Math.abs(bu - au) > 0.001) return bu - au;
+    return Number(a.score?.estimated_cost || 0) - Number(b.score?.estimated_cost || 0);
+  });
+  const trimmed = candidates.slice(0, Math.max(1, maxCandidates));
+  const selectedCandidate = trimmed.find((candidate) => candidate.selected) || trimmed[0] || null;
+  const trace = buildTeamSelectionTrace({ request, stress, candidates: trimmed, selectedCandidate, policy, source: 'team_configuration' });
+  appendTeamSelectionTrace(trace);
+  const selectedTeam = selectedCandidate?.team || primaryTeam || fallbackTeam || null;
+  if (selectedTeam) {
+    selectedTeam.planner_metadata = normalizePlannerMetadata({
+      ...selectedTeam.planner_metadata,
+      planning_source: clean(selectedTeam.planner_metadata?.planning_source || selectedTeam.planner_metadata?.planningSource || 'team_portfolio_selected'),
+      team_selection: {
+        selection_id: trace.selection_id,
+        policy,
+        stress,
+        stress_summary: summarizeStressVector(stress),
+        selected_candidate_id: selectedCandidate?.candidate_id || null,
+        candidate_count: trimmed.length,
+      },
+      reasoning_summary: [
+        ...asArray(selectedTeam.planner_metadata?.reasoning_summary || selectedTeam.planner_metadata?.reasoningSummary),
+        `portfolio selected: ${clean(selectedCandidate?.label || selectedCandidate?.candidate_id || 'candidate')}`,
+        `stress: ${summarizeStressVector(stress).join(', ')}`,
+      ].filter(Boolean),
+    });
+  }
+  return {
+    kind: 'team_candidate_portfolio_v1',
+    selection_id: trace.selection_id,
+    request_excerpt: request.slice(0, 500),
+    policy,
+    stress,
+    stress_summary: summarizeStressVector(stress),
+    selected_candidate_id: selectedCandidate?.candidate_id || null,
+    candidates: trimmed,
+    trace,
+    selected_team: selectedTeam,
+  };
+}
+
+export function formatTeamCandidatePortfolioMessage(portfolio = {}, { verbose = false } = {}) {
+  const row = asObject(portfolio);
+  const candidates = asArray(row.candidates);
+  if (candidates.length === 0) {
+    return 'Team candidate portfolio가 없습니다. /team suggest <목적>을 먼저 실행해 주세요.';
+  }
+  const lines = [
+    '🧭 Team candidate portfolio',
+    `selection=${clean(row.selection_id || '-')}`,
+    `policy=${clean(row.policy || 'cheapest_sufficient')}`,
+    `stress=${asArray(row.stress_summary).join(', ') || 'low-stress'}`,
+    '',
+  ];
+  candidates.forEach((candidate, index) => {
+    const mark = candidate.selected ? '✅' : '·';
+    const roles = asArray(candidate.roles).map((role) => roleLabel(role)).join(' → ') || '-';
+    lines.push(`${mark} ${index + 1}. ${clean(candidate.label || candidate.candidate_id)} · ${clean(candidate.motif_id || '-')}`);
+    lines.push(`   roles=${roles}`);
+    lines.push(`   gate=${summarizeCandidateGate(candidate.gate)} · utility=${Number(candidate.score?.utility || 0).toFixed(3)} · cost=${Number(candidate.score?.estimated_cost || 0).toFixed(2)}`);
+    if (verbose && asArray(candidate.rationale).length > 0) {
+      lines.push(`   rationale=${asArray(candidate.rationale).slice(0, 2).join(' / ')}`);
+    }
+  });
+  lines.push('', '적용: /team apply <번호>  · 현재 선택 후보 적용: /team apply');
+  return lines.join('\n');
+}
+
+export function selectPendingTeamCandidate(sessionStore, chatId, selector = '', { runtime = null } = {}) {
   const current = getSessionTeamState(sessionStore, chatId);
+  const portfolio = asObject(current.pending_team_portfolio);
+  const candidates = asArray(portfolio.candidates);
+  if (candidates.length === 0) throw new Error('no pending team candidate portfolio');
+  const raw = clean(selector);
+  const index = /^\d+$/.test(raw) ? Number(raw) - 1 : -1;
+  const picked = index >= 0 ? candidates[index] : candidates.find((candidate) => clean(candidate.candidate_id) === raw || clean(candidate.motif_id) === raw || cleanId(candidate.label) === cleanId(raw));
+  if (!picked?.team) throw new Error(`unknown team candidate: ${raw || selector}`);
+  const normalized = validateTeamConfiguration({ ...picked.team, proposal_mode: current.proposal_mode || picked.team.proposal_mode || 'suggest' }, { runtime });
+  const nextPortfolio = {
+    ...portfolio,
+    selected_candidate_id: picked.candidate_id,
+    candidates: candidates.map((candidate) => ({ ...candidate, selected: candidate.candidate_id === picked.candidate_id })),
+  };
+  saveSessionTeamState(sessionStore, chatId, {
+    ...current,
+    status: 'suggested',
+    pending_team: normalized,
+    pending_team_portfolio: nextPortfolio,
+    composition_mode: normalized.composition_mode,
+    proposal_mode: normalized.proposal_mode,
+  });
+  return { team: normalized, portfolio: nextPortfolio, candidate: picked };
+}
+
+export function storePendingTeam(sessionStore, chatId, team = {}, options = {}) {
+  const current = getSessionTeamState(sessionStore, chatId);
+  const portfolio = options && typeof options === 'object' && options.portfolio
+    ? options.portfolio
+    : (options && typeof options === 'object' && options.clearPortfolio ? null : current.pending_team_portfolio);
   saveSessionTeamState(sessionStore, chatId, {
     ...current,
     status: 'suggested',
     composition_mode: normalizeCompositionMode(team?.composition_mode || current.composition_mode || 'structured'),
     proposal_mode: normalizeProposalMode(team?.proposal_mode || current.proposal_mode || 'suggest'),
     pending_team: team,
+    pending_team_portfolio: portfolio,
   });
   return getSessionTeamState(sessionStore, chatId);
 }
@@ -2931,7 +3223,7 @@ export async function applyPendingTeam({ sessionStore, chatId, runtime = null } 
   if (!team) throw new Error('no pending team to apply');
   const normalized = validateTeamConfiguration({ ...team, proposal_mode: 'apply' }, { runtime });
   const transitionGuardrails = buildTeamTransitionGuardrails(current.active_team, normalized);
-  saveSessionTeamState(sessionStore, chatId, { status: 'active', active_team: normalized, pending_team: null, composition_mode: normalized.composition_mode, proposal_mode: normalized.proposal_mode });
+  saveSessionTeamState(sessionStore, chatId, { status: 'active', active_team: normalized, pending_team: null, pending_team_portfolio: null, composition_mode: normalized.composition_mode, proposal_mode: normalized.proposal_mode });
   if (sessionStore?.upsert) {
     sessionStore.upsert(chatId, (session) => ({ ...session, pending_team_apply_confirmation: null, last_team_apply_guardrails: transitionGuardrails }));
   }
@@ -2943,7 +3235,7 @@ export async function applyPendingTeam({ sessionStore, chatId, runtime = null } 
 }
 
 export async function resetTeamConfiguration(sessionStore, chatId, { runtime = null } = {}) {
-  saveSessionTeamState(sessionStore, chatId, { status: 'none', active_team: null, pending_team: null, composition_mode: 'structured', proposal_mode: 'suggest' });
+  saveSessionTeamState(sessionStore, chatId, { status: 'none', active_team: null, pending_team: null, pending_team_portfolio: null, composition_mode: 'structured', proposal_mode: 'suggest' });
   await clearConversationStoreTeamConfiguration(runtime).catch(() => null);
 }
 

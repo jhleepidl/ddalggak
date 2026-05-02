@@ -1,0 +1,30 @@
+{
+  "nodes": [
+    {
+      "id": "local_gemma4",
+      "label": "Local Gemma 4",
+      "provider": "openai_compatible",
+      "runtime": "ollama",
+      "base_url": "http://localhost:11434/v1",
+      "model": "gemma4:31b",
+      "enabled": false,
+      "capabilities": {
+        "chat": true,
+        "structured_json": true,
+        "code": true
+      },
+      "limits": {
+        "context_tokens": 32768,
+        "max_concurrent": 1,
+        "timeout_ms": 90000
+      },
+      "permissions": {
+        "memory_read": "project_scoped",
+        "memory_write": "write_intent_only",
+        "workspace_read": true,
+        "workspace_write": false
+      },
+      "role_bias": ["research", "review", "draft", "local_private_reasoning"]
+    }
+  ]
+}

@@ -52,6 +52,10 @@ export function resolveProviderInteractionCapabilities({ provider = '', model = 
     if (channelKey === 'acp' || channelKey === 'stream_json') {
       integration.streamed_event_bridge = true;
     }
+  } else if (providerKey === 'openai_compatible' || providerKey === 'ollama' || providerKey === 'local' || providerKey === 'local_model') {
+    native.streamed_events = false;
+    native.request_user_input = false;
+    integration.integration_stability = 'local_adapter';
   } else if (providerKey === 'chatgpt') {
     integration.integration_stability = 'none';
   }

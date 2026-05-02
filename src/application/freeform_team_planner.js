@@ -14,6 +14,7 @@ import { compactPromptJson } from './prompt_surface_builder.js';
 import { normalizeParticipantExecutionSchema } from '../shared/participant_schema.js';
 import { inferExecutionRoleFromText } from '../shared/work_intent.js';
 import { buildPlannerCreateConstraintLines, buildPlannerOutputSchemaLines, buildPlannerRefinementRuleLines } from './planner_prompt_fragments.js';
+import { formatModelNodeInventoryForPlanner, listPlannerModelChoices } from './model_node_registry.js';
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -216,7 +217,9 @@ function buildPlannerPrompt({
 } = {}) {
   const catalog = summarizeRuntimeAgents(runtime);
   const skills = summarizeSkills(skillRegistry);
-  const models = listSupportedModels().map((row) => clean(row.id)).filter(Boolean);
+  const modelChoices = [...listSupportedModels(), ...listPlannerModelChoices()];
+  const models = modelChoices.map((row) => clean(row.id)).filter(Boolean);
+  const modelNodeInventory = formatModelNodeInventoryForPlanner();
   return [
     'You are designing a multi-agent team for a runtime called ddalggak.',
     'Return JSON only. No markdown. No commentary outside JSON.',
@@ -231,6 +234,8 @@ function buildPlannerPrompt({
     `User request: ${clean(taskText)}`,
     '',
     `Supported models: ${models.join(', ')}`,
+    modelNodeInventory,
+    'Provider choices: gemini, codex, chatgpt, openai_compatible. Use provider=openai_compatible for listed local/OpenAI-compatible model nodes and set model to that node model name.',
     `Available tools: ${asArray(availableToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 10).join(', ') || '(none listed)'}`,
     catalog.length ? `Runtime catalog (compact): ${compactPromptJson(catalog, { maxDepth: 2, maxItems: 6, maxStringChars: 72 })}` : '',
     skills.length ? `Skill registry sample (compact): ${compactPromptJson(skills, { maxDepth: 2, maxItems: 6, maxStringChars: 72 })}` : '',
@@ -313,7 +318,9 @@ function buildRefinementPlannerPrompt({
 } = {}) {
   const catalog = summarizeRuntimeAgents(runtime);
   const skills = summarizeSkills(skillRegistry);
-  const models = listSupportedModels().map((row) => clean(row.id)).filter(Boolean);
+  const modelChoices = [...listSupportedModels(), ...listPlannerModelChoices()];
+  const models = modelChoices.map((row) => clean(row.id)).filter(Boolean);
+  const modelNodeInventory = formatModelNodeInventoryForPlanner();
   const current = summarizeRefinementCurrentTeam(currentTeam);
   return [
     'You are refining an existing ddalggak multi-agent team.',
@@ -332,6 +339,8 @@ ${buildCurrentRosterSummaryLines(currentTeam)}`,
     `Refinement instruction: ${clean(instruction)}`,
     '',
     `Supported models: ${models.join(', ')}`,
+    modelNodeInventory,
+    'Provider choices: gemini, codex, chatgpt, openai_compatible. Use provider=openai_compatible for listed local/OpenAI-compatible model nodes and set model to that node model name.',
     `Available tools: ${asArray(availableToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 10).join(', ') || '(none listed)'}`,
     catalog.length ? `Runtime catalog (compact): ${compactPromptJson(catalog, { maxDepth: 2, maxItems: 6, maxStringChars: 72 })}` : '',
     skills.length ? `Skill registry sample (compact): ${compactPromptJson(skills, { maxDepth: 2, maxItems: 6, maxStringChars: 72 })}` : '',
@@ -391,8 +400,8 @@ function normalizePlannerPlan(raw = {}) {
         name: clean(item.name || item.display_name || item.agent_name),
         role: inferPlannerRole(item),
         purpose: clean(item.purpose || item.goal || item.description),
-        model: clean(item.model),
-        provider: cleanId(item.provider || ''),
+        model: clean(item.model || item.provider_spec?.model || item.providerSpec?.model),
+        provider: cleanId(item.provider || item.provider_spec?.provider || item.providerSpec?.provider || ''),
         capabilities: asArray(item.capabilities || item.skill_labels).map((entry) => clean(entry)).filter(Boolean).slice(0, 5),
         attached_skill_ids: asArray(item.attached_skill_ids || item.attachedSkillIds || item.skills).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 6),
         generated_skill_briefs: normalizeGeneratedSkillBriefs(item.generated_skill_briefs || item.generatedSkillBriefs || []),

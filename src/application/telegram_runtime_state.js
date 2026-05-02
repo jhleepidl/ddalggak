@@ -429,6 +429,28 @@ function makeCancelledError(jobId) {
   return makeCancelledErrorDomain(jobId);
 }
 
+function runtimeQueueMaxSize() {
+  const raw = Number(process.env.TELEGRAM_RUNTIME_QUEUE_MAX || 64);
+  if (!Number.isFinite(raw)) return 64;
+  return Math.max(1, Math.min(1000, Math.floor(raw)));
+}
+
+function makeQueueFullError() {
+  const error = new Error(`runtime queue full: max=${runtimeQueueMaxSize()}`);
+  error.code = 'EQUEUEFULL';
+  error.category = 'backpressure';
+  return error;
+}
+
+function pruneCancelledQueueItems() {
+  for (let i = queue.length - 1; i >= 0; i -= 1) {
+    const item = queue[i];
+    if (!item?.signal?.aborted) continue;
+    queue.splice(i, 1);
+    try { item.reject(makeCancelledError(item.jobId || 'unknown')); } catch {}
+  }
+}
+
 function isCancelledError(error) {
   return isCancelledErrorDomain(error);
 }
@@ -512,6 +534,15 @@ function resetChatSession(chatId) {
 
 async function enqueue(fn, { jobId = "", signal = null, label = "" } = {}) {
   return await new Promise((resolve, reject) => {
+    pruneCancelledQueueItems();
+    if (signal?.aborted) {
+      reject(makeCancelledError(String(jobId || 'unknown')));
+      return;
+    }
+    if (queue.length >= runtimeQueueMaxSize()) {
+      reject(makeQueueFullError());
+      return;
+    }
     queue.push({ fn, resolve, reject, jobId: String(jobId || ""), signal, label });
     pump();
   });

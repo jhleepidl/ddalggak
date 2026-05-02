@@ -20,6 +20,9 @@ const MODEL_ALIASES = new Map([
   ['codex 5.3', 'gpt-5-codex'],
   ['gpt-5-codex', 'gpt-5-codex'],
   ['codex', 'gpt-5-codex'],
+  ['local', 'local-model'],
+  ['local model', 'local-model'],
+  ['ollama', 'local-model'],
 ]);
 
 export const SUPPORTED_MODELS = [
@@ -30,6 +33,7 @@ export const SUPPORTED_MODELS = [
   { id: 'gpt-5.4', label: 'GPT-5.4' },
   { id: 'gpt-5.5', label: 'GPT-5.5' },
   { id: 'gpt-5-codex', label: 'GPT-5 Codex' },
+  { id: 'local-model', label: 'Local/OpenAI-Compatible Model' },
 ];
 
 export function listSupportedModels() {
@@ -55,6 +59,7 @@ export function inferProviderForModel(raw = '') {
   if (!model) return '';
   if (model.startsWith('gemini')) return 'gemini';
   if (model.includes('codex')) return 'codex';
+  if (model === 'local-model' || model.startsWith('gemma') || model.startsWith('llama') || model.startsWith('qwen') || model.startsWith('mistral') || model.startsWith('deepseek')) return 'openai_compatible';
   if (model.startsWith('gpt-')) return 'chatgpt';
   return '';
 }
