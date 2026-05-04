@@ -39,3 +39,38 @@ test('runAgentProviderExecution executes chatgpt provider path and appends local
   assert.equal(calls.length, 1);
   assert.match(calls[0][1], /projection_network_error/);
 });
+
+test('runAgentProviderExecution fails over Gemini capacity errors to Codex assist', async () => {
+  const messages = [];
+  const logs = [];
+  const bot = { sendMessage: async (_chatId, text) => { messages.push(text); return { ok: true }; } };
+  const result = await runAgentProviderExecution({
+    provider: 'gemini',
+    agentId: 'research_lead',
+    roleId: 'researcher',
+    model: 'gemini-3-flash-preview',
+    bot,
+    chatId: 77,
+    jobId: 'job-failover',
+    prompts: { goal: 'help with travel', instruction: 'help with travel', userRequest: 'help with travel' },
+    callbacks: {
+      geminiResearch: async () => {
+        throw new Error('Gemini failed (exit=-1)\nNo capacity available for model gemini-3-flash-preview\nMODEL_CAPACITY_EXHAUSTED\n429');
+      },
+      codexAssist: async (_jobId, instruction, _signal, opts) => {
+        assert.match(instruction, /help with travel/);
+        assert.equal(opts.failoverDecision.to_provider, 'codex');
+        return 'codex fallback answer';
+      },
+      appendLocalLogs: (output, mode) => { logs.push({ output, mode }); },
+      memoryModeWithFallback: () => 'local',
+      takeGocFallbackReason: () => '',
+    },
+  });
+
+  assert.equal(result.provider, 'codex');
+  assert.equal(result.output, 'codex fallback answer');
+  assert.equal(result.failover.to_provider, 'codex');
+  assert.equal(logs.some((row) => /provider_failover/.test(row.output)), true);
+  assert.equal(messages.some((text) => /Codex|codex|fallback/.test(text)), true);
+});

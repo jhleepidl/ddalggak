@@ -1,6 +1,7 @@
 import { notifyAndConsumeGocFallback } from './telegram_status_notifications.js';
 import { runOpenAICompatiblePrompt } from '../providers/openai_compatible.js';
 import { getModelNode } from './model_node_registry.js';
+import { formatProviderFailoverNote, resolveProviderFailoverDecision } from './provider_failover_policy.js';
 
 export async function runAgentProviderExecution({
   provider = '',
@@ -33,7 +34,7 @@ export async function runAgentProviderExecution({
     takeGocFallbackReason,
   } = callbacks;
 
-  const finalize = async (output) => {
+  const finalize = async (output, overrides = {}) => {
     await notifyAndConsumeGocFallback(bot, chatId, {
       notify,
       takeFallbackReason: takeGocFallbackReason,
@@ -43,8 +44,9 @@ export async function runAgentProviderExecution({
       output,
       mode: typeof memoryModeWithFallback === 'function' ? memoryModeWithFallback() : 'default',
       agent,
-      provider: cleanProvider,
-      model,
+      provider: String(overrides.provider || cleanProvider || '').trim().toLowerCase(),
+      model: String(overrides.model || model || '').trim(),
+      failover: overrides.failover || undefined,
     };
   };
 
@@ -64,26 +66,61 @@ export async function runAgentProviderExecution({
   }
 
   if (cleanProvider === 'gemini') {
-    const output = await geminiResearch(jobId, String(prompts.goal || ''), signal, {
-      sectionTitle: `${agentId} notes`,
-      agentId,
-      roleId,
-      roleMemo: String(prompts.roleMemo || prompts.role_memo || '').trim(),
-      userRequest: String(prompts.userRequest || prompts.user_request || act?.inputs?.user_request || act?.inputs?.userRequest || '').trim(),
-      preparedContextInfo: act?.inputs?._prompt_context_info && typeof act.inputs._prompt_context_info === 'object'
-        ? act.inputs._prompt_context_info
-        : {},
-      outputGuide: String(prompts.outputGuide || prompts.output_guide || act?.inputs?.output_guide || act?.inputs?.outputGuide || '').trim(),
-      model,
-      concurrencyKey: geminiConcurrencyKey || `job:${String(jobId || '').trim()}`,
-      onGeminiRetry,
-      onGeminiModelSwitch,
-      onGeminiGiveUp,
-      runtimeExecutionPolicy,
-      providerOptions,
-      chatId,
-    });
-    return finalize(output);
+    try {
+      const output = await geminiResearch(jobId, String(prompts.goal || ''), signal, {
+        sectionTitle: `${agentId} notes`,
+        agentId,
+        roleId,
+        roleMemo: String(prompts.roleMemo || prompts.role_memo || '').trim(),
+        userRequest: String(prompts.userRequest || prompts.user_request || act?.inputs?.user_request || act?.inputs?.userRequest || '').trim(),
+        preparedContextInfo: act?.inputs?._prompt_context_info && typeof act.inputs._prompt_context_info === 'object'
+          ? act.inputs._prompt_context_info
+          : {},
+        outputGuide: String(prompts.outputGuide || prompts.output_guide || act?.inputs?.output_guide || act?.inputs?.outputGuide || '').trim(),
+        model,
+        concurrencyKey: geminiConcurrencyKey || `job:${String(jobId || '').trim()}`,
+        onGeminiRetry,
+        onGeminiModelSwitch,
+        onGeminiGiveUp,
+        runtimeExecutionPolicy,
+        providerOptions,
+        chatId,
+      });
+      return finalize(output);
+    } catch (error) {
+      const decision = resolveProviderFailoverDecision({ provider: 'gemini', error, roleId, agentId });
+      if (!decision.should_failover || typeof callbacks.codexAssist !== 'function') throw error;
+      const note = formatProviderFailoverNote(decision);
+      if (typeof appendLocalLogs === 'function') {
+        appendLocalLogs(note, typeof memoryModeWithFallback === 'function' ? memoryModeWithFallback() : 'default');
+      }
+      if (notify && bot && chatId) {
+        try { await bot.sendMessage(chatId, `🔁 Gemini 혼잡으로 ${decision.to_provider} fallback을 사용합니다. (${agentId || 'agent'})`); } catch {}
+      }
+      const output = await callbacks.codexAssist(jobId, String(prompts.instruction || prompts.goal || prompts.chatQuestion || ''), signal, {
+        runtimeExecutionPolicy,
+        providerOptions: {
+          sandboxMode: process.env.CODEX_ASSIST_SANDBOX_MODE || 'read-only',
+          approvalPolicy: process.env.CODEX_ASSIST_APPROVAL_POLICY || 'never',
+          profile: process.env.CODEX_ASSIST_PROFILE || process.env.CODEX_PROFILE || '',
+        },
+        chatId,
+        agentId,
+        roleId,
+        roleMemo: String(prompts.roleMemo || prompts.role_memo || '').trim(),
+        userRequest: String(prompts.userRequest || prompts.user_request || act?.inputs?.user_request || act?.inputs?.userRequest || '').trim(),
+        outputGuide: String(prompts.outputGuide || prompts.output_guide || act?.inputs?.output_guide || act?.inputs?.outputGuide || '').trim(),
+        failoverDecision: decision,
+        preparedContextInfo: act?.inputs?._prompt_context_info && typeof act.inputs._prompt_context_info === 'object'
+          ? act.inputs._prompt_context_info
+          : {},
+      });
+      return finalize(output, {
+        provider: 'codex',
+        model: providerOptions?.profile || process.env.CODEX_PROFILE || 'codex',
+        failover: decision,
+      });
+    }
   }
 
 

@@ -1178,6 +1178,175 @@ ${executionRequirementsBlock}` : "",
   return out;
 }
 
+
+async function codexAssist(jobId, instruction, signal = null, opts = {}) {
+  const runtimeExecutionPolicy = normalizeRuntimeExecutionPolicy(opts.runtimeExecutionPolicy || {});
+  const explicitProviderOptions = opts.providerOptions && typeof opts.providerOptions === 'object' ? opts.providerOptions : {};
+  const resolvedCodexOptions = resolveProviderRuntimeOptions({
+    runtimeExecutionPolicy,
+    provider: 'codex',
+    workspaceRoot: runWorkspaceDir(jobId),
+  });
+  const providerOptions = {
+    ...resolvedCodexOptions,
+    ...explicitProviderOptions,
+    sandboxMode: String(explicitProviderOptions.sandboxMode || explicitProviderOptions.sandbox_mode || process.env.CODEX_ASSIST_SANDBOX_MODE || resolvedCodexOptions.sandboxMode || 'read-only').trim() || 'read-only',
+    approvalPolicy: String(explicitProviderOptions.approvalPolicy || explicitProviderOptions.approval_policy || process.env.CODEX_ASSIST_APPROVAL_POLICY || resolvedCodexOptions.approvalPolicy || 'never').trim() || 'never',
+  };
+  const workspacePath = runWorkspaceDir(jobId);
+  const credentialEnv = resolveCredentialEnvForChat(chatSessionStore, opts.chatId || '');
+  const roleKey = String(opts.roleId || 'assistant').trim().toLowerCase() || 'assistant';
+  const agentKey = String(opts.agentId || 'codex_assist').trim().toLowerCase() || 'codex_assist';
+  const cleanUserRequest = String(opts.userRequest || opts.user_request || extractLatestUserRequestFromTaskText(instruction) || instruction || '').trim();
+  const outputGuide = buildDirectAnswerOutputGuide(opts.outputGuide || opts.output_guide || '');
+  const roleMemo = String(opts.roleMemo || opts.role_memo || memory.getAgentRole('codex') || '').trim();
+  const ctx = await runtimeIo.loadRoleScopedContextDocs(jobId, {
+    provider: 'codex',
+    roleId: roleKey,
+    fallbackDocIds: ['plan', 'progress', 'research', 'decisions', 'artifact_index'],
+    maxCharsPerDoc: clampInteger(process.env.CHAT_CODEX_ASSIST_CONTEXT_DOC_MAX_CHARS, 1800, { min: 0, max: 4200 }),
+    audienceLabel: 'agent failover assist',
+    runtimePolicy: opts.runtime?.harnessRuntimePolicy || opts.runtime?.openharnessInstallState?.runtime_policy || null,
+  });
+  const activeArtifactContext = formatActiveArtifactContext(runDir(jobId), { maxChars: 1200, limit: 4 });
+  const activeUserFactContext = formatActiveUserFactContext(runDir(jobId), { maxChars: 1600 });
+  const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 3 });
+  const executionRequirements = mergeExecutionRequirements(
+    extractExecutionRequirements(cleanUserRequest),
+    extractExecutionRequirements(instruction),
+  );
+  const artifactMaterializationGuide = executionRequirements.artifact_delivery_requested
+    ? [
+      '[FILE ARTIFACT OUTPUT CONTRACT]',
+      '- If the user expects a file deliverable, output explicit artifact blocks. The runtime will materialize them.',
+      '- Shape:',
+      '  [ARTIFACT]',
+      '  path: relative/path/to/file.ext',
+      '  ```language',
+      '  complete file contents',
+      '  ```',
+      '  [/ARTIFACT]',
+    ].join('\n')
+    : '';
+  const webSearchEnabled = ['1', 'true', 'yes', 'on'].includes(String(process.env.CODEX_ENABLE_WEB_SEARCH || '').trim().toLowerCase());
+  const failoverNote = opts.failoverDecision
+    ? `Provider failover: Gemini could not serve the request because of ${String(opts.failoverDecision?.failure?.category || opts.failoverDecision?.reason || 'transient capacity').trim()}. Continue with the best available answer; mention missing live-web capability only if it materially affects the answer.`
+    : '';
+  const prompt = [
+    '너는 Telegram /chat에서 호출된 일반 목적 assistant agent다.',
+    '이 실행은 코드 수정 전용이 아니다. 사용자의 최신 요청에 직접 답하라.',
+    failoverNote,
+    roleMemo ? `[ROLE]\n${clip(roleMemo, 700)}` : '',
+    '[SAFETY / EXECUTION]',
+    `- workspace sandbox: ${providerOptions.sandboxMode}`,
+    '- Do not edit files unless the user clearly requested a file/code artifact.',
+    webSearchEnabled
+      ? '- Web search may be available through Codex tooling; use it when needed for current facts.'
+      : '- Live web search may be unavailable in this fallback. If current facts are required, ask for permission/tooling or state the limitation briefly.',
+    ctx ? `[AVAILABLE MEMORY — optional]\n${ctx}` : '',
+    activeArtifactContext || '',
+    activeUserFactContext || '',
+    workspaceFilesText ? `[WORKSPACE FILES — optional]\n${workspaceFilesText}` : '',
+    artifactMaterializationGuide,
+    '[USER REQUEST]',
+    cleanUserRequest || instruction,
+    cleanUserRequest && cleanUserRequest !== String(instruction || '').trim() ? `[TASK CONTEXT]\n${compactTaskText(instruction, { maxChars: 1800 })}` : '',
+    outputGuide,
+    '최종 답변:',
+  ].filter(Boolean).join('\n\n');
+  appendPromptTelemetry({
+    jobDir: runDir(jobId),
+    sharedDir: runSharedDir(jobId),
+    row: {
+      kind: 'provider_prompt',
+      provider: 'codex',
+      model: String(providerOptions.profile || process.env.CODEX_PROFILE || '').trim() || 'codex',
+      agent_id: agentKey,
+      role_id: roleKey,
+      prompt_text: prompt,
+      prepared_context_tokens: opts.preparedContextInfo?.compiled_tokens_estimate,
+      prepared_context_chars: opts.preparedContextInfo?.compiled_chars,
+      components: {
+        user_request: cleanUserRequest || instruction,
+        local_context: ctx,
+        active_artifact_context: activeArtifactContext,
+        active_user_fact_context: activeUserFactContext,
+        workspace_files: workspaceFilesText,
+        output_guide: outputGuide,
+        failover_note: failoverNote,
+      },
+      metadata: {
+        sandbox_mode: providerOptions.sandboxMode || undefined,
+        approval_policy: providerOptions.approvalPolicy || undefined,
+        failover_from: opts.failoverDecision?.from_provider || undefined,
+        failover_reason: opts.failoverDecision?.reason || undefined,
+        prompt_mode: 'direct_answer_failover',
+      },
+    },
+  });
+  const cliSupport = ensureCliWorkspaceSupportFiles(jobId, {
+    provider: 'codex',
+    roleMemo,
+    kbContract: '',
+    instruction: prompt,
+    goal: cleanUserRequest || instruction,
+    runtimeExecutionPolicy,
+    providerOptions,
+    allowDirectExecution: false,
+  });
+  const r = await runCodexExec({
+    workspaceRoot: workspacePath,
+    cwd: workspacePath,
+    prompt,
+    signal,
+    jobId,
+    profile: providerOptions.profile || process.env.CODEX_PROFILE || '',
+    addDirs: providerOptions.addDirs || [],
+    sandboxMode: providerOptions.sandboxMode,
+    approvalPolicy: providerOptions.approvalPolicy,
+    configOverrides: {
+      ...(providerOptions.configOverrides || {}),
+      ...(cliSupport.codexInstructionFile ? { model_instructions_file: cliSupport.codexInstructionFile } : {}),
+    },
+    env: {
+      ...(providerOptions.extraEnv || {}),
+      ...credentialEnv,
+    },
+    surface: 'codex_assist_failover',
+    agentId: agentKey,
+    roleId: roleKey,
+    traceMetadata: {
+      failover_from: opts.failoverDecision?.from_provider || null,
+      failover_reason: opts.failoverDecision?.reason || null,
+    },
+  });
+  const out = String(r.stdout || r.stderr || '').trim();
+  const materialization = executionRequirements.artifact_delivery_requested
+    ? materializeArtifactsFromLlmOutput({ output: out, workspaceRoot: workspacePath, userRequest: cleanUserRequest || instruction })
+    : { materialized: [] };
+  if (materialization.materialized?.length) {
+    try { runtimeIo.refreshArtifactIndex(jobId, { maxFiles: 12 }); } catch {}
+  }
+  appendRoleAwareTracking(jobId, `## Codex fallback assist output\n\n${out}\n`, {
+    provider: 'codex',
+    roleId: roleKey,
+    purpose: opts.finalSynthesis === true ? 'final' : 'research',
+    fallbackDoc: 'research',
+    requestedDoc: opts.finalSynthesis === true ? 'final_answer' : 'research',
+  });
+  jobs.appendConversation(jobId, 'codex', out, { kind: 'assistant_failover', provider: 'codex', model: providerOptions.profile || process.env.CODEX_PROFILE || 'codex' });
+  ensureCommandOk('Codex fallback assist', r);
+  if (materialization.materialized?.length) {
+    return [
+      out,
+      '',
+      '생성된 파일:',
+      ...materialization.materialized.map((entry) => `- ${entry.path}`),
+    ].join('\n');
+  }
+  return out;
+}
+
 async function gitSummary(jobId, signal = null) {
   const commandCwd = runWorkspaceDir(jobId);
   const status = await runCommand("git", ["status", "--porcelain=v1"], { cwd: commandCwd, abortSignal: signal });
@@ -5126,6 +5295,7 @@ ${output}
         },
       callbacks: {
         codexImplement,
+        codexAssist,
         geminiResearch,
         sendChatGPTPrompt: routePlanning.sendChatGPTPrompt,
         appendLocalLogs,

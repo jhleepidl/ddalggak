@@ -1,5 +1,6 @@
 import path from "node:path";
 import { runGeminiPrompt } from "../gemini.js";
+import { runCodexExec } from "../codex.js";
 import { clip } from "../textutil.js";
 import { normalizeActionPlan } from "./actions.js";
 import { parseJsonObjectFromText } from "../shared/json_extract.js";
@@ -878,6 +879,75 @@ function buildRouterPrompt(message, context = {}) {
   ].filter(Boolean).join("\n");
 }
 
+
+function supervisorProviderOrder() {
+  const raw = String(process.env.CHAT_SUPERVISOR_PROVIDER || process.env.CHAT_ROUTER_PROVIDER || 'auto').trim().toLowerCase();
+  if (['codex', 'codex_cli'].includes(raw)) return ['codex'];
+  if (['gemini', 'gemini_cli'].includes(raw)) return ['gemini'];
+  if (['auto', 'fallback', 'failover', ''].includes(raw)) return ['gemini', 'codex'];
+  return ['gemini', 'codex'];
+}
+
+function codexRouterProfile() {
+  return String(process.env.CHAT_SUPERVISOR_CODEX_PROFILE || process.env.CHAT_ROUTER_CODEX_PROFILE || process.env.CODEX_ASSIST_PROFILE || process.env.CODEX_PROFILE || '').trim();
+}
+
+function codexRouterSandboxMode() {
+  return String(process.env.CHAT_SUPERVISOR_CODEX_SANDBOX_MODE || process.env.CHAT_ROUTER_CODEX_SANDBOX_MODE || 'read-only').trim() || 'read-only';
+}
+
+function codexRouterApprovalPolicy() {
+  return String(process.env.CHAT_SUPERVISOR_CODEX_APPROVAL_POLICY || process.env.CHAT_ROUTER_CODEX_APPROVAL_POLICY || 'never').trim() || 'never';
+}
+
+async function runSupervisorRouterProvider({
+  provider,
+  workspaceRoot,
+  cwd,
+  prompt,
+  signal,
+  currentJobId = '',
+  geminiConcurrencyKey = '',
+  geminiModel = '',
+  onGeminiRetry = null,
+  onGeminiModelSwitch = null,
+  onGeminiGiveUp = null,
+  routerTimeoutMs = 30000,
+} = {}) {
+  const cleanProvider = String(provider || '').trim().toLowerCase();
+  if (cleanProvider === 'codex') {
+    return await runCodexExec({
+      workspaceRoot,
+      cwd: path.resolve(cwd || workspaceRoot || process.cwd()),
+      prompt,
+      signal,
+      jobId: String(currentJobId || '').trim(),
+      profile: codexRouterProfile(),
+      sandboxMode: codexRouterSandboxMode(),
+      approvalPolicy: codexRouterApprovalPolicy(),
+      timeoutMs: positiveInt(process.env.CHAT_SUPERVISOR_CODEX_TIMEOUT_MS || process.env.CHAT_ROUTER_CODEX_TIMEOUT_MS, 60000, { min: 5000, max: 180000 }),
+      surface: 'supervisor_router',
+      agentId: 'supervisor_router',
+      roleId: 'supervisor',
+      traceMetadata: { surface_role: 'supervisor_router', router_provider: 'codex' },
+    });
+  }
+  return await runGeminiPrompt({
+    workspaceRoot,
+    cwd: path.resolve(cwd || workspaceRoot || process.cwd()),
+    prompt,
+    signal,
+    concurrencyKey: geminiConcurrencyKey || '',
+    jobId: String(currentJobId || '').trim(),
+    model: geminiModel || '',
+    onRetry: onGeminiRetry,
+    onModelSwitch: onGeminiModelSwitch,
+    onGiveUp: onGeminiGiveUp,
+    timeoutMs: routerTimeoutMs,
+    traceMetadata: { surface_role: 'supervisor_router', timeout_ms: routerTimeoutMs, router_provider: 'gemini' },
+  });
+}
+
 export async function routeWithSupervisor(message, {
   agents = [],
   agentsCatalog = [],
@@ -1004,30 +1074,47 @@ export async function routeWithSupervisor(message, {
 
   try {
     const routerTimeoutMs = positiveInt(process.env.CHAT_SUPERVISOR_GEMINI_TIMEOUT_MS, 30000, { min: 2000, max: 60000 });
-    const r = await runGeminiPrompt({
-      workspaceRoot,
-      cwd: path.resolve(cwd || workspaceRoot || process.cwd()),
-      prompt,
-      signal,
-      concurrencyKey: geminiConcurrencyKey || "",
-      jobId: String(currentJobId || "").trim(),
-      model: geminiModel || "",
-      onRetry: onGeminiRetry,
-      onModelSwitch: onGeminiModelSwitch,
-      onGiveUp: onGeminiGiveUp,
-      timeoutMs: routerTimeoutMs,
-      traceMetadata: { surface_role: 'supervisor_router', timeout_ms: routerTimeoutMs },
-    });
-    if (!r?.ok) {
+    const providerAttempts = supervisorProviderOrder();
+    let parsed = null;
+    let lastRouterFailure = null;
+    let selectedRouterProvider = '';
+    for (const routerProvider of providerAttempts) {
+      const r = await runSupervisorRouterProvider({
+        provider: routerProvider,
+        workspaceRoot,
+        cwd,
+        prompt,
+        signal,
+        currentJobId,
+        geminiConcurrencyKey,
+        geminiModel,
+        onGeminiRetry,
+        onGeminiModelSwitch,
+        onGeminiGiveUp,
+        routerTimeoutMs,
+      });
       if (signal?.aborted) {
         const aborted = new Error("supervisor router aborted");
         aborted.code = "ECANCELLED";
         throw aborted;
       }
+      if (!r?.ok) {
+        lastRouterFailure = r;
+        continue;
+      }
+      const candidate = parseJsonObjectFromText(r.stdout || r.stderr || "");
+      if (!candidate) {
+        lastRouterFailure = r;
+        continue;
+      }
+      parsed = candidate;
+      selectedRouterProvider = routerProvider;
+      break;
+    }
+    if (!parsed) {
+      void lastRouterFailure;
       return fallback;
     }
-    const parsed = parseJsonObjectFromText(r.stdout || r.stderr || "");
-    if (!parsed) return fallback;
 
     const routerMemoryRouting = normalizeRouterMemoryRouting(parsed.memory_routing || parsed.memoryRouting || parsed.memory_plan || parsed.memoryPlan || {}, {
       classifier: 'supervisor_router_llm',
@@ -1085,8 +1172,8 @@ export async function routeWithSupervisor(message, {
     });
     return {
       reason: routeAligned.adjusted
-        ? `${normalized.reason || "supervisor route"}; route_contract_ranked_agent=${routeAligned.preferred_agent_id || ''}`
-        : (normalized.reason || "supervisor route"),
+        ? `${normalized.reason || `supervisor route${selectedRouterProvider ? ` via ${selectedRouterProvider}` : ''}`}; route_contract_ranked_agent=${routeAligned.preferred_agent_id || ''}`
+        : (normalized.reason || `supervisor route${selectedRouterProvider ? ` via ${selectedRouterProvider}` : ''}`),
       route_contract: routeAligned.heuristic?.summary || routeHeuristic.summary || undefined,
       route_contract_adjusted: routeAligned.adjusted === true,
       route_contract_preferred_agent: routeAligned.preferred_agent_id || undefined,

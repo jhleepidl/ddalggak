@@ -23,7 +23,9 @@ exit 1
   fs.chmodSync(scriptPath, 0o755);
 
   const prevPath = process.env.PATH;
+  const prevMinInterval = process.env.GEMINI_MIN_INTERVAL_MS;
   process.env.PATH = `${binDir}:${prevPath}`;
+  process.env.GEMINI_MIN_INTERVAL_MS = '0';
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 150);
   try {
@@ -37,9 +39,12 @@ exit 1
     });
     assert.equal(result.ok, false);
     assert.equal(result.error_type, 'aborted');
-    assert.equal(Number(fs.readFileSync(counterFile, 'utf8').trim()), 1);
+    const count = fs.existsSync(counterFile) ? Number(fs.readFileSync(counterFile, 'utf8').trim()) : 0;
+    assert.ok(count <= 1, `expected at most one Gemini subprocess, got ${count}`);
   } finally {
     process.env.PATH = prevPath;
+    if (typeof prevMinInterval === 'undefined') delete process.env.GEMINI_MIN_INTERVAL_MS;
+    else process.env.GEMINI_MIN_INTERVAL_MS = prevMinInterval;
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { runCommand } from "./proc.js";
 import { recordLlmTrace } from "./application/llm_trace_recorder.js";
@@ -17,8 +18,12 @@ const REQUESTED_ENTITY_NOT_FOUND_RE = /Requested entity was not found/i;
 const MODEL_NOT_FOUND_RE = /ModelNotFoundError/i;
 const GEMINI_25_MODEL_RE = /\bgemini-2\.5(?:-[a-z0-9._-]+)?\b/i;
 const MODEL_FLAG_UNSUPPORTED_RE = /(unknown|unrecognized|unexpected)\s+(option|argument|flag)[^-\n\r]*--model|unknown flag:\s*--model/i;
-const DEFAULT_GEMINI_MODEL_PRIMARY = "gemini-3-flash-preview";
-const DEFAULT_GEMINI_MODEL_FALLBACKS = "gemini-3-flash-preview,auto";
+const DEFAULT_GEMINI_MODEL_PRIMARY = "auto";
+// DdalGgak auto-pool is intentionally different from Gemini CLI's own
+// `auto`: it tries concrete models first so a model-specific 429 on Gemini 3
+// does not make the whole Gemini provider unusable. Keep CLI auto last.
+const DEFAULT_GEMINI_MODEL_POOL = "gemini-2.5-flash,gemini-2.5-pro,gemini-3.1-pro-preview,gemini-3-flash-preview,auto";
+const DEFAULT_GEMINI_MODEL_FALLBACKS = DEFAULT_GEMINI_MODEL_POOL;
 const DEFAULT_CAPACITY_MAX_RETRIES = 2;
 const DEFAULT_CAPACITY_SWITCH_AFTER = 1;
 const DEFAULT_BACKOFF_BASE_MS = 1000;
@@ -44,6 +49,7 @@ const geminiCapacityCircuit = {
   consecutiveCapacityFailures: 0,
   openUntilMs: 0,
 };
+const geminiModelCapacityCircuits = new Map();
 
 function asObject(value) {
   return value && typeof value === "object" ? value : {};
@@ -279,6 +285,30 @@ function displayModelName(modelName) {
   return clean || "auto";
 }
 
+function modelCircuitKey(modelName) {
+  const clean = normalizeModelName(modelName);
+  return clean || "auto";
+}
+
+function getGeminiModelCircuit(modelName) {
+  const key = modelCircuitKey(modelName);
+  if (!geminiModelCapacityCircuits.has(key)) {
+    geminiModelCapacityCircuits.set(key, { consecutiveCapacityFailures: 0, openUntilMs: 0 });
+  }
+  return geminiModelCapacityCircuits.get(key);
+}
+
+function isTruthyEnv(raw) {
+  return ["1", "true", "yes", "on"].includes(String(raw || "").trim().toLowerCase());
+}
+
+function splitModelList(raw = "") {
+  return String(raw || "")
+    .split(",")
+    .map((token) => normalizeModelName(token))
+    .filter(Boolean);
+}
+
 function toPositiveInt(raw, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
   const n = Number(raw);
   if (!Number.isFinite(n)) return fallback;
@@ -357,13 +387,21 @@ function getGeminiCapacityCooldownMs() {
   );
 }
 
-function buildModelCandidates(explicitModel = "") {
-  const primary = normalizeModelName(
+function shouldUseDdalggakModelPool(primaryModel = "") {
+  const mode = String(process.env.GEMINI_MODEL_AUTO_MODE || process.env.GEMINI_AUTO_MODE || "pool").trim().toLowerCase();
+  if (["cli", "native", "gemini", "off", "false", "0"].includes(mode)) return false;
+  const primary = normalizeModelName(primaryModel);
+  return !primary || primary === "auto";
+}
+
+export function resolveGeminiModelCandidates(explicitModel = "") {
+  const rawPrimary = String(
     explicitModel
     || process.env.GEMINI_MODEL_PRIMARY
     || process.env.GEMINI_MODEL
     || DEFAULT_GEMINI_MODEL_PRIMARY
-  );
+  ).trim();
+  const primary = normalizeModelName(rawPrimary);
   const fallbackRaw = String(process.env.GEMINI_MODEL_FALLBACKS || DEFAULT_GEMINI_MODEL_FALLBACKS);
   const out = [];
   const seen = new Set();
@@ -377,8 +415,14 @@ function buildModelCandidates(explicitModel = "") {
     out.push(model);
   };
 
-  pushModel(primary);
-  for (const token of fallbackRaw.split(",")) pushModel(token);
+  if (shouldUseDdalggakModelPool(primary)) {
+    const poolRaw = String(process.env.GEMINI_MODEL_POOL || DEFAULT_GEMINI_MODEL_POOL);
+    for (const token of splitModelList(poolRaw)) pushModel(token);
+  } else {
+    pushModel(primary);
+  }
+
+  for (const token of splitModelList(fallbackRaw)) pushModel(token);
   if (out.length === 0) out.push("auto");
   return out;
 }
@@ -495,6 +539,108 @@ function envValueOrDefault(key, fallback) {
   if (typeof raw === "undefined") return String(fallback);
   const value = String(raw).trim();
   return value || String(fallback);
+}
+
+function resolveGeminiContextMode(raw = "") {
+  const value = String(raw || process.env.GEMINI_CONTEXT_MODE || process.env.GEMINI_CLI_CONTEXT_MODE || "isolated").trim().toLowerCase();
+  if (["workspace", "project", "repo", "native"].includes(value)) return "workspace";
+  if (["isolated", "isolate", "minimal", "prompt", "prompt_only", "prompt-only", "sandbox"].includes(value)) return "isolated";
+  return "isolated";
+}
+
+function sanitizeSurfaceForPath(raw = "") {
+  const clean = String(raw || "gemini_prompt").replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "");
+  return clean || "gemini_prompt";
+}
+
+function pruneOldGeminiIsolatedWorkspaces(baseDir) {
+  const maxAgeMs = toPositiveInt(process.env.GEMINI_CONTEXT_TEMP_MAX_AGE_MS, 6 * 60 * 60 * 1000, { min: 60_000, max: 7 * 24 * 60 * 60 * 1000 });
+  const maxDirs = toPositiveInt(process.env.GEMINI_CONTEXT_TEMP_MAX_DIRS, 64, { min: 4, max: 1024 });
+  let rows = [];
+  try {
+    rows = fs.readdirSync(baseDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => {
+        const fullPath = path.join(baseDir, entry.name);
+        let mtimeMs = 0;
+        try { mtimeMs = fs.statSync(fullPath).mtimeMs; } catch {}
+        return { fullPath, mtimeMs };
+      })
+      .sort((a, b) => Number(b.mtimeMs || 0) - Number(a.mtimeMs || 0));
+  } catch {
+    return;
+  }
+  const now = Date.now();
+  rows.forEach((row, index) => {
+    if (index < maxDirs && now - Number(row.mtimeMs || 0) <= maxAgeMs) return;
+    try { fs.rmSync(row.fullPath, { recursive: true, force: true }); } catch {}
+  });
+}
+
+function findRunRootFromWorkspacePath(originalCwd = "", jobId = "") {
+  const cwd = path.resolve(String(originalCwd || "").trim() || process.cwd());
+  const cleanJob = String(jobId || "").trim();
+  const parts = cwd.split(path.sep);
+
+  if (cleanJob) {
+    for (let i = parts.length - 1; i >= 0; i -= 1) {
+      if (parts[i] !== cleanJob) continue;
+      const candidate = parts.slice(0, i + 1).join(path.sep) || path.sep;
+      if (path.basename(candidate) === cleanJob) return candidate;
+    }
+  }
+
+  for (let i = parts.length - 1; i >= 0; i -= 1) {
+    if (parts[i] !== "workspace") continue;
+    const candidate = parts.slice(0, i).join(path.sep) || path.sep;
+    if (candidate && candidate !== cwd) return candidate;
+  }
+
+  if (path.basename(cwd) === "workspace") return path.dirname(cwd);
+  return "";
+}
+
+function resolveGeminiIsolatedWorkspaceBase({ jobId = "", originalCwd = "" } = {}) {
+  const explicit = String(process.env.GEMINI_CONTEXT_TEMP_DIR || process.env.GEMINI_CLI_CONTEXT_TEMP_DIR || "").trim();
+  if (explicit) return path.resolve(explicit);
+
+  const scope = String(process.env.GEMINI_CONTEXT_TEMP_SCOPE || "run").trim().toLowerCase();
+  if (!["tmp", "temp", "os_tmp", "os-tmp"].includes(scope)) {
+    const runRoot = findRunRootFromWorkspacePath(originalCwd, jobId);
+    if (runRoot) {
+      return path.join(runRoot, "local_memory", "gemini_cli_contexts");
+    }
+  }
+
+  return path.join(os.tmpdir(), "ddalggak-gemini-cli");
+}
+
+function makeGeminiIsolatedWorkspace({ jobId = "", surface = "", originalCwd = "" } = {}) {
+  const base = resolveGeminiIsolatedWorkspaceBase({ jobId, originalCwd });
+  fs.mkdirSync(base, { recursive: true });
+  try { fs.writeFileSync(path.join(base, ".gitignore"), "*\n!.gitignore\n", "utf8"); } catch {}
+  pruneOldGeminiIsolatedWorkspaces(base);
+  const safeJob = sanitizeSurfaceForPath(jobId || "noj").slice(0, 80);
+  const safeSurface = sanitizeSurfaceForPath(surface || "prompt").slice(0, 80);
+  const dir = fs.mkdtempSync(path.join(base, `${safeJob}-${safeSurface}-`));
+  fs.mkdirSync(path.join(dir, ".gemini"), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "GEMINI.md"),
+    [
+      "# DdalGgak isolated Gemini CLI context",
+      "Use only the prompt text and explicit file/artifact excerpts provided by DdalGgak.",
+      "Do not infer project state from this temporary directory.",
+      originalCwd ? `Original workspace path for audit only: ${originalCwd}` : "",
+      "",
+    ].filter(Boolean).join("\n"),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(dir, ".gemini", "settings.json"),
+    JSON.stringify(enforceWorkspaceContextSettings(defaultGeminiWorkspaceSettings()), null, 2) + "\n",
+    "utf8"
+  );
+  return dir;
 }
 
 function buildGeminiCliRuntimeEnv({ model = "", extraEnv = {} } = {}) {
@@ -833,6 +979,17 @@ function attachGeminiTrace({ result, jobId, surface, agentId, roleId, model, pro
   return trace ? { ...result, llm_trace_id: trace.trace_id, llm_trace_dir: trace.trace_dir } : result;
 }
 
+function cleanJobIdForContext(jobId = "", concurrencyKey = "") {
+  const direct = String(jobId || "").trim();
+  if (direct) return direct;
+  const key = String(concurrencyKey || "").trim();
+  return key.startsWith("job:") ? key.slice(4).trim() : "";
+}
+
+function optionsContextModeFromEnv(extraEnv = {}) {
+  return String(asObject(extraEnv).GEMINI_CONTEXT_MODE || asObject(extraEnv).GEMINI_CLI_CONTEXT_MODE || "").trim();
+}
+
 async function runGeminiPromptInternal({
   workspaceRoot,
   prompt,
@@ -863,9 +1020,19 @@ async function runGeminiPromptInternal({
     : (Number(process.env.GEMINI_TIMEOUT_MS || 0) > 0
       ? Number(process.env.GEMINI_TIMEOUT_MS)
       : 4 * 60 * 1000);
-  const commandCwd = path.resolve(String(cwd || workspaceRoot || process.cwd()).trim() || process.cwd());
+  const originalWorkspacePath = path.resolve(String(cwd || workspaceRoot || process.cwd()).trim() || process.cwd());
+  const contextMode = resolveGeminiContextMode(optionsContextModeFromEnv(extraEnv));
+  const commandCwd = contextMode === "isolated"
+    ? makeGeminiIsolatedWorkspace({
+      jobId: cleanJobIdForContext(jobId, concurrencyKey),
+      surface: workspaceSettingsPatch?.surface || extraEnv?.DDALGGAK_GEMINI_SURFACE || "gemini_prompt",
+      originalCwd: originalWorkspacePath,
+    })
+    : originalWorkspacePath;
   const workspacePath = commandCwd;
-  ensureGeminiWorkspaceConfig(workspacePath, { overwritePolicy: settingsOverwrite, patchSettings: workspaceSettingsPatch });
+  if (contextMode !== "isolated") {
+    ensureGeminiWorkspaceConfig(workspacePath, { overwritePolicy: settingsOverwrite, patchSettings: workspaceSettingsPatch });
+  }
   const cleanJobId = String(jobId || "").trim() || (
     String(concurrencyKey || "").startsWith("job:")
       ? String(concurrencyKey || "").slice(4).trim()
@@ -873,11 +1040,13 @@ async function runGeminiPromptInternal({
   );
   const baseEnv = {
     GEMINI_WORKSPACE_PATH: workspacePath,
+    DDALGGAK_ORIGINAL_WORKSPACE_PATH: originalWorkspacePath,
+    DDALGGAK_GEMINI_CONTEXT_MODE: contextMode,
     ...asObject(extraEnv),
   };
   void concurrencyKey;
   const requestedMode = VALID_APPROVAL_MODES.has(String(approvalMode || "").trim()) ? String(approvalMode || "").trim() : resolveApprovalMode();
-  const modelCandidates = buildModelCandidates(model);
+  const modelCandidates = resolveGeminiModelCandidates(model);
   const maxRetries = getCapacityMaxRetries();
   const switchAfter = getCapacitySwitchAfter();
   const retryTimeboxMs = getGeminiRetryTimeboxMs();
@@ -909,13 +1078,24 @@ async function runGeminiPromptInternal({
     }
 
     const nowMs = Date.now();
-    if (Number(geminiCapacityCircuit.openUntilMs || 0) > 0 && Number(geminiCapacityCircuit.openUntilMs || 0) <= nowMs) {
-      geminiCapacityCircuit.openUntilMs = 0;
-      geminiCapacityCircuit.consecutiveCapacityFailures = 0;
+    const currentCircuit = getGeminiModelCircuit(modelCandidates[modelIndex] || "auto");
+    if (Number(currentCircuit.openUntilMs || 0) > 0 && Number(currentCircuit.openUntilMs || 0) <= nowMs) {
+      currentCircuit.openUntilMs = 0;
+      currentCircuit.consecutiveCapacityFailures = 0;
     }
-    if (Number(geminiCapacityCircuit.openUntilMs || 0) > nowMs) {
-      const remainingMs = Math.max(0, Math.floor(Number(geminiCapacityCircuit.openUntilMs || 0) - nowMs));
-      const circuitMsg = `[gemini] capacity circuit open; retry after ${remainingMs}ms`;
+    if (Number(currentCircuit.openUntilMs || 0) > nowMs) {
+      const remainingMs = Math.max(0, Math.floor(Number(currentCircuit.openUntilMs || 0) - nowMs));
+      const currentKey = normalizeModelName(modelCandidates[modelIndex] || "auto").toLowerCase();
+      if (currentKey) unavailableModels.add(currentKey);
+      const nextModelIndex = pickNextAvailableModelIndex(modelIndex);
+      if (nextModelIndex >= 0) {
+        const fromModel = modelCandidates[modelIndex] || "auto";
+        const toModel = modelCandidates[nextModelIndex] || "auto";
+        notes.push(`[gemini] capacity circuit open for ${displayModelName(fromModel)}; switching to ${displayModelName(toModel)} (${remainingMs}ms remaining)`);
+        modelIndex = nextModelIndex;
+        continue;
+      }
+      const circuitMsg = `[gemini] capacity circuit open for ${displayModelName(modelCandidates[modelIndex] || "auto")}; retry after ${remainingMs}ms`;
       await safeHook(onGiveUp, {
         reason: "capacity_circuit_open",
         retryCount,
@@ -942,7 +1122,7 @@ async function runGeminiPromptInternal({
 
     const currentModelName = modelCandidates[modelIndex] || "auto";
     appendGeminiDebugLog(
-      `[gemini] job=${cleanJobId || "-"} cwd=${workspacePath} model=${displayModelName(currentModelName)} retry=${retryCount} file_storage=${envValueOrDefault("GEMINI_FORCE_FILE_STORAGE", DEFAULT_GEMINI_FORCE_FILE_STORAGE)} trust_workspace=${envValueOrDefault("GEMINI_CLI_TRUST_WORKSPACE", DEFAULT_GEMINI_CLI_TRUST_WORKSPACE)}`
+      `[gemini] job=${cleanJobId || "-"} cwd=${workspacePath} original_cwd=${originalWorkspacePath} context_mode=${contextMode} model=${displayModelName(currentModelName)} retry=${retryCount} file_storage=${envValueOrDefault("GEMINI_FORCE_FILE_STORAGE", DEFAULT_GEMINI_FORCE_FILE_STORAGE)} trust_workspace=${envValueOrDefault("GEMINI_CLI_TRUST_WORKSPACE", DEFAULT_GEMINI_CLI_TRUST_WORKSPACE)}`
     );
     const result = await withGeminiGlobalLimiter(async () => {
       return await invokeGeminiWithPlanFallback({
@@ -964,6 +1144,9 @@ async function runGeminiPromptInternal({
       });
     }
     if (result.ok) {
+      const successCircuit = getGeminiModelCircuit(currentModelName);
+      successCircuit.consecutiveCapacityFailures = 0;
+      successCircuit.openUntilMs = 0;
       geminiCapacityCircuit.consecutiveCapacityFailures = 0;
       geminiCapacityCircuit.openUntilMs = 0;
       return withGeminiMeta(result, {
@@ -1009,14 +1192,33 @@ async function runGeminiPromptInternal({
       });
     }
 
-    geminiCapacityCircuit.consecutiveCapacityFailures = Math.max(
+    const capacityCircuit = getGeminiModelCircuit(currentModelName);
+    capacityCircuit.consecutiveCapacityFailures = Math.max(
       0,
-      Number(geminiCapacityCircuit.consecutiveCapacityFailures || 0)
+      Number(capacityCircuit.consecutiveCapacityFailures || 0)
     ) + 1;
-    if (geminiCapacityCircuit.consecutiveCapacityFailures >= 3) {
-      geminiCapacityCircuit.openUntilMs = Date.now() + circuitCooldownMs;
-      const circuitMsg = `[gemini] capacity circuit opened for ${circuitCooldownMs}ms`;
+    if (capacityCircuit.consecutiveCapacityFailures >= 2) {
+      capacityCircuit.openUntilMs = Date.now() + circuitCooldownMs;
+      const currentKey = normalizeModelName(currentModelName).toLowerCase();
+      if (currentKey) unavailableModels.add(currentKey);
+      const nextModelIndex = pickNextAvailableModelIndex(modelIndex);
+      const circuitMsg = `[gemini] capacity circuit opened for ${displayModelName(currentModelName)} for ${circuitCooldownMs}ms`;
       notes.push(circuitMsg);
+      if (nextModelIndex >= 0) {
+        const toModel = modelCandidates[nextModelIndex] || "auto";
+        notes.push(`[gemini] capacity_exhausted -> model switch: ${displayModelName(currentModelName)} -> ${displayModelName(toModel)}`);
+        await safeHook(onModelSwitch, {
+          fromModel: displayModelName(currentModelName),
+          toModel: displayModelName(toModel),
+          retryCount: retryCount + 1,
+          maxRetries,
+          errorType,
+        });
+        modelIndex = nextModelIndex;
+        consecutiveCapacityErrors = 0;
+        retryCount += 1;
+        continue;
+      }
       await safeHook(onGiveUp, {
         reason: "capacity_circuit_opened",
         retryCount,

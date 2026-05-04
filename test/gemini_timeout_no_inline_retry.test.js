@@ -23,8 +23,10 @@ exit 1
   fs.chmodSync(scriptPath, 0o755);
 
   const prevPath = process.env.PATH;
+  const prevMinInterval = process.env.GEMINI_MIN_INTERVAL_MS;
   const prevInline = process.env.GEMINI_INLINE_RETRY_ON_STDIN_FAILURE;
   process.env.PATH = `${binDir}:${prevPath}`;
+  process.env.GEMINI_MIN_INTERVAL_MS = '0';
   delete process.env.GEMINI_INLINE_RETRY_ON_STDIN_FAILURE;
   try {
     const result = await runGeminiPrompt({
@@ -44,6 +46,8 @@ exit 1
     assert.ok(Number(result.wallDurationMs) < 3500);
   } finally {
     process.env.PATH = prevPath;
+    if (typeof prevMinInterval === 'undefined') delete process.env.GEMINI_MIN_INTERVAL_MS;
+    else process.env.GEMINI_MIN_INTERVAL_MS = prevMinInterval;
     if (typeof prevInline === 'undefined') delete process.env.GEMINI_INLINE_RETRY_ON_STDIN_FAILURE;
     else process.env.GEMINI_INLINE_RETRY_ON_STDIN_FAILURE = prevInline;
     fs.rmSync(tempDir, { recursive: true, force: true });
