@@ -1,5 +1,8 @@
 const ORDER = [
   'focus',
+  'chat_memory_anchor',
+  'memory_topology',
+  'memory_demand',
   'job_constraints',
   'current_task_packet',
   'active_directives',
@@ -39,6 +42,9 @@ function labelForKey(key = '') {
   const cleanKey = normalizeKey(key);
   switch (cleanKey) {
     case 'focus': return 'FOCUS';
+    case 'chat_memory_anchor': return 'CHAT MEMORY ANCHOR';
+    case 'memory_topology': return 'MEMORY TOPOLOGY';
+    case 'memory_demand': return 'MEMORY DEMAND CONTEXT';
     case 'job_constraints': return 'JOB CONSTRAINTS';
     case 'current_task_packet': return 'CURRENT TASK PACKET';
     case 'active_directives': return 'ACTIVE DIRECTIVES';

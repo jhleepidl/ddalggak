@@ -179,6 +179,7 @@ import { summarizeProviderInteractionCapabilities } from "./provider_interaction
 import { summarizeRuntimeCheckpointRef, writeRuntimeCheckpointBundle } from "./runtime_checkpointing.js";
 import { appendPromptTelemetry, estimateTextTokens as estimatePromptTelemetryTokens } from "./prompt_telemetry.js";
 import { readIterationDelta, readRoleSummary, updateRoleSummary } from "./summary_memory.js";
+import { getAgentMemoryGrant, loadMemoryTopology } from "./memory_topology.js";
 import { scoreTaskAutonomy, inferTypedMemoryNeeds } from "./autonomy_policy.js";
 
 import * as runtimeState from "./telegram_runtime_state.js";
@@ -708,6 +709,10 @@ function buildAgentKnowledgeBaseBlock(jobId, { provider = "", roleId = "", agent
   try {
     const profile = safeLoadTrackingProfile(jobId);
     if (!profile) return "";
+    const memoryTopology = loadMemoryTopology({ jobDir: safeRunDir(jobId) });
+    const memoryGrant = memoryTopology
+      ? getAgentMemoryGrant(memoryTopology, { agentId, roleId, provider })
+      : null;
     return buildAgentKnowledgeBaseGuidance({
       profile,
       sharedDir: safeRunSharedDir(jobId),
@@ -715,6 +720,8 @@ function buildAgentKnowledgeBaseBlock(jobId, { provider = "", roleId = "", agent
       roleId,
       agentId,
       detailLevel,
+      memoryTopology,
+      memoryGrant,
     });
   } catch {
     return "";

@@ -333,6 +333,28 @@ function formatDocBullet(doc = {}, { includeAliases = true } = {}) {
   return `- ${doc.file_name} (slot=${doc.doc_id}): ${doc.purpose}${aliases}`;
 }
 
+
+function formatTopologyGrantLines({ memoryTopology = null, memoryGrant = null } = {}) {
+  const topology = memoryTopology && typeof memoryTopology === 'object' ? memoryTopology : null;
+  if (!topology) return [];
+  const grant = memoryGrant && typeof memoryGrant === 'object' ? memoryGrant : {};
+  const read = asArray(grant.read).map((entry) => cleanText(entry)).filter(Boolean).join(', ') || '(none)';
+  const write = asArray(grant.write).map((entry) => cleanText(entry)).filter(Boolean).join(', ') || '(none)';
+  const mode = cleanText(topology.mode || 'compact_single', { lower: true }) || 'compact_single';
+  const stress = Number(topology?.stress?.score || 0);
+  return [
+    '[ADAPTIVE MEMORY TOPOLOGY]',
+    `mode=${mode}; stress=${Number.isFinite(stress) ? stress.toFixed(2) : '0.00'}`,
+    grant.role ? `role_lens=${grant.role}` : '',
+    `granted_read_surfaces=${read}`,
+    `granted_write_surfaces=${write}`,
+    grant.write_mode ? `write_mode=${grant.write_mode}` : '',
+    '- 이 topology grant가 역할별 기본 KB surface 목록보다 우선한다.',
+    '- compact_single/ephemeral 모드에서는 새 role별 memory 파일을 만들지 말고 shared/core memory를 우선한다.',
+    '- team_scoped 이상에서만 surface steward 역할을 강하게 적용한다.',
+  ].filter(Boolean);
+}
+
 export function buildAgentKnowledgeBaseGuidance({
   profile = null,
   sharedDir = '',
@@ -340,6 +362,8 @@ export function buildAgentKnowledgeBaseGuidance({
   roleId = '',
   agentId = '',
   detailLevel = 'standard',
+  memoryTopology = null,
+  memoryGrant = null,
 } = {}) {
   const normalized = normalizeKnowledgeBaseProfile(profile || {});
   const access = recommendKnowledgeAccess({ profile: normalized, provider, roleId });
@@ -352,12 +376,15 @@ export function buildAgentKnowledgeBaseGuidance({
   const cleanDetailLevel = cleanText(detailLevel, { lower: true });
   const compactMode = cleanDetailLevel === 'compact';
   const minimalMode = cleanDetailLevel === 'minimal';
+  const topologyLines = formatTopologyGrantLines({ memoryTopology, memoryGrant });
   const readDocs = dedupeDocs(access.read_docs).map((doc) => ({ ...doc, file_name: concretePath(doc.file_name) }));
   const writeDocs = dedupeDocs(access.write_docs).map((doc) => ({ ...doc, file_name: concretePath(doc.file_name) }));
   const publishDocs = dedupeDocs(access.publish_docs).map((doc) => ({ ...doc, file_name: concretePath(doc.file_name) }));
   if (minimalMode) {
     return [
       '[KB MEMORY RULES]',
+      ...topologyLines,
+      topologyLines.length ? '' : '',
       `profile=${normalized.profile_id}`,
       agentId ? `agent=${agentId}` : '',
       roleId ? `role=${roleId}` : '',
@@ -375,6 +402,8 @@ export function buildAgentKnowledgeBaseGuidance({
     agentId ? `agent=${agentId}` : '',
     roleId ? `role=${roleId}` : '',
     provider ? `provider=${provider}` : '',
+    ...topologyLines,
+    topologyLines.length ? '' : '',
     '규칙:',
     '- concrete tracking file_name만 사용하라. 임의의 tracking 파일을 만들지 마라.',
     '- 목록에 없는 tracking 파일명을 추측하거나 invent 하지 마라.',

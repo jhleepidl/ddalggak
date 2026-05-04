@@ -1,4 +1,8 @@
 import { clip } from "../../textutil.js";
+import { planMemoryTopology } from "../../application/memory_topology.js";
+import { buildChatMemoryAnchorPromptBlock, updateChatMemoryAnchor } from "../../application/chat_memory_anchor.js";
+import { buildMemoryDemandContext } from "../../application/memory_demand_context.js";
+import { syncMemoryTopologyToGoc } from "../../application/goc_memory_topology_sync.js";
 import { loadCurrentTaskPacket, renderTaskPacket, updateCurrentTaskPacket } from "../../application/task_packet.js";
 import {
   normalizeScopeHintCore as normalizeLensSpecDomain,
@@ -172,6 +176,25 @@ export class GocContextEngine extends ContextEngineBase {
     return renderTaskPacket(packet, { roleId: normalized.roleId, maxChars: 1600 });
   }
 
+  _memoryDemand(input = {}, reason = 'goc_preflight') {
+    const normalized = input && typeof input === 'object' ? input : {};
+    const jobDir = this._jobDir(normalized.jobId || '');
+    if (!jobDir) return { text: '', sources: [], totalItems: 0, demand: {} };
+    return buildMemoryDemandContext({
+      jobDir,
+      userText: normalized.userMessageText || normalized.goal || '',
+      goal: normalized.goal || '',
+      roleId: normalized.roleId || normalized.role_id || '',
+      agentId: normalized.agentId || '',
+      runMeta: normalized.runMeta || {},
+      scopeHint: normalized.lensSpec || normalized.lens || null,
+      routerMemoryPlan: normalized.runMeta?.memoryRouting || normalized.runMeta?.memory_routing || null,
+      persist: true,
+      reason,
+      maxChars: clamp(process.env.MEMORY_DEMAND_CONTEXT_MAX_CHARS, 900, 6000, 2400),
+    });
+  }
+
   setRuntime(runtime = null) {
     this.runtime = runtime && typeof runtime === "object" ? runtime : {};
     this.sharedPolicy = normalizePolicy(this.runtime?.jobConfig || {});
@@ -338,20 +361,71 @@ export class GocContextEngine extends ContextEngineBase {
 
   async onRunEnd(input = {}) {
     const row = input && typeof input === 'object' ? input : {};
-    const jobDir = this._jobDir(row.jobId || '');
+    const jobId = String(row.jobId || '').trim();
+    const jobDir = this._jobDir(jobId);
+    const runMeta = asObject(row.runMeta);
+    const threadId = String(row.threadId || runMeta.threadId || runMeta.thread_id || this.runtime?.map?.threadId || '').trim();
+    const runId = String(runMeta.runId || runMeta.run_id || '').trim();
+    let topology = null;
+    let anchor = null;
     if (jobDir && String(row.lastUserText || '').trim()) {
-      updateCurrentTaskPacket({ jobDir, currentUserText: row.lastUserText, runMeta: row.runMeta || {}, persist: true });
+      updateCurrentTaskPacket({ jobDir, currentUserText: row.lastUserText, runMeta, persist: true });
     }
-    return await this.rebuildSharedContext(input, { compile: false });
+    if (jobDir) {
+      try {
+        topology = planMemoryTopology({
+          jobDir,
+          runMeta,
+          userText: row.lastUserText || '',
+          persist: true,
+          eventReason: 'goc_run_end',
+        });
+      } catch {}
+      try {
+        anchor = updateChatMemoryAnchor({
+          jobDir,
+          jobId,
+          chatId: row.chatId || '',
+          threadId,
+          runId,
+          topology,
+          reason: 'run_end',
+          userText: row.lastUserText || '',
+          assistantText: row.lastAssistantText || '',
+        });
+      } catch {}
+      await syncMemoryTopologyToGoc({
+        client: this.client,
+        threadId,
+        jobDir,
+        jobId,
+        runId,
+        topology,
+        anchor,
+        source: 'ddalggak:goc_context_engine',
+        logger: (line) => this.log(line),
+      }).catch(() => null);
+    }
+    const rebuilt = await this.rebuildSharedContext(input, { compile: false });
+    return { ...asObject(rebuilt), memoryTopology: topology, chatMemoryAnchor: anchor };
   }
 
   async prepareRouterContext(input = {}) {
     const normalized = this.normalizeInput(input, { stepKind: "router", agentId: "router" });
     const taskPacketText = this._taskPacketBlock(normalized, { refresh: !!String(normalized.userMessageText || '').trim() });
+    const memoryDemand = this._memoryDemand(normalized, 'goc_router_preflight');
+    const memoryDemandText = memoryDemand?.text || '';
+    let chatMemoryAnchorText = '';
+    try {
+      const jobDir = this._jobDir(normalized.jobId || '');
+      const topology = jobDir ? planMemoryTopology({ jobDir, runMeta: normalized.runMeta || {}, userText: normalized.userMessageText || normalized.goal || '', persist: true, eventReason: 'goc_router_context' }) : null;
+      const anchor = jobDir ? updateChatMemoryAnchor({ jobDir, jobId: normalized.jobId, chatId: normalized.chatId, threadId: normalized.runMeta?.threadId || normalized.runMeta?.thread_id || '', runId: normalized.runMeta?.runId || normalized.runMeta?.run_id || '', topology, reason: 'router_context', userText: normalized.userMessageText || normalized.goal || '' }) : null;
+      chatMemoryAnchorText = anchor ? buildChatMemoryAnchorPromptBlock(anchor) : '';
+    } catch {}
     const shared = this._resolveSharedRef(normalized);
     if (!this.client || !shared.sharedContextSetId) {
       return {
-        contextText: buildContextEnvelope([{ key: 'current_task_packet', raw: taskPacketText }]).text,
+        contextText: buildContextEnvelope([{ key: 'chat_memory_anchor', raw: chatMemoryAnchorText }, { key: 'memory_demand', raw: memoryDemandText }, { key: 'current_task_packet', raw: taskPacketText }]).text,
         meta: {
           mode: "goc",
           budgetTokens: normalized.budgetTokens,
@@ -374,6 +448,8 @@ export class GocContextEngine extends ContextEngineBase {
     );
     const typeBreakdown = asObject(this.runtime?.sharedActiveTypeBreakdown || compiled.typeBreakdown);
     const contextText = buildContextEnvelope([
+      { key: 'chat_memory_anchor', raw: chatMemoryAnchorText },
+      { key: 'memory_demand', raw: memoryDemandText },
       { key: 'current_task_packet', raw: taskPacketText },
       { key: 'raw', raw: compiled.text },
     ]).text;
@@ -399,6 +475,12 @@ export class GocContextEngine extends ContextEngineBase {
         contextActiveNodeIds: activeNodeIds,
         activeNodeIdsCount: activeNodeIds.length,
         typeBreakdown,
+        memoryDemandReasons: memoryDemand?.demand?.reasons || undefined,
+        memoryDemandSources: memoryDemand?.sources || undefined,
+        memoryDemandItems: memoryDemand?.totalItems || 0,
+        memoryDemandRetrievalMode: memoryDemand?.demand?.routerMemoryPlan?.classifier ? 'router_llm_preflight' : 'runtime_preflight',
+        memoryDemandClassifier: memoryDemand?.demand?.routerMemoryPlan?.classifier || undefined,
+        memoryDemandConfidence: memoryDemand?.demand?.routerMemoryPlan?.confidence,
         lensSpec: { mode: "shared_only", budget_tokens: normalized.budgetTokens },
         lensAddedCount: 0,
         lensRemovedCount: 0,
@@ -409,10 +491,19 @@ export class GocContextEngine extends ContextEngineBase {
   async prepareStepContext(input = {}) {
     const normalized = this.normalizeInput(input, { stepKind: "agent" });
     const taskPacketText = this._taskPacketBlock(normalized, { refresh: false });
+    const memoryDemand = this._memoryDemand(normalized, 'goc_agent_preflight');
+    const memoryDemandText = memoryDemand?.text || '';
+    let chatMemoryAnchorText = '';
+    try {
+      const jobDir = this._jobDir(normalized.jobId || '');
+      const topology = jobDir ? planMemoryTopology({ jobDir, runMeta: normalized.runMeta || {}, userText: normalized.userMessageText || normalized.goal || '', roleId: normalized.roleId, agentId: normalized.agentId, provider: normalized.provider || '', persist: true, eventReason: 'goc_agent_context' }) : null;
+      const anchor = jobDir ? updateChatMemoryAnchor({ jobDir, jobId: normalized.jobId, chatId: normalized.chatId, threadId: normalized.runMeta?.threadId || normalized.runMeta?.thread_id || '', runId: normalized.runMeta?.runId || normalized.runMeta?.run_id || '', topology, reason: 'agent_context', userText: normalized.userMessageText || normalized.goal || '' }) : null;
+      chatMemoryAnchorText = anchor ? buildChatMemoryAnchorPromptBlock(anchor) : '';
+    } catch {}
     const shared = this._resolveSharedRef(normalized);
     if (!this.client || !shared.sharedContextSetId) {
       return {
-        contextText: buildContextEnvelope([{ key: 'current_task_packet', raw: taskPacketText }]).text,
+        contextText: buildContextEnvelope([{ key: 'chat_memory_anchor', raw: chatMemoryAnchorText }, { key: 'memory_demand', raw: memoryDemandText }, { key: 'current_task_packet', raw: taskPacketText }]).text,
         meta: {
           mode: "goc",
           budgetTokens: normalized.budgetTokens,
@@ -486,10 +577,14 @@ export class GocContextEngine extends ContextEngineBase {
     const lensCompiled = await this._compileWithBudget(lensContextSetId, lensSpec.budget_tokens, { includeMeta: true });
     const contextText = lensContextSetId === shared.sharedContextSetId
       ? buildContextEnvelope([
+        { key: 'chat_memory_anchor', raw: chatMemoryAnchorText },
+        { key: 'memory_demand', raw: memoryDemandText },
         { key: 'current_task_packet', raw: taskPacketText },
         { key: 'raw', raw: lensCompiled.text },
       ]).text
       : buildContextEnvelope([
+        { key: 'chat_memory_anchor', raw: chatMemoryAnchorText },
+        { key: 'memory_demand', raw: memoryDemandText },
         { key: 'current_task_packet', raw: taskPacketText },
         { key: 'shared_summary', body: clip(sharedCompiled.text || "", 2400) },
         { key: 'lens_context', body: lensCompiled.text || "" },
@@ -530,6 +625,12 @@ export class GocContextEngine extends ContextEngineBase {
         contextActiveNodeIds: activeNodeIds,
         activeNodeIdsCount: activeNodeIds.length,
         typeBreakdown,
+        memoryDemandReasons: memoryDemand?.demand?.reasons || undefined,
+        memoryDemandSources: memoryDemand?.sources || undefined,
+        memoryDemandItems: memoryDemand?.totalItems || 0,
+        memoryDemandRetrievalMode: memoryDemand?.demand?.routerMemoryPlan?.classifier ? 'router_llm_preflight' : 'runtime_preflight',
+        memoryDemandClassifier: memoryDemand?.demand?.routerMemoryPlan?.classifier || undefined,
+        memoryDemandConfidence: memoryDemand?.demand?.routerMemoryPlan?.confidence,
         lensSpec,
         lensAddedCount,
         lensRemovedCount,

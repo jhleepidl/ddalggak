@@ -1,4 +1,5 @@
 import { normalizeNodeIds } from "../shared/normalize.js";
+import { normalizeRouterMemoryRouting } from "../application/router_memory_plan.js";
 
 export const SCOPE_HINT_MODES = ["shared_only", "unfold_query", "add_nodes", "remove_nodes"];
 
@@ -25,6 +26,7 @@ export function normalizeScopeHintCore(rawScope, { fallbackBudget = 1200 } = {})
       .filter(Boolean)
       .slice(0, 16)
     : [];
+  const memoryDemand = normalizeRouterMemoryRouting(row.memory_demand || row.memoryDemand || row.memory_routing || row.memoryRouting || {});
 
   return {
     mode,
@@ -41,6 +43,7 @@ export function normalizeScopeHintCore(rawScope, { fallbackBudget = 1200 } = {})
     max_closure_nodes: Number.isFinite(maxClosureRaw)
       ? Math.max(10, Math.min(2000, Math.floor(maxClosureRaw)))
       : 180,
+    memory_demand: Object.keys(memoryDemand).length > 0 ? memoryDemand : undefined,
   };
 }
 

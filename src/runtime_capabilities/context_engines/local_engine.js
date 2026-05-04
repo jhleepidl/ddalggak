@@ -2,6 +2,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { clip } from "../../textutil.js";
 import { readIterationDelta, readRoleSummary } from "../../application/summary_memory.js";
+import {
+  buildMemoryTopologyPromptBlock,
+  getAgentMemoryGrant,
+  planMemoryTopology,
+  shouldIncludeRoleLocalMemory,
+} from "../../application/memory_topology.js";
+import { runIdleMemoryMaintenance } from "../../application/idle_compaction.js";
+import { buildChatMemoryAnchorPromptBlock, loadChatMemoryAnchor, updateChatMemoryAnchor } from "../../application/chat_memory_anchor.js";
+import { buildMemoryDemandContext } from "../../application/memory_demand_context.js";
 import { loadCurrentTaskPacket, renderTaskPacket, updateCurrentTaskPacket } from "../../application/task_packet.js";
 import { ContextEngineBase } from "./base.js";
 import { buildContextEnvelope } from '../context_envelope.js';
@@ -552,9 +561,15 @@ export class LocalContextEngine extends ContextEngineBase {
     turns = [],
     toolSnippets = [],
     includeToolSnippets = true,
+    memoryTopologyText = "",
+    chatMemoryAnchorText = "",
+    memoryDemandText = "",
   } = {}) {
     const sections = [];
     if (focusHeader) sections.push(`[FOCUS]\n${focusHeader}`);
+    if (chatMemoryAnchorText) sections.push(chatMemoryAnchorText);
+    if (memoryTopologyText) sections.push(memoryTopologyText);
+    if (memoryDemandText) sections.push(memoryDemandText);
     if (constraintsText) sections.push(`[JOB CONSTRAINTS]\n${constraintsText}`);
     if (taskPacketText) sections.push(taskPacketText);
     if (activeDirectivesText) sections.push(`[ACTIVE DIRECTIVES]\n${activeDirectivesText}`);
@@ -581,6 +596,9 @@ export class LocalContextEngine extends ContextEngineBase {
     deltaSummaryText = "",
     turns = [],
     toolSnippets = [],
+    memoryTopologyText = "",
+    chatMemoryAnchorText = "",
+    memoryDemandText = "",
   } = {}) {
     const maxChars = this.maxCharsFromBudget(budgetTokens);
     const workingTurns = Array.isArray(turns) ? [...turns] : [];
@@ -602,6 +620,9 @@ export class LocalContextEngine extends ContextEngineBase {
       turns: workingTurns,
       toolSnippets,
       includeToolSnippets: includeTools,
+      memoryTopologyText,
+      chatMemoryAnchorText,
+      memoryDemandText,
     });
     let estimated = this.estimateTokens(text);
     while (estimated > budgetTokens) {
@@ -636,6 +657,9 @@ export class LocalContextEngine extends ContextEngineBase {
         turns: workingTurns,
         toolSnippets,
         includeToolSnippets: includeTools,
+        memoryTopologyText,
+        chatMemoryAnchorText,
+        memoryDemandText,
       });
       estimated = this.estimateTokens(text);
     }
@@ -688,6 +712,37 @@ export class LocalContextEngine extends ContextEngineBase {
       refresh: normalized.stepKind === 'router' && !!String(normalized.userMessageText || '').trim(),
     });
     const taskPacketText = renderTaskPacket(taskPacket, { roleId: normalized.roleId, maxChars: 1800 });
+    const memoryTopology = resolvedJobDir
+      ? planMemoryTopology({
+          jobDir: resolvedJobDir,
+          runMeta: normalized.runMeta,
+          userText: normalized.userMessageText || normalized.goal,
+          roleId: normalized.roleId,
+          agentId: normalized.agentId,
+          provider: normalized.provider || normalized.runMeta?.provider || '',
+          persist: true,
+          eventReason: normalized.stepKind === 'router' ? 'router_context' : 'agent_context',
+        })
+      : null;
+    const memoryGrant = memoryTopology
+      ? getAgentMemoryGrant(memoryTopology, { agentId: normalized.agentId, roleId: normalized.roleId, provider: normalized.provider || normalized.runMeta?.provider || '' })
+      : null;
+    const memoryTopologyText = memoryTopology
+      ? buildMemoryTopologyPromptBlock(memoryTopology, memoryGrant)
+      : '';
+    const chatMemoryAnchor = resolvedJobDir
+      ? updateChatMemoryAnchor({
+          jobDir: resolvedJobDir,
+          jobId: normalized.jobId,
+          chatId: normalized.chatId,
+          threadId: normalized.runMeta?.threadId || normalized.runMeta?.thread_id || normalized.threadId || '',
+          runId: normalized.runMeta?.runId || normalized.runMeta?.run_id || '',
+          topology: memoryTopology,
+          reason: normalized.stepKind === 'router' ? 'router_context' : 'agent_context',
+          userText: normalized.userMessageText || normalized.goal || '',
+        })
+      : null;
+    const chatMemoryAnchorText = chatMemoryAnchor ? buildChatMemoryAnchorPromptBlock(chatMemoryAnchor) : '';
     const summaryText = this._loadSummary(normalized.jobId);
     const latestDirectiveTs = this._findLatestDirectiveTs(normalized.jobId);
     const recentTurns = this._selectTurnsForContext(
@@ -695,10 +750,11 @@ export class LocalContextEngine extends ContextEngineBase {
       { maxTurns: clamp(process.env.LOCAL_RECENT_TURNS, 2, 30, this.defaultRecentTurns), taskPacket }
     );
     const activeDirectivesText = buildActiveDirectivesText({ turns: recentTurns, directiveEntries, maxItems: 6 });
-    const roleSummaryText = normalized.stepKind === "agent"
+    const includeRoleLocalMemory = normalized.stepKind === "agent" && shouldIncludeRoleLocalMemory(memoryTopology || {}, memoryGrant);
+    const roleSummaryText = includeRoleLocalMemory
       ? readRoleSummary({ jobDir: resolvedJobDir, roleId: normalized.roleId, agentId: normalized.agentId, sinceTs: latestDirectiveTs })
       : "";
-    const deltaSummaryText = normalized.stepKind === "agent"
+    const deltaSummaryText = includeRoleLocalMemory
       ? readIterationDelta({ jobDir: resolvedJobDir, sinceTs: latestDirectiveTs })
       : "";
     const toolSnippets = this._loadToolSnippets(normalized.jobId, 4);
@@ -710,6 +766,22 @@ export class LocalContextEngine extends ContextEngineBase {
       goal: normalized.goal || normalized.userMessageText,
       lensSpec: normalized.lensSpec,
     });
+    const memoryDemand = resolvedJobDir
+      ? buildMemoryDemandContext({
+          jobDir: resolvedJobDir,
+          userText: normalized.userMessageText || normalized.goal || '',
+          goal: normalized.goal || '',
+          roleId: normalized.roleId,
+          agentId: normalized.agentId,
+          runMeta: normalized.runMeta,
+          scopeHint: normalized.lensSpec,
+          routerMemoryPlan: normalized.runMeta?.memoryRouting || normalized.runMeta?.memory_routing || null,
+          persist: true,
+          reason: normalized.stepKind === 'router' ? 'router_preflight' : 'agent_preflight',
+          maxChars: clamp(process.env.MEMORY_DEMAND_CONTEXT_MAX_CHARS, 900, 6000, 2600),
+        })
+      : null;
+    const memoryDemandText = memoryDemand?.text || '';
 
     const packed = this._enforceBudget({
       budgetTokens,
@@ -723,12 +795,27 @@ export class LocalContextEngine extends ContextEngineBase {
       deltaSummaryText,
       turns: recentTurns,
       toolSnippets,
+      memoryTopologyText,
+      chatMemoryAnchorText,
+      memoryDemandText,
     });
 
     return {
       contextText: packed.text,
       meta: {
         mode: "local",
+        memoryTopologyMode: memoryTopology?.mode || undefined,
+        memoryTopologyStress: memoryTopology?.stress?.score,
+        chatMemoryAnchorJobId: chatMemoryAnchor?.job_id || undefined,
+        chatMemoryAnchorThreadId: chatMemoryAnchor?.thread_id || undefined,
+        memoryReadSurfaces: memoryGrant?.read || undefined,
+        memoryWriteSurfaces: memoryGrant?.write || undefined,
+        memoryDemandReasons: memoryDemand?.demand?.reasons || undefined,
+        memoryDemandSources: memoryDemand?.sources || undefined,
+        memoryDemandItems: memoryDemand?.totalItems || 0,
+        memoryDemandRetrievalMode: memoryDemand?.demand?.routerMemoryPlan?.classifier ? 'router_llm_preflight' : 'runtime_preflight',
+        memoryDemandClassifier: memoryDemand?.demand?.routerMemoryPlan?.classifier || undefined,
+        memoryDemandConfidence: memoryDemand?.demand?.routerMemoryPlan?.confidence,
         budgetTokens,
         estimatedTokens: packed.estimatedTokens,
         compiledChars: packed.text.length,
@@ -806,9 +893,40 @@ export class LocalContextEngine extends ContextEngineBase {
     if (resolvedJobDir && userText) {
       updateCurrentTaskPacket({ jobDir: resolvedJobDir, currentUserText: userText, runMeta: row.runMeta || {}, persist: true });
     }
+    let idleMaintenance = null;
+    let chatMemoryAnchor = null;
+    if (resolvedJobDir) {
+      try {
+        idleMaintenance = runIdleMemoryMaintenance({
+          jobDir: resolvedJobDir,
+          jobId,
+          chatId: row.chatId || '',
+          threadId: row.threadId || row.runMeta?.threadId || row.runMeta?.thread_id || '',
+          runId: row.runMeta?.runId || row.runMeta?.run_id || '',
+          force: false,
+        });
+      } catch (error) {
+        idleMaintenance = { ok: false, error: String(error?.message || error || 'unknown') };
+      }
+      try {
+        chatMemoryAnchor = updateChatMemoryAnchor({
+          jobDir: resolvedJobDir,
+          jobId,
+          chatId: row.chatId || '',
+          threadId: row.threadId || row.runMeta?.threadId || row.runMeta?.thread_id || '',
+          runId: row.runMeta?.runId || row.runMeta?.run_id || '',
+          topology: idleMaintenance?.topology || null,
+          reason: 'run_end',
+          userText,
+          assistantText: assistantTurnText || assistantSummaryText,
+        });
+      } catch {}
+    }
     return {
       ok: true,
       summaryChars: nextSummary.length,
+      idleMaintenance,
+      chatMemoryAnchor,
     };
   }
 

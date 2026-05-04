@@ -39,6 +39,7 @@ import { buildBenchmarkTeamTemplate, buildBenchmarkTemplateCatalogText } from '.
 import { syncRawHistoryToGoC } from '../../application/goc_raw_history_sync.js';
 import { inspectAndPrepareImprovementJob, loadImprovementExecutionContext, runImprovementAutomation, runImprovementCanary, runImprovementEvalGate, runImprovementReview, runImprovementRollback, runImprovementTests, markImprovementPromotion } from '../../application/improvement_orchestrator.js';
 import { writeIdleCompactionCandidate, formatIdleCompactionCandidateForTelegram } from '../../application/idle_compaction.js';
+import { formatMemoryTopologyForTelegram, planMemoryTopology } from '../../application/memory_topology.js';
 import { listModelNodes } from '../../application/model_node_registry.js';
 import { listModelNodesWithHealth } from '../../application/model_node_health.js';
 import { readRecentModelNodeUsage } from '../../application/model_node_usage_log.js';
@@ -66,7 +67,7 @@ const ADVANCED_HELP_TEXT = [
   "- /whoami: 현재 chat_id / user_id 확인",
   "- /running: 실행/대기 job 목록 확인",
   "- /credential ...: credential 바인딩/확인",
-  "- /memory ... 또는 /settings ...: 런타임 메모리/KB 조회·수정",
+  "- /memory ... 또는 /settings ...: adaptive memory topology와 런타임 메모리/KB 조회·수정",
   "- /skills: 현재/예정 agent roster와 대표 skill 보기",
   "- /models: 연결된 로컬/API model node 보기",
   "- /tools: 현재 job의 tool 상태 보기",
@@ -543,6 +544,21 @@ export function createTelegramCommandHandler(deps = {}) {
         return true;
       }
 
+      if (sub === "topology" || sub === "topo" || sub === "map") {
+        const currentJobId = resolveLiveJobIdForChat(chatId);
+        if (!currentJobId) {
+          await bot.sendMessage(chatId, "현재 job이 없어 memory topology를 표시할 수 없습니다. /chat 또는 /run 으로 job을 먼저 시작하세요.");
+          return true;
+        }
+        try {
+          const topology = planMemoryTopology({ jobDir: jobs.jobDir(currentJobId), persist: true, eventReason: 'telegram_memory_topology' });
+          await sendLong(bot, chatId, formatMemoryTopologyForTelegram(topology));
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ memory topology 생성 실패: ${String(e?.message ?? e)}`);
+        }
+        return true;
+      }
+
       if (sub === "reset") {
         memory.reset();
         await sendLong(bot, chatId, `✅ 메모리를 기본값으로 되돌렸습니다.\n\n${formatMemorySummary()}`);
@@ -630,7 +646,7 @@ export function createTelegramCommandHandler(deps = {}) {
         return true;
       }
 
-      await bot.sendMessage(chatId, "Usage:\n/memory show\n/memory md\n/memory kb\n/memory policy <자연어 프롬프트>\n/memory routing <자연어 프롬프트>\n/memory role <gemini|codex|chatgpt> <자연어 역할>\n/memory agents\n/memory note <메모>\n/memory lesson <교훈>\n/memory compact\n/memory reset");
+      await bot.sendMessage(chatId, "Usage:\n/memory show\n/memory md\n/memory kb\n/memory policy <자연어 프롬프트>\n/memory routing <자연어 프롬프트>\n/memory role <gemini|codex|chatgpt> <자연어 역할>\n/memory agents\n/memory note <메모>\n/memory lesson <교훈>\n/memory compact\n/memory topology\n/memory reset");
       return true;
     }
 

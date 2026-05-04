@@ -10,6 +10,7 @@ import { runDir, runSharedDir } from "../application/telegram_runtime_state.js";
 import { compactPromptJson } from "../application/prompt_surface_builder.js";
 import { resolveRoutingContractSummary, resolveRouteContractHeuristic, alignPlanActionsToRouteContract, rankAgentsByRouteContract } from "../application/route_contract.js";
 import { buildSupervisorOutputSchemaLines, buildSupervisorRuleLines } from "./supervisor_prompt_fragments.js";
+import { attachMemoryRoutingToRawPlan, buildRouterMemoryRoutingInstruction, normalizeRouterMemoryRouting } from "../application/router_memory_plan.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -809,6 +810,8 @@ function buildRouterPrompt(message, context = {}) {
     "",
     "핵심 규칙:",
     ...coreRuleLines,
+    '',
+    buildRouterMemoryRoutingInstruction(),
     ...(process.env.CHAT_SUPERVISOR_FEWSHOT === "1" ? [
       "",
       "few-shot 예시:",
@@ -916,11 +919,20 @@ export async function routeWithSupervisor(message, {
     activeTeam,
     runtimeTeamSnapshot,
   });
+  const fallbackRawPlan = fallbackPlan(msg, { agents, tools, jobConfig, parallelSpawnAllowed, activeTeam, runtimeTeamSnapshot });
+  const fallbackMemoryRouting = normalizeRouterMemoryRouting({
+    mode: msg ? 'minimal' : 'none',
+    query: msg,
+    reasons: ['local_fallback_memory_route'],
+    classifier: 'local_fallback_router',
+    confidence: 0.25,
+  });
   const fallback = {
     ...normalizeActionPlan(
-      fallbackPlan(msg, { agents, tools, jobConfig, parallelSpawnAllowed, activeTeam, runtimeTeamSnapshot }),
+      attachMemoryRoutingToRawPlan(fallbackRawPlan, fallbackMemoryRouting),
       { maxActions: 4 }
     ),
+    memory_routing: fallbackMemoryRouting,
     route_contract: routeHeuristic.summary || undefined,
   };
 
@@ -1017,7 +1029,12 @@ export async function routeWithSupervisor(message, {
     const parsed = parseJsonObjectFromText(r.stdout || r.stderr || "");
     if (!parsed) return fallback;
 
-    const normalized = normalizeActionPlan(parsed, {
+    const routerMemoryRouting = normalizeRouterMemoryRouting(parsed.memory_routing || parsed.memoryRouting || parsed.memory_plan || parsed.memoryPlan || {}, {
+      classifier: 'supervisor_router_llm',
+      query: msg,
+    });
+    const parsedWithMemoryRouting = attachMemoryRoutingToRawPlan(parsed, routerMemoryRouting);
+    const normalized = normalizeActionPlan(parsedWithMemoryRouting, {
       maxActions: Number(jobConfig?.budget?.max_actions) > 0
         ? Math.floor(Number(jobConfig.budget.max_actions))
         : 4,
@@ -1074,6 +1091,7 @@ export async function routeWithSupervisor(message, {
       route_contract_adjusted: routeAligned.adjusted === true,
       route_contract_preferred_agent: routeAligned.preferred_agent_id || undefined,
       route_contract_adjustment_type: routeAligned.plan?.route_contract_adjustment_type || undefined,
+      memory_routing: routerMemoryRouting && Object.keys(routerMemoryRouting).length > 0 ? routerMemoryRouting : undefined,
       actions: Array.isArray(contractSafe?.plan?.actions) ? contractSafe.plan.actions : (Array.isArray(routeAligned?.plan?.actions) ? routeAligned.plan.actions : hardened),
       final_response_style: normalized.final_response_style,
       done: normalized.done === true,

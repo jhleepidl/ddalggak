@@ -1020,6 +1020,19 @@ export class GocClient {
     });
   }
 
+  async recordMemoryTopology(threadId, body = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("recordMemoryTopology requires threadId");
+    return await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/memory/topology`, body },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/memory/topology`, body },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/memory/topology`, body },
+      ],
+    });
+  }
+
   async createMemoryNode(threadId, body = {}) {
     const cleanThreadId = String(threadId || "").trim();
     if (!cleanThreadId) throw new Error("createMemoryNode requires threadId");

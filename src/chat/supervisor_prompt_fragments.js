@@ -17,7 +17,7 @@ export function buildSupervisorActionSchemaLines({ teamLocked = false, parallelS
   }
 
   const sharedLines = [
-    `    {"type":"run_agent","agent_id":"...","goal":"...","inputs":{},"scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes","query":"optional","add_node_ids":["..."],"remove_node_ids":["..."],"budget_tokens":1200,"closure_edge_types":["..."],"closure_direction":"both|forward|backward","max_closure_nodes":180},"risk":"L0|L1|L2|L3"},`,
+    `    {"type":"run_agent","agent_id":"...","goal":"...","inputs":{},"scope":{"mode":"shared_only|unfold_query|add_nodes|remove_nodes","query":"optional","memory_demand":{"mode":"minimal|query|expanded","query":"optional","source_types":["turns|summary|task_state|shared_work|artifacts|user_facts|decisions"],"surface_ids":["..."],"reasons":["..."],"confidence":0.0},"add_node_ids":["..."],"remove_node_ids":["..."],"budget_tokens":1200,"closure_edge_types":["..."],"closure_direction":"both|forward|backward","max_closure_nodes":180},"risk":"L0|L1|L2|L3"},`,
     `    {"type":"need_more_detail","context_set_id":"...","node_ids":["..."],"depth":1,"max_chars":7000},`,
     `    {"type":"get_status","detail":"summary|full"},`,
     `    {"type":"interrupt","mode":"cancel|replan","note":"..."},`,
@@ -66,6 +66,7 @@ export function buildSupervisorOutputSchemaLines({ teamLocked = false, parallelS
     '  "deliverables": ["..."],',
     '  "completed_deliverables": ["..."],',
     '  "followup_hint": "optional",',
+    '  "memory_routing": {"mode":"minimal|query|expanded|none","query":"optional search phrase","source_types":["turns|summary|task_state|shared_work|artifacts|user_facts|decisions"],"surface_ids":["optional"],"reasons":["..."],"confidence":0.0},',
     '  "actions": [',
     ...buildSupervisorActionSchemaLines({ teamLocked, parallelSpawnAllowed }),
     '  ],',
@@ -79,6 +80,7 @@ export function buildSupervisorRuleLines({ teamLocked = false, parallelSpawnAllo
     return [
       '- locked team: 팀 변경 action 금지. 허용: run_agent, need_more_detail, summarize, get_status, interrupt, open_context' + (parallelSpawnAllowed ? ', spawn_agents.' : '.'),
       '- 일반 요청은 enabled agent 중 가장 적합한 1명에게 run_agent 1개로 보낸다.',
+      '- agent 선택과 함께 필요한 memory_routing/source_types를 판단한다. agent 선택만으로 memory 선택을 대체하지 마라.',
       '- agent_id는 enabled_agents_for_this_conversation 안에서만 고른다.',
       '- goal에는 최신 user_message의 실제 요청을 그대로 반영하고 stale context가 충돌하면 무시한다.',
       '- 컨텍스트가 꼭 부족할 때만 need_more_detail을 먼저 둔다.',
@@ -90,6 +92,11 @@ export function buildSupervisorRuleLines({ teamLocked = false, parallelSpawnAllo
 
   return [
     '- action은 필요한 최소만 선택한다 (최대 4개).',
+    '- 너는 agent router인 동시에 memory router다. agent 선택과 필요한 memory retrieval 계획을 함께 결정한다.',
+    '- agent_id를 잘 고르는 것만으로 충분하지 않다. 같은 agent라도 질문마다 필요한 과거 맥락이 달라진다.',
+    '- 이전 대화, 첨부, 작업 상태, 결정사항, 사용자 사실, 정정/제약이 필요하면 top-level memory_routing 또는 run_agent.scope.memory_demand에 명시한다.',
+    '- memory_routing.source_types는 turns, summary, task_state, shared_work, artifacts, user_facts, decisions 중에서 고른다.',
+    '- 표현이 정확히 “아까/전에/파일”이 아니어도 의미상 과거 맥락이 필요하면 continuity/task/artifact/user_fact memory를 요청한다.',
     '- run_agent/spawn_agents에서 agent_id는 enabled_agents_for_this_conversation 목록 안에서만 선택한다.',
     '- 일반 요청은 run_agent 1개로 우선 처리한다.',
     '- 컨텍스트가 부족하면 need_more_detail 후 run_agent를 배치한다.',
