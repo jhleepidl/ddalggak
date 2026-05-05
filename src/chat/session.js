@@ -71,6 +71,33 @@ function normalizePendingApproval(raw) {
   };
 }
 
+function normalizeRuntimeRules(raw) {
+  const rows = Array.isArray(raw) ? raw : [];
+  const out = [];
+  for (const row of rows) {
+    const item = row && typeof row === 'object' ? row : { text: row };
+    const text = clipSessionText(item.text || item.rule || '', 500).trim();
+    if (!text) continue;
+    const id = String(item.id || '').trim() || `rule_${out.length + 1}`;
+    const source = String(item.source || item.origin || item.scope || 'user').trim().toLowerCase() || 'user';
+    out.push({
+      id,
+      text,
+      enabled: item.enabled !== false,
+      scope: String(item.scope || 'chat').trim().toLowerCase() || 'chat',
+      source,
+      origin: String(item.origin || source).trim().toLowerCase() || source,
+      topic: String(item.topic || '').trim().toLowerCase() || undefined,
+      confidence: Number.isFinite(Number(item.confidence)) ? Math.max(0, Math.min(1, Number(item.confidence))) : undefined,
+      reason: String(item.reason || '').trim() || undefined,
+      created_at: String(item.created_at || item.createdAt || nowIso()),
+      updated_at: String(item.updated_at || item.updatedAt || '').trim() || undefined,
+    });
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
 function normalizePublicSearchCache(raw) {
   const rows = Array.isArray(raw) ? raw : [];
   const out = [];
@@ -578,6 +605,7 @@ function normalizeSession(chatId, raw = {}) {
           }
         : null),
     public_search_cache: normalizePublicSearchCache(row.public_search_cache),
+    runtime_rules: normalizeRuntimeRules(row.runtime_rules || row.runtimeRules),
     team_config: normalizeSessionTeamConfig(row.team_config),
     awaiting_install_approval: row.awaiting_install_approval === true,
     pending_install_proposal: normalizeInstallProposalState(row.pending_install_proposal || row.pendingInstallProposal),

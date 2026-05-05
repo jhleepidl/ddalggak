@@ -73,6 +73,7 @@ export async function runAgentProviderExecution({
         roleId,
         roleMemo: String(prompts.roleMemo || prompts.role_memo || '').trim(),
         userRequest: String(prompts.userRequest || prompts.user_request || act?.inputs?.user_request || act?.inputs?.userRequest || '').trim(),
+        chatRuntimeRules: String(prompts.chatRuntimeRules || prompts.chat_runtime_rules || act?.inputs?._runtime_rules_text || act?.inputs?.runtime_rules_text || '').trim(),
         preparedContextInfo: act?.inputs?._prompt_context_info && typeof act.inputs?._prompt_context_info === 'object'
           ? act.inputs._prompt_context_info
           : {},
@@ -115,6 +116,7 @@ export async function runAgentProviderExecution({
         roleId,
         roleMemo: String(prompts.roleMemo || prompts.role_memo || '').trim(),
         userRequest: String(prompts.userRequest || prompts.user_request || act?.inputs?.user_request || act?.inputs?.userRequest || '').trim(),
+        chatRuntimeRules: String(prompts.chatRuntimeRules || prompts.chat_runtime_rules || act?.inputs?._runtime_rules_text || act?.inputs?.runtime_rules_text || '').trim(),
         outputGuide: String(prompts.outputGuide || prompts.output_guide || act?.inputs?.output_guide || act?.inputs?.outputGuide || '').trim(),
         failoverDecision: decision,
         preparedContextInfo: act?.inputs?._prompt_context_info && typeof act.inputs._prompt_context_info === 'object'

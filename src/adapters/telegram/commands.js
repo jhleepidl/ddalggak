@@ -55,6 +55,7 @@ const HELP_TEXT = [
   "- /status: 지금 진행 상황 보기",
   "- /models: 연결된 로컬/API model node 보기",
   "- /context: 현재 작업과 GoC 링크 보기",
+  "- /rule <자연어 지침>: agent/runtime 동작 지침 반영",
   "- /artifacts [limit]: 결과물 보기",
   "- /send <번호|path>: 결과물 전송",
   "- /files [all|workspace|uploads] [limit]: 파일 보기",
@@ -74,6 +75,7 @@ const ADVANCED_HELP_TEXT = [
   "- /upload (+파일 첨부) [메모]: 실행 없이 업로드만 저장",
   "- /team more: team의 고급 명령 보기",
   "- /chat [--debug] <message>|reset: supervisor chat 실행 또는 세션 초기화",
+  "- /rule <자연어 지침>: chat-level agent/runtime 지침 반영 (상세 편집은 GoC)",
   "- /run <goal>: goal 기반 실행 시작",
   "- /continue <jobId>: 기존 job 이어서 실행",
   "- /gptprompt <jobId> <question>: GPT 확인용 프롬프트 생성",
@@ -433,6 +435,126 @@ export function createTelegramCommandHandler(deps = {}) {
     };
   }
 
+  function normalizeRuleSource(row = {}) {
+    const source = String(row?.source || row?.origin || row?.scope || 'user').trim().toLowerCase();
+    if (/learn|auto|runtime|system/.test(source)) return 'learned';
+    return 'user';
+  }
+
+  function inferRuntimeRuleTopic(raw = '') {
+    const text = String(raw || '').toLowerCase();
+    if (!text.trim()) return 'general';
+    if (/(산출물|결과물|artifact|deliverable|workspace|파일|문서|file|document|send|전송|보내|저장|생성|만들)/i.test(text)) return 'artifacts';
+    if (/(메모리|기억|memory|remember|retain|summary|요약)/i.test(text)) return 'memory';
+    if (/(답변|응답|말투|길이|간단|자세|tone|style|format|메시지)/i.test(text)) return 'answer_style';
+    if (/(검색|web|웹|출처|citation|인용|최신|current)/i.test(text)) return 'search';
+    if (/(모델|model|gemini|codex|router|routing|라우팅|agent|에이전트)/i.test(text)) return 'agent_behavior';
+    return 'general';
+  }
+
+  function compactRuntimeRuleText(raw = '') {
+    return String(raw || '')
+      .replace(/^\s*(?:\/rule\s+|rule\s*:|rules\s*:|규칙\s*:|지침\s*:|운영\s*지침\s*:)/i, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 500);
+  }
+
+  function formatRuntimeRulesMessage(chatId) {
+    const session = chatSessionStore.get(chatId);
+    const rules = Array.isArray(session.runtime_rules)
+      ? session.runtime_rules.filter((row) => row?.enabled !== false && String(row?.text || '').trim())
+      : [];
+    if (rules.length === 0) {
+      return [
+        '현재 적용 중인 운영 지침이 없습니다.',
+        '',
+        '사용법: /rule <자연어 지침>',
+        '예: /rule 산출물은 내가 명시적으로 요청할 때만 만들어줘.',
+        '',
+        '세부 편집과 히스토리 관리는 GoC에서 다룹니다.',
+      ].join('\n');
+    }
+    return [
+      '현재 적용 중인 운영 지침:',
+      ...rules.slice(0, 8).map((row, index) => `${index + 1}. ${String(row.text || '').trim()}`),
+      '',
+      '새 지침은 /rule <자연어 지침>으로 말하면 반영합니다. 세부 편집과 히스토리 관리는 GoC에서 다룹니다.',
+    ].join('\n');
+  }
+
+  function addRuntimeRule(chatId, ruleText, opts = {}) {
+    const text = compactRuntimeRuleText(ruleText);
+    if (!text) return null;
+    const source = String(opts.source || opts.origin || 'user').trim().toLowerCase() || 'user';
+    const sourceGroup = /learn|auto|runtime|system/.test(source) ? 'learned' : 'user';
+    const normalized = text.toLowerCase();
+    const topic = String(opts.topic || inferRuntimeRuleTopic(text)).trim().toLowerCase() || 'general';
+    const idPrefix = sourceGroup === 'learned' ? 'learned_rule' : 'rule';
+    const now = new Date().toISOString();
+    let inserted = null;
+    chatSessionStore.upsert(chatId, (session) => {
+      const existing = Array.isArray(session.runtime_rules) ? session.runtime_rules : [];
+      const deduped = existing.filter((row) => String(row?.text || '').trim().toLowerCase() !== normalized);
+      const replaced = topic === 'general'
+        ? deduped
+        : deduped.filter((row) => !(normalizeRuleSource(row) === sourceGroup && String(row?.topic || inferRuntimeRuleTopic(row?.text || '')).toLowerCase() === topic));
+      const row = {
+        id: `${idPrefix}_${Date.now().toString(36)}`,
+        text,
+        enabled: true,
+        scope: 'chat',
+        source,
+        origin: String(opts.origin || source).trim().toLowerCase() || source,
+        topic,
+        confidence: Number.isFinite(Number(opts.confidence)) ? Math.max(0, Math.min(1, Number(opts.confidence))) : undefined,
+        reason: String(opts.reason || '').trim() || undefined,
+        created_at: now,
+        updated_at: opts.replaces ? now : undefined,
+      };
+      inserted = row;
+      const nextRows = [...replaced, row];
+      const userRows = nextRows.filter((item) => normalizeRuleSource(item) !== 'learned').slice(-8);
+      const learnedRows = nextRows.filter((item) => normalizeRuleSource(item) === 'learned').slice(-6);
+      return { ...session, runtime_rules: [...userRows, ...learnedRows] };
+    });
+    return inserted;
+  }
+
+  function parseChatEmbeddedRule(raw = '') {
+    const text = String(raw || '').trim();
+    if (!text) return null;
+    const match = text.match(/^(?:rule\s*:|rules\s*:|규칙\s*:|지침\s*:|agent\s+rule\s*:|runtime\s+rule\s*:|시스템\s*지침\s*:|에이전트\s*지침\s*:|운영\s*지침\s*:)([\s\S]+)/i);
+    const ruleText = compactRuntimeRuleText(match?.[1] || '');
+    return ruleText ? ruleText : null;
+  }
+
+  function inferAutoRuntimeRule(raw = '') {
+    const text = String(raw || '').replace(/^\/chat\s+/i, '').trim();
+    if (!text || text.length < 8 || text.length > 900) return null;
+    if (parseChatEmbeddedRule(text)) return null;
+    const behaviorSubject = /(답변|응답|메시지|산출물|파일|문서|workspace|artifact|deliverable|메모리|기억|검색|모델|agent|에이전트|routing|라우팅|prompt|프롬프트|rule|규칙|지침)/i.test(text);
+    const correctionSignal = /(아니|그런식|그렇게|방금|이전|앞으로|다음부터|기본적으로|항상|절대|하지\s*마|하지\s*말|해야|말고|원하지|바꾸|수정|편집|관리해|가능하게|prefer|default|from\s+now|do\s+not|don't|never|always|instead)/i.test(text);
+    if (!behaviorSubject || !correctionSignal) return null;
+    return compactRuntimeRuleText(text);
+  }
+
+  function maybeLearnRuntimeRule(chatId, message = '') {
+    const ruleText = inferAutoRuntimeRule(message);
+    if (!ruleText) return null;
+    addRuntimeRule(chatId, ruleText, {
+      source: 'runtime_learned',
+      origin: 'auto_correction',
+      confidence: 0.62,
+      reason: 'latest chat message looked like a correction/preference about agent behavior',
+    });
+    return ruleText;
+  }
+
+  function clearRuntimeRules(chatId) {
+    return chatSessionStore.upsert(chatId, (session) => ({ ...session, runtime_rules: [] }));
+  }
+
   return async function handleTelegramCommand({ msg, text, chatId, userId }) {
     if (!String(text || "").startsWith("/")) return false;
 
@@ -449,6 +571,29 @@ export function createTelegramCommandHandler(deps = {}) {
         return true;
       }
       await bot.sendMessage(chatId, HELP_TEXT);
+      return true;
+    }
+
+    if (cmd === "/rule" || cmd === "/rules") {
+      const raw = String(args || '').trim();
+      const lower = raw.toLowerCase();
+      if (!raw || lower === 'help' || lower === 'status' || lower === 'list' || lower === 'show') {
+        await bot.sendMessage(chatId, formatRuntimeRulesMessage(chatId));
+        return true;
+      }
+      if (['reset', 'clear', 'delete', 'remove', '초기화', '삭제', '정리'].includes(lower)) {
+        clearRuntimeRules(chatId);
+        await bot.sendMessage(chatId, '✅ 운영 지침을 초기화했어요. 세부 편집과 히스토리 관리는 GoC에서 다룹니다.');
+        return true;
+      }
+      const naturalRule = raw.replace(/^(?:add|set|edit|update|추가|수정|변경)\s+/i, '').trim() || raw;
+      const saved = addRuntimeRule(chatId, naturalRule, { source: 'user', origin: 'telegram_rule_command' });
+      await bot.sendMessage(chatId, [
+        '✅ 운영 지침에 반영했어요.',
+        saved?.topic && saved.topic !== 'general' ? `분류: ${saved.topic}` : '',
+        '',
+        '자세한 편집/비활성화/히스토리는 GoC에서 다룹니다.',
+      ].filter(Boolean).join('\n'));
       return true;
     }
 
@@ -1427,6 +1572,13 @@ size=${formatByteSize(sentBundle.size)}`
         await bot.sendMessage(chatId, "Usage: /chat [--debug] <message>\n세션 초기화: /chat reset");
         return true;
       }
+      const embeddedRule = parseChatEmbeddedRule(message);
+      if (embeddedRule) {
+        addRuntimeRule(chatId, embeddedRule, { source: 'user', origin: 'chat_inline_rule' });
+        await bot.sendMessage(chatId, '✅ 운영 지침에 반영했어요. 자세한 편집/비활성화/히스토리는 GoC에서 다룹니다.');
+        return true;
+      }
+      maybeLearnRuntimeRule(chatId, message);
 
       try {
         let teamState = getSessionTeamState(chatSessionStore, chatId);

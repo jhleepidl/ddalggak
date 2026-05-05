@@ -168,6 +168,7 @@ import { buildAgentKnowledgeBaseGuidance, buildRoleMemoryContract, summarizeRole
 import { executeToolProxyAction } from "./tool_proxy_runtime.js";
 import { writeGeminiMemoryFile, writeCodexInstructionFile } from "./cli_workspace_contract.js";
 import {
+  applyRuntimeRulePolicy,
   detectUnmetExecutionRequirements,
   extractExecutionRequirements,
   formatExecutionRequirementsBlock,
@@ -820,13 +821,15 @@ function compactTaskText(value = '', { maxChars = 2400 } = {}) {
   const limit = Number.isFinite(Number(maxChars)) ? Math.max(600, Math.floor(Number(maxChars))) : 2400;
   if (!text || text.length <= limit) return text;
 
+  const compactRequirements = extractExecutionRequirements(text);
+  const preserveDeliveryRequirements = compactRequirements.artifact_delivery_forbidden !== true;
   const head = clip(text, Math.max(420, Math.floor(limit * 0.48)));
   const tail = clip(text.slice(Math.max(0, text.length - Math.max(180, Math.floor(limit * 0.12)))).trim(), Math.max(180, Math.floor(limit * 0.12)));
   const preserved = [
     extractBracketSection(text, 'CURRENT TASK PACKET', { maxChars: Math.max(360, Math.floor(limit * 0.28)) }),
     extractBracketSection(text, 'ACTIVE DIRECTIVES', { maxChars: Math.max(260, Math.floor(limit * 0.2)) }),
     extractBracketSection(text, 'PINNED FACTS', { maxChars: Math.max(260, Math.floor(limit * 0.2)) }),
-    extractBracketSection(text, 'DELIVERY REQUIREMENTS', { maxChars: Math.max(240, Math.floor(limit * 0.18)) }),
+    preserveDeliveryRequirements ? extractBracketSection(text, 'DELIVERY REQUIREMENTS', { maxChars: Math.max(240, Math.floor(limit * 0.18)) }) : '',
     extractBracketSection(text, 'JOB CONSTRAINTS', { maxChars: Math.max(220, Math.floor(limit * 0.16)) }),
     extractBracketSection(text, 'RECENT TURNS', { maxChars: Math.max(320, Math.floor(limit * 0.24)), tailLines: 6 }),
   ].filter(Boolean);
@@ -942,6 +945,43 @@ function buildDirectAnswerOutputGuide(rawGuide = '') {
   ].join('\n');
 }
 
+function buildArtifactTurnPolicyBlock(requirements = {}, { hasArtifactContract = false } = {}) {
+  const row = requirements && typeof requirements === 'object' ? requirements : {};
+  if (hasArtifactContract) return '';
+  const strictMemoryOnly = row.artifact_delivery_forbidden || row.memory_only_requested;
+  return [
+    '[TASK OUTPUT POLICY]',
+    strictMemoryOnly
+      ? '- Memory-only turn: do not create/update/send workspace artifacts; answer in chat and let runtime memory capture useful facts.'
+      : '- No explicit file deliverable requested: answer in chat; do not create/update/send workspace artifacts.',
+    '- Existing workspace files are context only unless the latest user explicitly asks to edit/send them.',
+  ].join('\n');
+}
+
+function normalizeRuleSource(row = {}) {
+  const source = String(row?.source || row?.origin || row?.scope || 'user').trim().toLowerCase();
+  if (/learn|auto|runtime|system/.test(source)) return 'learned';
+  return 'user';
+}
+
+function formatChatRuntimeRulesBlock(session = null, { maxRules = 6, maxChars = 700 } = {}) {
+  const rules = Array.isArray(session?.runtime_rules) ? session.runtime_rules : [];
+  const enabled = rules
+    .filter((row) => row && row.enabled !== false && String(row.text || '').trim())
+    .map((row) => ({ ...row, source_group: normalizeRuleSource(row) }))
+    .sort((a, b) => (a.source_group === b.source_group ? 0 : (a.source_group === 'user' ? -1 : 1)))
+    .slice(0, Math.max(1, Math.floor(Number(maxRules) || 6)))
+    .map((row, index) => `${index + 1}. ${clip(String(row.text || '').trim(), 170)}`);
+  if (enabled.length === 0) return '';
+  return clip([
+    '[CHAT RUNTIME GUIDANCE]',
+    'Use these as chat-level operating preferences unless the latest user request clearly overrides them.',
+    ...enabled,
+  ].join('\n'), Math.max(240, Math.floor(Number(maxChars) || 700)));
+}
+
+
+
 async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const runtimeExecutionPolicy = normalizeRuntimeExecutionPolicy(opts.runtimeExecutionPolicy || {});
   const sectionTitle = String(opts.sectionTitle || "Gemini notes");
@@ -979,13 +1019,19 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
       provider: "gemini",
       workspaceRoot: workspacePath,
     });
-  const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 3 });
-  const activeArtifactContext = formatActiveArtifactContext(runDir(jobId), { maxChars: 1800, limit: 4 });
-  const activeUserFactContext = formatActiveUserFactContext(runDir(jobId), { maxChars: 2200 });
-  const artifactOutputRequirements = mergeExecutionRequirements(
+  const artifactOutputRequirements = applyRuntimeRulePolicy(mergeExecutionRequirements(
     extractExecutionRequirements(cleanUserRequest),
     extractExecutionRequirements(rawGoal),
-  );
+  ), opts.chatRuntimeRules || opts.chat_runtime_rules || '');
+  const artifactPolicyBlock = buildArtifactTurnPolicyBlock(artifactOutputRequirements, { hasArtifactContract: artifactOutputRequirements.artifact_delivery_requested === true });
+  const includeArtifactContext = artifactOutputRequirements.artifact_delivery_requested === true;
+  const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, {
+    limitPerBucket: 3,
+    includeWorkspaceArtifacts: includeArtifactContext,
+    includeActiveArtifactContext: includeArtifactContext,
+  });
+  const activeArtifactContext = includeArtifactContext ? formatActiveArtifactContext(runDir(jobId), { maxChars: 1800, limit: 4 }) : '';
+  const activeUserFactContext = formatActiveUserFactContext(runDir(jobId), { maxChars: 2200 });
   const artifactMaterializationGuide = artifactOutputRequirements.artifact_delivery_requested
     ? [
       "[FILE ARTIFACT OUTPUT CONTRACT]",
@@ -1018,6 +1064,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     activeUserFactContext ? activeUserFactContext : '',
     ctx ? `[AVAILABLE MEMORY — optional]\n${ctx}` : '',
     workspaceFilesText ? `[WORKSPACE FILES — optional]\n${workspaceFilesText}` : '',
+    artifactPolicyBlock,
     artifactMaterializationGuide,
     '',
     '[USER REQUEST]',
@@ -1256,13 +1303,19 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
     audienceLabel: 'agent failover assist',
     runtimePolicy: opts.runtime?.harnessRuntimePolicy || opts.runtime?.openharnessInstallState?.runtime_policy || null,
   });
-  const activeArtifactContext = formatActiveArtifactContext(runDir(jobId), { maxChars: 1200, limit: 4 });
-  const activeUserFactContext = formatActiveUserFactContext(runDir(jobId), { maxChars: 1600 });
-  const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 3 });
-  const executionRequirements = mergeExecutionRequirements(
+  const executionRequirements = applyRuntimeRulePolicy(mergeExecutionRequirements(
     extractExecutionRequirements(cleanUserRequest),
     extractExecutionRequirements(instruction),
-  );
+  ), opts.chatRuntimeRules || opts.chat_runtime_rules || '');
+  const artifactPolicyBlock = buildArtifactTurnPolicyBlock(executionRequirements, { hasArtifactContract: executionRequirements.artifact_delivery_requested === true });
+  const includeArtifactContext = executionRequirements.artifact_delivery_requested === true;
+  const activeArtifactContext = includeArtifactContext ? formatActiveArtifactContext(runDir(jobId), { maxChars: 1200, limit: 4 }) : '';
+  const activeUserFactContext = formatActiveUserFactContext(runDir(jobId), { maxChars: 1600 });
+  const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, {
+    limitPerBucket: 3,
+    includeWorkspaceArtifacts: includeArtifactContext,
+    includeActiveArtifactContext: includeArtifactContext,
+  });
   const artifactMaterializationGuide = executionRequirements.artifact_delivery_requested
     ? [
       '[FILE ARTIFACT OUTPUT CONTRACT]',
@@ -1295,6 +1348,7 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
     activeArtifactContext || '',
     activeUserFactContext || '',
     workspaceFilesText ? `[WORKSPACE FILES — optional]\n${workspaceFilesText}` : '',
+    artifactPolicyBlock,
     artifactMaterializationGuide,
     '[USER REQUEST]',
     cleanUserRequest || instruction,
@@ -2226,17 +2280,19 @@ function buildSupervisorExecutionCallbacks({
       roleId: roleKey,
       runtimeExecutionPolicy,
     });
-    const executionRequirements = mergeExecutionRequirements(
+    const executionRequirements = applyRuntimeRulePolicy(mergeExecutionRequirements(
       extractExecutionRequirements(cleanGoal),
       extractExecutionRequirements(detailContext),
       extractExecutionRequirements(actionInputs?.user_request || actionInputs?.userRequest || ''),
-    );
+    ), actionInputs?._runtime_rules_text || actionInputs?.runtime_rules_text || '');
     const deliveryRequirementsBlock = formatExecutionRequirementsBlock(executionRequirements);
+    const artifactPolicyBlock = buildArtifactTurnPolicyBlock(executionRequirements, { hasArtifactContract: executionRequirements.artifact_delivery_requested === true });
     const finalPrompt = [
       String(prepared?.final_prompt || "").trim() || cleanGoal,
       promptRoleSummary ? `[ROLE SUMMARY]\n${clip(promptRoleSummary, 900)}` : "",
       promptIterationDelta ? `[ITERATION DELTA]\n${clip(promptIterationDelta, 700)}` : "",
       deliveryRequirementsBlock ? `[DELIVERY REQUIREMENTS]\n${deliveryRequirementsBlock}` : "",
+      artifactPolicyBlock,
       outputContractBlock,
     ].filter(Boolean).join("\n\n");
     try {
@@ -3437,6 +3493,7 @@ async function runSupervisorChat(
   } = {}
 ) {
   const chatKey = String(chatId);
+  const currentTurnStartedAtMs = Date.now();
   const verbose = !!(debug || CHAT_VERBOSE);
   const cleanForceMode = normalizeForceMode(forceMode);
   let currentJobId = resolveCurrentJobIdForChat(chatId);
@@ -3518,6 +3575,7 @@ async function runSupervisorChat(
   let patternRecoveryState = null;
   let pendingTeamApprovalNotice = '';
   const sessionAtStart = chatSessionStore.get(chatId);
+  const chatRuntimeRulesBlock = formatChatRuntimeRulesBlock(sessionAtStart);
   let currentTurnAckMessageId = Number(sessionAtStart?.current_turn_ack_message_id || 0);
   if (!(Number.isFinite(currentTurnAckMessageId) && currentTurnAckMessageId > 0)) {
     currentTurnAckMessageId = Number(await sendRouterAckMessage(bot, chatId, {
@@ -4063,7 +4121,7 @@ async function runSupervisorChat(
         cwd: runWorkspaceDir(currentJobId),
         signal: controller.signal,
         locale: "ko-KR",
-        routerPolicy: `${memory.getRouterPrompt()}\n\n${autonomyPolicyHint}`,
+        routerPolicy: [memory.getRouterPrompt(), chatRuntimeRulesBlock, autonomyPolicyHint].filter(Boolean).join('\n\n'),
         autonomyDecision,
         typedMemoryNeeds,
         contextSummary: routerCtx.contextText || runtime.contextSummary,
@@ -4167,7 +4225,17 @@ async function runSupervisorChat(
         return deliverables.some((item) => item.toLowerCase() === String(entry || "").trim().toLowerCase());
       });
 
-      const planActions = decoratePlanActionsWithAgentMetadata(Array.isArray(routePlan?.actions) ? routePlan.actions : [], runtime);
+      const planActions = decoratePlanActionsWithAgentMetadata(Array.isArray(routePlan?.actions) ? routePlan.actions : [], runtime)
+        .map((action) => {
+          if (!chatRuntimeRulesBlock || !action || typeof action !== 'object') return action;
+          return {
+            ...action,
+            inputs: {
+              ...(action.inputs && typeof action.inputs === 'object' ? action.inputs : {}),
+              _runtime_rules_text: chatRuntimeRulesBlock,
+            },
+          };
+        });
       routePlan = {
         ...routePlan,
         actions: planActions,
@@ -4889,6 +4957,7 @@ ${pendingTeamApprovalNotice}`.trim();
     await maybeSendArtifactSummary(bot, chatId, currentJobId, {
       execution: mergedExecution,
       replyToMessageId: getCurrentTurnReplyMessageId(chatId),
+      sinceMs: currentTurnStartedAtMs,
     }).catch(() => null);
     return { routePlan, execution: mergedExecution, jobId: currentJobId };
   } catch (e) {
@@ -5352,6 +5421,7 @@ ${output}
           chatQuestion: combinedChatQuestion,
           roleMemo: combinedRoleMemo,
           userRequest: String(act?.inputs?.user_request || act?.inputs?.userRequest || extractLatestUserRequestFromTaskText(taskPrompt) || taskPrompt).trim(),
+          chatRuntimeRules: String(act?.inputs?._runtime_rules_text || act?.inputs?.runtime_rules_text || '').trim(),
         }
         : {
           instruction: combinedInstruction,

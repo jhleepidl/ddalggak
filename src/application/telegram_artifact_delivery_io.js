@@ -173,13 +173,13 @@ function formatWorkspaceFileListText(jobId, entries = [], { scope = 'all', limit
   return lines.join('\n');
 }
 
-function buildWorkspaceFilesPromptSection(jobId, { limitPerBucket = 5 } = {}) {
+function buildWorkspaceFilesPromptSection(jobId, { limitPerBucket = 5, includeWorkspaceArtifacts = true, includeActiveArtifactContext = true } = {}) {
   const limit = Number.isFinite(Number(limitPerBucket))
     ? Math.max(1, Math.min(20, Math.floor(Number(limitPerBucket))))
     : 5;
   const uploads = collectWorkspaceFileEntries(jobId, { scope: 'uploads' }).slice(0, limit);
-  const workspaceFiles = collectWorkspaceFileEntries(jobId, { scope: 'workspace' }).slice(0, limit);
-  const activeArtifactContext = formatActiveArtifactContext(runDir(jobId), { maxChars: 1600, limit });
+  const workspaceFiles = includeWorkspaceArtifacts === false ? [] : collectWorkspaceFileEntries(jobId, { scope: 'workspace' }).slice(0, limit);
+  const activeArtifactContext = includeActiveArtifactContext === false ? '' : formatActiveArtifactContext(runDir(jobId), { maxChars: 1600, limit });
   const render = (rows) => (
     rows.length > 0
       ? rows.map((row) => `- ${row.rel} (${formatByteSize(row.size)})`).join('\n')
@@ -190,11 +190,11 @@ function buildWorkspaceFilesPromptSection(jobId, { limitPerBucket = 5 } = {}) {
     'workspace 파일 목록(최근):',
     'uploads:',
     render(uploads),
-    'workspace artifacts:',
-    render(workspaceFiles),
+    includeWorkspaceArtifacts === false ? 'workspace artifacts: (hidden for this memory-only turn)' : 'workspace artifacts:',
+    includeWorkspaceArtifacts === false ? '' : render(workspaceFiles),
     '지시:',
     '- 필요하면 uploads/ 경로의 파일 내용을 참고해라.',
-    '- 최종 산출물은 원래 workspace 경로에 유지된다. outputs/ 복사본을 만들지 마라.',
+    includeWorkspaceArtifacts === false ? '- 이번 턴은 기존 workspace artifact를 새 산출물 후보로 되살리지 마라.' : '- 최종 산출물은 원래 workspace 경로에 유지된다. outputs/ 복사본을 만들지 마라.',
     '- 내부 지원 파일(GEMINI.md, .codex/*, .orchestrator/*)은 사용자 산출물 후보에서 제외된다.',
     '- 매우 큰 파일은 목록만 참고하고 필요한 부분만 선택해 사용해라.',
   ].filter(Boolean).join('\n');
@@ -513,11 +513,16 @@ function formatArtifactIndexText(jobId, artifactIndex = null, { limit = 8 } = {}
   return lines.join('\n');
 }
 
-async function maybeSendArtifactSummary(bot, chatId, jobId, { execution = null, replyToMessageId = null, maxFiles = 5 } = {}) {
+async function maybeSendArtifactSummary(bot, chatId, jobId, { execution = null, replyToMessageId = null, maxFiles = 5, sinceMs = null } = {}) {
   const cleanJobId = String(jobId || '').trim();
   if (!cleanJobId || !bot || chatId == null) return null;
   const artifactIndex = refreshArtifactIndex(cleanJobId, { execution, maxFiles: Math.max(3, maxFiles) });
-  const rows = Array.isArray(artifactIndex.artifacts) ? artifactIndex.artifacts.slice(0, Math.max(1, Math.min(12, Math.floor(Number(maxFiles) || 5)))) : [];
+  const allRows = Array.isArray(artifactIndex.artifacts) ? artifactIndex.artifacts : [];
+  const minMtime = Number.isFinite(Number(sinceMs)) && Number(sinceMs) > 0 ? Math.max(0, Number(sinceMs) - 2000) : null;
+  const recentRows = minMtime == null
+    ? allRows
+    : allRows.filter((row) => Number(row?.mtime_ms || row?.mtimeMs || 0) >= minMtime);
+  const rows = recentRows.slice(0, Math.max(1, Math.min(12, Math.floor(Number(maxFiles) || 5))));
   if (rows.length === 0) return artifactIndex;
   const lines = [
     '📦 주요 산출물 후보를 찾았어요.',

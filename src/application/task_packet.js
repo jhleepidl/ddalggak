@@ -208,8 +208,12 @@ function pushUnique(out = [], seen = new Set(), value = '', maxChars = 190) {
 function deriveDeliverables(textPool = [], override = {}, previous = {}) {
   const out = [];
   const seen = new Set();
-  for (const entry of [...asArray(override.deliverables), ...asArray(previous.deliverables)]) pushUnique(out, seen, entry, 180);
   const execution = mergeExecutionRequirements(...textPool.map((text) => extractExecutionRequirements(text)));
+  const previousDeliverables = execution.artifact_delivery_forbidden
+    ? asArray(previous.deliverables).filter((entry) => !/(파일|문서|산출물|결과물|artifact|deliverable|경로|전달|send|file)/i.test(String(entry || '')))
+    : asArray(previous.deliverables);
+  for (const entry of [...asArray(override.deliverables), ...previousDeliverables]) pushUnique(out, seen, entry, 180);
+  if (execution.memory_only_requested) pushUnique(out, seen, '새 산출물 없이 runtime memory에 기록·관리한다.', 180);
   if (execution.artifact_delivery_requested) pushUnique(out, seen, '생성된 파일 경로/이름까지 포함해 산출물을 전달해야 한다.', 180);
   if (execution.expected_artifact_kinds.includes('exe')) pushUnique(out, seen, 'Windows 실행 파일(.exe) 산출물이 기대된다.', 180);
   if (execution.expected_artifact_kinds.includes('zip')) pushUnique(out, seen, '압축(zip) 형태 산출물이 기대된다.', 180);
@@ -228,6 +232,7 @@ function deriveVerificationExpectations(textPool = [], override = {}, previous =
   if (execution.shell_execution_requested || execution.direct_execution_requested) pushUnique(out, seen, '필요한 dependency 설치 및 bounded shell 실행 여부를 확인한다.', 190);
   if (execution.artifact_build_requested) pushUnique(out, seen, '실제 빌드/패키징 산출이 생성됐는지 확인한다.', 190);
   if (execution.artifact_delivery_requested) pushUnique(out, seen, '산출물을 만들지 못했으면 blocker를 명시하고 성공처럼 쓰지 않는다.', 190);
+  if (execution.artifact_delivery_forbidden) pushUnique(out, seen, '산출물 생성·전달 없이 메모리/응답만으로 처리한다.', 190);
   return out.slice(0, 4);
 }
 
