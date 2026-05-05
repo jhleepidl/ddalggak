@@ -807,6 +807,8 @@ function buildRouterPrompt(message, context = {}) {
   return [
     "너는 Telegram /chat supervisor_router다.",
     "반드시 JSON 객체 1개만 출력한다. JSON 외 텍스트 금지.",
+    "Gemini CLI나 Codex CLI의 내장 tool/subagent/invoke_agent 기능은 절대 호출하지 말고, 텍스트 JSON만 작성한다.",
+    "enabled agent는 literal id 문자열로만 참조한다. @mention 형식은 쓰지 않는다.",
     ...outputSchemaLines,
     "",
     "핵심 규칙:",
@@ -833,7 +835,7 @@ function buildRouterPrompt(message, context = {}) {
     agentText,
     "",
     "enabled_agents_for_this_conversation:",
-    enabledAgentIds.length > 0 ? enabledAgentIds.map((id) => `- @${id}`).join("\n") : "(none)",
+    enabledAgentIds.length > 0 ? enabledAgentIds.map((id) => `- id=${id}`).join("\n") : "(none)",
     "",
     "relevant_catalog_agents:",
     relevantCatalogText,
@@ -880,12 +882,45 @@ function buildRouterPrompt(message, context = {}) {
 }
 
 
+
+const supervisorGeminiToolLeakCircuit = {
+  openUntilMs: 0,
+  lastReason: '',
+};
+
+const GEMINI_ROUTER_TOOL_LEAK_RE = /\b(?:invoke_agent|Subagent\s+['"]?@?[A-Za-z0-9_.-]+['"]?\s+not\s+found|Error\s+executing\s+tool\s+invoke_agent)\b/i;
+
+function supervisorGeminiToolLeakCooldownMs() {
+  const raw = Number(process.env.CHAT_SUPERVISOR_GEMINI_TOOL_LEAK_COOLDOWN_MS || process.env.CHAT_ROUTER_GEMINI_TOOL_LEAK_COOLDOWN_MS || 10 * 60 * 1000);
+  if (!Number.isFinite(raw) || raw < 0) return 10 * 60 * 1000;
+  return Math.max(0, Math.min(60 * 60 * 1000, Math.floor(raw)));
+}
+
+function isSupervisorGeminiToolLeak(result = {}) {
+  const text = [result?.stderr, result?.stdout, result?.error, result?.message].map((v) => String(v || '')).join('\n');
+  return GEMINI_ROUTER_TOOL_LEAK_RE.test(text);
+}
+
+function noteSupervisorGeminiToolLeak(result = {}) {
+  const cooldownMs = supervisorGeminiToolLeakCooldownMs();
+  if (cooldownMs <= 0) return;
+  supervisorGeminiToolLeakCircuit.openUntilMs = Date.now() + cooldownMs;
+  supervisorGeminiToolLeakCircuit.lastReason = clip(String(result?.stderr || result?.stdout || '').replace(/\s+/g, ' '), 240);
+}
+
+function isSupervisorGeminiToolLeakCircuitOpen() {
+  const until = Number(supervisorGeminiToolLeakCircuit.openUntilMs || 0);
+  return until > 0 && until > Date.now();
+}
+
 function supervisorProviderOrder() {
   const raw = String(process.env.CHAT_SUPERVISOR_PROVIDER || process.env.CHAT_ROUTER_PROVIDER || 'auto').trim().toLowerCase();
   if (['codex', 'codex_cli'].includes(raw)) return ['codex'];
   if (['gemini', 'gemini_cli'].includes(raw)) return ['gemini'];
-  if (['auto', 'fallback', 'failover', ''].includes(raw)) return ['gemini', 'codex'];
-  return ['gemini', 'codex'];
+  if (['auto', 'fallback', 'failover', ''].includes(raw)) {
+    return isSupervisorGeminiToolLeakCircuitOpen() ? ['codex', 'gemini'] : ['gemini', 'codex'];
+  }
+  return isSupervisorGeminiToolLeakCircuitOpen() ? ['codex', 'gemini'] : ['gemini', 'codex'];
 }
 
 function codexRouterProfile() {
@@ -944,7 +979,12 @@ async function runSupervisorRouterProvider({
     onModelSwitch: onGeminiModelSwitch,
     onGiveUp: onGeminiGiveUp,
     timeoutMs: routerTimeoutMs,
-    traceMetadata: { surface_role: 'supervisor_router', timeout_ms: routerTimeoutMs, router_provider: 'gemini' },
+    surface: 'supervisor_router',
+    agentId: 'supervisor_router',
+    roleId: 'supervisor',
+    workspaceSettingsPatch: { surface: 'supervisor_router' },
+    extraEnv: { DDALGGAK_GEMINI_SURFACE: 'supervisor_router' },
+    traceMetadata: { surface_role: 'supervisor_router', timeout_ms: routerTimeoutMs, router_provider: 'gemini', toolless_router: true },
   });
 }
 
@@ -1078,6 +1118,7 @@ export async function routeWithSupervisor(message, {
     let parsed = null;
     let lastRouterFailure = null;
     let selectedRouterProvider = '';
+    let selectedRouterResult = null;
     for (const routerProvider of providerAttempts) {
       const r = await runSupervisorRouterProvider({
         provider: routerProvider,
@@ -1100,15 +1141,22 @@ export async function routeWithSupervisor(message, {
       }
       if (!r?.ok) {
         lastRouterFailure = r;
+        if (routerProvider === 'gemini' && isSupervisorGeminiToolLeak(r)) {
+          noteSupervisorGeminiToolLeak(r);
+        }
         continue;
       }
       const candidate = parseJsonObjectFromText(r.stdout || r.stderr || "");
       if (!candidate) {
         lastRouterFailure = r;
+        if (routerProvider === 'gemini' && isSupervisorGeminiToolLeak(r)) {
+          noteSupervisorGeminiToolLeak(r);
+        }
         continue;
       }
       parsed = candidate;
       selectedRouterProvider = routerProvider;
+      selectedRouterResult = r;
       break;
     }
     if (!parsed) {
@@ -1186,6 +1234,8 @@ export async function routeWithSupervisor(message, {
       deliverables: Array.isArray(normalized.deliverables) ? normalized.deliverables : [],
       completed_deliverables: Array.isArray(normalized.completed_deliverables) ? normalized.completed_deliverables : [],
       followup_hint: String(normalized.followup_hint || (routeAligned.adjusted ? `route contract preferred ${routeAligned.preferred_agent_id || 'publisher-capable agent'} for this request` : "")).trim() || undefined,
+      router_provider: selectedRouterProvider || undefined,
+      router_model: String(selectedRouterResult?.used_model || selectedRouterResult?.model || '').trim() || undefined,
     };
   } catch (e) {
     if (signal?.aborted) throw e;

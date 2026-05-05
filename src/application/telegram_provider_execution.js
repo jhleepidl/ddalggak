@@ -67,13 +67,13 @@ export async function runAgentProviderExecution({
 
   if (cleanProvider === 'gemini') {
     try {
-      const output = await geminiResearch(jobId, String(prompts.goal || ''), signal, {
+      const geminiResult = await geminiResearch(jobId, String(prompts.goal || ''), signal, {
         sectionTitle: `${agentId} notes`,
         agentId,
         roleId,
         roleMemo: String(prompts.roleMemo || prompts.role_memo || '').trim(),
         userRequest: String(prompts.userRequest || prompts.user_request || act?.inputs?.user_request || act?.inputs?.userRequest || '').trim(),
-        preparedContextInfo: act?.inputs?._prompt_context_info && typeof act.inputs._prompt_context_info === 'object'
+        preparedContextInfo: act?.inputs?._prompt_context_info && typeof act.inputs?._prompt_context_info === 'object'
           ? act.inputs._prompt_context_info
           : {},
         outputGuide: String(prompts.outputGuide || prompts.output_guide || act?.inputs?.output_guide || act?.inputs?.outputGuide || '').trim(),
@@ -86,7 +86,13 @@ export async function runAgentProviderExecution({
         providerOptions,
         chatId,
       });
-      return finalize(output);
+      const output = geminiResult && typeof geminiResult === 'object'
+        ? String(geminiResult.output || '')
+        : String(geminiResult || '');
+      return finalize(output, {
+        provider: geminiResult && typeof geminiResult === 'object' ? geminiResult.provider : 'gemini',
+        model: geminiResult && typeof geminiResult === 'object' ? geminiResult.model : model,
+      });
     } catch (error) {
       const decision = resolveProviderFailoverDecision({ provider: 'gemini', error, roleId, agentId });
       if (!decision.should_failover || typeof callbacks.codexAssist !== 'function') throw error;

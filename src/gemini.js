@@ -993,6 +993,17 @@ function optionsContextModeFromEnv(extraEnv = {}) {
   return String(asObject(extraEnv).GEMINI_CONTEXT_MODE || asObject(extraEnv).GEMINI_CLI_CONTEXT_MODE || "").trim();
 }
 
+function resolveGeminiTraceCommandCwd(options = {}) {
+  const originalWorkspacePath = path.resolve(String(options?.cwd || options?.workspaceRoot || process.cwd()).trim() || process.cwd());
+  const contextMode = resolveGeminiContextMode(optionsContextModeFromEnv(options?.extraEnv));
+  if (contextMode !== "isolated") return originalWorkspacePath;
+  const reuseMode = String(process.env.GEMINI_CONTEXT_REUSE || "stable").trim().toLowerCase();
+  if (reuseMode === "temp") return originalWorkspacePath;
+  const jobId = String(options?.jobId || (String(options?.concurrencyKey || "").startsWith("job:") ? String(options.concurrencyKey).slice(4).trim() : "")).trim();
+  const surface = String(options?.workspaceSettingsPatch?.surface || options?.extraEnv?.DDALGGAK_GEMINI_SURFACE || options?.surface || "gemini_prompt").trim() || "gemini_prompt";
+  return path.join(resolveGeminiIsolatedWorkspaceBase({ jobId, originalCwd: originalWorkspacePath }), sanitizeSurfaceForPath(surface).slice(0, 40) || "default");
+}
+
 async function runGeminiPromptInternal({
   workspaceRoot,
   prompt,
@@ -1341,7 +1352,8 @@ export async function runGeminiPrompt(options = {}) {
     endedAt: traceEndedAt,
   };
   const promptText = String(options?.prompt ?? "");
-  const commandCwd = path.resolve(String(options?.cwd || options?.workspaceRoot || process.cwd()).trim() || process.cwd());
+  const originalTraceCwd = path.resolve(String(options?.cwd || options?.workspaceRoot || process.cwd()).trim() || process.cwd());
+  const commandCwd = resolveGeminiTraceCommandCwd(options);
   const traceModel = String(tracedResult?.used_model || options?.model || process.env.GEMINI_MODEL_PRIMARY || process.env.GEMINI_MODEL || "auto").trim() || "auto";
   return attachGeminiTrace({
     result: tracedResult,
@@ -1352,11 +1364,14 @@ export async function runGeminiPrompt(options = {}) {
     model: traceModel,
     prompt: promptText,
     cwd: commandCwd,
-    workspaceRoot: commandCwd,
+    workspaceRoot: originalTraceCwd,
     metadata: {
       approval_mode: options?.approvalMode || process.env.GEMINI_APPROVAL_MODE || "default",
       concurrency_key: options?.concurrencyKey || null,
       settings_overwrite: options?.settingsOverwrite || null,
+      original_cwd: originalTraceCwd,
+      command_cwd: commandCwd,
+      context_mode: resolveGeminiContextMode(optionsContextModeFromEnv(options?.extraEnv)),
       ...asObject(options?.traceMetadata),
     },
   });

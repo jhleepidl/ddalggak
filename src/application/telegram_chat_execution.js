@@ -578,6 +578,49 @@ function buildTurnDeltaFingerprint(outputs = []) {
   return rows.join("\n");
 }
 
+function chatModelBadgeEnabled() {
+  const raw = String(process.env.CHAT_SHOW_MODEL_BADGE ?? process.env.CHAT_RESPONSE_MODEL_BADGE ?? 'true').trim().toLowerCase();
+  return !['0', 'false', 'no', 'off', 'hide', 'hidden'].includes(raw);
+}
+
+function compactProviderModelLabel(provider = '', model = '') {
+  const cleanProvider = String(provider || '').trim().toLowerCase();
+  const cleanModel = String(model || '').trim();
+  if (!cleanProvider && !cleanModel) return '';
+  if (!cleanProvider) return cleanModel;
+  if (!cleanModel || cleanModel.toLowerCase() === cleanProvider) return cleanProvider;
+  return `${cleanProvider}/${cleanModel}`;
+}
+
+function firstAgentModelLabel(outputs = []) {
+  for (const row of Array.isArray(outputs) ? outputs : []) {
+    if (!row || typeof row !== 'object') continue;
+    if (String(row.agentId || '').trim().toLowerCase() === 'system') continue;
+    const label = compactProviderModelLabel(row.provider, row.model);
+    if (label) return label;
+  }
+  return '';
+}
+
+function appendResponseModelBadge(replyText = '', { routePlan = null, execution = null } = {}) {
+  const text = String(replyText || '').trim();
+  if (!text || !chatModelBadgeEnabled()) return text;
+  if (/↳\s*(?:model|모델|응답)\s*:/i.test(text)) return text;
+  const finalLabel = compactProviderModelLabel(
+    execution?._response_model_badge?.final?.provider || '',
+    execution?._response_model_badge?.final?.model || '',
+  );
+  const agentLabel = firstAgentModelLabel(execution?.outputs || []);
+  const routerLabel = compactProviderModelLabel(routePlan?.router_provider || '', routePlan?.router_model || '');
+  const parts = [];
+  if (finalLabel) parts.push(`answer ${finalLabel}`);
+  if (agentLabel && agentLabel !== finalLabel) parts.push(`agent ${agentLabel}`);
+  if (routerLabel && routerLabel !== finalLabel && routerLabel !== agentLabel) parts.push(`router ${routerLabel}`);
+  if (parts.length === 0) return text;
+  const maxParts = Math.max(1, Math.min(3, Number(process.env.CHAT_MODEL_BADGE_MAX_PARTS || 3) || 3));
+  return `${text}\n\n↳ model: ${parts.slice(0, maxParts).join(' · ')}`;
+}
+
 function deriveGocMemorySurfaceSpec(doc = {}) {
   return deriveKnowledgeBaseMemorySurfaceSpec(doc);
 }
@@ -1072,9 +1115,14 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
         : '검증: provider-side 파일쓰기 제한 이후 LLM 출력물을 파싱해 workspace에 저장했습니다.',
     ].join('\n')
     : out;
-  jobs.appendConversation(jobId, "gemini", userFacingOut, { kind: "research" });
+  jobs.appendConversation(jobId, "gemini", userFacingOut, { kind: "research", provider: 'gemini', model: effectiveGeminiResult.used_model || preferredModel || 'gemini' });
   if (!acceptedProviderFileLimitation && !acceptedTimedPartial) ensureCommandOk("Gemini", effectiveGeminiResult);
-  return userFacingOut;
+  return {
+    output: userFacingOut,
+    provider: 'gemini',
+    model: String(effectiveGeminiResult.used_model || preferredModel || 'gemini').trim() || 'gemini',
+    llm_trace_id: effectiveGeminiResult.llm_trace_id || undefined,
+  };
 }
 
 async function codexImplement(jobId, instruction, signal = null, opts = {}) {
@@ -1466,11 +1514,23 @@ async function synthesizeChatReply(message, routePlan, execution = {}) {
     );
     const out = String(r?.stdout || r?.stderr || "").trim();
     if (r?.ok && out) {
+      if (execution && typeof execution === 'object') {
+        execution._response_model_badge = {
+          ...(execution._response_model_badge && typeof execution._response_model_badge === 'object' ? execution._response_model_badge : {}),
+          final: { provider: 'gemini', model: String(r.used_model || r.model || '').trim() || 'gemini' },
+        };
+      }
       const reply = clip(out, 3800);
       return appendFoldedDigestAlways ? appendFoldedContributionDigest(reply, foldedSignals) : reply;
     }
   } catch {}
 
+  if (execution && typeof execution === 'object') {
+    execution._response_model_badge = {
+      ...(execution._response_model_badge && typeof execution._response_model_badge === 'object' ? execution._response_model_badge : {}),
+      final: { provider: 'local', model: 'fallback' },
+    };
+  }
   const fallback = buildChatSynthesisFallback(message, execution, runtime || null);
   return appendFoldedDigestOnFallback ? appendFoldedContributionDigest(fallback, foldedSignals) : fallback;
 }
@@ -4724,6 +4784,10 @@ ${pendingTeamApprovalNotice}`.trim();
       }
     }
 
+    if (!mergedExecution.pendingApproval) {
+      replyText = appendResponseModelBadge(replyText, { routePlan, execution: mergedExecution });
+    }
+
     if (verbose) {
       await sendLong(bot, chatId, formatChatSummary(routePlan, mergedExecution.results));
       await bot.sendMessage(chatId, `autopilot_stop_reason=${stopReason}`);
@@ -5113,6 +5177,7 @@ async function executeChatActions(
           outputs.push({
             agentId,
             provider: result.provider,
+            model: result.model,
             mode: result.mode,
             output: String(result.output || ""),
             jobId: targetJobId,

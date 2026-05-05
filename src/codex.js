@@ -121,7 +121,8 @@ function attachCodexTrace({ result, jobId, surface, agentId, roleId, model, prom
     workspaceRoot,
     metadata,
   });
-  return trace ? { ...result, llm_trace_id: trace.trace_id, llm_trace_dir: trace.trace_dir } : result;
+  const withModel = { ...(result && typeof result === 'object' ? result : {}), used_model: String(model || '').trim() || 'codex' };
+  return trace ? { ...withModel, llm_trace_id: trace.trace_id, llm_trace_dir: trace.trace_dir } : withModel;
 }
 
 export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId = "", model = "", profile = "", addDirs = [], configOverrides = {}, sandboxMode = "", approvalPolicy = "", env = {}, surface = "codex_exec", agentId = "", roleId = "", traceMetadata = {}, timeoutMs = 0 }) {
