@@ -232,3 +232,28 @@ test('sendArtifactBundle blocks bundle delivery when artifact publish contract h
     );
   });
 });
+
+
+test('maybeSendArtifactSummary does not re-announce stale artifacts for a later memory-only turn', async () => {
+  await withTempRunsDir(async () => {
+    const job = jobs.createJob({ title: 'artifact summary stale suppression' });
+    fs.mkdirSync(path.dirname(jobs.ensureWorkspacePath(job.jobId, 'travel/icde2026_itinerary.md')), { recursive: true });
+    fs.writeFileSync(jobs.ensureWorkspacePath(job.jobId, 'travel/icde2026_itinerary.md'), 'old itinerary', 'utf8');
+    refreshArtifactIndex(job.jobId, { maxFiles: 5 });
+
+    const sentMessages = [];
+    const bot = {
+      async sendMessage(chatId, text, options) {
+        sentMessages.push({ chatId, text, options });
+        return { ok: true };
+      },
+    };
+
+    await maybeSendArtifactSummary(bot, 'chat-1', job.jobId, {
+      sinceMs: Date.now() + 60_000,
+      replyToMessageId: 123,
+    });
+
+    assert.equal(sentMessages.length, 0);
+  });
+});

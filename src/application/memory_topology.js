@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { syncTrackingFilesView } from './memory_tracking_files_view.js';
+
 const TOPOLOGY_FILE = 'memory_topology.json';
 const TOPOLOGY_EVENTS_FILE = 'memory_topology_events.jsonl';
 const VALID_MODES = new Set(['ephemeral', 'compact_single', 'structured_single', 'team_scoped', 'graph_snapshot']);
@@ -378,6 +380,7 @@ export function writeMemoryTopology({ jobDir = '', topology = {}, previous = nul
   const next = { ...asObject(topology), updated_at: new Date().toISOString() };
   if (!next.created_at) next.created_at = asObject(previous).created_at || next.updated_at;
   fs.writeFileSync(path.join(dir, TOPOLOGY_FILE), `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+  try { syncTrackingFilesView({ jobDir, topology: next }); } catch {}
   if (!previous || compactForCompare(previous) !== compactForCompare(next)) {
     const event = {
       ts: next.updated_at,

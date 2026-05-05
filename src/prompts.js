@@ -1,5 +1,29 @@
 import { getKnowledgeDocEntry, normalizeKnowledgeBaseProfile } from "./knowledge_base/profile.js";
 
+function uniqueTrackingDocs(docs = []) {
+  const out = [];
+  const byName = new Map();
+  for (const doc of Array.isArray(docs) ? docs : []) {
+    const fileName = String(doc?.file_name || '').trim();
+    if (!fileName) continue;
+    const key = fileName.toLowerCase();
+    const existing = byName.get(key);
+    const slot = String(doc?.doc_id || '').trim();
+    if (existing) {
+      if (slot && !existing.slots.includes(slot)) existing.slots.push(slot);
+      continue;
+    }
+    const row = {
+      file_name: fileName,
+      purpose: String(doc?.purpose || 'tracking document').trim(),
+      slots: slot ? [slot] : [],
+    };
+    byName.set(key, row);
+    out.push(row);
+  }
+  return out;
+}
+
 export function orchestratorNotes({ goal, knowledgeBaseProfile = null }) {
   const profile = knowledgeBaseProfile ? normalizeKnowledgeBaseProfile(knowledgeBaseProfile) : null;
   const docs = Array.isArray(profile?.docs) && profile.docs.length > 0
@@ -10,7 +34,11 @@ export function orchestratorNotes({ goal, knowledgeBaseProfile = null }) {
       { file_name: 'progress.md', purpose: '실행 로그/결과' },
       { file_name: 'decisions.md', purpose: '최종 결론/트레이드오프' },
     ];
-  const docLines = docs.map((doc) => `- ${doc.file_name}: ${doc.purpose || 'tracking document'}`).join('\n');
+  const trackingDocs = uniqueTrackingDocs(docs);
+  const docLines = trackingDocs.map((doc) => {
+    const slotSuffix = doc.slots.length > 1 ? ` (semantic slots: ${doc.slots.join(', ')})` : '';
+    return `- ${doc.file_name}: ${doc.purpose || 'tracking document'}${slotSuffix}`;
+  }).join('\n');
   const kbLines = profile
     ? [
         `## Knowledge Base Profile`,

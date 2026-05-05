@@ -70,3 +70,51 @@ test('Tracking syncToGoc=false suppresses append hook for bootstrap/local-only w
     fs.rmSync(runsDir, { recursive: true, force: true });
   }
 });
+
+import { orchestratorNotes } from '../src/prompts.js';
+
+test('orchestrator notes deduplicate adaptive compact tracking files by concrete file name', () => {
+  const design = deriveInitialKnowledgeBaseDesign({ goal: '여행 일정을 기억하고 도와줘' });
+  const notes = orchestratorNotes({ goal: '여행 일정을 기억하고 도와줘', knowledgeBaseProfile: design.profile });
+  const coreLines = notes.split('\n').filter((line) => /^- core_memory\.md:/.test(line));
+  assert.equal(coreLines.length, 1);
+  assert.match(coreLines[0], /semantic slots: plan, research, progress, decisions, artifacts/);
+});
+
+import { planMemoryTopology } from '../src/application/memory_topology.js';
+
+test('Tracking files section is regenerated from current memory topology instead of appended', () => {
+  const prevRunsDir = process.env.RUNS_DIR;
+  const runsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ddalggak-tracking-view-'));
+  process.env.RUNS_DIR = runsDir;
+  try {
+    const jobs = new Jobs();
+    const tracking = new Tracking(jobs);
+    const job = jobs.createJob({ title: 'tracking view test' });
+    const design = deriveInitialKnowledgeBaseDesign({ goal: 'tracking view test' });
+    tracking.init(job.jobId, design.profile);
+    tracking.append(job.jobId, 'plan', orchestratorNotes({ goal: 'tracking view test', knowledgeBaseProfile: design.profile }), { timestamp: false, syncToGoc: false });
+
+    planMemoryTopology({ jobDir: job.dir, persist: true, forceMode: 'team_scoped', eventReason: 'test_promote' });
+    const corePath = path.join(job.dir, 'shared', 'core_memory.md');
+    const core = fs.readFileSync(corePath, 'utf8');
+    assert.equal((core.match(/^## Tracking files$/gm) || []).length, 1);
+    assert.equal((core.match(/^- core_memory\.md:/gm) || []).length, 1);
+    assert.match(core, /Generated from current memory topology \(team_scoped/);
+    assert.match(core, /^- research\.md:/m);
+    assert.match(core, /^- progress\.md:/m);
+    assert.match(core, /^- review_findings\.md:/m);
+    assert.match(core, /^- decisions\.md:/m);
+
+    planMemoryTopology({ jobDir: job.dir, persist: true, forceMode: 'compact_single', eventReason: 'test_compact' });
+    const compactCore = fs.readFileSync(corePath, 'utf8');
+    assert.equal((compactCore.match(/^## Tracking files$/gm) || []).length, 1);
+    assert.equal((compactCore.match(/^- core_memory\.md:/gm) || []).length, 1);
+    assert.match(compactCore, /Generated from current memory topology \(compact_single/);
+    assert.doesNotMatch(compactCore, /^- review_findings\.md:/m);
+  } finally {
+    if (typeof prevRunsDir === 'undefined') delete process.env.RUNS_DIR;
+    else process.env.RUNS_DIR = prevRunsDir;
+    fs.rmSync(runsDir, { recursive: true, force: true });
+  }
+});
