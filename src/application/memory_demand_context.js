@@ -398,6 +398,14 @@ export function buildMemoryDemandContext({
       confidence: demand.routerMemoryPlan?.confidence,
       sources: result.sources,
       item_count: items.length,
+      source_types: Array.isArray(demand.routerMemoryPlan?.source_types) ? demand.routerMemoryPlan.source_types : [...new Set(items.map((item) => String(item.kind || '').trim()).filter(Boolean))],
+      surface_ids: Array.isArray(demand.routerMemoryPlan?.surface_ids) ? demand.routerMemoryPlan.surface_ids : [],
+      matching: {
+        strategy: demand.routerMemoryPlan?.classifier ? 'router_memory_plan' : 'runtime_token_scoring',
+        item_count: items.length,
+        sources: result.sources,
+        demand_reasons: demand.reasons,
+      },
       agent_id: String(agentId || '').trim().toLowerCase() || undefined,
       role_id: String(roleId || '').trim().toLowerCase() || undefined,
     });

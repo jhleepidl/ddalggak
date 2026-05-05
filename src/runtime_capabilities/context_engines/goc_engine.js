@@ -3,6 +3,8 @@ import { planMemoryTopology } from "../../application/memory_topology.js";
 import { buildChatMemoryAnchorPromptBlock, updateChatMemoryAnchor } from "../../application/chat_memory_anchor.js";
 import { buildMemoryDemandContext } from "../../application/memory_demand_context.js";
 import { syncMemoryTopologyToGoc } from "../../application/goc_memory_topology_sync.js";
+import { syncMemoryDemandToGoc } from "../../application/goc_memory_demand_sync.js";
+import { enqueueGocLateSync, flushGocLateSyncQueue, gocLateSyncMode, scheduleGocLateSyncFlush } from "../../application/goc_late_sync.js";
 import { loadCurrentTaskPacket, renderTaskPacket, updateCurrentTaskPacket } from "../../application/task_packet.js";
 import {
   normalizeScopeHintCore as normalizeLensSpecDomain,
@@ -176,11 +178,64 @@ export class GocContextEngine extends ContextEngineBase {
     return renderTaskPacket(packet, { roleId: normalized.roleId, maxChars: 1600 });
   }
 
+  async _flushMemoryLateSync(jobId = '', { threadId = '', runId = '' } = {}) {
+    const cleanJobId = String(jobId || '').trim();
+    const cleanThreadId = String(threadId || this.runtime?.map?.threadId || '').trim();
+    if (!cleanJobId || !cleanThreadId || !this.client || !this.jobs) return { ok: false, reason: 'missing_client_or_thread' };
+    const jobDir = this._jobDir(cleanJobId);
+    return await flushGocLateSyncQueue({
+      jobs: this.jobs,
+      jobId: cleanJobId,
+      logger: (line) => this.log(line),
+      shouldProcess: (row) => ['memory_topology', 'memory_demand'].includes(String(row?.kind || '').trim()),
+      handler: async (row) => {
+        const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
+        const kind = String(row?.kind || '').trim();
+        if (kind === 'memory_topology') {
+          await syncMemoryTopologyToGoc({
+            client: this.client,
+            threadId: cleanThreadId,
+            jobDir,
+            jobId: cleanJobId,
+            runId: payload.runId || payload.run_id || runId,
+            topology: payload.topology || null,
+            anchor: payload.anchor || null,
+            source: payload.source || 'ddalggak:goc_context_engine_late',
+            eventLimit: payload.eventLimit || 40,
+            logger: (line) => this.log(line),
+          });
+        }
+        if (kind === 'memory_demand') {
+          await syncMemoryDemandToGoc({
+            client: this.client,
+            threadId: cleanThreadId,
+            jobDir,
+            runId: payload.runId || payload.run_id || runId,
+            source: payload.source || 'ddalggak:goc_context_engine_late',
+            eventLimit: payload.eventLimit || 80,
+            logger: (line) => this.log(line),
+          });
+        }
+      },
+    });
+  }
+
+  _scheduleMemoryLateSync(jobId = '', { threadId = '', runId = '' } = {}) {
+    const cleanJobId = String(jobId || '').trim();
+    if (!cleanJobId || !this.jobs) return false;
+    return scheduleGocLateSyncFlush({
+      jobs: this.jobs,
+      jobId: cleanJobId,
+      logger: (line) => this.log(line),
+      flush: () => this._flushMemoryLateSync(cleanJobId, { threadId, runId }),
+    });
+  }
+
   _memoryDemand(input = {}, reason = 'goc_preflight') {
     const normalized = input && typeof input === 'object' ? input : {};
     const jobDir = this._jobDir(normalized.jobId || '');
     if (!jobDir) return { text: '', sources: [], totalItems: 0, demand: {} };
-    return buildMemoryDemandContext({
+    const result = buildMemoryDemandContext({
       jobDir,
       userText: normalized.userMessageText || normalized.goal || '',
       goal: normalized.goal || '',
@@ -193,6 +248,21 @@ export class GocContextEngine extends ContextEngineBase {
       reason,
       maxChars: clamp(process.env.MEMORY_DEMAND_CONTEXT_MAX_CHARS, 900, 6000, 2400),
     });
+    if (gocLateSyncMode() === 'late' && result?.totalItems > 0) {
+      const runMeta = asObject(normalized.runMeta);
+      const threadId = String(runMeta.threadId || runMeta.thread_id || this.runtime?.map?.threadId || '').trim();
+      const runId = String(runMeta.runId || runMeta.run_id || '').trim();
+      enqueueGocLateSync({
+        jobs: this.jobs,
+        jobId: normalized.jobId || '',
+        kind: 'memory_demand',
+        priority: 'normal',
+        reason,
+        payload: { runId, source: 'ddalggak:goc_context_engine', eventLimit: 80 },
+      });
+      this._scheduleMemoryLateSync(normalized.jobId || '', { threadId, runId });
+    }
+    return result;
   }
 
   setRuntime(runtime = null) {
@@ -394,17 +464,29 @@ export class GocContextEngine extends ContextEngineBase {
           assistantText: row.lastAssistantText || '',
         });
       } catch {}
-      await syncMemoryTopologyToGoc({
-        client: this.client,
-        threadId,
-        jobDir,
-        jobId,
-        runId,
-        topology,
-        anchor,
-        source: 'ddalggak:goc_context_engine',
-        logger: (line) => this.log(line),
-      }).catch(() => null);
+      if (gocLateSyncMode() === 'late') {
+        enqueueGocLateSync({
+          jobs: this.jobs,
+          jobId,
+          kind: 'memory_topology',
+          priority: 'normal',
+          reason: 'run_end',
+          payload: { runId, topology, anchor, source: 'ddalggak:goc_context_engine', eventLimit: 40 },
+        });
+        this._scheduleMemoryLateSync(jobId, { threadId, runId });
+      } else {
+        await syncMemoryTopologyToGoc({
+          client: this.client,
+          threadId,
+          jobDir,
+          jobId,
+          runId,
+          topology,
+          anchor,
+          source: 'ddalggak:goc_context_engine',
+          logger: (line) => this.log(line),
+        }).catch(() => null);
+      }
     }
     const rebuilt = await this.rebuildSharedContext(input, { compile: false });
     return { ...asObject(rebuilt), memoryTopology: topology, chatMemoryAnchor: anchor };

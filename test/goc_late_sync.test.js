@@ -79,3 +79,36 @@ test('GoC late sync keeps failed events for retry', async () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test('GoC late sync can flush selected kinds without dropping deferred rows', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ddalggak-goc-late-filter-'));
+  const prevRuns = process.env.RUNS_DIR;
+  const prevMode = process.env.GOC_SYNC_MODE;
+  process.env.RUNS_DIR = tempDir;
+  process.env.GOC_SYNC_MODE = 'late';
+  try {
+    const jobs = new Jobs();
+    const job = jobs.createJob({ title: 'late sync filter test' });
+    enqueueGocLateSync({ jobs, jobId: job.jobId, kind: 'memory_demand', payload: { runId: 'run-1' } });
+    enqueueGocLateSync({ jobs, jobId: job.jobId, kind: 'tracking_append', payload: { docName: 'progress.md' } });
+
+    const handled = [];
+    const result = await flushGocLateSyncQueue({
+      jobs,
+      jobId: job.jobId,
+      shouldProcess: (row) => row.kind === 'memory_demand',
+      handler: async (row) => { handled.push(row.kind); },
+    });
+    assert.deepEqual(handled, ['memory_demand']);
+    assert.equal(result.processed, 1);
+    const remaining = readGocLateSyncQueue(jobs, job.jobId);
+    assert.equal(remaining.length, 1);
+    assert.equal(remaining[0].kind, 'tracking_append');
+  } finally {
+    if (typeof prevRuns === 'undefined') delete process.env.RUNS_DIR;
+    else process.env.RUNS_DIR = prevRuns;
+    if (typeof prevMode === 'undefined') delete process.env.GOC_SYNC_MODE;
+    else process.env.GOC_SYNC_MODE = prevMode;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});

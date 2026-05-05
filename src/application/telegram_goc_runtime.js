@@ -42,6 +42,8 @@ import {
   isGocLateSyncEnabled,
   scheduleGocLateSyncFlush,
 } from "./goc_late_sync.js";
+import { syncMemoryTopologyToGoc } from './goc_memory_topology_sync.js';
+import { syncMemoryDemandToGoc } from './goc_memory_demand_sync.js';
 import { sendLong as sendLongAdapter } from "../adapters/telegram/send.js";
 import {
   buildPendingApprovalPrompt as buildPendingApprovalPromptAdapter,
@@ -393,22 +395,52 @@ async function flushJobGocLateSync(jobId) {
   const cleanJobId = String(jobId || '').trim();
   if (!cleanJobId || memoryModeWithFallback() !== "goc") return { ok: false, reason: 'not_ready' };
   const client = requireGocClient();
+  const jobDir = runDir(cleanJobId);
   return await flushGocLateSyncQueue({
     jobs,
     jobId: cleanJobId,
     logger: (line) => jobs.log(cleanJobId, line),
+    shouldProcess: (row) => ['tracking_append', 'memory_topology', 'memory_demand'].includes(String(row?.kind || '').trim()),
     handler: async (row) => {
       const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
-      if (row?.kind !== 'tracking_append') return;
+      const kind = String(row?.kind || '').trim();
       const map = await ensureJobThread(client, {
         jobId: cleanJobId,
-        jobDir: runDir(cleanJobId),
+        jobDir,
         title: `job:${cleanJobId}`,
       });
+      if (kind === 'memory_topology') {
+        await syncMemoryTopologyToGoc({
+          client,
+          threadId: map.threadId,
+          jobDir,
+          jobId: cleanJobId,
+          runId: payload.runId || payload.run_id || '',
+          topology: payload.topology || null,
+          anchor: payload.anchor || null,
+          source: payload.source || 'ddalggak:late_sync',
+          eventLimit: payload.eventLimit || 40,
+          logger: (line) => jobs.log(cleanJobId, line),
+        });
+        return;
+      }
+      if (kind === 'memory_demand') {
+        await syncMemoryDemandToGoc({
+          client,
+          threadId: map.threadId,
+          jobDir,
+          runId: payload.runId || payload.run_id || '',
+          source: payload.source || 'ddalggak:late_sync',
+          eventLimit: payload.eventLimit || 80,
+          logger: (line) => jobs.log(cleanJobId, line),
+        });
+        return;
+      }
+      if (kind !== 'tracking_append') return;
       if (payload.syncChunk !== false) {
         await appendTrackingChunkToGoc(client, {
           jobId: cleanJobId,
-          jobDir: runDir(cleanJobId),
+          jobDir,
           docName: payload.docName,
           chunkText: String(payload.chunk || ''),
         });

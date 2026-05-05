@@ -101,13 +101,17 @@ export function enqueueGocLateSync({ jobs, jobId = '', kind = '', payload = {}, 
 
 const flushTimers = new Map();
 
-export function scheduleGocLateSyncFlush({ jobs, jobId = '', flush, delayMs = null, logger = null } = {}) {
+export function scheduleGocLateSyncFlush({ jobs, jobId = '', flush, delayMs = null, logger = null, replaceExisting = false } = {}) {
   const cleanJobId = cleanText(jobId);
   if (!jobs || !cleanJobId || typeof flush !== 'function' || !isGocLateSyncEnabled()) return false;
   const waitMs = Number.isFinite(Number(delayMs))
     ? Math.max(0, Math.floor(Number(delayMs)))
     : intEnv('GOC_LATE_SYNC_DEBOUNCE_MS', 3000, { min: 0, max: 600000 });
-  if (flushTimers.has(cleanJobId)) return true;
+  if (flushTimers.has(cleanJobId)) {
+    if (!replaceExisting) return true;
+    try { clearTimeout(flushTimers.get(cleanJobId)); } catch {}
+    flushTimers.delete(cleanJobId);
+  }
   const timer = setTimeout(async () => {
     flushTimers.delete(cleanJobId);
     try { await flush(); }
@@ -135,6 +139,7 @@ export async function flushGocLateSyncQueue({
   maxBatch = null,
   handler,
   logger = null,
+  shouldProcess = null,
 } = {}) {
   const cleanJobId = cleanText(jobId);
   if (!jobs || !cleanJobId || typeof handler !== 'function') return { ok: false, processed: 0, failed: 0, remaining: 0 };
@@ -147,8 +152,16 @@ export async function flushGocLateSyncQueue({
   const limit = Number.isFinite(Number(maxBatch))
     ? Math.max(1, Math.floor(Number(maxBatch)))
     : intEnv('GOC_LATE_SYNC_MAX_BATCH', 50, { min: 1, max: 500 });
-  const batch = rows.slice(0, limit);
-  const rest = rows.slice(limit);
+  const batch = [];
+  const rest = [];
+  for (const row of rows) {
+    let eligible = true;
+    if (typeof shouldProcess === 'function') {
+      try { eligible = shouldProcess(row) !== false; } catch { eligible = false; }
+    }
+    if (eligible && batch.length < limit) batch.push(row);
+    else rest.push(row);
+  }
   const keep = [];
   let processed = 0;
   let failed = 0;

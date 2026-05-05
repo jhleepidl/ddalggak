@@ -1033,6 +1033,19 @@ export class GocClient {
     });
   }
 
+  async recordMemoryDemand(threadId, body = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("recordMemoryDemand requires threadId");
+    return await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/memory/demand`, body },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/memory/demand`, body },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/memory/demand`, body },
+      ],
+    });
+  }
+
   async createMemoryNode(threadId, body = {}) {
     const cleanThreadId = String(threadId || "").trim();
     if (!cleanThreadId) throw new Error("createMemoryNode requires threadId");
