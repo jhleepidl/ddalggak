@@ -23,7 +23,7 @@ const DEFAULT_GEMINI_MODEL_PRIMARY = "auto";
 // `auto`: it tries concrete models first so a model-specific 429 on Gemini 3
 // does not make the whole Gemini provider unusable. Keep CLI auto last.
 const DEFAULT_GEMINI_MODEL_POOL = "gemini-2.5-flash,gemini-2.5-pro,gemini-3.1-pro-preview,gemini-3-flash-preview,auto";
-const DEFAULT_GEMINI_MODEL_FALLBACKS = DEFAULT_GEMINI_MODEL_POOL;
+const DEFAULT_GEMINI_MODEL_FALLBACKS = "";
 const DEFAULT_CAPACITY_MAX_RETRIES = 2;
 const DEFAULT_CAPACITY_SWITCH_AFTER = 1;
 const DEFAULT_BACKOFF_BASE_MS = 1000;
@@ -544,7 +544,7 @@ export function resolveGeminiModelCandidates(explicitModel = "", context = {}) {
     || DEFAULT_GEMINI_MODEL_PRIMARY
   ).trim();
   const primary = normalizeModelName(rawPrimary);
-  const fallbackRaw = String(process.env.GEMINI_MODEL_FALLBACKS || DEFAULT_GEMINI_MODEL_FALLBACKS);
+  const fallbackRaw = String(process.env.GEMINI_MODEL_FALLBACKS ?? DEFAULT_GEMINI_MODEL_FALLBACKS);
   const out = [];
   const seen = new Set();
 
