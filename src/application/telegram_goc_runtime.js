@@ -11,7 +11,7 @@ import { runGeminiPrompt } from "../gemini.js";
 import { OrchestratorMemory } from "../settings.js";
 import { orchestratorNotes, buildChatGPTNextStepPrompt } from "../prompts.js";
 import { clip, extractCodexInstruction, extractJsonPlan } from "../textutil.js";
-import { deriveKnowledgeBaseDesign, deriveKnowledgeBaseProfile } from "../knowledge_base/profile.js";
+import { deriveKnowledgeBaseDesign, deriveKnowledgeBaseProfile, deriveInitialKnowledgeBaseDesign } from "../knowledge_base/profile.js";
 import { loadAgents, getAgent } from "../agents.js";
 import {
   parseAutoSuggestDecision as parseAutoSuggestDecisionShared,
@@ -35,6 +35,13 @@ import {
   buildGocMemoryNodePayload,
   ensureKnowledgeBaseMemorySurfacesInGoc as ensureKnowledgeBaseMemorySurfacesInGocShared,
 } from "./goc_memory_sync.js";
+import {
+  enqueueGocLateSync,
+  flushGocLateSyncQueue,
+  gocLateSyncMode,
+  isGocLateSyncEnabled,
+  scheduleGocLateSyncFlush,
+} from "./goc_late_sync.js";
 import { sendLong as sendLongAdapter } from "../adapters/telegram/send.js";
 import {
   buildPendingApprovalPrompt as buildPendingApprovalPromptAdapter,
@@ -154,6 +161,22 @@ let agentRegistry = runtimeState.agentRegistry;
 let gocClient = runtimeState.gocClient;
 let gocReady = runtimeState.gocReady;
 let gocInitError = runtimeState.gocInitError;
+
+function envFlag(name, fallback = false) {
+  const key = String(process.env[name] ?? '').trim().toLowerCase();
+  if (!key) return fallback;
+  if (["1", "true", "yes", "on"].includes(key)) return true;
+  if (["0", "false", "no", "off"].includes(key)) return false;
+  return fallback;
+}
+
+function shouldSyncBootstrapMemoryToGoc() {
+  return envFlag('GOC_SYNC_BOOTSTRAP_MEMORY', false);
+}
+
+function shouldUseLateGocSync() {
+  return memoryModeWithFallback() === "goc" && gocLateSyncMode() === 'late' && isGocLateSyncEnabled();
+}
 
 function refreshAgentRegistryLocal() {
   agentRegistry = setAgentRegistry(loadAgents());
@@ -365,24 +388,85 @@ async function syncTrackingAppendToGocMemory({ jobId = '', docName = '', markdow
   }
 }
 
+
+async function flushJobGocLateSync(jobId) {
+  const cleanJobId = String(jobId || '').trim();
+  if (!cleanJobId || memoryModeWithFallback() !== "goc") return { ok: false, reason: 'not_ready' };
+  const client = requireGocClient();
+  return await flushGocLateSyncQueue({
+    jobs,
+    jobId: cleanJobId,
+    logger: (line) => jobs.log(cleanJobId, line),
+    handler: async (row) => {
+      const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
+      if (row?.kind !== 'tracking_append') return;
+      const map = await ensureJobThread(client, {
+        jobId: cleanJobId,
+        jobDir: runDir(cleanJobId),
+        title: `job:${cleanJobId}`,
+      });
+      if (payload.syncChunk !== false) {
+        await appendTrackingChunkToGoc(client, {
+          jobId: cleanJobId,
+          jobDir: runDir(cleanJobId),
+          docName: payload.docName,
+          chunkText: String(payload.chunk || ''),
+        });
+      }
+      await syncTrackingAppendToGocMemory({
+        jobId: cleanJobId,
+        docName: payload.docName,
+        markdown: payload.markdown,
+        provider: payload.provider,
+        roleId: payload.roleId,
+        purpose: payload.purpose,
+        source: payload.source,
+        eventType: payload.eventType,
+        actorKind: payload.actorKind,
+        pipelineStage: payload.pipelineStage,
+        semanticKind: payload.semanticKind,
+        memoryContractEnforced: payload.memoryContractEnforced,
+        threadId: map.threadId,
+        client,
+      });
+    },
+  });
+}
+
+function enqueueTrackingAppendForLateGocSync(payload = {}) {
+  const jobId = String(payload?.jobId || '').trim();
+  if (!jobId || !shouldUseLateGocSync()) return { queued: false };
+  const result = enqueueGocLateSync({
+    jobs,
+    jobId,
+    kind: 'tracking_append',
+    reason: payload.eventType || payload.source || 'tracking_append',
+    payload: {
+      ...payload,
+      markdown: String(payload.markdown || ''),
+      chunk: String(payload.chunk || ''),
+      syncChunk: payload.syncChunk !== false,
+    },
+  });
+  scheduleGocLateSyncFlush({
+    jobs,
+    jobId,
+    logger: (line) => jobs.log(jobId, line),
+    flush: () => flushJobGocLateSync(jobId),
+  });
+  return result;
+}
+
 function installTrackingGocHook() {
-  tracking.setAppendHook(async ({ jobId, docName, chunk, markdown, provider, roleId, purpose, source, eventType, actorKind, pipelineStage, semanticKind, memoryContractEnforced }) => {
+  tracking.setAppendHook(async ({ jobId, docName, chunk, markdown, provider, roleId, purpose, source, eventType, actorKind, pipelineStage, semanticKind, memoryContractEnforced, syncToGoc }) => {
+    if (syncToGoc === false) return;
     if (memoryModeWithFallback() !== "goc") return;
     const trackedDocs = tracking.listDocs(jobId).map((entry) => String(entry?.file_name || '').trim()).filter(Boolean);
     if (!trackedDocs.includes(docName) && !TRACK_DOC_NAMES.includes(docName)) return;
-    try {
-      await appendTrackingChunkToGoc(requireGocClient(), {
-        jobId,
-        jobDir: runDir(jobId),
-        docName,
-        chunkText: String(chunk || ""),
-      });
-    } catch (e) {
-      jobs.log(jobId, `GoC append hook failed (${docName}): ${String(e?.message ?? e)}`);
-    }
-    void syncTrackingAppendToGocMemory({
+    const payload = {
       jobId,
       docName,
+      chunk,
       markdown,
       provider,
       roleId,
@@ -393,10 +477,27 @@ function installTrackingGocHook() {
       pipelineStage,
       semanticKind,
       memoryContractEnforced,
-    });
+    };
+    if (shouldUseLateGocSync()) {
+      const queued = enqueueTrackingAppendForLateGocSync(payload);
+      if (queued?.queued) {
+        try { jobs.log(jobId, `GoC late sync queued (${docName})`); } catch {}
+      }
+      return;
+    }
+    try {
+      await appendTrackingChunkToGoc(requireGocClient(), {
+        jobId,
+        jobDir: runDir(jobId),
+        docName,
+        chunkText: String(chunk || ""),
+      });
+    } catch (e) {
+      jobs.log(jobId, `GoC append hook failed (${docName}): ${String(e?.message ?? e)}`);
+    }
+    void syncTrackingAppendToGocMemory(payload);
   });
 }
-
 installTrackingGocHook();
 
 function getAgentRolesText() {
@@ -428,22 +529,35 @@ async function createJob(goal, { ownerUserId = null, ownerChatId = null, teamCon
     ownerUserId,
     ownerChatId,
   });
-  const knowledgeDesign = deriveKnowledgeBaseDesign({ goal, teamConfig });
+  const knowledgeDesign = deriveInitialKnowledgeBaseDesign({ goal, teamConfig });
   const knowledgeBaseProfile = knowledgeDesign.profile;
   tracking.init(job.jobId, knowledgeBaseProfile);
-  tracking.append(job.jobId, "plan", orchestratorNotes({ goal, knowledgeBaseProfile }), { timestamp: false, source: 'planner', purpose: 'implementation', eventType: 'planner_brief_seed', actorKind: 'planner', pipelineStage: 'initialization', semanticKind: 'plan' });
-  tracking.append(job.jobId, "research", `## Goal
-
-${goal}
-`, { timestamp: false, source: 'planner', purpose: 'research', eventType: 'task_goal_seed', actorKind: 'planner', pipelineStage: 'initialization', semanticKind: 'research' });
-  tracking.append(job.jobId, "progress", `## Started
-- goal: ${goal}
-`, { timestamp: false, source: 'system', purpose: 'implementation', eventType: 'run_started', actorKind: 'system', pipelineStage: 'initialization', semanticKind: 'progress' });
-  tracking.append(job.jobId, "artifacts", [
-    "## Artifact policy",
-    "- uploads, generated files, exports, and delivery references should be indexed here.",
-    `- kb_profile: ${knowledgeBaseProfile.profile_id}`,
-  ].join("\n"), { timestamp: false, source: 'system', purpose: 'artifact', eventType: 'artifact_index_initialized', actorKind: 'system', pipelineStage: 'initialization', semanticKind: 'artifacts' });
+  const syncBootstrapToGoc = shouldSyncBootstrapMemoryToGoc();
+  const seedMode = String(process.env.MEMORY_SEED_MODE || 'adaptive_compact').trim().toLowerCase();
+  const compactSeed = knowledgeBaseProfile.profile_id === 'adaptive_compact_seed' && !['legacy', 'structured', 'eager_structured', 'template'].includes(seedMode);
+  if (compactSeed) {
+    tracking.append(job.jobId, "plan", [
+      '# Core Memory Seed',
+      '',
+      `- goal: ${goal}`,
+      `- kb_profile: ${knowledgeBaseProfile.profile_id}`,
+      '- memory_mode: compact_single bootstrap',
+      '- policy: keep the initial run memory flat; split into plan/research/progress/artifacts only when adaptive topology pressure requires it.',
+      '- artifact_policy: record uploads/generated deliverables here initially; typed artifact observations remain in artifact_observations.jsonl.',
+      '',
+      '## Runtime brief',
+      orchestratorNotes({ goal, knowledgeBaseProfile }),
+    ].join("\n"), { timestamp: false, source: 'planner', purpose: 'implementation', eventType: 'compact_core_seed', actorKind: 'planner', pipelineStage: 'initialization', semanticKind: 'plan', syncToGoc: syncBootstrapToGoc });
+  } else {
+    tracking.append(job.jobId, "plan", orchestratorNotes({ goal, knowledgeBaseProfile }), { timestamp: false, source: 'planner', purpose: 'implementation', eventType: 'planner_brief_seed', actorKind: 'planner', pipelineStage: 'initialization', semanticKind: 'plan', syncToGoc: syncBootstrapToGoc });
+    tracking.append(job.jobId, "research", `## Goal\n\n${goal}\n`, { timestamp: false, source: 'planner', purpose: 'research', eventType: 'task_goal_seed', actorKind: 'planner', pipelineStage: 'initialization', semanticKind: 'research', syncToGoc: syncBootstrapToGoc });
+    tracking.append(job.jobId, "progress", `## Started\n- goal: ${goal}\n`, { timestamp: false, source: 'system', purpose: 'implementation', eventType: 'run_started', actorKind: 'system', pipelineStage: 'initialization', semanticKind: 'progress', syncToGoc: syncBootstrapToGoc });
+    tracking.append(job.jobId, "artifacts", [
+      "## Artifact policy",
+      "- uploads, generated files, exports, and delivery references should be indexed here.",
+      `- kb_profile: ${knowledgeBaseProfile.profile_id}`,
+    ].join("\n"), { timestamp: false, source: 'system', purpose: 'artifact', eventType: 'artifact_index_initialized', actorKind: 'system', pipelineStage: 'initialization', semanticKind: 'artifacts', syncToGoc: syncBootstrapToGoc });
+  }
   jobs.appendConversation(job.jobId, "user", goal, { kind: "goal" });
   return job;
 }

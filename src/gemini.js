@@ -608,7 +608,8 @@ function resolveGeminiIsolatedWorkspaceBase({ jobId = "", originalCwd = "" } = {
   if (!["tmp", "temp", "os_tmp", "os-tmp"].includes(scope)) {
     const runRoot = findRunRootFromWorkspacePath(originalCwd, jobId);
     if (runRoot) {
-      return path.join(runRoot, "local_memory", "gemini_cli_contexts");
+      const dirName = String(process.env.GEMINI_CONTEXT_DIR_NAME || "gemini_cwd").trim() || "gemini_cwd";
+      return path.join(runRoot, "local_memory", dirName);
     }
   }
 
@@ -619,10 +620,12 @@ function makeGeminiIsolatedWorkspace({ jobId = "", surface = "", originalCwd = "
   const base = resolveGeminiIsolatedWorkspaceBase({ jobId, originalCwd });
   fs.mkdirSync(base, { recursive: true });
   try { fs.writeFileSync(path.join(base, ".gitignore"), "*\n!.gitignore\n", "utf8"); } catch {}
+  const reuseMode = String(process.env.GEMINI_CONTEXT_REUSE || "stable").trim().toLowerCase();
   pruneOldGeminiIsolatedWorkspaces(base);
-  const safeJob = sanitizeSurfaceForPath(jobId || "noj").slice(0, 80);
-  const safeSurface = sanitizeSurfaceForPath(surface || "prompt").slice(0, 80);
-  const dir = fs.mkdtempSync(path.join(base, `${safeJob}-${safeSurface}-`));
+  const safeSurface = sanitizeSurfaceForPath(surface || "default").slice(0, 40) || "default";
+  const dir = reuseMode === "temp"
+    ? fs.mkdtempSync(path.join(base, `${safeSurface}-`))
+    : path.join(base, safeSurface);
   fs.mkdirSync(path.join(dir, ".gemini"), { recursive: true });
   fs.writeFileSync(
     path.join(dir, "GEMINI.md"),

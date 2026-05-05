@@ -41,7 +41,7 @@ exit 0
     const pwd = result.stdout.match(/^PWD=(.*)$/m)?.[1];
     assert.ok(pwd, 'fake Gemini should report cwd');
     assert.notEqual(path.resolve(pwd), path.resolve(workspace));
-    assert.match(path.resolve(pwd), new RegExp(`${path.resolve(tempDir).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*local_memory.*gemini_cli_contexts`));
+    assert.match(path.resolve(pwd), new RegExp(`${path.resolve(tempDir).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*local_memory.*gemini_cwd`));
     assert.ok(fs.existsSync(path.join(pwd, 'GEMINI.md')), 'isolated cwd should contain only a small generated GEMINI.md');
   } finally {
     process.env.PATH = prevPath;

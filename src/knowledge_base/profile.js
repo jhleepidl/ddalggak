@@ -478,6 +478,72 @@ function resolveKnowledgeProfileSeed({ goal = '', teamConfig = null } = {}) {
   return null;
 }
 
+
+
+export function buildAdaptiveCompactSeedProfile({ goal = '', teamConfig = null } = {}) {
+  const team = asObject(teamConfig);
+  const structure = asObject(team.structure_v2 || team.structureV2);
+  const teamName = cleanText(team.team_name || structure?.metadata?.team_name || '');
+  const topologyPattern = inferTopologyPattern(teamConfig) || 'single_memory_seed';
+  const taskBrief = cleanText(team.task_brief || structure?.intent?.task_brief || goal);
+  const coreFileName = safeFileName(process.env.MEMORY_COMPACT_SEED_FILE || 'core_memory.md');
+  const coreAliases = ['core', 'shared_core', 'plan', 'research', 'progress', 'decisions', 'artifacts', 'mission_brief', 'working_memory', 'artifact_index', 'final_answer'];
+  const docs = KB_SEMANTIC_SLOTS.map((slot, index) => ({
+    doc_id: slot,
+    surface_id: 'core',
+    file_name: coreFileName,
+    title: 'Core Memory',
+    purpose: [
+      'Initial compact memory surface for this chat/run.',
+      'All semantic slots resolve here until memory pressure promotes the run to structured surfaces.',
+      'Do not create role-specific memory files during the low-pressure bootstrap phase.',
+    ].join(' '),
+    legacy_names: uniqueStrings([slot, `${slot}.md`, ...coreAliases], { limit: 32 }),
+    section_hints: ['goal', 'facts', 'progress', 'decisions', 'artifacts'],
+    target_roles: [],
+    load_policy: 'always',
+    write_policy: 'shared',
+    read_priority: index + 1,
+  }));
+  return normalizeKnowledgeBaseProfile({
+    profile_id: 'adaptive_compact_seed',
+    display_name: 'Adaptive compact seed memory',
+    strategy: 'adaptive_compact_seed',
+    selection_reason: 'Starts with one compact memory surface; idle/topology maintenance may propose structured surfaces when pressure increases.',
+    team_name: teamName || undefined,
+    topology_pattern: topologyPattern,
+    task_brief: taskBrief,
+    docs,
+    memory_policy: {
+      stable_semantic_slots: [],
+      mutable_semantic_slots: KB_SEMANTIC_SLOTS,
+      preserve_history: true,
+      migration_strategy: 'adaptive_promote_from_core',
+      enforce_concrete_file_names_in_prompts: true,
+    },
+  });
+}
+
+export function deriveInitialKnowledgeBaseDesign({ goal = '', teamConfig = null, mode = process.env.MEMORY_SEED_MODE || 'adaptive_compact' } = {}) {
+  const cleanMode = cleanText(mode, { lower: true });
+  if (['legacy', 'structured', 'eager_structured', 'template'].includes(cleanMode)) {
+    return deriveKnowledgeBaseDesign({ goal, teamConfig });
+  }
+  const explicitProfileSeed = resolveKnowledgeProfileSeed({ goal, teamConfig });
+  if (explicitProfileSeed && !['compact', 'adaptive_compact', 'single', 'single_memory'].includes(cleanMode)) {
+    return deriveKnowledgeBaseDesign({ goal, teamConfig });
+  }
+  const profile = buildAdaptiveCompactSeedProfile({ goal, teamConfig });
+  const memoryPolicy = normalizeMemoryPolicy(profile.memory_policy, { docs: profile.docs });
+  const normalizedProfile = normalizeKnowledgeBaseProfile({ ...profile, memory_policy: memoryPolicy });
+  return {
+    profile: normalizedProfile,
+    knowledge_surface: buildKnowledgeSurfaceFromProfile(normalizedProfile),
+    memory_policy: memoryPolicy,
+    memory_plan: normalizeMemoryPlan(buildMemoryPlanFromProfile(normalizedProfile)),
+  };
+}
+
 export function deriveKnowledgeBaseDesign({ goal = '', teamConfig = null } = {}) {
   const explicitProfileSeed = resolveKnowledgeProfileSeed({ goal, teamConfig });
   const team = asObject(teamConfig);

@@ -372,6 +372,7 @@ export class Tracking {
     pipelineStage = '',
     semanticKind = '',
     memoryContractEnforced = false,
+    syncToGoc = true,
   } = {}) {
     name = this.resolveDocName(jobId, name);
     if (READ_ONLY_SYSTEM_DOCS.has(String(name || '').trim().toLowerCase())) {
@@ -390,7 +391,7 @@ export class Tracking {
       semanticKind,
     });
 
-    this._invokeAppendHook(jobId, {
+    if (syncToGoc !== false) this._invokeAppendHook(jobId, {
       jobId: String(jobId),
       docName: name,
       markdown: String(markdown),
@@ -503,6 +504,7 @@ export class Tracking {
     actorKind = '',
     pipelineStage = '',
     semanticKind = '',
+    syncToGoc = true,
   } = {}) {
     const cleanRequested = cleanText(requestedName || fallbackDoc || 'progress');
     const cleanProvider = cleanLower(provider);
@@ -528,6 +530,7 @@ export class Tracking {
         actorKind: meta.actorKind,
         pipelineStage: meta.pipelineStage,
         semanticKind: meta.semanticKind,
+        syncToGoc,
       });
       const resolvedName = this.resolveDocName(jobId, cleanRequested || fallbackDoc || 'progress');
       const event = {
@@ -595,6 +598,7 @@ export class Tracking {
         pipelineStage: meta.pipelineStage,
         semanticKind: meta.semanticKind,
         memoryContractEnforced: true,
+        syncToGoc,
       });
       const fallbackResolvedDoc = this.resolveDocName(jobId, fallbackDoc);
       const event = {
@@ -630,6 +634,7 @@ export class Tracking {
       pipelineStage: meta.pipelineStage,
       semanticKind: meta.semanticKind,
       memoryContractEnforced: true,
+      syncToGoc,
     });
     const resolvedDocName = this.resolveDocName(jobId, decision.target_doc.file_name);
     const event = {

@@ -287,6 +287,30 @@ export function canRolePublishSurface({ profile = null, provider = '', roleId = 
 export function renderKnowledgeBaseContractMarkdown(profile = null) {
   const normalized = normalizeKnowledgeBaseProfile(profile || {});
   const memoryPolicy = normalizeMemoryPolicy(normalized.memory_policy, { docs: normalized.docs });
+  const compactSeed = normalized.profile_id === 'adaptive_compact_seed';
+  if (compactSeed) {
+    const fileName = normalized.docs[0]?.file_name || 'core_memory.md';
+    const slots = [...new Set(normalized.docs.map((doc) => cleanText(doc.doc_id, { lower: true })).filter(Boolean))];
+    return [
+      '# Knowledge Base Contract',
+      '',
+      '이 파일은 job별 knowledge base의 고정 계약이다.',
+      '- initial mode: adaptive compact seed',
+      '- 처음에는 단일 core memory만 사용한다.',
+      '- plan/research/progress/decisions/artifacts alias는 모두 같은 core file로 resolve된다.',
+      '- idle/topology maintenance가 pressure를 감지하면 구조화 surface 승격을 제안할 수 있다.',
+      '',
+      `- profile_id: ${normalized.profile_id}`,
+      `- display_name: ${normalized.display_name}`,
+      `- core_file: ${fileName}`,
+      `- semantic_aliases: ${slots.join(', ')}`,
+      `- migration_strategy: ${memoryPolicy.migration_strategy}`,
+      '',
+      '## Stable memories',
+      `- ${KNOWLEDGE_BASE_CONTRACT_FILE}: read_only KB contract`,
+      `- ${KNOWLEDGE_BASE_PROFILE_FILE}: system manifest (do not edit manually)`,
+    ].join('\n');
+  }
   const lines = [
     '# Knowledge Base Contract',
     '',
