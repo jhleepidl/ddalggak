@@ -37,6 +37,14 @@ const DEFAULT_GEMINI_SETTINGS_OVERWRITE = "merge";
 const DEFAULT_GEMINI_DEBUG_LOG = "gemini_debug.log";
 const DEFAULT_GEMINI_FORCE_FILE_STORAGE = "true";
 const DEFAULT_GEMINI_CLI_TRUST_WORKSPACE = "true";
+// Sticky success is intentionally an operational default, not a sample .env knob.
+// In GEMINI_MODEL=auto/pool mode, the last successful concrete model is tried
+// first on the next matching surface. Hidden env switches remain for emergency
+// debugging/rollback, but the default TTL is infinite.
+const DEFAULT_GEMINI_MODEL_STICKY_SUCCESS_ENABLED = "true";
+const DEFAULT_GEMINI_MODEL_STICKY_SUCCESS_SCOPE = "surface";
+const DEFAULT_GEMINI_MODEL_STICKY_SUCCESS_TTL_MS = 0;
+const GEMINI_STICKY_STATE_VERSION = 1;
 
 let planModeAvailability = null;
 let modelFlagAvailability = null;
@@ -315,6 +323,139 @@ function toPositiveInt(raw, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER }
   return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
+function isFalseyEnv(raw) {
+  return ["0", "false", "no", "off", "disabled"].includes(String(raw || "").trim().toLowerCase());
+}
+
+function isGeminiStickySuccessEnabled() {
+  const raw = process.env.GEMINI_MODEL_STICKY_SUCCESS;
+  if (typeof raw === "undefined") return DEFAULT_GEMINI_MODEL_STICKY_SUCCESS_ENABLED === "true";
+  return !isFalseyEnv(raw);
+}
+
+function getGeminiStickySuccessScope() {
+  const raw = String(process.env.GEMINI_MODEL_STICKY_SUCCESS_SCOPE || DEFAULT_GEMINI_MODEL_STICKY_SUCCESS_SCOPE).trim().toLowerCase();
+  if (["global", "all", "shared", "provider"].includes(raw)) return "global";
+  if (["off", "false", "0", "none", "disabled"].includes(raw)) return "off";
+  return "surface";
+}
+
+function getGeminiStickySuccessTtlMs() {
+  // 0 means no expiry. This is the default so operators do not need an env knob.
+  const raw = process.env.GEMINI_MODEL_STICKY_SUCCESS_TTL_MS;
+  if (typeof raw === "undefined" || String(raw).trim() === "") return DEFAULT_GEMINI_MODEL_STICKY_SUCCESS_TTL_MS;
+  return toPositiveInt(raw, DEFAULT_GEMINI_MODEL_STICKY_SUCCESS_TTL_MS, { min: 0, max: 3650 * 24 * 60 * 60 * 1000 });
+}
+
+function normalizeStickySurface(raw = "") {
+  return String(raw || "gemini_prompt").trim().replace(/[^a-zA-Z0-9._:-]+/g, "_").replace(/^_+|_+$/g, "") || "gemini_prompt";
+}
+
+function resolveGeminiProviderStateDir({ originalCwd = "", jobId = "" } = {}) {
+  const explicit = String(process.env.GEMINI_MODEL_SUCCESS_STATE_DIR || process.env.GEMINI_PROVIDER_STATE_DIR || "").trim();
+  if (explicit) return path.resolve(explicit);
+
+  const runRoot = findRunRootFromWorkspacePath(originalCwd, jobId);
+  if (runRoot && path.basename(runRoot) === String(jobId || "").trim()) {
+    return path.join(path.dirname(runRoot), "provider_state");
+  }
+  if (runRoot && path.basename(runRoot) !== "workspace") {
+    return path.join(path.dirname(runRoot), "provider_state");
+  }
+
+  const runsDir = String(process.env.RUNS_DIR || "runs").trim() || "runs";
+  return path.join(path.resolve(runsDir), "provider_state");
+}
+
+function getGeminiStickySuccessStatePath(context = {}) {
+  return path.join(resolveGeminiProviderStateDir(context), "gemini_model_success.json");
+}
+
+function readGeminiStickySuccessState(context = {}) {
+  const filePath = getGeminiStickySuccessStatePath(context);
+  try {
+    const parsed = parseJsonMaybe(fs.readFileSync(filePath, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeGeminiStickySuccessState(state = {}, context = {}) {
+  const filePath = getGeminiStickySuccessStatePath(context);
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(state, null, 2) + "\n", "utf8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function stickyBucketForScope(scope, surface = "") {
+  if (scope === "global") return "global:*";
+  return `surface:${normalizeStickySurface(surface)}`;
+}
+
+function getGeminiStickySuccessEntry({ surface = "", originalCwd = "", jobId = "" } = {}) {
+  if (!isGeminiStickySuccessEnabled()) return null;
+  const scope = getGeminiStickySuccessScope();
+  if (scope === "off") return null;
+  const state = readGeminiStickySuccessState({ originalCwd, jobId });
+  const buckets = state && typeof state === "object" && state.buckets && typeof state.buckets === "object" ? state.buckets : {};
+  const entry = buckets[stickyBucketForScope(scope, surface)] || null;
+  if (!entry || typeof entry !== "object") return null;
+  const model = normalizeModelName(entry.model);
+  if (!model || model === "auto") return null;
+  const ttlMs = getGeminiStickySuccessTtlMs();
+  if (ttlMs > 0) {
+    const updatedAtMs = Number(entry.updated_at_ms || 0);
+    if (!Number.isFinite(updatedAtMs) || updatedAtMs <= 0 || Date.now() - updatedAtMs > ttlMs) return null;
+  }
+  return { ...entry, model };
+}
+
+function recordGeminiStickySuccess({ model = "", surface = "", originalCwd = "", jobId = "" } = {}) {
+  if (!isGeminiStickySuccessEnabled()) return false;
+  const scope = getGeminiStickySuccessScope();
+  if (scope === "off") return false;
+  const cleanModel = normalizeModelName(model);
+  if (!cleanModel || cleanModel === "auto") return false;
+  const state = readGeminiStickySuccessState({ originalCwd, jobId });
+  const buckets = state && typeof state === "object" && state.buckets && typeof state.buckets === "object" ? state.buckets : {};
+  const bucketKey = stickyBucketForScope(scope, surface);
+  const previous = buckets[bucketKey] && typeof buckets[bucketKey] === "object" ? buckets[bucketKey] : {};
+  const nextState = {
+    ...(state && typeof state === "object" ? state : {}),
+    version: GEMINI_STICKY_STATE_VERSION,
+    updated_at: new Date().toISOString(),
+    updated_at_ms: Date.now(),
+    buckets: {
+      ...buckets,
+      [bucketKey]: {
+        model: cleanModel,
+        scope,
+        surface: scope === "surface" ? normalizeStickySurface(surface) : "*",
+        updated_at: new Date().toISOString(),
+        updated_at_ms: Date.now(),
+        success_count: Math.max(0, Number(previous.success_count || 0)) + 1,
+      },
+    },
+  };
+  return writeGeminiStickySuccessState(nextState, { originalCwd, jobId });
+}
+
+function applyGeminiStickySuccessCandidates(candidates = [], context = {}) {
+  if (!Array.isArray(candidates) || candidates.length <= 1) return candidates;
+  const entry = getGeminiStickySuccessEntry(context);
+  const stickyModel = normalizeModelName(entry?.model || "");
+  if (!stickyModel || stickyModel === "auto") return candidates;
+  const stickyKey = stickyModel.toLowerCase();
+  const index = candidates.findIndex((candidate) => normalizeModelName(candidate).toLowerCase() === stickyKey);
+  if (index <= 0) return candidates;
+  return [candidates[index], ...candidates.slice(0, index), ...candidates.slice(index + 1)];
+}
+
 function getGeminiConcurrencyLimit() {
   return toPositiveInt(
     process.env.MAX_CONCURRENT_GEMINI,
@@ -394,9 +535,10 @@ function shouldUseDdalggakModelPool(primaryModel = "") {
   return !primary || primary === "auto";
 }
 
-export function resolveGeminiModelCandidates(explicitModel = "") {
+export function resolveGeminiModelCandidates(explicitModel = "", context = {}) {
+  const explicit = String(explicitModel || "").trim();
   const rawPrimary = String(
-    explicitModel
+    explicit
     || process.env.GEMINI_MODEL_PRIMARY
     || process.env.GEMINI_MODEL
     || DEFAULT_GEMINI_MODEL_PRIMARY
@@ -415,7 +557,8 @@ export function resolveGeminiModelCandidates(explicitModel = "") {
     out.push(model);
   };
 
-  if (shouldUseDdalggakModelPool(primary)) {
+  const usingAutoPool = shouldUseDdalggakModelPool(primary);
+  if (usingAutoPool) {
     const poolRaw = String(process.env.GEMINI_MODEL_POOL || DEFAULT_GEMINI_MODEL_POOL);
     for (const token of splitModelList(poolRaw)) pushModel(token);
   } else {
@@ -424,6 +567,12 @@ export function resolveGeminiModelCandidates(explicitModel = "") {
 
   for (const token of splitModelList(fallbackRaw)) pushModel(token);
   if (out.length === 0) out.push("auto");
+
+  // Only implicit auto/pool mode gets sticky reordering. Explicit per-call models
+  // must stay operator/request controlled, though they still receive fallbacks.
+  if (!explicit && usingAutoPool) {
+    return applyGeminiStickySuccessCandidates(out, context);
+  }
   return out;
 }
 
@@ -1020,6 +1169,7 @@ async function runGeminiPromptInternal({
   workspaceSettingsPatch = {},
   extraEnv = {},
   timeoutMs: requestedTimeoutMs = 0,
+  surface = "",
 }) {
   // Keep CLI prompt argument simple and stream the real prompt via stdin.
   // This avoids parser issues when prompt text starts with "-" or markdown fences.
@@ -1036,10 +1186,16 @@ async function runGeminiPromptInternal({
       : 4 * 60 * 1000);
   const originalWorkspacePath = path.resolve(String(cwd || workspaceRoot || process.cwd()).trim() || process.cwd());
   const contextMode = resolveGeminiContextMode(optionsContextModeFromEnv(extraEnv));
+  const geminiSurface = String(workspaceSettingsPatch?.surface || extraEnv?.DDALGGAK_GEMINI_SURFACE || surface || "gemini_prompt").trim() || "gemini_prompt";
+  const cleanJobId = String(jobId || "").trim() || (
+    String(concurrencyKey || "").startsWith("job:")
+      ? String(concurrencyKey || "").slice(4).trim()
+      : ""
+  );
   const commandCwd = contextMode === "isolated"
     ? makeGeminiIsolatedWorkspace({
-      jobId: cleanJobIdForContext(jobId, concurrencyKey),
-      surface: workspaceSettingsPatch?.surface || extraEnv?.DDALGGAK_GEMINI_SURFACE || "gemini_prompt",
+      jobId: cleanJobId,
+      surface: geminiSurface,
       originalCwd: originalWorkspacePath,
     })
     : originalWorkspacePath;
@@ -1047,11 +1203,6 @@ async function runGeminiPromptInternal({
   if (contextMode !== "isolated") {
     ensureGeminiWorkspaceConfig(workspacePath, { overwritePolicy: settingsOverwrite, patchSettings: workspaceSettingsPatch });
   }
-  const cleanJobId = String(jobId || "").trim() || (
-    String(concurrencyKey || "").startsWith("job:")
-      ? String(concurrencyKey || "").slice(4).trim()
-      : ""
-  );
   const baseEnv = {
     GEMINI_WORKSPACE_PATH: workspacePath,
     DDALGGAK_ORIGINAL_WORKSPACE_PATH: originalWorkspacePath,
@@ -1060,7 +1211,11 @@ async function runGeminiPromptInternal({
   };
   void concurrencyKey;
   const requestedMode = VALID_APPROVAL_MODES.has(String(approvalMode || "").trim()) ? String(approvalMode || "").trim() : resolveApprovalMode();
-  const modelCandidates = resolveGeminiModelCandidates(model);
+  const modelCandidates = resolveGeminiModelCandidates(model, {
+    surface: geminiSurface,
+    originalCwd: originalWorkspacePath,
+    jobId: cleanJobId,
+  });
   const maxRetries = getCapacityMaxRetries();
   const switchAfter = getCapacitySwitchAfter();
   const retryTimeboxMs = getGeminiRetryTimeboxMs();
@@ -1158,6 +1313,12 @@ async function runGeminiPromptInternal({
       });
     }
     if (result.ok) {
+      recordGeminiStickySuccess({
+        model: currentModelName,
+        surface: geminiSurface,
+        originalCwd: originalWorkspacePath,
+        jobId: cleanJobId,
+      });
       const successCircuit = getGeminiModelCircuit(currentModelName);
       successCircuit.consecutiveCapacityFailures = 0;
       successCircuit.openUntilMs = 0;
