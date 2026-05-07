@@ -1143,6 +1143,47 @@ export class GocClient {
   }
 
 
+  async recordWatchTask(threadId, body = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("recordWatchTask requires threadId");
+    return await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/watch-tasks`, body },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/watch-tasks`, body },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/watch-tasks`, body },
+      ],
+    });
+  }
+
+  async listWatchTasks(threadId, { limit = 20 } = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("listWatchTasks requires threadId");
+    return await this._requestAny({
+      method: "GET",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/watch-tasks`, query: { limit } },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/watch-tasks`, query: { limit } },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/watch-tasks`, query: { limit } },
+      ],
+    });
+  }
+
+  async applyWatchTaskAction(threadId, taskId, body = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    const cleanTaskId = String(taskId || "").trim();
+    if (!cleanThreadId || !cleanTaskId) throw new Error("applyWatchTaskAction requires threadId and taskId");
+    return await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/watch-tasks/${encodeURIComponent(cleanTaskId)}/action`, body },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/watch-tasks/${encodeURIComponent(cleanTaskId)}/action`, body },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/watch-tasks/${encodeURIComponent(cleanTaskId)}/action`, body },
+      ],
+    });
+  }
+
+
   async recordRuntimeProposals(threadId, body = {}) {
     const cleanThreadId = String(threadId || "").trim();
     if (!cleanThreadId) throw new Error("recordRuntimeProposals requires threadId");

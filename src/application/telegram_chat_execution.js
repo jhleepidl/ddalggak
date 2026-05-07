@@ -76,6 +76,13 @@ import { recordChannelExperimentVerification } from "./channel_experiment_verifi
 import { recordChannelPromotion } from "./channel_promotion_manager.js";
 import { recordAdaptiveExecutionOutcome } from "./execution_mode_adaptation.js";
 import { buildExecutionQualitySignals } from './execution_quality_signals.js';
+import { installWorkflowExecutionContract } from './workflow_execution_contract.js';
+import {
+  ensureWatchTaskContract,
+  startWatchIteration,
+  completeWatchIteration,
+  summarizeWatchTaskState,
+} from './watch_task_store.js';
 import { formatActiveArtifactContext, recordArtifactObservationFromAgentOutput } from "./artifact_context.js";
 import { hasProviderFileToolLimitation, materializeArtifactsFromLlmOutput } from "./llm_output_artifact_materializer.js";
 import { formatActiveUserFactContext, recordUserFactEvents } from "./user_fact_context.js";
@@ -228,6 +235,32 @@ function resolveRuntimeExecutionPolicyForRuntime(runtime = null) {
   return normalizeRuntimeExecutionPolicy(source);
 }
 
+function installWorkflowContractFromRoute(runtime = null, route = null, { jobId = '', source = 'route' } = {}) {
+  if (!runtime || typeof runtime !== 'object') return { changed: false };
+  const routeObj = route && typeof route === 'object' ? route : {};
+  const contract = routeObj.team_workflow_contract
+    || routeObj.teamWorkflowContract
+    || routeObj.planner_metadata?.team_workflow_contract
+    || routeObj.plannerMetadata?.teamWorkflowContract
+    || routeObj.task_interpretation?.team_workflow_contract
+    || routeObj.taskInterpretation?.teamWorkflowContract
+    || null;
+  const installed = installWorkflowExecutionContract(runtime, contract, { source });
+  if (installed.changed) {
+    try {
+      tracking.append(jobId, 'decisions', [
+        '## Workflow execution contract installed',
+        `- workflow_kind: ${contract.workflow_kind || contract.workflowKind || 'workflow'}`,
+        `- continuous_improvement: ${installed.runtime_execution_patch?.continuous_improvement?.enabled ? 'enabled' : 'disabled'}`,
+        `- mode: ${installed.runtime_execution_patch?.continuous_improvement?.mode || ''}`,
+        `- min_turns: ${installed.runtime_execution_patch?.continuous_improvement?.min_turns || ''}`,
+        `- max_turns: ${installed.runtime_execution_patch?.continuous_improvement?.max_turns || ''}`,
+      ].filter(Boolean).join('\n'), { source: 'workflow_contract', purpose: 'audit', eventType: 'workflow_contract_install', semanticKind: 'decisions' });
+    } catch {}
+  }
+  return installed;
+}
+
 function safeLoadTrackingProfile(jobId = '') {
   try {
     return tracking.loadProfile(jobId);
@@ -304,7 +337,8 @@ function buildAgentOutputContractBlock({ roleId = '', runtimeExecutionPolicy = n
     'OUTPUT CONTRACT',
     `- role_id: ${String(roleId || '').trim().toLowerCase() || '(unspecified)'}`,
     `- checkpointing: ${policy.checkpointing?.enabled === false ? 'disabled' : 'enabled'}`,
-    `- continuous_improvement: ${policy.continuous_improvement?.enabled ? 'enabled' : 'disabled'}`,
+    `- continuous_improvement: ${policy.continuous_improvement?.enabled ? `enabled(mode=${policy.continuous_improvement.mode || 'bounded'}, min_turns=${policy.continuous_improvement.min_turns || 1}, max_turns=${policy.continuous_improvement.max_turns || 1})` : 'disabled'}`,
+    policy.workflow_contract?.workflow_kind ? `- workflow_contract: ${policy.workflow_contract.workflow_kind}; required_passes=${(policy.workflow_contract.required_passes || []).join('→') || '(unspecified)'}` : '',
     '- respond with concrete artifacts, verification notes, and next-step risks when relevant',
   ];
   return lines.join('\n');
@@ -3744,16 +3778,18 @@ async function runSupervisorChat(
         jobId: currentJobId,
       });
     }
-    const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
-    const continuousImprovementPolicy = runtimeExecutionPolicy.continuous_improvement || {};
+    let runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
+    let continuousImprovementPolicy = runtimeExecutionPolicy.continuous_improvement || {};
     const checkpointPolicy = runtimeExecutionPolicy.checkpointing || {};
-    const autopilotEnabled = AUTOPILOT_ENABLED || continuousImprovementPolicy.enabled === true;
-    const maxTurns = continuousImprovementPolicy.enabled === true
+    let autopilotEnabled = AUTOPILOT_ENABLED || continuousImprovementPolicy.enabled === true;
+    let maxTurns = continuousImprovementPolicy.enabled === true
       ? Number(continuousImprovementPolicy.max_turns || AUTOPILOT_MAX_TURNS || 1)
       : (autopilotEnabled ? AUTOPILOT_MAX_TURNS : 1);
-    const maxTotalActions = continuousImprovementPolicy.enabled === true
+    let maxTotalActions = continuousImprovementPolicy.enabled === true
       ? Number(continuousImprovementPolicy.max_total_actions || AUTOPILOT_MAX_TOTAL_ACTIONS || 4)
       : (autopilotEnabled ? AUTOPILOT_MAX_TOTAL_ACTIONS : 4);
+    let activeWatchTaskContract = null;
+    let activeWatchIteration = null;
     const callbacks = buildSupervisorExecutionCallbacks({
       bot,
       chatId,
@@ -4249,6 +4285,67 @@ async function runSupervisorChat(
         ...routePlan,
         actions: planActions,
       };
+      const workflowInstall = installWorkflowContractFromRoute(runtime, routePlan, { jobId: currentJobId, source: 'telegram_route_turn' });
+      if (workflowInstall.changed) {
+        runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
+        continuousImprovementPolicy = runtimeExecutionPolicy.continuous_improvement || {};
+        autopilotEnabled = AUTOPILOT_ENABLED || continuousImprovementPolicy.enabled === true;
+        maxTurns = continuousImprovementPolicy.enabled === true
+          ? Number(continuousImprovementPolicy.max_turns || AUTOPILOT_MAX_TURNS || 1)
+          : (autopilotEnabled ? AUTOPILOT_MAX_TURNS : 1);
+        maxTotalActions = continuousImprovementPolicy.enabled === true
+          ? Number(continuousImprovementPolicy.max_total_actions || AUTOPILOT_MAX_TOTAL_ACTIONS || 4)
+          : (autopilotEnabled ? AUTOPILOT_MAX_TOTAL_ACTIONS : 4);
+      }
+      const workflowContract = routePlan.team_workflow_contract
+        || routePlan.teamWorkflowContract
+        || routePlan.planner_metadata?.team_workflow_contract
+        || routePlan.plannerMetadata?.teamWorkflowContract
+        || routePlan.task_interpretation?.team_workflow_contract
+        || routePlan.taskInterpretation?.teamWorkflowContract
+        || runtime?.team_workflow_contract
+        || runtime?.teamWorkflowContract
+        || null;
+      const watchInstall = ensureWatchTaskContract({
+        jobDir: runDir(currentJobId),
+        jobId: currentJobId,
+        threadId: runThreadId,
+        userText: message,
+        workflowContract,
+        runtimeExecutionPolicy,
+        source: 'telegram_route_turn',
+      });
+      if (watchInstall?.contract) {
+        activeWatchTaskContract = watchInstall.contract;
+        activeWatchIteration = startWatchIteration({
+          jobDir: runDir(currentJobId),
+          contract: activeWatchTaskContract,
+          userText: lastUserText,
+          routePlan,
+        });
+        if (activeWatchIteration) {
+          routePlan = {
+            ...routePlan,
+            watch_task_contract: activeWatchTaskContract,
+            watch_iteration: activeWatchIteration,
+          };
+        }
+        if (runThreadId) {
+          try {
+            const goc = requireGocClient();
+            if (goc && typeof goc.recordWatchTask === 'function') {
+              await goc.recordWatchTask(runThreadId, {
+                source: 'ddalggak',
+                run_id: currentJobId,
+                contract: activeWatchTaskContract,
+                iterations: activeWatchIteration ? [activeWatchIteration] : [],
+              });
+            }
+          } catch (e) {
+            jobs.log(currentJobId, `watch task GoC sync skipped: ${String(e?.message ?? e)}`);
+          }
+        }
+      }
       if ((totalActions + planActions.length) > maxTotalActions) {
         forcedAwaitReason = `자동 실행 한도(${maxTotalActions} actions)에 도달했습니다.`;
         stopReason = "max_total_actions";
@@ -4394,6 +4491,40 @@ async function runSupervisorChat(
         turnOutputs
       );
       const activeStopSignals = collectActiveRouteSignals(mergedOutputs);
+      if (activeWatchTaskContract) {
+        const watchCompletion = completeWatchIteration({
+          jobDir: runDir(currentJobId),
+          contract: activeWatchTaskContract,
+          iteration: activeWatchIteration,
+          execution,
+          routePlan,
+          stopReason,
+          stopSignals: activeStopSignals,
+        });
+        if (watchCompletion) {
+          routePlan = { ...routePlan, watch_iteration_completion: watchCompletion };
+          activeWatchTaskContract = {
+            ...activeWatchTaskContract,
+            current_iteration: watchCompletion.iteration,
+            status: watchCompletion.status,
+          };
+          if (runThreadId) {
+            try {
+              const goc = requireGocClient();
+              if (goc && typeof goc.recordWatchTask === 'function') {
+                await goc.recordWatchTask(runThreadId, {
+                  source: 'ddalggak',
+                  run_id: currentJobId,
+                  contract: activeWatchTaskContract,
+                  iterations: [watchCompletion],
+                });
+              }
+            } catch (e) {
+              jobs.log(currentJobId, `watch iteration GoC sync skipped: ${String(e?.message ?? e)}`);
+            }
+          }
+        }
+      }
       const turnFingerprint = buildTurnDeltaFingerprint(turnOutputs);
       const syntheticStopSignals = [];
       if (continuousImprovementPolicy.enabled === true && routePlan.done === true && previousTurnFingerprint && turnFingerprint && previousTurnFingerprint === turnFingerprint) {
@@ -5460,6 +5591,7 @@ ${output}
 
 async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts = {}) {
   const runtime = opts?.runtime && typeof opts.runtime === "object" ? opts.runtime : null;
+  installWorkflowContractFromRoute(runtime, route, { jobId, source: 'execute_routed_plan' });
   const runtimeAuthority = buildRunAuthority(runtime);
   const agentIndex = buildTelegramAgentIndex({ runtime, routePlan: route, actions: route?.actions || [] });
   const telegramUserId = String(opts?.telegramUserId || "").trim();

@@ -272,11 +272,19 @@ export function selectAdaptiveExecutionMode({
   const workflowContract = asObject(signals.team_workflow_contract || signals.teamWorkflowContract);
   const workflowKind = cleanText(workflowContract.workflow_kind || workflowContract.workflowKind || '', { lower: true, maxLen: 80 });
 
-  if (workflowKind === 'bounded_continuous_loop' && policy.allow_direct_multi_start) {
-    nextLevel = 2;
-    reasons.push('workflow_contract_bounded_loop');
-  } else if ((workflowKind === 'review_gated_pipeline' || workflowKind === 'explore_then_synthesize') && policy.allow_direct_hybrid_start) {
-    nextLevel = workflowKind === 'explore_then_synthesize' && policy.allow_direct_multi_start ? 2 : 1;
+  if (workflowKind === 'bounded_continuous_loop') {
+    // A user-requested loop/review/approval/stop-condition contract is a hard
+    // workflow shape, not a soft pressure signal.  It must never collapse to a
+    // one-shot single_compiled route.  If policy disables direct multi start we
+    // still keep at least a hybrid sidecar so the loop contract remains visible.
+    nextLevel = policy.allow_direct_multi_start === false ? 1 : 2;
+    reasons.push(policy.allow_direct_multi_start === false
+      ? 'workflow_contract_bounded_loop_hybrid_floor'
+      : 'workflow_contract_bounded_loop');
+  } else if (workflowKind === 'review_gated_pipeline' || workflowKind === 'explore_then_synthesize') {
+    // Review/explore contracts are also hard workflow contracts.  The direct
+    // start policy may cap them at hybrid, but it may not demote them to single.
+    nextLevel = workflowKind === 'explore_then_synthesize' && policy.allow_direct_multi_start !== false ? 2 : 1;
     reasons.push(`workflow_contract_${workflowKind}`);
   } else if (explicitModeRequest === 'multi_motif' && policy.respect_explicit_multi_intent && policy.allow_direct_multi_start) {
     nextLevel = 2;

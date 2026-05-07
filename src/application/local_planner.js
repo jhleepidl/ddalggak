@@ -283,6 +283,9 @@ export class LocalPlanner {
       jobId: effectiveRequest.job_id,
       runsDir: effectiveRequest.runs_dir,
       persistSkillEvents: effectiveRequest.persist_skill_events,
+      runtimePolicy: effectiveRequest.runtime_policy,
+      runtimeBehavior: effectiveRequest.runtime_behavior,
+      runtimeSessionState: effectiveRequest.runtime_session_state,
       planSource: this.source,
       plannerType: "local",
     });

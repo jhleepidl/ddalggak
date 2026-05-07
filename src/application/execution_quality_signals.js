@@ -89,7 +89,14 @@ export function buildExecutionQualitySignals({
   const userFollowupRequired = cleanStatus === 'await_user' || route.await_user === true || route.awaitUser === true || pendingApproval;
   const followupBurden = clampInt((userFollowupRequired ? 1 : 0) + (pendingApproval ? 1 : 0), { max: 4 });
   const contractCheck = verifyExecutionAgainstWorkflowContract({
-    contract: route.planner_metadata?.team_workflow_contract || route.plannerMetadata?.teamWorkflowContract || route.team_workflow_contract || route.teamWorkflowContract,
+    contract: route.planner_metadata?.team_workflow_contract
+      || route.plannerMetadata?.teamWorkflowContract
+      || route.team_workflow_contract
+      || route.teamWorkflowContract
+      || route.task_interpretation?.team_workflow_contract
+      || route.taskInterpretation?.teamWorkflowContract
+      || route.runtime_team_snapshot?.task_interpretation?.team_workflow_contract
+      || route.runtimeTeamSnapshot?.taskInterpretation?.teamWorkflowContract,
     plannerMetadata: route.planner_metadata || route.plannerMetadata || route,
     execution: outcome,
     executionInsights: insights,

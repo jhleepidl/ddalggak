@@ -32,6 +32,7 @@ import { buildCollaborationCells } from "../control_plane/collaboration_policy.j
 import { buildExecutionCheckpoints } from "../control_plane/checkpoint_policy.js";
 import { readHarnessMotifPolicy } from "./harness_runtime_behavior.js";
 import { applyAdaptiveExecutionModeToTaskInterpretation, selectAdaptiveExecutionMode } from "./execution_mode_adaptation.js";
+import { buildWorkflowContractExecutionMetadata, buildWorkflowRuntimeExecutionPatch } from "./workflow_execution_contract.js";
 import {
   coordinateExecutionPlan,
   createDefaultRunRoute as createDefaultRunRouteV2,
@@ -506,6 +507,8 @@ function buildPlannerMetadata({
   plannerType = "local",
   teamSynthesisPlan = null,
   executionModeSelection = null,
+  workflowRuntimeExecutionPatch = null,
+  workflowExecutionMetadata = null,
 } = {}) {
   return {
     planner_type: plannerType,
@@ -567,6 +570,12 @@ function buildPlannerMetadata({
     task_family_mode_hint: executionModeSelection?.task_family_mode_hint && typeof executionModeSelection.task_family_mode_hint === 'object'
       ? { ...executionModeSelection.task_family_mode_hint }
       : undefined,
+    runtime_execution_contract_patch: workflowRuntimeExecutionPatch && typeof workflowRuntimeExecutionPatch === 'object'
+      ? { ...workflowRuntimeExecutionPatch }
+      : undefined,
+    workflow_execution_metadata: workflowExecutionMetadata && typeof workflowExecutionMetadata === 'object'
+      ? { ...workflowExecutionMetadata }
+      : undefined,
   };
 }
 
@@ -584,7 +593,7 @@ export function mapTeamPlanToRouteActions(teamBuild = {}, {
     mode,
     goal,
     seedInstruction,
-    taskInterpretation: executionModeTaskInterpretation,
+    taskInterpretation,
   });
 }
 
@@ -593,12 +602,14 @@ export function shouldUseGeneratedTeamActions({
   defaultRoute = null,
   teamActions = [],
   hasExplicitRoutePlan = true,
+  taskInterpretation = null,
 } = {}) {
   return shouldUseGeneratedTeamActionsV2({
     normalizedRoute,
     defaultRoute,
     teamActions,
     hasExplicitRoutePlan,
+    taskInterpretation,
   });
 }
 
@@ -677,6 +688,14 @@ export function buildRuntimeOrchestration({
     promotionSummary,
   });
   const executionModeTaskInterpretation = applyAdaptiveExecutionModeToTaskInterpretation(taskInterpretation, executionModeSelection);
+  const workflowRuntimeExecutionPatch = buildWorkflowRuntimeExecutionPatch(
+    executionModeTaskInterpretation.team_workflow_contract || executionModeTaskInterpretation.teamWorkflowContract || null,
+    runtimePolicy?.runtime_execution || runtimePolicy?.runtimeExecution || runtimePolicy || runtimeBehavior?.runtime_execution || runtimeBehavior?.runtimeExecution || {}
+  );
+  const workflowExecutionMetadata = buildWorkflowContractExecutionMetadata(
+    executionModeTaskInterpretation.team_workflow_contract || executionModeTaskInterpretation.teamWorkflowContract || null,
+    workflowRuntimeExecutionPatch
+  );
 
   const motifPolicy = readHarnessMotifPolicy(runtimePolicy || runtimeBehavior);
   const motifFeedbackSummary = loadTeamMotifFeedbackSummary({
@@ -1123,6 +1142,8 @@ export function buildRuntimeOrchestration({
     selection_explanations: combinedSelectionExplanations,
     route_contract: routeContract || undefined,
     blueprint_summary: executionBlueprintSummary,
+    runtime_execution_contract_patch: workflowRuntimeExecutionPatch || undefined,
+    workflow_execution_metadata: workflowExecutionMetadata || undefined,
   }, builtRuntimeTeamSnapshot);
   const missingRoles = normalizeStringList(
     presetResolution.missing_roles || teamBuild.missing_roles || [],
@@ -1149,6 +1170,8 @@ export function buildRuntimeOrchestration({
     plannerType,
     teamSynthesisPlan,
     executionModeSelection,
+    workflowRuntimeExecutionPatch,
+    workflowExecutionMetadata,
   });
 
   return {

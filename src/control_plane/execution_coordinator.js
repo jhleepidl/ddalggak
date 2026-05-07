@@ -1413,12 +1413,18 @@ export function shouldUseGeneratedTeamActions({
   defaultRoute = null,
   teamActions = [],
   hasExplicitRoutePlan = true,
+  taskInterpretation = null,
 } = {}) {
   if (!hasExplicitRoutePlan) {
     return Array.isArray(teamActions) && teamActions.length > 0;
   }
   const explicitActions = Array.isArray(normalizedRoute?.actions) ? normalizedRoute.actions : [];
   if (!Array.isArray(teamActions) || teamActions.length === 0) return false;
+  const contract = taskInterpretation && typeof taskInterpretation === 'object'
+    ? (taskInterpretation.team_workflow_contract || taskInterpretation.teamWorkflowContract || null)
+    : null;
+  const workflowKind = normalizeText(contract?.workflow_kind || contract?.workflowKind, { lower: true });
+  if (workflowKind && workflowKind !== 'single_task') return true;
   if (explicitActions.length === 0) return true;
 
   const reason = normalizeText(normalizedRoute?.reason, { lower: true });
@@ -1465,6 +1471,7 @@ export function coordinateExecutionPlan({
     defaultRoute,
     teamActions,
     hasExplicitRoutePlan,
+    taskInterpretation,
   });
   const explicitActions = Array.isArray(normalizedRoute.actions) ? normalizedRoute.actions : [];
   const effectiveActions = useTeamActions

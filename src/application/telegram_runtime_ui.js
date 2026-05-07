@@ -64,6 +64,7 @@ import {
   formatSkillDraftApprovalMessage,
 } from "./skill_draft_approval.js";
 import { listLocalSkillPackages, getLocalSkillPackage } from "./local_skill_catalog.js";
+import { summarizeWatchTaskState } from "./watch_task_store.js";
 
 async function sendTextWithOptionalGocButton(
   bot,
@@ -862,6 +863,12 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
 
   const artifactIndex = currentJobId ? loadArtifactIndex(currentJobId) : null;
   const artifactCount = Array.isArray(artifactIndex?.artifacts) ? artifactIndex.artifacts.length : 0;
+  let watchSummary = null;
+  try {
+    watchSummary = currentJobId ? summarizeWatchTaskState(jobs.jobDir(currentJobId)) : null;
+  } catch {
+    watchSummary = null;
+  }
   const teamArchetype = inferTeamArchetype(activeTeam, runtimeTeamSnapshot);
   const overlayProfileRows = summarizeRoleOverlayProfiles(
     Array.isArray(runtimeTeamSnapshot?.runtime_agents) && runtimeTeamSnapshot.runtime_agents.length > 0
@@ -979,6 +986,7 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
       `- phase: ${phaseLabel}`,
       `- situation: ${situationLabel}`,
       `- heartbeat: ${heartbeatLabel}`,
+      watchSummary ? `- watch: ${watchSummary.status} · iteration ${watchSummary.current_iteration}/${watchSummary.max_iterations}` : '',
       routeReadinessLabel ? `- route_ready: ${routeReadinessLabel}` : '',
       activeAgentsLabel ? `- active: ${activeAgentsLabel}` : '',
       runtimeActivity.items.length > 0 ? '- recent_work:' : '- recent_work: (none)',
@@ -1009,6 +1017,7 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
       `- situation: ${situationLabel}`,
       `- team: ${String(activeTeam?.team_name || 'configured_team').trim() || '(none)'}${teamArchetype ? ` · ${teamArchetype}` : ''}`,
       overlayProfileRows.length > 0 ? `- role_profiles: ${overlayProfileRows.join(', ')}` : '',
+      watchSummary ? `- watch: ${watchSummary.status} · iteration ${watchSummary.current_iteration}/${watchSummary.max_iterations} · ${watchSummary.workflow_kind}` : '',
       iterationLabel ? `- iteration: ${iterationLabel}` : '',
       `- heartbeat: ${heartbeatLabel}`,
       routeReadinessLabel ? `- route_ready: ${routeReadinessLabel}` : '',
@@ -1049,6 +1058,8 @@ export function buildChatStatusCard(chatId, runtime = null, { detail = "compact"
     `- job_id: ${currentJobId || "(none)"}`,
     `- active_run_id: ${session.active_run_id || "(none)"}`,
     `- running: ${activeJobId ? "yes" : "no"}`,
+    watchSummary ? `- watch_task: ${watchSummary.status} · iteration ${watchSummary.current_iteration}/${watchSummary.max_iterations} · ${watchSummary.workflow_kind}` : '',
+    watchSummary ? `- watch_required_passes: ${(watchSummary.required_passes || []).join('→') || '(none)'}` : '',
     `- queue_for_job: ${queueItems.length}`,
     `- abort_signal: ${activeController ? (activeController.signal.aborted ? "aborted" : "active") : "none"}`,
     `- pending_interrupt: ${interrupt?.requested ? `${interrupt.mode}${interrupt.reason ? ` (${clip(interrupt.reason, 90)})` : ""}` : "none"}`,

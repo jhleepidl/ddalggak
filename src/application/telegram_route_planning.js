@@ -294,6 +294,10 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
       skill_usage_summary: planningResult?.skill_usage_summary || {},
       supervisor_runtime: planningResult?.team_plan?.supervisor_runtime || routePlan?.supervisor_runtime || null,
       runtime_team_snapshot: planningResult?.runtime_team_snapshot || null,
+      planner_metadata: planningResult?.planner_metadata || null,
+      runtime_execution_contract_patch: planningResult?.planner_metadata?.runtime_execution_contract_patch || routePlan?.runtime_execution_contract_patch || null,
+      workflow_execution_metadata: planningResult?.planner_metadata?.workflow_execution_metadata || routePlan?.workflow_execution_metadata || null,
+      team_workflow_contract: planningResult?.planner_metadata?.team_workflow_contract || planningResult?.interpreted_task?.team_workflow_contract || null,
     };
   } catch {
     const fallbackRoute = defaultRouteFor(mode, goal, seedInstruction);
@@ -342,6 +346,10 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
       skill_usage_summary: planningResult?.skill_usage_summary || {},
       supervisor_runtime: planningResult?.team_plan?.supervisor_runtime || routePlan?.supervisor_runtime || null,
       runtime_team_snapshot: planningResult?.runtime_team_snapshot || null,
+      planner_metadata: planningResult?.planner_metadata || null,
+      runtime_execution_contract_patch: planningResult?.planner_metadata?.runtime_execution_contract_patch || routePlan?.runtime_execution_contract_patch || null,
+      workflow_execution_metadata: planningResult?.planner_metadata?.workflow_execution_metadata || routePlan?.workflow_execution_metadata || null,
+      team_workflow_contract: planningResult?.planner_metadata?.team_workflow_contract || planningResult?.interpreted_task?.team_workflow_contract || null,
     };
   }
 }

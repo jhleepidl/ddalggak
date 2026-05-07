@@ -141,6 +141,9 @@ export function normalizeRuntimeExecutionPolicy(raw = {}) {
     providers: providerPolicies,
     codex: providerPolicies.codex,
     gemini: providerPolicies.gemini,
+    workflow_contract: row.workflow_contract && typeof row.workflow_contract === 'object'
+      ? row.workflow_contract
+      : (row.workflowContract && typeof row.workflowContract === 'object' ? row.workflowContract : undefined),
   };
 }
 

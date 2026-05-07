@@ -42,6 +42,8 @@ export function resolveHarnessRuntimePolicy(source = null) {
     || row.deliveryPolicy
     || row.runtime_execution
     || row.runtimeExecution
+    || row.execution_mode_policy
+    || row.executionModePolicy
   ) ? row : null;
   return asObject(
     direct
