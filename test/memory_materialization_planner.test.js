@@ -17,7 +17,7 @@ function appendJsonl(filePath, rows) {
   fs.appendFileSync(filePath, rows.map((row) => JSON.stringify(row)).join('\n') + '\n', 'utf8');
 }
 
-test('plans meal tracking materialization from repeated meal memories and aggregate queries', () => {
+test('plans generic time-series materialization from repeated temporal memories and aggregate queries', () => {
   const jobDir = makeJobDir();
   appendJsonl(path.join(jobDir, 'local_memory', 'turns.jsonl'), [
     { role: 'user', text: '아침은 삶은 계란 2개랑 바나나 먹었어.', ts: '2026-05-01T08:00:00Z' },
@@ -32,16 +32,16 @@ test('plans meal tracking materialization from repeated meal memories and aggreg
     { query: '최근 식사 단백질 섭취 추세 알려줘', demand_reasons: ['user_fact_reference'], sources: ['local_memory/turns.jsonl'], item_count: 5 },
   ]);
   const plan = planMemoryMaterialization({ jobDir, persist: true });
-  const meal = plan.candidates.find((row) => row.domain === 'meal_tracking');
-  assert.ok(meal, 'meal candidate should exist');
-  assert.equal(meal.proposed_schema.table, 'meal_entries');
-  assert.ok(meal.proposed_operations.some((op) => op.name === 'summarize_meals'));
-  assert.ok(meal.backfill_preview.total_candidates >= 4);
+  const series = plan.candidates.find((row) => row.shape_id === 'time_series');
+  assert.ok(series, 'time-series candidate should exist');
+  assert.equal(series.proposed_schema.table, 'time_series_entries');
+  assert.ok(series.proposed_operations.some((op) => op.name === 'summarize_time_series'));
+  assert.ok(series.backfill_preview.total_candidates >= 4);
   assert.ok(fs.existsSync(path.join(jobDir, 'local_memory', 'memory_materialization_latest.json')));
-  assert.match(formatMemoryMaterializationPlanForTelegram(plan), /Meal tracking/);
+  assert.match(formatMemoryMaterializationPlanForTelegram(plan), /Time-series memory/);
 });
 
-test('marks conference knowledge as publishable sourced knowledge pack candidate', () => {
+test('marks source-backed public facts as publishable sourced knowledge pack candidate', () => {
   const jobDir = makeJobDir();
   fs.writeFileSync(path.join(jobDir, 'shared', 'core_memory.md'), [
     '# Core memory',
@@ -53,8 +53,8 @@ test('marks conference knowledge as publishable sourced knowledge pack candidate
     { query: 'ICDE 등록 마감과 venue 최신 정보 알려줘', sources: ['shared/core_memory.md'], item_count: 1 },
   ]);
   const plan = planMemoryMaterialization({ jobDir });
-  const conf = plan.candidates.find((row) => row.domain === 'conference_knowledge');
-  assert.ok(conf, 'conference candidate should exist');
+  const conf = plan.candidates.find((row) => row.shape_id === 'source_knowledge_base');
+  assert.ok(conf, 'source knowledge candidate should exist');
   assert.equal(conf.publish_policy.publishable_as, 'sourced_knowledge_pack');
   assert.equal(conf.publish_policy.raw_private_memory_included, false);
   assert.equal(conf.publish_policy.freshness_policy.refresh_on_clone, true);

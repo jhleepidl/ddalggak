@@ -103,20 +103,21 @@ export function collectDemandQueries(jobDir = '', { limit = 240 } = {}) {
     .filter((row) => row.query || row.text);
 }
 
-const DOMAIN_SPECS = [
+const GENERIC_SHAPE_SPECS = [
   {
-    id: 'meal_tracking',
-    title: 'Meal tracking',
-    table: 'meal_entries',
-    description: 'Repeated meal/food logs should become a queryable time-series table when aggregate questions emerge.',
+    id: 'time_series',
+    title: 'Time-series memory',
+    table: 'time_series_entries',
+    description: 'Repeated temporal observations should become a queryable event series when range, trend, missing-entry, or aggregate questions emerge.',
     evidence: [/아침|점심|저녁|간식|야식|식사|먹었|먹은|메뉴|칼로리|영양|단백질|탄수화물|meal|breakfast|lunch|dinner|snack|ate|diet|food/i],
     aggregate: [/이번\s*주|지난\s*주|최근|평균|합계|며칠|추세|비율|빠진|거른|count|average|trend|weekly|monthly|last\s+\d+|summary/i],
     correction: [/아까|수정|정정|아니라|추가|취소|빼줘|update|correct|instead|actually/i],
     schema: [
       { name: 'id', type: 'text', role: 'primary_key' },
-      { name: 'eaten_at', type: 'datetime', nullable: true },
-      { name: 'meal_type', type: 'text', nullable: true },
-      { name: 'foods', type: 'json', nullable: false },
+      { name: 'occurred_at', type: 'datetime', nullable: true },
+      { name: 'series_key', type: 'text', nullable: true },
+      { name: 'subject', type: 'text', nullable: true },
+      { name: 'value_json', type: 'json', nullable: true },
       { name: 'notes', type: 'text', nullable: true },
       { name: 'source_ref', type: 'text', nullable: false },
       { name: 'confidence', type: 'real', nullable: false },
@@ -124,27 +125,28 @@ const DOMAIN_SPECS = [
       { name: 'created_at', type: 'datetime' },
     ],
     operations: [
-      { name: 'add_meal', kind: 'insert', required_fields: ['eaten_at', 'meal_type', 'foods'] },
-      { name: 'update_meal', kind: 'update', filters: ['id'], patch_fields: ['eaten_at', 'meal_type', 'foods', 'notes', 'status'] },
-      { name: 'list_meals', kind: 'select', filters: ['from', 'to', 'meal_type', 'status'] },
-      { name: 'summarize_meals', kind: 'aggregate', group_by: ['day', 'meal_type'] },
-      { name: 'detect_missing_meals', kind: 'analysis', filters: ['from', 'to', 'meal_type'] },
+      { name: 'add_time_series_entry', kind: 'insert', required_fields: ['occurred_at', 'subject'] },
+      { name: 'update_time_series_entry', kind: 'update', filters: ['id'], patch_fields: ['occurred_at', 'series_key', 'subject', 'value_json', 'notes', 'status'] },
+      { name: 'list_time_series_entries', kind: 'select', filters: ['from', 'to', 'series_key', 'subject', 'status'] },
+      { name: 'summarize_time_series', kind: 'aggregate', group_by: ['day', 'series_key', 'subject'] },
+      { name: 'detect_missing_time_series_entries', kind: 'analysis', filters: ['from', 'to', 'series_key'] },
     ],
+    aliases: ['meal_tracking', 'habit_tracking', 'metric_tracking'],
   },
   {
-    id: 'expense_tracking',
-    title: 'Expense tracking',
-    table: 'expense_entries',
-    description: 'Repeated spending/payment notes should become a table when totals, categories, or ranges are queried.',
+    id: 'record_collection',
+    title: 'Record collection',
+    table: 'memory_records',
+    description: 'Repeated similarly shaped records should become a typed collection when filtering, totals, categories, or updates matter.',
     evidence: [/지출|결제|샀|구매|영수증|가격|비용|원\b|달러|카드|현금|expense|spent|bought|cost|receipt|price|paid/i],
     aggregate: [/합계|총액|평균|카테고리|이번\s*달|지난\s*달|최근|비율|total|average|category|monthly|weekly/i],
     correction: [/환불|취소|정정|수정|아니라|refund|cancel|correct|actually/i],
     schema: [
       { name: 'id', type: 'text', role: 'primary_key' },
-      { name: 'spent_at', type: 'datetime', nullable: true },
-      { name: 'merchant', type: 'text', nullable: true },
-      { name: 'amount', type: 'real', nullable: true },
-      { name: 'currency', type: 'text', nullable: true },
+      { name: 'recorded_at', type: 'datetime', nullable: true },
+      { name: 'record_type', type: 'text', nullable: true },
+      { name: 'title', type: 'text', nullable: true },
+      { name: 'value_json', type: 'json', nullable: true },
       { name: 'category', type: 'text', nullable: true },
       { name: 'notes', type: 'text', nullable: true },
       { name: 'source_ref', type: 'text' },
@@ -152,22 +154,24 @@ const DOMAIN_SPECS = [
       { name: 'status', type: 'text', default: 'active' },
     ],
     operations: [
-      { name: 'add_expense', kind: 'insert', required_fields: ['spent_at', 'amount'] },
-      { name: 'list_expenses', kind: 'select', filters: ['from', 'to', 'category', 'merchant'] },
-      { name: 'summarize_expenses', kind: 'aggregate', group_by: ['category', 'month'] },
+      { name: 'add_record', kind: 'insert', required_fields: ['title'] },
+      { name: 'update_record', kind: 'update', filters: ['id'], patch_fields: ['recorded_at', 'record_type', 'title', 'value_json', 'category', 'notes', 'status'] },
+      { name: 'list_records', kind: 'select', filters: ['from', 'to', 'record_type', 'category', 'status'] },
+      { name: 'summarize_records', kind: 'aggregate', group_by: ['record_type', 'category'] },
     ],
+    aliases: ['expense_tracking'],
   },
   {
-    id: 'conference_knowledge',
-    title: 'Conference public knowledge',
-    table: 'conference_facts',
-    description: 'Public conference facts should become a sourced knowledge pack with freshness rules instead of private memory.',
+    id: 'source_knowledge_base',
+    title: 'Sourced knowledge base',
+    table: 'sourced_facts',
+    description: 'Reusable public or source-backed facts should become a sourced knowledge pack with provenance and freshness rules instead of private memory.',
     evidence: [/학회|컨퍼런스|ICDE|NeurIPS|ICML|CVPR|SIGMOD|VLDB|deadline|submission|registration|venue|CFP|call for papers|conference/i],
     aggregate: [/마감|일정|언제|등록|비자|장소|venue|deadline|date|schedule|fee|registration/i],
     correction: [/변경|업데이트|최신|바뀌|update|changed|latest|refresh/i],
     schema: [
       { name: 'id', type: 'text', role: 'primary_key' },
-      { name: 'conference_key', type: 'text' },
+      { name: 'topic_key', type: 'text' },
       { name: 'fact_type', type: 'text' },
       { name: 'title', type: 'text' },
       { name: 'value_json', type: 'json' },
@@ -177,18 +181,19 @@ const DOMAIN_SPECS = [
       { name: 'confidence', type: 'real' },
     ],
     operations: [
-      { name: 'add_conference_fact', kind: 'insert', required_fields: ['conference_key', 'fact_type', 'title'] },
-      { name: 'list_conference_facts', kind: 'select', filters: ['conference_key', 'fact_type', 'freshness_state'] },
-      { name: 'refresh_conference_facts', kind: 'refresh_intent', filters: ['conference_key', 'fact_type'] },
+      { name: 'add_sourced_fact', kind: 'insert', required_fields: ['topic_key', 'fact_type', 'title'] },
+      { name: 'list_sourced_facts', kind: 'select', filters: ['topic_key', 'fact_type', 'freshness_state'] },
+      { name: 'refresh_sourced_facts', kind: 'refresh_intent', filters: ['topic_key', 'fact_type'] },
     ],
     publishable: true,
-    freshness_policy: { refresh_on_clone: true, ttl_days: 14, requires_refresh_for: ['deadlines', 'registration fees', 'venue changes', 'visa/travel advisories'] },
+    freshness_policy: { refresh_on_clone: true, ttl_days: 14, requires_refresh_for: ['deadlines', 'prices/fees', 'venues/locations', 'policy/API/legal/medical/financial facts'] },
+    aliases: ['conference_knowledge'],
   },
   {
-    id: 'action_item_tracking',
-    title: 'Action item tracking',
-    table: 'action_items',
-    description: 'Repeated TODO/action-item decisions should become a status table when ownership or deadlines matter.',
+    id: 'task_board',
+    title: 'Task board',
+    table: 'task_items',
+    description: 'Repeated TODOs, ownership, deadlines, and status updates should become a task board when progress and accountability matter.',
     evidence: [/TODO|할\s*일|액션|담당|마감|해야|진행|pending|done|blocked|action item|owner|deadline|task/i],
     aggregate: [/남은|완료|상태|마감|담당자별|pending|done|status|overdue|by owner/i],
     correction: [/완료|취소|변경|수정|미뤄|done|cancel|update|postpone/i],
@@ -204,10 +209,11 @@ const DOMAIN_SPECS = [
       { name: 'updated_at', type: 'datetime' },
     ],
     operations: [
-      { name: 'add_action_item', kind: 'insert', required_fields: ['title'] },
-      { name: 'update_action_item_status', kind: 'update', filters: ['id'], patch_fields: ['status', 'owner', 'due_at'] },
-      { name: 'list_action_items', kind: 'select', filters: ['status', 'owner', 'due_before'] },
+      { name: 'add_task_item', kind: 'insert', required_fields: ['title'] },
+      { name: 'update_task_item_status', kind: 'update', filters: ['id'], patch_fields: ['status', 'owner', 'due_at'] },
+      { name: 'list_task_items', kind: 'select', filters: ['status', 'owner', 'due_before'] },
     ],
+    aliases: ['action_item_tracking'],
   },
 ];
 
@@ -306,7 +312,9 @@ function buildCandidate(spec, scored) {
   const rec = recommendationFor(scored.score, rows);
   return {
     candidate_id: `${spec.id}_${Date.now().toString(36)}`,
+    shape_id: spec.id,
     domain: spec.id,
+    legacy_domain_aliases: asArray(spec.aliases),
     title: spec.title,
     description: spec.description,
     materialization_score: scored.score,
@@ -315,6 +323,7 @@ function buildCandidate(spec, scored) {
     signal_counts: {
       evidence: scored.evidenceRows.length,
       domain_queries: scored.queryRows.length,
+      shape_queries: scored.queryRows.length,
       aggregate_queries: scored.aggregateRows.length,
       corrections: scored.correctionRows.length,
       typed_facts: scored.factRows.length,
@@ -353,7 +362,7 @@ export function planMemoryMaterialization({ jobDir = '', minScore = 0.28, maxCan
   if (!d) throw new Error('jobDir is required');
   const evidence = collectMemoryEvidence(d);
   const demandQueries = collectDemandQueries(d);
-  const candidates = DOMAIN_SPECS
+  const candidates = GENERIC_SHAPE_SPECS
     .map((spec) => ({ spec, scored: scoreDomain(spec, evidence, demandQueries) }))
     .filter(({ scored }) => scored.score >= Number(minScore || 0) || scored.evidenceRows.length >= 4 || scored.aggregateRows.length >= 1)
     .map(({ spec, scored }) => buildCandidate(spec, scored))
@@ -361,9 +370,10 @@ export function planMemoryMaterialization({ jobDir = '', minScore = 0.28, maxCan
     .slice(0, Math.max(1, Math.floor(Number(maxCandidates) || 6)));
   const plan = {
     kind: 'ddalggak_memory_materialization_plan',
-    schema_version: 1,
+    schema_version: 2,
     generated_at: new Date().toISOString(),
     reason,
+    detector: { kind: 'generic_memory_shape_detector', shape_ids: GENERIC_SHAPE_SPECS.map((spec) => spec.id) },
     inventory: summarizeInventory(evidence, demandQueries),
     candidates,
     summary: {
@@ -374,8 +384,8 @@ export function planMemoryMaterialization({ jobDir = '', minScore = 0.28, maxCan
       publishable_knowledge_candidates: candidates.filter((c) => c.publish_policy?.publishable_as === 'sourced_knowledge_pack').length,
     },
     next_steps: candidates.length
-      ? ['Review candidate schema and backfill preview in GoC or Telegram.', 'Create only shadow tables automatically; require approval before canonical write-path changes.', 'Keep raw memory as provenance until reviewed migration is complete.']
-      : ['Keep compact markdown memory for now.', 'Continue collecting usage signals until a repeated, queryable domain emerges.'],
+      ? ['Review generic shape, schema, and backfill preview in GoC.', 'Create only shadow tables automatically; require approval before canonical write-path changes.', 'Keep raw memory as provenance until reviewed migration is complete.']
+      : ['Keep compact markdown memory for now.', 'Continue collecting usage signals until a repeated, queryable memory shape emerges.'],
   };
   if (persist) writeMemoryMaterializationPlan({ jobDir: d, plan });
   return plan;
@@ -397,6 +407,7 @@ export function formatMemoryMaterializationPlanForTelegram(plan = {}) {
   const row = asObject(plan), summary = asObject(row.summary), inv = asObject(row.inventory), candidates = asArray(row.candidates);
   const lines = [
     '🧠 Memory materialization preview',
+    `- detector: ${row.detector?.kind || 'generic_memory_shape_detector'}`,
     `- evidence items: ${Number(inv.evidence_items || 0)}`,
     `- demand queries: ${Number(inv.demand_queries || 0)}`,
     `- candidates: ${Number(summary.candidate_count || candidates.length || 0)}`,
@@ -410,9 +421,9 @@ export function formatMemoryMaterializationPlanForTelegram(plan = {}) {
   }
   candidates.slice(0, 5).forEach((c, i) => {
     const counts = asObject(c.signal_counts), back = asObject(c.backfill_preview);
-    lines.push('', `${i + 1}. ${c.title} · score=${Number(c.materialization_score || 0).toFixed(2)} · ${c.recommendation}`);
+    lines.push('', `${i + 1}. ${c.title} · shape=${c.shape_id || c.domain || '-'} · score=${Number(c.materialization_score || 0).toFixed(2)} · ${c.recommendation}`);
     lines.push(`   - store: ${c.proposed_store} table=${c.proposed_schema?.table || '-'}`);
-    lines.push(`   - signals: evidence=${counts.evidence || 0}, queries=${counts.domain_queries || 0}, aggregate=${counts.aggregate_queries || 0}, corrections=${counts.corrections || 0}`);
+    lines.push(`   - signals: evidence=${counts.evidence || 0}, queries=${counts.shape_queries ?? counts.domain_queries ?? 0}, aggregate=${counts.aggregate_queries || 0}, corrections=${counts.corrections || 0}`);
     lines.push(`   - backfill: ${back.total_candidates || 0} rows (${back.high_confidence || 0} high confidence, ${back.needs_review || 0} review)`);
     if (c.publish_policy?.publishable_as === 'sourced_knowledge_pack') lines.push('   - publish: optional sourced knowledge pack with freshness policy');
     const ops = asArray(c.proposed_operations).slice(0, 4).map((op) => op.name).filter(Boolean);

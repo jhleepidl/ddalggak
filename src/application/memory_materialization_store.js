@@ -90,14 +90,14 @@ function buildOperationContracts(candidate = {}) {
 }
 function buildModuleManifest({ candidate = {}, jobDir = '', reason = 'shadow_materialization' } = {}) {
   const schema = normalizeSchema(candidate);
-  const moduleId = safeId(candidate.domain || candidate.candidate_id || schema.table || 'memory_module');
+  const moduleId = safeId(candidate.shape_id || candidate.domain || candidate.candidate_id || schema.table || 'memory_module');
   const createdAt = nowIso();
   return {
     kind: 'ddalggak_memory_module_manifest',
     schema_version: 1,
     module_id: moduleId,
-    domain: clean(candidate.domain || moduleId),
-    title: clean(candidate.title || candidate.domain || moduleId),
+    domain: clean(candidate.shape_id || candidate.domain || moduleId),
+    title: clean(candidate.title || candidate.shape_id || candidate.domain || moduleId),
     status: 'shadow',
     canonical_memory_switch: false,
     raw_memory_retained: true,
@@ -161,7 +161,14 @@ export function findMaterializationCandidate(plan = {}, selector = '') {
   const candidates = asArray(asObject(plan).candidates);
   const wanted = clean(selector).toLowerCase();
   if (!wanted) return candidates[0] || null;
-  return candidates.find((c) => clean(c.domain).toLowerCase() === wanted || clean(c.candidate_id).toLowerCase() === wanted || clean(c.title).toLowerCase() === wanted) || null;
+  return candidates.find((c) => {
+    const aliases = asArray(c.legacy_domain_aliases || c.aliases).map((x) => clean(x).toLowerCase()).filter(Boolean);
+    return clean(c.domain).toLowerCase() === wanted
+      || clean(c.shape_id).toLowerCase() === wanted
+      || clean(c.candidate_id).toLowerCase() === wanted
+      || clean(c.title).toLowerCase() === wanted
+      || aliases.includes(wanted);
+  }) || null;
 }
 export function createShadowMemoryModule({ jobDir = '', candidate = {}, reason = 'shadow_materialization' } = {}) {
   const d = String(jobDir || '').trim();
@@ -212,7 +219,7 @@ export function formatShadowMemoryModuleResultForTelegram(result = {}) {
 }
 export function formatShadowMemoryModuleListForTelegram(index = {}) {
   const modules = asArray(asObject(index).modules);
-  if (!modules.length) return 'No shadow memory modules yet. Use /memory materialize-preview first, then /memory materialize shadow <domain>.';
+  if (!modules.length) return 'No shadow memory modules yet. Review/create materialization candidates in GoC, or use /memory debug materialize-preview then /memory debug materialize shadow <shape>.';
   const lines = ['🧱 Memory modules'];
   modules.forEach((m, i) => {
     lines.push(`${i + 1}. ${m.title || m.module_id} · ${m.status || 'shadow'} · table=${m.table || '-'} · rows=${Number(m.row_count || 0)} · review=${Number(m.review_count || 0)}`);

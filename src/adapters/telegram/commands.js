@@ -50,15 +50,14 @@ import { readRecentModelNodeUsage } from '../../application/model_node_usage_log
 const HELP_TEXT = [
   "Commands:",
   "- /chat <text>: 질문/작업 시작",
+  "- /memory: memory topology/pressure/proposal 상태 요약",
+  "- /rule <자연어 지침>: 명시적 runtime rule 추가",
+  "- /skill: skill/agent roster 상태 보기",
   "- /team: 현재 team 상태 보기",
-  "- /team suggest <목적>: LLM planner로 필요한 team 초안 만들기",
-  "- /team create <설명>: 원하는 team 직접 설명해서 만들기",
-  "- /team refine <수정>: 현재/대기 team 수정하기",
-  "- /team apply: 대기 team 적용",
+  "- /goc: GoC sync/review 링크와 상태 보기",
   "- /status: 지금 진행 상황 보기",
   "- /models: 연결된 로컬/API model node 보기",
   "- /context: 현재 작업과 GoC 링크 보기",
-  "- /rule <자연어 지침>: agent/runtime 동작 지침 반영",
   "- /artifacts [limit]: 결과물 보기",
   "- /send <번호|path>: 결과물 전송",
   "- /files [all|workspace|uploads] [limit]: 파일 보기",
@@ -71,8 +70,10 @@ const ADVANCED_HELP_TEXT = [
   "- /whoami: 현재 chat_id / user_id 확인",
   "- /running: 실행/대기 job 목록 확인",
   "- /credential ...: credential 바인딩/확인",
-  "- /memory ... 또는 /settings ...: topology, pressure, evidence, proposal queue, materialization과 런타임 메모리/KB 조회·수정",
-  "- /skills: 현재/예정 agent roster와 대표 skill 보기",
+  "- /memory: topology, pressure, proposal/materialization 상태 요약",
+  "- /memory debug <show|md|kb|topology|pressure|evidence|review|materialize-preview|modules>: 개발/진단용 상세 조회",
+  "- /settings ...: legacy alias, 가능하면 /memory 또는 GoC 사용",
+  "- /skills 또는 /skill: 현재/예정 agent roster와 대표 skill 보기",
   "- /models: 연결된 로컬/API model node 보기",
   "- /tools: 현재 job의 tool 상태 보기",
   "- /upload (+파일 첨부) [메모]: 실행 없이 업로드만 저장",
@@ -655,9 +656,23 @@ export function createTelegramCommandHandler(deps = {}) {
     }
 
     if (cmd === "/memory" || cmd === "/settings") {
-      const sub = String(rest[0] || "show").trim().toLowerCase();
+      const firstMemoryArg = String(rest[0] || "show").trim().toLowerCase();
+      const debugMode = firstMemoryArg === "debug" || firstMemoryArg === "--debug";
+      const memoryRest = debugMode ? rest.slice(1) : rest;
+      const sub = String(memoryRest[0] || "show").trim().toLowerCase();
+      const publicMemorySubcommands = new Set(["", "show", "status"]);
 
-      if (sub === "show") {
+      if (!debugMode && !publicMemorySubcommands.has(sub)) {
+        await sendLong(bot, chatId, [
+          formatMemorySummary(),
+          '',
+          '세부 memory 조회/수정은 GoC Review Inbox에서 처리하는 것이 기본입니다.',
+          '개발/진단 목적으로만 Telegram에서 보려면 /memory debug <subcommand>를 사용하세요.',
+        ].join('\n'));
+        return true;
+      }
+
+      if (sub === "show" || sub === "status") {
         await sendLong(bot, chatId, formatMemorySummary());
         return true;
       }
@@ -737,7 +752,7 @@ export function createTelegramCommandHandler(deps = {}) {
           return true;
         }
         const jobDir = jobs.jobDir(currentJobId);
-        const materializeTokens = rest.slice(1).filter((x) => !/^--/.test(String(x || '')));
+        const materializeTokens = memoryRest.slice(1).filter((x) => !/^--/.test(String(x || '')));
         const action = materializeTokens[0] || (sub === 'modules' ? 'list' : 'preview');
         if (sub === 'modules' || action === 'modules' || action === 'list') {
           await sendLong(bot, chatId, formatShadowMemoryModuleListForTelegram(listShadowMemoryModules({ jobDir })));
@@ -749,7 +764,7 @@ export function createTelegramCommandHandler(deps = {}) {
             const latest = loadLatestMemoryMaterializationPlan({ jobDir }) || planMemoryMaterialization({ jobDir, persist: true, reason: 'telegram_shadow_module_candidate_refresh' });
             const candidate = findMaterializationCandidate(latest, selector);
             if (!candidate) {
-              await bot.sendMessage(chatId, `shadow module로 만들 candidate를 찾지 못했습니다. 먼저 /memory materialize-preview를 실행하세요.${selector ? ` selector=${selector}` : ''}`);
+              await bot.sendMessage(chatId, `shadow module로 만들 candidate를 찾지 못했습니다. 먼저 GoC에서 candidate를 검토하거나 /memory debug materialize-preview를 실행하세요.${selector ? ` selector=${selector}` : ''}`);
               return true;
             }
             const result = createShadowMemoryModule({ jobDir, candidate, reason: 'telegram_memory_materialize_shadow' });
@@ -759,7 +774,7 @@ export function createTelegramCommandHandler(deps = {}) {
           }
           return true;
         }
-        const useServer = /--server\b/i.test(rest.slice(1).join(' '));
+        const useServer = /--server\b/i.test(memoryRest.slice(1).join(' '));
         const session = chatSessionStore?.get?.(chatId) || {};
         const threadId = session?.runtime?.threadId || session?.runtime?.map?.threadId || session?.map?.threadId || '';
         if (useServer && threadId && memoryModeWithFallback?.() === 'goc' && typeof requireGocClient === 'function') {
@@ -787,9 +802,9 @@ export function createTelegramCommandHandler(deps = {}) {
       }
 
       if (sub === "policy") {
-        const value = rest.slice(1).join(" ").trim();
+        const value = memoryRest.slice(1).join(" ").trim();
         if (!value) {
-          await bot.sendMessage(chatId, "Usage: /memory policy <자연어 프롬프트>");
+          await bot.sendMessage(chatId, "Usage: /memory debug policy <자연어 프롬프트>");
           return true;
         }
         try {
@@ -802,9 +817,9 @@ export function createTelegramCommandHandler(deps = {}) {
       }
 
       if (sub === "routing") {
-        const value = rest.slice(1).join(" ").trim();
+        const value = memoryRest.slice(1).join(" ").trim();
         if (!value) {
-          await bot.sendMessage(chatId, "Usage: /memory routing <자연어 프롬프트>");
+          await bot.sendMessage(chatId, "Usage: /memory debug routing <자연어 프롬프트>");
           return true;
         }
         try {
@@ -817,10 +832,10 @@ export function createTelegramCommandHandler(deps = {}) {
       }
 
       if (sub === "role") {
-        const agent = String(rest[1] || "").trim().toLowerCase();
-        const value = rest.slice(2).join(" ").trim();
+        const agent = String(memoryRest[1] || "").trim().toLowerCase();
+        const value = memoryRest.slice(2).join(" ").trim();
         if (!agent || !value) {
-          await bot.sendMessage(chatId, "Usage: /memory role <gemini|codex|chatgpt> <자연어 역할>");
+          await bot.sendMessage(chatId, "Usage: /memory debug role <gemini|codex|chatgpt> <자연어 역할>");
           return true;
         }
         try {
@@ -838,9 +853,9 @@ export function createTelegramCommandHandler(deps = {}) {
       }
 
       if (sub === "note") {
-        const value = rest.slice(1).join(" ").trim();
+        const value = memoryRest.slice(1).join(" ").trim();
         if (!value) {
-          await bot.sendMessage(chatId, "Usage: /memory note <메모>");
+          await bot.sendMessage(chatId, "Usage: /memory debug note <메모>");
           return true;
         }
         try {
@@ -853,9 +868,9 @@ export function createTelegramCommandHandler(deps = {}) {
       }
 
       if (sub === "lesson") {
-        const value = rest.slice(1).join(" ").trim();
+        const value = memoryRest.slice(1).join(" ").trim();
         if (!value) {
-          await bot.sendMessage(chatId, "Usage: /memory lesson <교훈>");
+          await bot.sendMessage(chatId, "Usage: /memory debug lesson <교훈>");
           return true;
         }
         try {
@@ -867,7 +882,7 @@ export function createTelegramCommandHandler(deps = {}) {
         return true;
       }
 
-      await bot.sendMessage(chatId, "Usage:\n/memory show\n/memory md\n/memory kb\n/memory policy <자연어 프롬프트>\n/memory routing <자연어 프롬프트>\n/memory role <gemini|codex|chatgpt> <자연어 역할>\n/memory agents\n/memory note <메모>\n/memory lesson <교훈>\n/memory compact\n/memory topology\n/memory reset");
+      await bot.sendMessage(chatId, ['Usage:', '/memory', '/memory debug show', '/memory debug md', '/memory debug kb', '/memory debug topology', '/memory debug pressure', '/memory debug evidence', '/memory debug review', '/memory debug materialize-preview', '/memory debug modules', '', '수정/승인/삭제/편집은 GoC에서 처리하세요.'].join('\n'));
       return true;
     }
 
@@ -1253,7 +1268,7 @@ ${buildTeamListMessage({ active_team: applied }, { runtime: runtimeForTeam })}`)
       });
     }
 
-    if (cmd === "/skills") {
+    if (cmd === "/skill" || cmd === "/skills") {
       const skillsArgs = ["skills", ...rest].join(" ").trim();
       await sendAgentOrToolListQuick(bot, chatId, "agent", skillsArgs, { telegramUserId: userId });
       return true;

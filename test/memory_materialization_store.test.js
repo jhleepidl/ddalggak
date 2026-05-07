@@ -29,17 +29,17 @@ test('creates a shadow module from a materialization candidate without switching
   fs.appendFileSync(path.join(jobDir, 'local_memory', 'memory_demand_events.jsonl'), `${JSON.stringify({ query: '최근 식사 추세와 빠진 아침 알려줘', sources: ['turns'] })}\n`);
 
   const plan = planMemoryMaterialization({ jobDir, persist: true, minScore: 0.1 });
-  const candidate = findMaterializationCandidate(plan, 'meal_tracking');
+  const candidate = findMaterializationCandidate(plan, 'time_series');
   assert.ok(candidate);
   const result = createShadowMemoryModule({ jobDir, candidate, reason: 'test_shadow' });
   assert.equal(result.ok, true);
-  assert.equal(result.manifest.domain, 'meal_tracking');
+  assert.equal(result.manifest.domain, 'time_series');
   assert.equal(result.manifest.status, 'shadow');
   assert.equal(result.manifest.canonical_memory_switch, false);
   assert.equal(result.manifest.generated_code_execution, false);
   assert.ok(result.stats.row_count >= 3);
 
-  const root = path.join(jobDir, 'local_memory', 'memory_modules', 'meal_tracking');
+  const root = path.join(jobDir, 'local_memory', 'memory_modules', 'time_series');
   assert.ok(fs.existsSync(path.join(root, 'module_manifest.json')));
   assert.ok(fs.existsSync(path.join(root, 'rows.jsonl')));
   const rows = fs.readFileSync(path.join(root, 'rows.jsonl'), 'utf8').trim().split(/\n/).filter(Boolean).map((line) => JSON.parse(line));
@@ -48,5 +48,5 @@ test('creates a shadow module from a materialization candidate without switching
 
   const index = listShadowMemoryModules({ jobDir });
   assert.equal(index.modules.length, 1);
-  assert.equal(index.modules[0].module_id, 'meal_tracking');
+  assert.equal(index.modules[0].module_id, 'time_series');
 });
