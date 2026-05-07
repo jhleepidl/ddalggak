@@ -1,3 +1,4 @@
+import { internalLanguagePolicyBlock, resolveUserSurfaceLocale, userSurfaceLanguageDirective } from './language_policy.js';
 import { findAnswerCapsuleByTelegramMessageId } from "./answer_capsules.js";
 
 function asArray(value) {
@@ -194,9 +195,10 @@ function buildReplyAnchoredFollowup({ capsule = null, message = "" } = {}) {
   if (!agentId) return null;
   const prompt = [
     "[FOLLOW-UP SHORTCUT: REPLY ANCHOR]",
-    "너는 이전 답변을 작성했던 동일한 agent다.",
-    "이번 요청은 오래된 답장(reply) 기반의 후속 질문이므로 team router를 다시 거치지 않는다.",
-    "가능하면 이전 답변의 논리와 근거를 그대로 이어서 설명하고, 새 팀 구성 제안은 하지 말라.",
+    internalLanguagePolicyBlock({ surfaceLocale: resolveUserSurfaceLocale({ message, fallback: 'ko' }) }),
+    "You are the same agent that wrote the previous answer.",
+    "This request is a follow-up anchored to an older reply; do not re-run the team router.",
+    "Continue the previous answer’s logic and evidence where possible; do not propose a new team structure.",
     row.original_goal_summary ? `[ORIGINAL GOAL SUMMARY]\n${row.original_goal_summary}` : "",
     row.answer_summary ? `[PREVIOUS ANSWER SUMMARY]\n${row.answer_summary}` : "",
     row.answer_excerpt ? `[PREVIOUS ANSWER EXCERPT]\n${clipText(row.answer_excerpt, 3600)}` : "",
@@ -207,7 +209,7 @@ function buildReplyAnchoredFollowup({ capsule = null, message = "" } = {}) {
       ? `[ARTIFACT REFS]\n${row.artifact_refs.map((entry) => `- ${entry}`).join("\n")}`
       : "",
     `[USER FOLLOW-UP]\n${clean(message)}`,
-    "[RESPONSE STYLE] 한국어로 직접 답하고, 필요하면 이전 답변과 연결되는 핵심 근거만 짧게 덧붙여라.",
+    `[RESPONSE STYLE] ${userSurfaceLanguageDirective(resolveUserSurfaceLocale({ message, fallback: 'ko' }))} Add only brief supporting context from the previous answer when useful.`,
   ].filter(Boolean).join("\n\n");
 
   return {
@@ -288,14 +290,15 @@ export function planAgentFollowupShortcut({ message = "", session = null, runtim
 
   const followupPrompt = [
     "[FOLLOW-UP SHORTCUT]",
-    "너는 방금 직전 응답을 작성했던 동일한 agent다.",
-    "이번 요청은 team router를 다시 거치지 않는 짧은 후속 질문이다.",
-    "가능하면 방금 네가 제시한 논리와 근거를 그대로 이어서 설명하라.",
-    "새 팀 구성이나 새 agent 분배를 제안하지 말고, 필요한 설명만 바로 답하라.",
+    internalLanguagePolicyBlock({ surfaceLocale: resolveUserSurfaceLocale({ message, fallback: 'ko' }) }),
+    "You are the same agent that wrote the immediately previous response.",
+    "This is a short follow-up that should not re-run the team router.",
+    "Continue the previous logic and evidence where possible.",
+    "Do not propose a new team structure or agent assignment; answer directly.",
     targetTurn.goal ? `[PREVIOUS GOAL]\n${targetTurn.goal}` : "",
     targetTurn.output ? `[YOUR PREVIOUS ANSWER]\n${clipText(targetTurn.output, 3600)}` : "",
     `[USER FOLLOW-UP]\n${clean(message)}`,
-    "[RESPONSE STYLE] 한국어로 직접 답하고, 필요하면 핵심 근거만 짧게 덧붙여라.",
+    `[RESPONSE STYLE] ${userSurfaceLanguageDirective(resolveUserSurfaceLocale({ message, fallback: 'ko' }))} Add only brief supporting context when useful.`,
   ].filter(Boolean).join("\n\n");
 
   return {

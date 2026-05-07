@@ -1,3 +1,4 @@
+import { verifyExecutionAgainstWorkflowContract } from './execution_contract_verifier.js';
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
@@ -87,12 +88,19 @@ export function buildExecutionQualitySignals({
   const pendingApproval = outcome.pendingApproval != null || outcome.pending_approval != null;
   const userFollowupRequired = cleanStatus === 'await_user' || route.await_user === true || route.awaitUser === true || pendingApproval;
   const followupBurden = clampInt((userFollowupRequired ? 1 : 0) + (pendingApproval ? 1 : 0), { max: 4 });
-  const qualityTags = extractQualityTags(routePlan, execution);
+  const contractCheck = verifyExecutionAgainstWorkflowContract({
+    contract: route.planner_metadata?.team_workflow_contract || route.plannerMetadata?.teamWorkflowContract || route.team_workflow_contract || route.teamWorkflowContract,
+    plannerMetadata: route.planner_metadata || route.plannerMetadata || route,
+    execution: outcome,
+    executionInsights: insights,
+  });
+  const qualityTags = [...extractQualityTags(routePlan, execution), ...asArray(contractCheck.tags)].filter(Boolean).slice(0, 16);
   const qualityGap = clampInt(
     capabilityGapCount
       + retryCount
       + missingAgentCount
-      + (qualityTags.some((tag) => ['needs_more_research', 'needs_more_revision', 'quality_gap_remaining', 'evidence_gap_remaining', 'verification_failed', 'not_ready_yet'].includes(tag)) ? 1 : 0)
+      + clampInt(contractCheck.quality_gap, { max: 8 })
+      + (qualityTags.some((tag) => ['needs_more_research', 'needs_more_revision', 'quality_gap_remaining', 'evidence_gap_remaining', 'verification_failed', 'not_ready_yet', 'missed_workflow_contract', 'missed_loop_contract', 'review_missing'].includes(tag)) ? 1 : 0)
       + (userFollowupRequired ? 1 : 0),
     { max: 12 }
   );
@@ -119,5 +127,7 @@ export function buildExecutionQualitySignals({
     quality_gap: qualityGap,
     quality_health_score: round1(qualityHealthScore),
     quality_tags: qualityTags,
+    workflow_contract_ok: contractCheck.ok !== false,
+    workflow_contract_violations: asArray(contractCheck.violations).slice(0, 8),
   };
 }

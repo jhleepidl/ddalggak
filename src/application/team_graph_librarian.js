@@ -90,9 +90,21 @@ export function buildDemandGraph({
     for (const entry of slot.preferred_skill_ids) demandTags.add(entry);
   }
 
-  if (cleanText(interpreted.review_policy, { lower: true }) === 'required') demandTags.add('verification');
+  const workflowContract = asObject(interpreted.team_workflow_contract || interpreted.teamWorkflowContract);
+  const workflowKind = cleanId(workflowContract.workflow_kind || workflowContract.workflowKind || '');
+  if (cleanText(interpreted.review_policy, { lower: true }) === 'required' || asArray(workflowContract.required_passes || workflowContract.requiredPasses).includes('review')) demandTags.add('verification');
   if (cleanText(interpreted.parallelism_preference, { lower: true }) === 'parallel') demandTags.add('parallel_research');
-  if (cleanText(interpreted.task_type, { lower: true }) === 'workflow') demandTags.add('workflow');
+  if (cleanText(interpreted.task_type, { lower: true }) === 'workflow' || workflowKind === 'bounded_continuous_loop') demandTags.add('workflow');
+  if (workflowKind === 'bounded_continuous_loop') {
+    demandTags.add('bounded_loop');
+    demandTags.add('implementation');
+    demandTags.add('verification');
+    demandTags.add('risk');
+  }
+  if (workflowKind === 'review_gated_pipeline') {
+    demandTags.add('implementation');
+    demandTags.add('verification');
+  }
   if (cleanText(interpreted.deliverable_type, { lower: true }).includes('brief')) demandTags.add('briefing');
   if (cleanText(interpreted.deliverable_type, { lower: true }).includes('report')) demandTags.add('summary');
   if (cleanText(interpreted.task_type, { lower: true }) === 'code_change') demandTags.add('implementation');
@@ -215,6 +227,8 @@ function buildBeamSearch({ demandGraph, motifRegistry = [], beamWidth = 4, maxDe
 function buildAugmentedSlots({ demandGraph, selectedMotifs = [], maxAgents = 6 }) {
   const existing = asArray(demandGraph.nodes);
   const currentCounts = countBy(existing, (slot) => slot.role_id);
+  const tagSet = new Set(asArray(demandGraph.tags));
+  const workflowRequiresFullLoop = tagSet.has('bounded_loop') || tagSet.has('approval_gate') || asArray(selectedMotifs).some((motif) => /bounded.*watch.*loop|bounded_watch_loop/i.test(String(motif.motif_id || motif.label || '')));
   const additions = [];
   for (const motif of selectedMotifs) {
     for (const slot of asArray(motif.role_slots)) {
@@ -224,7 +238,10 @@ function buildAugmentedSlots({ demandGraph, selectedMotifs = [], maxAgents = 6 }
       const canAddParallelResearch = slot.role_id === 'researcher'
         && demandGraph.needs_parallel_research
         && current < 2;
-      const shouldAdd = hasExactNeed || canAddParallelResearch || (slot.role_id === 'synthesizer' && demandGraph.needs_synthesizer && current === 0);
+      const canAddSynthesizer = slot.role_id === 'synthesizer' && (demandGraph.needs_synthesizer || workflowRequiresFullLoop) && current === 0;
+      const canAddReviewer = slot.role_id === 'reviewer' && (demandGraph.needs_reviewer || workflowRequiresFullLoop || asArray(motif.coverage_tags).includes('verification')) && current === 0;
+      const canAddWorkflowRole = workflowRequiresFullLoop && ['operator', 'researcher', 'builder', 'reviewer', 'synthesizer'].includes(slot.role_id) && current === 0;
+      const shouldAdd = hasExactNeed || canAddParallelResearch || canAddSynthesizer || canAddReviewer || canAddWorkflowRole;
       if (!shouldAdd) continue;
       const augmented = normalizeCapabilitySlot({
         ...slot,
@@ -237,7 +254,20 @@ function buildAugmentedSlots({ demandGraph, selectedMotifs = [], maxAgents = 6 }
     }
     if (existing.length + additions.length >= maxAgents) break;
   }
-  return [...existing, ...additions].slice(0, maxAgents);
+  let combined = [...existing, ...additions].slice(0, maxAgents);
+  if (workflowRequiresFullLoop && !combined.some((slot) => slot.role_id === 'reviewer')) {
+    const reviewerMotifSlot = asArray(selectedMotifs).flatMap((motif) => asArray(motif.role_slots).map((slot) => ({ ...slot, motif_id: motif.motif_id }))).find((slot) => slot.role_id === 'reviewer');
+    if (reviewerMotifSlot) {
+      const reviewerSlot = normalizeCapabilitySlot({
+        ...reviewerMotifSlot,
+        selection_reason: `graph_librarian:${reviewerMotifSlot.motif_id}:required_review_pass`,
+      }, combined.length);
+      const replaceIndex = combined.findIndex((slot) => slot.role_id === 'synthesizer');
+      if (reviewerSlot && replaceIndex >= 0) combined[replaceIndex] = reviewerSlot;
+      else if (reviewerSlot && combined.length < maxAgents) combined.push(reviewerSlot);
+    }
+  }
+  return combined.slice(0, maxAgents);
 }
 
 function buildSingleModePlan({ demandGraph, preferredRoles = [], motifFeedbackSummary = null } = {}) {
@@ -352,6 +382,10 @@ export function planTeamCompositionWithGraphLibrarian({
   const targetAgentCount = predictTargetAgentCount(demandGraph, { maxAgents });
   const roleDemand = roleDemandSignature(demandGraph.nodes);
   const rankedMotifs = asArray(motifRegistry)
+    .filter((motif) => {
+      if (!/bounded.*watch.*loop|bounded_watch_loop/i.test(String(motif?.motif_id || motif?.label || ''))) return true;
+      return asArray(demandGraph.tags).includes('bounded_loop') || asArray(demandGraph.tags).includes('approval_gate');
+    })
     .map((motif) => {
       const motifRoles = motif.role_slots.map((slot) => slot.role_id);
       const overlap = motifRoles.filter((roleId) => demandGraph.role_counts.has(roleId)).length;

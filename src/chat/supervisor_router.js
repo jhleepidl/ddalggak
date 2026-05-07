@@ -12,6 +12,7 @@ import { compactPromptJson } from "../application/prompt_surface_builder.js";
 import { resolveRoutingContractSummary, resolveRouteContractHeuristic, alignPlanActionsToRouteContract, rankAgentsByRouteContract } from "../application/route_contract.js";
 import { buildSupervisorOutputSchemaLines, buildSupervisorRuleLines } from "./supervisor_prompt_fragments.js";
 import { attachMemoryRoutingToRawPlan, buildRouterMemoryRoutingInstruction, normalizeRouterMemoryRouting } from "../application/router_memory_plan.js";
+import { internalLanguagePolicyBlock, normalizeLocale } from "../application/language_policy.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
@@ -805,20 +806,21 @@ function buildRouterPrompt(message, context = {}) {
   const coreRuleLines = buildSupervisorRuleLines({ teamLocked, parallelSpawnAllowed, allowChatGPTPlanner });
 
   return [
-    "너는 Telegram /chat supervisor_router다.",
-    "반드시 JSON 객체 1개만 출력한다. JSON 외 텍스트 금지.",
-    "Gemini CLI나 Codex CLI의 내장 tool/subagent/invoke_agent 기능은 절대 호출하지 말고, 텍스트 JSON만 작성한다.",
-    "enabled agent는 literal id 문자열로만 참조한다. @mention 형식은 쓰지 않는다.",
+    internalLanguagePolicyBlock({ surfaceLocale: normalizeLocale(row.locale || 'ko') }),
+    "You are the Telegram /chat supervisor_router.",
+    "Output exactly one JSON object. No text outside JSON.",
+    "Never call built-in Gemini CLI or Codex CLI tool/subagent/invoke_agent features; write text JSON only.",
+    "Reference enabled agents only by literal id strings. Do not use @mention syntax.",
     ...outputSchemaLines,
     "",
-    "핵심 규칙:",
+    "Core rules:",
     ...coreRuleLines,
     '',
     buildRouterMemoryRoutingInstruction(),
     ...(process.env.CHAT_SUPERVISOR_FEWSHOT === "1" ? [
       "",
-      "few-shot 예시:",
-      "user: \"주제 3개 제안하고 ipynb 코드 뼈대와 과제 5개 만들어줘\"",
+      "few-shot example:",
+      "user: \"Suggest 3 topics, create an ipynb code skeleton, and make 5 assignments.\"",
       "assistant(JSON): {\"reason\":\"복합 산출물\",\"done\":false,\"await_user\":false,\"deliverables\":[\"주제 제안\",\"ipynb 코드\",\"과제\"],\"completed_deliverables\":[],\"actions\":[{\"type\":\"run_agent\",\"agent_id\":\"researcher\",\"goal\":\"주제 3개 제안\"},{\"type\":\"run_agent\",\"agent_id\":\"coder\",\"goal\":\"ipynb 코드 뼈대 작성\"},{\"type\":\"run_agent\",\"agent_id\":\"reviewer\",\"goal\":\"과제 5개 생성 및 품질 점검\"}],\"final_response_style\":\"concise\"}",
     ] : []),
     "",

@@ -130,6 +130,7 @@ import { expandDetailContext } from "../chat/unfold.js";
 import { ChatRunManager } from "../chat/run_manager.js";
 import { GocExecutionGraphRecorder } from "../chat/goc_execution_graph.js";
 import { updateAgentStatus } from "./agent_status_store.js";
+import { internalLanguagePolicyBlock, resolveUserSurfaceLocale } from "./language_policy.js";
 
 import * as runtimeState from "./telegram_runtime_state.js";
 import * as runtimeIo from "./telegram_runtime_io.js";
@@ -187,12 +188,14 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
   const roleText = getAgentRolesText();
   const registryText = await getRegisteredAgentsText();
 
+  const surfaceLocale = resolveUserSurfaceLocale({ message: seedInstruction || goal, fallback: 'ko' });
   const prompt = [
-    "너는 오케스트레이터의 Multi-Agent 라우터다.",
-    "목표를 가장 빠르고 안전하게 달성하기 위해 필요한 에이전트만 선택하고 순서를 정해라.",
-    "반드시 JSON 객체 하나만 출력해라. JSON 외 텍스트 금지.",
+    internalLanguagePolicyBlock({ surfaceLocale }),
+    "You are the orchestrator's multi-agent router.",
+    "Choose only the agents and sequence needed to complete the goal quickly and safely.",
+    "Output exactly one JSON object. No text outside JSON.",
     "",
-    "출력 JSON 스키마:",
+    "Output JSON schema:",
     "{",
     "  \"reason\": \"한 줄 이유\",",
     "  \"actions\": [",
@@ -203,22 +206,22 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
     "  ]",
     "}",
     "",
-    "규칙:",
-    "- 중복 작업 금지. 같은 분석/계획/구현을 반복 배정하지 말 것.",
-    "- 필요한 최소 액션만 포함.",
-    "- action은 최대 4개.",
+    "Rules:",
+    "- No duplicate work. Do not assign the same analysis, planning, or implementation twice.",
+    "- Include only the minimum necessary actions.",
+    "- Use at most 4 actions.",
     "",
     `mode=${mode}`,
     `goal=${goal}`,
     `seedInstruction=${seedInstruction || "(none)"}`,
     "",
-    "라우팅 기준 메모리:",
+    "Routing criteria memory:",
     routerPrompt,
     "",
-    "에이전트 역할 메모리:",
+    "Agent role memory:",
     roleText,
     "",
-    "에이전트 레지스트리:",
+    "Agent registry:",
     registryText,
     "",
     "shared docs:",
@@ -353,20 +356,22 @@ async function reflectAutoSuggest(jobId, trigger, question, signal = null) {
   const convo = clip(convoToText(jobs.tailConversation(jobId, 50)), 5000);
   const policyPrompt = memory.getPolicyPrompt();
 
+  const surfaceLocale = resolveUserSurfaceLocale({ message: question || goal, fallback: 'ko' });
   const prompt = [
-    "너는 Telegram 오케스트레이터의 '자체 반성 판단기'다.",
-    "지금 이 시점에 ChatGPT에게 다음 단계 질문 프롬프트를 자동 생성할지 판단해라.",
-    "반드시 JSON 객체 하나만 출력해라. JSON 외 텍스트 금지.",
+    internalLanguagePolicyBlock({ surfaceLocale }),
+    "You are the Telegram orchestrator self-reflection judge.",
+    "Decide whether the orchestrator should automatically create a next-step prompt for ChatGPT at this point.",
+    "Output exactly one JSON object. No text outside JSON.",
     "",
-    "출력 JSON 스키마:",
+    "Output JSON schema:",
     "{",
     "  \"shouldAskChatGPT\": true|false,",
-    "  \"reason\": \"짧은 한 줄 이유\",",
+    "  \"reason\": \"short one-line reason\",",
     "  \"signals\": [\"looping\"|\"complexity\"|\"needs_review\"|\"blocked\"|\"none\"],",
     "  \"confidence\": 0-100",
     "}",
     "",
-    "판단 기준(운영자 메모리 프롬프트):",
+    "Judgment criteria (operator memory prompt):",
     policyPrompt,
     "",
     `trigger=${trigger}`,

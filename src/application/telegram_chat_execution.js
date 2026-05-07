@@ -182,6 +182,7 @@ import { appendPromptTelemetry, estimateTextTokens as estimatePromptTelemetryTok
 import { readIterationDelta, readRoleSummary, updateRoleSummary } from "./summary_memory.js";
 import { getAgentMemoryGrant, loadMemoryTopology } from "./memory_topology.js";
 import { scoreTaskAutonomy, inferTypedMemoryNeeds } from "./autonomy_policy.js";
+import { buildLocalizedSurfaceLabels, internalLanguagePolicyBlock, resolveUserSurfaceLocale, userSurfaceLanguageDirective } from "./language_policy.js";
 
 import * as runtimeState from "./telegram_runtime_state.js";
 import * as runtimeIo from "./telegram_runtime_io.js";
@@ -932,17 +933,18 @@ function isStaleBuilderHandoffTaskContext(text = '') {
   return /구현을\s*바로\s*진행|builder에게\s*handoff|핵심\s*요구사항|제품\s*흐름|외부\s*제약\/?리스크/i.test(src);
 }
 
-function buildDirectAnswerOutputGuide(rawGuide = '') {
+function buildDirectAnswerOutputGuide(rawGuide = '', { userLocale = 'ko' } = {}) {
   const explicit = String(rawGuide || '').trim();
   if (explicit) return explicit;
+  const locale = resolveUserSurfaceLocale({ message: '', fallback: userLocale || 'ko' });
+  const labels = buildLocalizedSurfaceLabels(locale);
   return [
-    '출력 지침:',
-    '- 사용자의 최신 요청에 직접 답하라.',
-    '- 추천/질문 요청이면 바로 추천/답변을 제공하라.',
-    '- 구현 전 확인사항/리스크/검증 체크리스트 같은 고정 템플릿은 사용하지 마라.',
-    '- 내부 KB, tracking file, route, provider, run_dir 정보는 사용자에게 노출하지 마라.',
-    '- 한국어로 간결하게 답하되, 필요한 근거는 짧게 붙여라.',
-  ].join('\n');
+    labels.outputGuide,
+    '- Answer the latest user request directly.',
+    '- If the user asks for a recommendation, question answer, or explanation, provide it directly instead of using a fixed implementation-risk template.',
+    '- Do not expose internal KB, tracking file, route, provider, run_dir, or runtime metadata unless the user explicitly asks for diagnostics.',
+    `- ${userSurfaceLanguageDirective(locale)}`,
+  ].join('\\n');
 }
 
 function buildArtifactTurnPolicyBlock(requirements = {}, { hasArtifactContract = false } = {}) {
@@ -985,7 +987,8 @@ function formatChatRuntimeRulesBlock(session = null, { maxRules = 6, maxChars = 
 async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const runtimeExecutionPolicy = normalizeRuntimeExecutionPolicy(opts.runtimeExecutionPolicy || {});
   const sectionTitle = String(opts.sectionTitle || "Gemini notes");
-  const outputGuide = buildDirectAnswerOutputGuide(opts.outputGuide || opts.output_guide || '');
+  const surfaceLocale = resolveUserSurfaceLocale({ message: opts.userRequest || opts.user_request || goal, runtime: opts.runtime || null, fallback: opts.userLocale || opts.user_locale || 'ko' });
+  const outputGuide = buildDirectAnswerOutputGuide(opts.outputGuide || opts.output_guide || '', { userLocale: surfaceLocale });
   const concurrencyKey = String(opts.concurrencyKey || "").trim() || `job:${String(jobId || "").trim()}`;
   const preferredModel = String(opts.model || "").trim();
   const providedRoleMemo = String(opts.roleMemo || opts.role_memo || '').trim();
@@ -1056,8 +1059,9 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   });
   ensureCliWorkspaceSupportFiles(jobId, { provider: "gemini", roleMemo, kbContract, goal: cleanUserRequest || rawGoal, runtimeExecutionPolicy, providerOptions });
   const prompt = [
-    '너는 Telegram /chat에서 호출된 agent다.',
-    '가장 중요한 기준은 [USER REQUEST]이며, 오래된 memory/context가 충돌하면 [USER REQUEST]를 따른다.',
+    internalLanguagePolicyBlock({ surfaceLocale }),
+    'You are an agent invoked by Telegram /chat.',
+    'The most important authority is [USER REQUEST]; if older memory/context conflicts with it, follow [USER REQUEST].',
     roleMemo ? `[ROLE]\n${clip(roleMemo, 900)}` : '',
     kbContract,
     activeArtifactContext ? activeArtifactContext : '',
@@ -1073,7 +1077,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     '',
     outputGuide,
     '',
-    '최종 답변:',
+    buildLocalizedSurfaceLabels(surfaceLocale).finalAnswer,
   ].filter(Boolean).join('\n\n');
   appendPromptTelemetry({
     jobDir: runDir(jobId),
@@ -1197,21 +1201,21 @@ async function codexImplement(jobId, instruction, signal = null, opts = {}) {
     "",
     "Codex workspace context is preloaded via .codex/instructions.md.",
     kbContract,
-    "너는 코드 수정 에이전트다.",
-    "규칙:",
-    "- 네트워크 접근 금지.",
-    `- CODEX_WORKSPACE_ROOT(코드 작업 영역) 내부 파일만 수정: ${workspacePath}`,
-    `- 현재 run workspace: ${workspacePath}`,
-    "- 필요하면 uploads/ 경로의 파일 내용을 참고해라.",
+    "You are a code implementation agent.",
+    "Rules:",
+    "- No network access.",
+    `- Modify files only inside CODEX_WORKSPACE_ROOT: ${workspacePath}`,
+    `- Current run workspace: ${workspacePath}`,
+    "- Read uploads/ files when they are relevant to the task.",
     workspaceFilesText,
     allowDirectExecution
-      ? "- 이번 작업은 실제 실행/빌드 산출이 요구된다. bounded local shell command를 직접 실행해 결과를 확인하라."
-      : "- 테스트/빌드 실행은 별도의 tool_proxy 검증 단계가 담당한다. 수정 내용에 맞는 검증 명령을 염두에 두고 변경하라.",
-    "- 변경 요약(파일별 이유) 포함.",
+      ? "- This task requires real execution/build output. Run bounded local shell commands directly and verify results."
+      : "- A separate tool_proxy verification stage may run tests/builds; keep appropriate verification commands in mind while editing.",
+    "- Include a concise change summary with per-file rationale.",
     executionRequirementsBlock ? `[DELIVERY REQUIREMENTS]
 ${executionRequirementsBlock}` : "",
     "",
-    "작업:",
+    "Task:",
     compactInstruction,
     "",
   ].join("\n");
@@ -1293,7 +1297,8 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
   const roleKey = String(opts.roleId || 'assistant').trim().toLowerCase() || 'assistant';
   const agentKey = String(opts.agentId || 'codex_assist').trim().toLowerCase() || 'codex_assist';
   const cleanUserRequest = String(opts.userRequest || opts.user_request || extractLatestUserRequestFromTaskText(instruction) || instruction || '').trim();
-  const outputGuide = buildDirectAnswerOutputGuide(opts.outputGuide || opts.output_guide || '');
+  const surfaceLocale = resolveUserSurfaceLocale({ message: cleanUserRequest || instruction, runtime: opts.runtime || null, fallback: opts.userLocale || opts.user_locale || 'ko' });
+  const outputGuide = buildDirectAnswerOutputGuide(opts.outputGuide || opts.output_guide || '', { userLocale: surfaceLocale });
   const roleMemo = String(opts.roleMemo || opts.role_memo || memory.getAgentRole('codex') || '').trim();
   const ctx = await runtimeIo.loadRoleScopedContextDocs(jobId, {
     provider: 'codex',
@@ -1334,8 +1339,9 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
     ? `Provider failover: Gemini could not serve the request because of ${String(opts.failoverDecision?.failure?.category || opts.failoverDecision?.reason || 'transient capacity').trim()}. Continue with the best available answer; mention missing live-web capability only if it materially affects the answer.`
     : '';
   const prompt = [
-    '너는 Telegram /chat에서 호출된 일반 목적 assistant agent다.',
-    '이 실행은 코드 수정 전용이 아니다. 사용자의 최신 요청에 직접 답하라.',
+    internalLanguagePolicyBlock({ surfaceLocale }),
+    'You are a general-purpose assistant agent invoked by Telegram /chat.',
+    'This execution is not code-editing only. Answer the latest user request directly.',
     failoverNote,
     roleMemo ? `[ROLE]\n${clip(roleMemo, 700)}` : '',
     '[SAFETY / EXECUTION]',
@@ -1354,7 +1360,7 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
     cleanUserRequest || instruction,
     cleanUserRequest && cleanUserRequest !== String(instruction || '').trim() ? `[TASK CONTEXT]\n${compactTaskText(instruction, { maxChars: 1800 })}` : '',
     outputGuide,
-    '최종 답변:',
+    buildLocalizedSurfaceLabels(surfaceLocale).finalAnswer,
   ].filter(Boolean).join('\n\n');
   appendPromptTelemetry({
     jobDir: runDir(jobId),
@@ -1480,6 +1486,8 @@ function buildChatSynthesisFallback(message, execution = {}, runtime = null) {
 }
 
 async function synthesizeChatReply(message, routePlan, execution = {}) {
+  const surfaceLocale = resolveUserSurfaceLocale({ message, runtime: execution?.runtime || routePlan?.runtime || null, fallback: 'ko' });
+  const surfaceLabels = buildLocalizedSurfaceLabels(surfaceLocale);
   if (execution && typeof execution === 'object' && !execution.runtime && routePlan?.runtime) execution.runtime = routePlan.runtime;
   const runtime = execution?.runtime || routePlan?.runtime || null;
   const foldedSignals = collectFoldedParticipantSignals(runtime, {
@@ -1532,27 +1540,28 @@ async function synthesizeChatReply(message, routePlan, execution = {}) {
   })();
 
   const prompt = [
-    "너는 Telegram /chat의 최종 응답 작성기다.",
-    "아래 내부 실행 결과를 바탕으로 사용자에게 보여줄 최종 답변 1개만 작성하라.",
-    "규칙:",
-    "- 한국어로 답하라.",
-    "- 내부 라우팅/잡ID/run_dir/provider/agent 이름/로그는 숨겨라.",
-    "- 핵심 답변을 먼저 주고, 필요하면 간단한 다음 단계 1~3개를 번호로 제시하라.",
+    internalLanguagePolicyBlock({ surfaceLocale }),
+    "You are the final response writer for Telegram /chat.",
+    "Write exactly one user-facing final response from the internal execution results below.",
+    "Rules:",
+    `- ${userSurfaceLanguageDirective(surfaceLocale)}`,
+    "- Hide internal routing, job IDs, run_dir, provider names, agent names, and raw logs unless the user explicitly asks for diagnostics.",
+    "- Give the core answer first, then at most 1–3 short next steps if useful.",
     "",
-    "사용자 요청:",
+    surfaceLabels.userRequest,
     String(message || ""),
     "",
-    "내부 라우팅 요약:",
+    "Internal routing summary:",
     `reason=${String(routePlan?.reason || "(none)")}`,
     `actions=${(Array.isArray(routePlan?.actions) ? routePlan.actions : []).map((a) => chatActionLabel(a)).join(", ") || "(none)"}`,
     "",
-    "실행 결과:",
+    "Execution results:",
     outputText,
-    special ? "특수 실행 요약:" : "",
+    special ? "Special execution summary:" : "",
     special ? special : "",
     foldedSignals.prompt_block ? foldedSignals.prompt_block : "",
     "",
-    "최종 답변:",
+    surfaceLabels.finalAnswer,
   ].join("\n");
 
   try {

@@ -1,5 +1,7 @@
 import { readHarnessExecutionModePolicy } from './harness_runtime_behavior.js';
 import { syncRuntimeExecutionState } from './runtime_session_state.js';
+import { extractTeamCreationSignals, summarizeTeamCreationSignals } from './team_signal_extractor.js';
+import { buildTeamWorkflowContract } from './team_workflow_contract.js';
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -152,6 +154,8 @@ export function buildAdaptiveExecutionSignals({
   const critiqueCount = Number(participantKinds.critique || 0) + Number(participantKinds.conflict_flag || 0) + Number(participantKinds.vote || 0);
   const participantPressure = critiqueCount + Math.min(3, clampInt(participantSurface.last_folded_count, { max: 8 })) + Math.min(2, clampInt(participantSurface.decision_log_size, { max: 24 }) > 2 ? 1 : 0);
   const latestQuality = asObject(adaptive.last_quality_signals || adaptive.lastQualitySignals);
+  const teamCreationSignals = extractTeamCreationSignals({ goal, message, taskInterpretation, runtime, runtimeSessionState });
+  const teamWorkflowContract = buildTeamWorkflowContract({ signals: teamCreationSignals, goal: goal || message, taskInterpretation });
   const modeHistoryTail = asArray(adaptive.mode_history || adaptive.modeHistory).slice(-5).map((entry) => {
     const item = asObject(entry);
     return {
@@ -165,8 +169,13 @@ export function buildAdaptiveExecutionSignals({
   }).filter((entry) => entry.mode);
   return {
     explicit_multi_intent: hasExplicitMultiIntent({ goal, message, taskInterpretation }),
-    explicit_hybrid_intent: hasExplicitHybridIntent({ goal, message, taskInterpretation }),
+    explicit_hybrid_intent: hasExplicitHybridIntent({ goal, message, taskInterpretation }) || (teamWorkflowContract.workflow_kind !== 'single_task' && teamCreationSignals.workflow_intent?.review_required === true),
     explicit_mode_request: detectExplicitModeRequest({ goal, message, taskInterpretation }),
+    team_creation_signals: teamCreationSignals,
+    team_signal_summary: summarizeTeamCreationSignals(teamCreationSignals),
+    team_workflow_contract: teamWorkflowContract,
+    workflow_kind: teamWorkflowContract.workflow_kind,
+    workflow_contract_required: teamWorkflowContract.workflow_kind !== 'single_task',
     task_family_key: buildTaskFamilyKey(taskInterpretation),
     decomposability_score: decomposability.score,
     unique_role_count: decomposability.unique_role_count,
@@ -260,8 +269,16 @@ export function selectAdaptiveExecutionMode({
   const reasons = [];
   const initialStart = signals.run_count <= 0 && asArray(signals.mode_history_tail).length === 0;
   const explicitModeRequest = cleanMode(signals.explicit_mode_request || '', '');
+  const workflowContract = asObject(signals.team_workflow_contract || signals.teamWorkflowContract);
+  const workflowKind = cleanText(workflowContract.workflow_kind || workflowContract.workflowKind || '', { lower: true, maxLen: 80 });
 
-  if (explicitModeRequest === 'multi_motif' && policy.respect_explicit_multi_intent && policy.allow_direct_multi_start) {
+  if (workflowKind === 'bounded_continuous_loop' && policy.allow_direct_multi_start) {
+    nextLevel = 2;
+    reasons.push('workflow_contract_bounded_loop');
+  } else if ((workflowKind === 'review_gated_pipeline' || workflowKind === 'explore_then_synthesize') && policy.allow_direct_hybrid_start) {
+    nextLevel = workflowKind === 'explore_then_synthesize' && policy.allow_direct_multi_start ? 2 : 1;
+    reasons.push(`workflow_contract_${workflowKind}`);
+  } else if (explicitModeRequest === 'multi_motif' && policy.respect_explicit_multi_intent && policy.allow_direct_multi_start) {
     nextLevel = 2;
     reasons.push('explicit_mode_request_multi');
   } else if (explicitModeRequest === 'hybrid_sidecar' && policy.respect_explicit_hybrid_intent && policy.allow_direct_hybrid_start) {
@@ -336,6 +353,17 @@ export function selectAdaptiveExecutionMode({
     shapedSlots = buildHybridSlots(taskInterpretation, preferredRoles, signals);
     shapedMaxAgents = Math.min(Math.max(2, shapedSlots.length), Math.max(2, Math.floor(Number(maxAgents) || 6), 2));
     shapedMaxAgents = Math.min(shapedMaxAgents, 3);
+  } else if (mode === 'multi_motif' && asArray(workflowContract.recommended_roles || workflowContract.recommendedRoles).length > 0) {
+    const existingSlots = asArray(taskInterpretation?.candidate_capability_slots || taskInterpretation?.candidateCapabilitySlots);
+    const byRole = new Map(existingSlots.map((slot) => [cleanText(slot?.role_id || slot?.roleId || slot?.role || '', { lower: true, maxLen: 64 }), slot]));
+    shapedSlots = asArray(workflowContract.recommended_roles || workflowContract.recommendedRoles)
+      .map((roleId) => {
+        const role = cleanText(roleId, { lower: true, maxLen: 64 });
+        return byRole.get(role) || { role_id: role, purpose: role, selection_reason: `workflow_contract:${workflowKind || 'team'}` };
+      })
+      .filter((slot) => cleanText(slot?.role_id || slot?.roleId || slot?.role || '', { lower: true, maxLen: 64 }))
+      .slice(0, Math.max(2, Math.min(6, Math.floor(Number(maxAgents) || 6))));
+    shapedMaxAgents = Math.max(2, Math.min(Math.max(shapedSlots.length, 3), Math.floor(Number(maxAgents) || 6)));
   }
 
   return {
@@ -348,6 +376,7 @@ export function selectAdaptiveExecutionMode({
     history_tail: asArray(signals.mode_history_tail).slice(-5),
     quality_signals: asObject(signals.last_quality_signals),
     task_family_mode_hint: taskFamilyModeHint,
+    team_workflow_contract: workflowContract,
     max_agents: shapedMaxAgents,
     shaped_candidate_capability_slots: shapedSlots,
   };
@@ -366,6 +395,12 @@ export function applyAdaptiveExecutionModeToTaskInterpretation(taskInterpretatio
     execution_mode: mode,
     execution_mode_reason: asArray(row.reasons).join(',') || undefined,
   };
+  if (row.team_workflow_contract || row.teamWorkflowContract || row.signals?.team_workflow_contract) {
+    next.team_workflow_contract = asObject(row.team_workflow_contract || row.teamWorkflowContract || row.signals?.team_workflow_contract);
+  }
+  if (row.signals?.team_creation_signals) {
+    next.team_creation_signals = asObject(row.signals.team_creation_signals);
+  }
   if (mode === 'single_compiled') {
     next.parallelism_preference = 'serial';
   } else if (mode === 'hybrid_sidecar' && !cleanText(next.parallelism_preference, { lower: true })) {
@@ -390,6 +425,8 @@ function summarizeModeSignals(signals = null) {
     explicit_multi_intent: row.explicit_multi_intent === true,
     explicit_hybrid_intent: row.explicit_hybrid_intent === true,
     task_family_key: cleanText(row.task_family_key || row.taskFamilyKey || '', { lower: true, maxLen: 96 }) || undefined,
+    workflow_kind: cleanText(row.workflow_kind || row.workflowKind || '', { lower: true, maxLen: 80 }) || undefined,
+    workflow_contract_required: row.workflow_contract_required === true || row.workflowContractRequired === true,
   };
 }
 

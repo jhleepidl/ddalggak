@@ -37,6 +37,7 @@ import { getCredentialBindingState } from '../../application/credential_binding.
 import { buildTeamSchemaOptionsText, buildTeamSchemaOptionsSummaryLines } from '../../shared/team_schema_catalog.js';
 import { buildBenchmarkTeamTemplate, buildBenchmarkTemplateCatalogText } from '../../application/benchmark_team_templates.js';
 import { syncRawHistoryToGoC } from '../../application/goc_raw_history_sync.js';
+import { normalizeLanguageMetadata, resolveUserSurfaceLocale } from '../../application/language_policy.js';
 import { inspectAndPrepareImprovementJob, loadImprovementExecutionContext, runImprovementAutomation, runImprovementCanary, runImprovementEvalGate, runImprovementReview, runImprovementRollback, runImprovementTests, markImprovementPromotion } from '../../application/improvement_orchestrator.js';
 import { writeIdleCompactionCandidate, formatIdleCompactionCandidateForTelegram } from '../../application/idle_compaction.js';
 import { formatMemoryTopologyForTelegram, planMemoryTopology } from '../../application/memory_topology.js';
@@ -503,9 +504,17 @@ export function createTelegramCommandHandler(deps = {}) {
       const replaced = topic === 'general'
         ? deduped
         : deduped.filter((row) => !(normalizeRuleSource(row) === sourceGroup && String(row?.topic || inferRuntimeRuleTopic(row?.text || '')).toLowerCase() === topic));
+      const language = normalizeLanguageMetadata({ text, displayText: text, locale: resolveUserSurfaceLocale({ message: text, fallback: 'ko' }), source: 'telegram_rule_command' });
       const row = {
         id: `${idPrefix}_${Date.now().toString(36)}`,
         text,
+        source_original_text: language.source_original_text,
+        source_original_language: language.source_original_language,
+        original_language: language.original_language,
+        display_text: language.display_text,
+        canonical_language: language.canonical_language,
+        canonical_text_en: language.canonical_text_en,
+        canonical_projection_status: language.canonical_projection_status,
         enabled: true,
         scope: 'chat',
         source,

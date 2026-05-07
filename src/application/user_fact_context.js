@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { normalizeLanguageMetadata } from './language_policy.js';
+import { buildCanonicalProjectionRequest, upsertCanonicalProjectionRequest } from './canonical_projection.js';
 
 const USER_FACTS_FILE = 'user_facts.jsonl';
 const MAX_VALUE_LEN = 220;
@@ -107,6 +109,22 @@ function inferFactKey(fact = {}) {
 function makeFact(partial = {}, meta = {}) {
   const observedAt = String(meta.observedAt || meta.timestamp || partial.observed_at || partial.created_at || nowIso());
   const observedTimezone = cleanTimezone(meta.timezone || meta.observedTimezone || partial.observed_timezone || process.env.USER_FACT_TIMEZONE || process.env.TZ || DEFAULT_USER_FACT_TIMEZONE);
+  const language = normalizeLanguageMetadata({
+    text: meta.observedText || partial.observed_text || partial.value || '',
+    displayText: partial.display_text || partial.value || meta.observedText || partial.observed_text || '',
+    locale: partial.original_language || partial.source_original_language || '',
+    canonicalTextEn: partial.canonical_text_en || partial.canonical_summary_en || '',
+    source: 'user_fact_context',
+  });
+  const projection = buildCanonicalProjectionRequest({
+    object_type: `user_fact:${partial.type || 'fact'}`,
+    source_original_text: language.source_original_text,
+    source_original_language: language.source_original_language,
+    display_text: language.display_text,
+    canonical_text_en: language.canonical_text_en,
+    title: partial.field || partial.type || 'user fact',
+  });
+  const canonicalTextEn = projection.canonical_text_en || language.canonical_text_en;
   const fact = {
     schema_version: 1,
     id: `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
@@ -118,6 +136,15 @@ function makeFact(partial = {}, meta = {}) {
     observed_at: observedAt,
     observed_timezone: observedTimezone,
     observed_text: cleanText(meta.observedText || partial.observed_text || '').slice(0, 500),
+    source_original_text: language.source_original_text,
+    source_original_language: language.source_original_language,
+    original_language: language.original_language,
+    display_text: language.display_text,
+    canonical_language: language.canonical_language,
+    canonical_text_en: canonicalTextEn,
+    canonical_projection_status: projection.canonical_projection_status || language.canonical_projection_status,
+    canonical_projection_id: projection.projection_id,
+    projection_method: projection.projection_method,
     ...partial,
   };
   if (fact.type === 'meal' && !fact.target_date) {
@@ -131,6 +158,23 @@ function appendFacts(runDir, facts = []) {
   const cleanFacts = (Array.isArray(facts) ? facts : []).filter((fact) => fact && typeof fact === 'object');
   if (!runDir || cleanFacts.length === 0) return 0;
   safeMkdir(runDir);
+  for (const fact of cleanFacts) {
+    upsertCanonicalProjectionRequest({
+      jobDir: runDir,
+      item: {
+        object_type: `user_fact:${fact.type || 'fact'}`,
+        source_ref: fact.key || fact.id,
+        source_id: fact.id,
+        title: fact.field || fact.type || 'user fact',
+        source_original_text: fact.source_original_text || fact.observed_text || fact.value,
+        source_original_language: fact.source_original_language || fact.original_language,
+        display_text: fact.display_text || fact.value,
+        canonical_text_en: fact.canonical_text_en,
+        metadata: { type: fact.type, field: fact.field, key: fact.key },
+      },
+      actor: 'user_fact_context',
+    });
+  }
   const rows = cleanFacts.map((fact) => JSON.stringify(fact)).join('\n') + '\n';
   fs.appendFileSync(factsPath(runDir), rows, 'utf8');
   return cleanFacts.length;

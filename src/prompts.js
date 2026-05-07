@@ -1,4 +1,5 @@
 import { getKnowledgeDocEntry, normalizeKnowledgeBaseProfile } from "./knowledge_base/profile.js";
+import { internalLanguagePolicyBlock, resolveUserSurfaceLocale, userSurfaceLanguageDirective } from "./application/language_policy.js";
 
 function uniqueTrackingDocs(docs = []) {
   const out = [];
@@ -66,13 +67,22 @@ export function buildChatGPTNextStepPrompt({
   routerPrompt = "",
   agentRolesText = "",
   knowledgeBaseProfile = null,
+  userLocale = "",
 }) {
   const roleBlock = agentRolesText
-    ? `\n## 에이전트 역할 메모리\n${agentRolesText}\n`
+    ? `
+## Agent role memory
+${agentRolesText}
+`
     : "";
   const routerBlock = routerPrompt
-    ? `\n## 에이전트 라우팅 기준\n${routerPrompt}\n`
+    ? `
+## Agent routing criteria
+${routerPrompt}
+`
     : "";
+  const surfaceLocale = resolveUserSurfaceLocale({ message: question, fallback: userLocale || process.env.DEFAULT_USER_LOCALE || 'ko' });
+  const languagePolicy = internalLanguagePolicyBlock({ surfaceLocale });
   const profile = knowledgeBaseProfile ? normalizeKnowledgeBaseProfile(knowledgeBaseProfile) : null;
   const defaultMemoryDoc = 'core_memory.md';
   const planDoc = profile ? (getKnowledgeDocEntry(profile, 'plan')?.file_name || defaultMemoryDoc) : defaultMemoryDoc;
@@ -84,18 +94,57 @@ export function buildChatGPTNextStepPrompt({
     ? [
         '## Knowledge Base contract',
         `- profile_id: ${profile.profile_id}`,
-        '- semantic slots(plan/research/progress/decisions/artifacts)은 안정적이지만, 파일명은 아래 concrete name을 사용한다.',
+        '- Semantic slots(plan/research/progress/decisions/artifacts) are stable, but actions must use the concrete file names below.',
         `- plan -> ${planDoc}`,
         `- research -> ${researchDoc}`,
         `- progress -> ${progressDoc}`,
         `- decisions -> ${decisionsDoc}`,
-        '- knowledge_base_contract.md 는 read-only reference다.',
+        '- knowledge_base_contract.md is a read-only reference.',
         `- artifacts -> ${artifactsDoc}`,
         profile?.memory_policy ? `- stable semantic slots: ${(profile.memory_policy.stable_semantic_slots || []).join(', ') || '(none)'}` : '',
-        '- JSON action의 track_append.doc 는 가능하면 concrete file name을 사용한다.',
+        '- In JSON actions, prefer concrete file names for track_append.doc.',
         '',
       ].join('\n')
     : '';
 
-  return `# 요청: 중앙 통제 AI(=ChatGPT)로 다음 단계 결정\n\n너는 중앙 통제 AI다. 아래 컨텍스트를 보고 다음 단계를 결정해라.\n너의 답변은 **사람이 Telegram에 붙여넣어도 자동 실행될 수 있게** JSON 액션 플랜을 포함해야 한다.\n\n## 목표(jobId=${jobId})\n${goal}\n\n## 질문/요청\n${question}${routerBlock}${roleBlock}${kbBlock ? `\n${kbBlock}` : ''}\n## 기록: shared docs\n${contextDocsText}\n\n## 기록: 최근 대화\n${convoText}\n\n## 반드시 포함할 JSON (단일 JSON 객체)\n아래 형식으로만 출력해줘. (설명은 JSON 아래에 짧게 5줄 이내)\n\n\`\`\`json\n{\n  \"jobId\": \"${jobId}\",\n  \"actions\": [\n    {\"type\":\"track_append\",\"doc\":\"${planDoc}\",\"markdown\":\"(필요한 계획/체크리스트)\"},\n    {\"type\":\"agent_run\",\"agent\":\"researcher\",\"prompt\":\"(조사가 더 필요하면)\",\"inputs\":{}},\n    {\"type\":\"agent_run\",\"agent\":\"coder\",\"prompt\":\"(짧고 명확한 구현 지시)\",\"inputs\":{}},\n    {\"type\":\"git_summary\"}\n  ]\n}\n\`\`\`\n\n추가 규칙:\n- 에이전트 역할이 겹치지 않게, 필요한 액션만 최소로 구성하라.\n- commit_request는 정말 필요할 때만 추가하라(실제 커밋은 승인 필요).\n- agent_run 프롬프트는 짧고 명확하게.\n- ${planDoc}에 \"Codex에게 줄 작업 지시문\" 섹션을 만들어주면 이후 /continue가 그 부분을 우선 사용한다.\n`;
+  return `# Request: decide the next executable step as the central controller
+
+You are the central control AI for ddalggak. Review the context below and decide the next step.
+Your response must include a JSON action plan that can be pasted into Telegram and executed automatically.
+
+${languagePolicy}
+
+## Goal(jobId=${jobId})
+${goal}
+
+## User request
+${question}${routerBlock}${roleBlock}${kbBlock ? `
+${kbBlock}` : ''}
+## Shared docs
+${contextDocsText}
+
+## Recent conversation
+${convoText}
+
+## Required JSON (single object)
+Output the following JSON shape. After the JSON, include at most 5 short user-facing lines. ${userSurfaceLanguageDirective(surfaceLocale)}
+
+\`\`\`json
+{
+  "jobId": "${jobId}",
+  "actions": [
+    {"type":"track_append","doc":"${planDoc}","markdown":"(needed plan/checklist)"},
+    {"type":"agent_run","agent":"researcher","prompt":"(research instruction if needed)","inputs":{}},
+    {"type":"agent_run","agent":"coder","prompt":"(short implementation instruction)","inputs":{}},
+    {"type":"git_summary"}
+  ]
+}
+\`\`\`
+
+Additional rules:
+- Avoid overlapping agent roles; include only necessary actions.
+- Add commit_request only when truly needed; actual commits require approval.
+- Keep agent_run prompts short and explicit.
+- If you add a "Codex task instructions" section to ${planDoc}, later /continue will prioritize it.
+`;
 }

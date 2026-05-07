@@ -336,6 +336,155 @@ function createSkillUsageEventsFromRuntimeAgents({
   return events;
 }
 
+
+function ensureWorkflowRequiredRoles({ teamPlan = null, runtimeAgents = [], taskInterpretation = null, goal = "" } = {}) {
+  const contract = taskInterpretation && typeof taskInterpretation === "object"
+    ? (taskInterpretation.team_workflow_contract || taskInterpretation.teamWorkflowContract || null)
+    : null;
+  const requiredPasses = asArray(contract?.required_passes || contract?.requiredPasses);
+  const workflowKind = normalizeText(contract?.workflow_kind || contract?.workflowKind, { lower: true });
+  const requiredRoles = [];
+  if (workflowKind === "bounded_continuous_loop") requiredRoles.push("operator", "builder", "reviewer");
+  if (requiredPasses.includes("review")) requiredRoles.push("reviewer");
+  if (requiredPasses.includes("stop_condition_evaluation")) requiredRoles.push("reviewer");
+  const uniqueRequired = Array.from(new Set(requiredRoles));
+  if (uniqueRequired.length === 0) return { team_plan: teamPlan, runtime_agents: runtimeAgents, changed: false };
+  const existingRoles = new Set(asArray(runtimeAgents).map((agent) => normalizeText(agent?.role_id || agent?.roleId || agent?.role_label || agent?.roleLabel, { lower: true })).filter(Boolean));
+  const existingSlotRoles = new Set(asArray(teamPlan?.slots).map((slot) => normalizeText(slot?.role_id || slot?.roleId, { lower: true })).filter(Boolean));
+  const nextSlots = [...asArray(teamPlan?.slots)];
+  const nextAgents = [...asArray(runtimeAgents)];
+  let changed = false;
+  for (const role of uniqueRequired) {
+    if (!existingSlotRoles.has(role)) {
+      const slotId = `slot_${role}_${nextSlots.length + 1}`;
+      nextSlots.push({
+        slot_id: slotId,
+        role_id: role,
+        purpose: role === "reviewer" ? "Required workflow review / verification pass" : `Required workflow role: ${role}`,
+        authority_profile_id: role === "operator" ? "supervisor_controlled" : "worker_publish_guarded",
+        parallelizable: false,
+        selection_reason: `workflow_contract_required_role:${workflowKind || "workflow"}`,
+        status: "ready",
+      });
+      existingSlotRoles.add(role);
+      changed = true;
+    }
+    if (!existingRoles.has(role)) {
+      const slot = nextSlots.find((item) => normalizeText(item?.role_id, { lower: true }) === role) || {};
+      nextAgents.push({
+        instance_id: `inst_${role}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+        slot_id: slot.slot_id || `slot_${role}_${nextSlots.length}`,
+        role_id: role,
+        role_label: role,
+        display_label: role === "reviewer" ? "Workflow Reviewer" : role,
+        synthesized: true,
+        fallback: true,
+        ephemeral: true,
+        status: "ready",
+        attached_skill_ids: [],
+        attached_skills: [],
+        authority_profile_id: slot.authority_profile_id || "worker_publish_guarded",
+        selection_reason: `workflow_contract_required_role:${workflowKind || "workflow"}`,
+        assigned_goal: goal,
+      });
+      existingRoles.add(role);
+      changed = true;
+    }
+  }
+  if (!changed) return { team_plan: teamPlan, runtime_agents: runtimeAgents, changed: false };
+  return {
+    team_plan: normalizeTeamPlan({
+      ...(teamPlan || {}),
+      slots: nextSlots,
+      runtime_agents: nextAgents,
+      selection_explanations: [
+        ...asArray(teamPlan?.selection_explanations),
+        { subject_id: "team_plan", reason: `workflow_contract:required_roles=${uniqueRequired.join(",")}` },
+      ],
+    }),
+    runtime_agents: nextAgents,
+    changed: true,
+  };
+}
+
+function ensureParallelResearchSlots({ teamPlan = null, runtimeAgents = [], taskInterpretation = null, goal = "" } = {}) {
+  const interpretation = taskInterpretation && typeof taskInterpretation === "object" ? taskInterpretation : {};
+  const demandGraph = interpretation.team_graph_librarian?.demand_graph
+    || interpretation.demand_graph
+    || interpretation.teamSynthesisPlan?.demand_graph
+    || {};
+  const isParallelResearch = normalizeText(interpretation.parallelism_preference || interpretation.parallelismPreference, { lower: true }) === "parallel"
+    || demandGraph.needs_parallel_research === true
+    || asArray(demandGraph.tags).map((tag) => normalizeText(tag, { lower: true })).includes("parallel_research");
+  if (!isParallelResearch) return { team_plan: teamPlan, runtime_agents: runtimeAgents, changed: false };
+
+  const nextSlots = [...asArray(teamPlan?.slots)];
+  const nextAgents = [...asArray(runtimeAgents)];
+  const researcherSlots = nextSlots.filter((slot) => normalizeText(slot?.role_id || slot?.roleId, { lower: true }) === "researcher");
+  const researcherAgents = nextAgents.filter((agent) => normalizeText(agent?.role_id || agent?.roleId || agent?.role_label || agent?.roleLabel, { lower: true }) === "researcher");
+  let changed = false;
+
+  while (researcherSlots.length < 2) {
+    let suffix = nextSlots.length + 1;
+    let slotId = `slot_researcher_${suffix}`;
+    const usedSlotIds = new Set(nextSlots.map((slot) => normalizeText(slot?.slot_id || slot?.slotId)).filter(Boolean));
+    while (usedSlotIds.has(slotId)) {
+      suffix += 1;
+      slotId = `slot_researcher_${suffix}`;
+    }
+    const slot = {
+      slot_id: slotId,
+      role_id: "researcher",
+      purpose: "Parallel source investigation lane",
+      authority_profile_id: "read_only_worker",
+      parallelizable: true,
+      selection_reason: "parallel_research_required_slot",
+      status: "ready",
+    };
+    nextSlots.push(slot);
+    researcherSlots.push(slot);
+    changed = true;
+  }
+
+  while (researcherAgents.length < 2) {
+    const slot = researcherSlots[researcherAgents.length] || researcherSlots[0] || {};
+    const agent = {
+      instance_id: `inst_researcher_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      slot_id: slot.slot_id || `slot_researcher_${nextSlots.length}`,
+      role_id: "researcher",
+      role_label: "researcher",
+      display_label: "Parallel Researcher",
+      synthesized: true,
+      fallback: true,
+      ephemeral: true,
+      status: "ready",
+      attached_skill_ids: [],
+      attached_skills: [],
+      authority_profile_id: slot.authority_profile_id || "read_only_worker",
+      selection_reason: "parallel_research_required_agent",
+      assigned_goal: goal,
+    };
+    nextAgents.push(agent);
+    researcherAgents.push(agent);
+    changed = true;
+  }
+
+  if (!changed) return { team_plan: teamPlan, runtime_agents: runtimeAgents, changed: false };
+  return {
+    team_plan: normalizeTeamPlan({
+      ...(teamPlan || {}),
+      slots: nextSlots,
+      runtime_agents: nextAgents,
+      selection_explanations: [
+        ...asArray(teamPlan?.selection_explanations),
+        { subject_id: "team_plan", reason: "parallel_research:required_two_researcher_lanes" },
+      ],
+    }),
+    runtime_agents: nextAgents,
+    changed: true,
+  };
+}
+
 function buildPlannerMetadata({
   interpretedTask = {},
   routePlan = {},
@@ -401,6 +550,14 @@ function buildPlannerMetadata({
     execution_mode_signals: executionModeSelection?.signals && typeof executionModeSelection.signals === 'object'
       ? { ...executionModeSelection.signals }
       : undefined,
+    team_creation_signals: executionModeSelection?.signals?.team_creation_signals && typeof executionModeSelection.signals.team_creation_signals === 'object'
+      ? { ...executionModeSelection.signals.team_creation_signals }
+      : undefined,
+    team_workflow_contract: executionModeSelection?.team_workflow_contract && typeof executionModeSelection.team_workflow_contract === 'object'
+      ? { ...executionModeSelection.team_workflow_contract }
+      : (executionModeSelection?.signals?.team_workflow_contract && typeof executionModeSelection.signals.team_workflow_contract === 'object'
+        ? { ...executionModeSelection.signals.team_workflow_contract }
+        : undefined),
     execution_quality_signals: executionModeSelection?.quality_signals && typeof executionModeSelection.quality_signals === 'object'
       ? { ...executionModeSelection.quality_signals }
       : undefined,
@@ -797,6 +954,28 @@ export function buildRuntimeOrchestration({
     runtimeAgents,
   });
   runtimeAgents = asArray(teamPlan.runtime_agents);
+
+  const workflowRoleRepair = ensureWorkflowRequiredRoles({
+    teamPlan,
+    runtimeAgents,
+    taskInterpretation: planningTaskInterpretation,
+    goal: effectiveGoal,
+  });
+  if (workflowRoleRepair.changed) {
+    teamPlan = reconcileTeamPlanRuntimeBindings(workflowRoleRepair.team_plan, { runtimeAgents: workflowRoleRepair.runtime_agents });
+    runtimeAgents = asArray(teamPlan.runtime_agents);
+  }
+
+  const parallelResearchRepair = ensureParallelResearchSlots({
+    teamPlan,
+    runtimeAgents,
+    taskInterpretation: planningTaskInterpretation,
+    goal: effectiveGoal,
+  });
+  if (parallelResearchRepair.changed) {
+    teamPlan = reconcileTeamPlanRuntimeBindings(parallelResearchRepair.team_plan, { runtimeAgents: parallelResearchRepair.runtime_agents });
+    runtimeAgents = asArray(teamPlan.runtime_agents);
+  }
 
   const validation = validateNormalizedTeamPlan(teamPlan);
   if (!validation.ok) {

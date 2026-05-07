@@ -1142,6 +1142,47 @@ export class GocClient {
     });
   }
 
+
+  async recordRuntimeProposals(threadId, body = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("recordRuntimeProposals requires threadId");
+    return await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/proposals`, body },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/proposals`, body },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/proposals`, body },
+      ],
+    });
+  }
+
+  async listRuntimeProposals(threadId, { status = '', kind = '', includeClosed = false, limit = 100 } = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("listRuntimeProposals requires threadId");
+    return await this._requestAny({
+      method: "GET",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/proposals`, query: { status, kind, include_closed: includeClosed ? 1 : 0, limit } },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/proposals`, query: { status, kind, include_closed: includeClosed ? 1 : 0, limit } },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/proposals`, query: { status, kind, include_closed: includeClosed ? 1 : 0, limit } },
+      ],
+    });
+  }
+
+  async applyRuntimeProposalAction(threadId, proposalId, body = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    const cleanProposalId = String(proposalId || "").trim();
+    if (!cleanThreadId || !cleanProposalId) throw new Error("applyRuntimeProposalAction requires threadId and proposalId");
+    return await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/proposals/${encodeURIComponent(cleanProposalId)}/action`, body },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/proposals/${encodeURIComponent(cleanProposalId)}/action`, body },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/proposals/${encodeURIComponent(cleanProposalId)}/action`, body },
+      ],
+    });
+  }
+
   async createMemoryNode(threadId, body = {}) {
     const cleanThreadId = String(threadId || "").trim();
     if (!cleanThreadId) throw new Error("createMemoryNode requires threadId");

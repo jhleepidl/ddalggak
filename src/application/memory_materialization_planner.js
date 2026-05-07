@@ -108,6 +108,8 @@ const GENERIC_SHAPE_SPECS = [
     id: 'time_series',
     title: 'Time-series memory',
     table: 'time_series_entries',
+    preferred_store: 'relational_table',
+    vector_fields: ['subject', 'notes'],
     description: 'Repeated temporal observations should become a queryable event series when range, trend, missing-entry, or aggregate questions emerge.',
     evidence: [/아침|점심|저녁|간식|야식|식사|먹었|먹은|메뉴|칼로리|영양|단백질|탄수화물|meal|breakfast|lunch|dinner|snack|ate|diet|food/i],
     aggregate: [/이번\s*주|지난\s*주|최근|평균|합계|며칠|추세|비율|빠진|거른|count|average|trend|weekly|monthly|last\s+\d+|summary/i],
@@ -137,6 +139,8 @@ const GENERIC_SHAPE_SPECS = [
     id: 'record_collection',
     title: 'Record collection',
     table: 'memory_records',
+    preferred_store: 'hybrid_table_vector_index',
+    vector_fields: ['title', 'notes', 'category'],
     description: 'Repeated similarly shaped records should become a typed collection when filtering, totals, categories, or updates matter.',
     evidence: [/지출|결제|샀|구매|영수증|가격|비용|원\b|달러|카드|현금|expense|spent|bought|cost|receipt|price|paid/i],
     aggregate: [/합계|총액|평균|카테고리|이번\s*달|지난\s*달|최근|비율|total|average|category|monthly|weekly/i],
@@ -165,6 +169,8 @@ const GENERIC_SHAPE_SPECS = [
     id: 'source_knowledge_base',
     title: 'Sourced knowledge base',
     table: 'sourced_facts',
+    preferred_store: 'hybrid_table_vector_index',
+    vector_fields: ['topic_key', 'fact_type', 'title', 'value_json', 'source_url'],
     description: 'Reusable public or source-backed facts should become a sourced knowledge pack with provenance and freshness rules instead of private memory.',
     evidence: [/학회|컨퍼런스|ICDE|NeurIPS|ICML|CVPR|SIGMOD|VLDB|deadline|submission|registration|venue|CFP|call for papers|conference/i],
     aggregate: [/마감|일정|언제|등록|비자|장소|venue|deadline|date|schedule|fee|registration/i],
@@ -193,6 +199,8 @@ const GENERIC_SHAPE_SPECS = [
     id: 'task_board',
     title: 'Task board',
     table: 'task_items',
+    preferred_store: 'relational_table_with_vector_notes',
+    vector_fields: ['title', 'owner'],
     description: 'Repeated TODOs, ownership, deadlines, and status updates should become a task board when progress and accountability matter.',
     evidence: [/TODO|할\s*일|액션|담당|마감|해야|진행|pending|done|blocked|action item|owner|deadline|task/i],
     aggregate: [/남은|완료|상태|마감|담당자별|pending|done|status|overdue|by owner/i],
@@ -239,54 +247,50 @@ function scoreDomain(spec, evidence = [], demandQueries = []) {
   if (publicSourcePressure >= 0.2) reasons.push('public_source_knowledge_candidate');
   return { evidenceRows, queryRows, aggregateRows, correctionRows, factRows, publicSourceRows, score: Number(Math.min(1, score).toFixed(3)), components: { repetition, queryPressure, correctionPressure, typedFactPressure, publicSourcePressure }, reasons };
 }
-function inferMealType(text = '') {
+function inferTemporalSubject(text = '') {
   const src = String(text || '').toLowerCase();
-  if (/아침|breakfast/.test(src)) return 'breakfast';
-  if (/점심|lunch/.test(src)) return 'lunch';
-  if (/저녁|dinner/.test(src)) return 'dinner';
-  if (/간식|snack/.test(src)) return 'snack';
-  if (/야식/.test(src)) return 'late_night';
-  return '';
+  if (/아침|breakfast/.test(src)) return { series_key: 'meal', subject: 'breakfast' };
+  if (/점심|lunch/.test(src)) return { series_key: 'meal', subject: 'lunch' };
+  if (/저녁|dinner/.test(src)) return { series_key: 'meal', subject: 'dinner' };
+  if (/간식|snack/.test(src)) return { series_key: 'meal', subject: 'snack' };
+  if (/야식/.test(src)) return { series_key: 'meal', subject: 'late_night' };
+  return { series_key: null, subject: null };
 }
-function parseMealFoods(text = '') {
+function parseListFragment(text = '') {
   const raw = clean(text);
   if (!raw) return [];
-  let fragment = raw;
-  const m = raw.match(/(?:아침|점심|저녁|간식|야식|breakfast|lunch|dinner|snack)[^\n。.!?]*(?:먹었|먹은|ate|had)?([^\n。.!?]*)/i);
-  if (m?.[0]) fragment = m[0];
-  fragment = fragment
-    .replace(/^(아침|점심|저녁|간식|야식|breakfast|lunch|dinner|snack)(은|는|으로|에)?/i, '')
-    .replace(/먹었어|먹었다|먹은|먹었|ate|had/ig, '')
-    .replace(/그리고|랑|와|과|및|plus|and/ig, ',');
+  let fragment = raw.replace(/그리고|랑|와|과|및|plus|and/ig, ',');
+  fragment = fragment.replace(/^(아침|점심|저녁|간식|야식|breakfast|lunch|dinner|snack)(은|는|으로|에)?/i, '')
+    .replace(/먹었어|먹었다|먹은|먹었|ate|had/ig, '');
   return fragment.split(/[,/、，]+/).map((x) => clean(x)).filter((x) => x && x.length <= 80).slice(0, 8);
 }
 function extractBackfillRows(spec, evidenceRows = []) {
-  if (spec.id !== 'meal_tracking') {
-    return evidenceRows.slice(0, 12).map((row, i) => ({
-      id: `${spec.id}_${i + 1}`,
-      source_ref: `${row.source}${row.source_id ? `#${row.source_id}` : ''}`,
-      preview: clip(row.text, 180),
-      confidence: row.kind === 'user_fact' ? 0.72 : 0.55,
-      review_state: 'needs_review',
-    }));
-  }
-  const rows = [];
-  evidenceRows.slice(0, 80).forEach((row, i) => {
-    const mealType = inferMealType(row.text);
-    const foods = parseMealFoods(row.text);
-    if (!mealType && !foods.length) return;
-    rows.push({
-      id: `meal_preview_${i + 1}`,
-      eaten_at: row.created_at || null,
-      meal_type: mealType || null,
-      foods,
-      notes: foods.length ? '' : clip(row.text, 180),
-      source_ref: `${row.source}${row.source_id ? `#${row.source_id}` : ''}`,
-      confidence: Number((0.52 + (mealType ? 0.14 : 0) + (foods.length ? 0.18 : 0) + (row.kind === 'user_fact' ? 0.08 : 0)).toFixed(2)),
-      review_state: mealType && foods.length ? 'high_confidence' : 'needs_review',
+  if (spec.id === 'time_series') {
+    const rows = [];
+    evidenceRows.slice(0, 80).forEach((row, i) => {
+      const temporal = inferTemporalSubject(row.text);
+      const values = parseListFragment(row.text);
+      rows.push({
+        id: `time_series_preview_${i + 1}`,
+        occurred_at: row.created_at || null,
+        series_key: temporal.series_key,
+        subject: temporal.subject || clip(row.text, 60),
+        value_json: values.length ? { items: values } : null,
+        notes: values.length ? '' : clip(row.text, 180),
+        source_ref: `${row.source}${row.source_id ? `#${row.source_id}` : ''}`,
+        confidence: Number((0.5 + (temporal.subject ? 0.18 : 0) + (values.length ? 0.12 : 0) + (row.kind === 'user_fact' ? 0.08 : 0)).toFixed(2)),
+        review_state: temporal.subject || values.length ? 'high_confidence' : 'needs_review',
+      });
     });
-  });
-  return rows.slice(0, 24);
+    return rows.slice(0, 24);
+  }
+  return evidenceRows.slice(0, 12).map((row, i) => ({
+    id: `${spec.id}_${i + 1}`,
+    source_ref: `${row.source}${row.source_id ? `#${row.source_id}` : ''}`,
+    preview: clip(row.text, 180),
+    confidence: row.kind === 'user_fact' ? 0.72 : 0.55,
+    review_state: 'needs_review',
+  }));
 }
 function buildCreateTableSql(table = '', columns = []) {
   const safeTable = clean(table).replace(/[^a-zA-Z0-9_]/g, '');
@@ -307,6 +311,32 @@ function recommendationFor(score = 0, rows = []) {
   if (score >= 0.32) return 'watch_and_continue_markdown';
   return 'no_action';
 }
+
+function proposedStoreFor(spec = {}, recommendation = '') {
+  if (recommendation === 'watch_and_continue_markdown' || recommendation === 'no_action') return 'markdown_with_watch';
+  const preferred = clean(spec.preferred_store || '');
+  if (preferred) return preferred;
+  if (recommendation === 'create_shadow_table') return 'sqlite_shadow_table';
+  if (recommendation === 'create_typed_jsonl_first') return 'typed_jsonl_event_log';
+  return 'markdown_with_watch';
+}
+function buildStorageContract(spec = {}, recommendation = '') {
+  const store = proposedStoreFor(spec, recommendation);
+  const vector = /vector|embedding/i.test(store) || asArray(spec.vector_fields).length > 0;
+  return {
+    canonical_payload: false,
+    raw_memory_retained: true,
+    generated_code_execution: false,
+    canonical_memory_switch: false,
+    storage_backend: store,
+    vector_index: vector,
+    vector_fields: asArray(spec.vector_fields).slice(0, 8),
+    metadata_filter_required: vector,
+    safe_now: ['candidate_preview', 'schema_draft', 'backfill_dry_run', 'shadow_projection'],
+    requires_approval_for: ['canonical_write_path', 'raw_memory_deletion', 'public_publish', 'generated_code_execution'],
+  };
+}
+
 function buildCandidate(spec, scored) {
   const rows = extractBackfillRows(spec, scored.evidenceRows);
   const rec = recommendationFor(scored.score, rows);
@@ -329,7 +359,8 @@ function buildCandidate(spec, scored) {
       typed_facts: scored.factRows.length,
       public_sources: scored.publicSourceRows.length,
     },
-    proposed_store: rec === 'create_shadow_table' ? 'sqlite_shadow_table' : (rec === 'create_typed_jsonl_first' ? 'typed_jsonl_event_log' : 'markdown_with_watch'),
+    proposed_store: proposedStoreFor(spec, rec),
+    storage_contract: buildStorageContract(spec, rec),
     proposed_schema: { table: spec.table, columns: spec.schema, create_table_sql: buildCreateTableSql(spec.table, spec.schema) },
     proposed_operations: spec.operations,
     backfill_preview: {
@@ -382,6 +413,7 @@ export function planMemoryMaterialization({ jobDir = '', minScore = 0.28, maxCan
       typed_jsonl_candidates: candidates.filter((c) => c.recommendation === 'create_typed_jsonl_first').length,
       watchlist_candidates: candidates.filter((c) => c.recommendation === 'watch_and_continue_markdown').length,
       publishable_knowledge_candidates: candidates.filter((c) => c.publish_policy?.publishable_as === 'sourced_knowledge_pack').length,
+      vector_index_candidates: candidates.filter((c) => c.storage_contract?.vector_index === true).length,
     },
     next_steps: candidates.length
       ? ['Review generic shape, schema, and backfill preview in GoC.', 'Create only shadow tables automatically; require approval before canonical write-path changes.', 'Keep raw memory as provenance until reviewed migration is complete.']
@@ -414,6 +446,7 @@ export function formatMemoryMaterializationPlanForTelegram(plan = {}) {
     `- shadow table candidates: ${Number(summary.shadow_table_candidates || 0)}`,
     `- typed JSONL candidates: ${Number(summary.typed_jsonl_candidates || 0)}`,
     `- publishable knowledge candidates: ${Number(summary.publishable_knowledge_candidates || 0)}`,
+    `- vector index candidates: ${Number(summary.vector_index_candidates || 0)}`,
   ];
   if (!candidates.length) {
     lines.push('', 'No materialization candidate is strong enough yet.', '- Keep compact markdown memory and continue collecting usage signals.');

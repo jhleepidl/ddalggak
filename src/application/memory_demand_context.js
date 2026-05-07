@@ -6,6 +6,7 @@ import { formatActiveArtifactContext, loadArtifactObservations, loadUploadedArti
 import { formatActiveUserFactContext, readUserFacts, resolveActiveUserFacts } from './user_fact_context.js';
 import { mergeRouterMemoryRouting, normalizeRouterMemoryRouting } from './router_memory_plan.js';
 import { loadCurrentTaskPacket, renderTaskPacket } from './task_packet.js';
+import { searchSemanticIndex } from './semantic_index.js';
 
 const DEFAULT_MAX_CHARS = 2600;
 const EVENTS_FILE = 'memory_demand_events.jsonl';
@@ -93,6 +94,7 @@ function inferMemoryDemand(userText = '', { roleId = '', agentId = '', goal = ''
     needsTaskState: false,
     needsSharedWork: false,
     needsDecisions: false,
+    needsSemanticMemory: false,
     reasons: [],
   };
   const mark = (key, reason) => {
@@ -113,6 +115,7 @@ function inferMemoryDemand(userText = '', { roleId = '', agentId = '', goal = ''
   if (hasSource('artifacts')) mark('needsArtifacts', 'router_memory_classifier');
   if (hasSource('user_facts')) mark('needsUserFacts', 'router_memory_classifier');
   if (hasSource('decisions')) { mark('needsDecisions', 'router_memory_classifier'); mark('needsTurns', 'router_memory_classifier'); }
+  if (hasSource('semantic_index') || hasSource('semantic_memory') || hasSource('vector_memory')) mark('needsSemanticMemory', 'router_memory_classifier');
   demand.routerMemoryPlan = routerPlan;
 
   if (hasAny(q, [/\bprevious\b|\bearlier\b|\blast time\b|\bremember\b/i, /아까|이전|전에|지난|방금|기억|말했|했던|하던|이어|계속|다시|중간|쉬었다|못\s*찾|못\s*기억/])) {
@@ -131,6 +134,7 @@ function inferMemoryDemand(userText = '', { roleId = '', agentId = '', goal = ''
   }
   if (hasAny(q, [/왜|원인|분석|설계|구조|memory|메모리|topology|agent|context|projection|idle|compaction/i])) {
     mark('needsSharedWork', 'design_or_memory_reference');
+    mark('needsSemanticMemory', 'semantic_design_or_memory_reference');
   }
   if (hasAny(q, [/결정|바꿔|변경|하지\s*마|해야|원해|목적|방향|주의|constraint|requirement|decision|must|never/i])) {
     mark('needsDecisions', 'directive_or_decision_reference');
@@ -141,7 +145,10 @@ function inferMemoryDemand(userText = '', { roleId = '', agentId = '', goal = ''
   if (/reviewer|critic|builder|coder|researcher|synthesizer|planner|router/.test(role)) {
     mark('needsTaskState', 'agent_role_requires_task_state');
   }
-  if (!demand.needsContinuity && !demand.needsUserFacts && !demand.needsArtifacts && !demand.needsTaskState && !demand.needsSharedWork && !demand.needsDecisions) {
+  if (hasAny(q, [/비슷|유사|관련|찾아|검색|recall|remember|similar|related|semantic|vector|embedding|skill|role|team|스킬|역할|팀|벡터|임베딩/i])) {
+    mark('needsSemanticMemory', 'semantic_recall_reference');
+  }
+  if (!demand.needsContinuity && !demand.needsUserFacts && !demand.needsArtifacts && !demand.needsTaskState && !demand.needsSharedWork && !demand.needsDecisions && !demand.needsSemanticMemory) {
     if (tokens.length >= 3) mark('needsTurns', 'query_terms_available');
   }
   return demand;
@@ -310,6 +317,27 @@ function retrieveTaskPacket(jobDir = '', demand = {}, runMeta = {}) {
   return text ? [{ kind: 'task_packet', source: 'local_memory/current_task_packet.json', text, score: 4 }] : [];
 }
 
+function retrieveSemanticMemory(jobDir = '', demand = {}, { maxItems = 4 } = {}) {
+  if (!demand.needsSemanticMemory && !demand.needsContinuity && !demand.needsDecisions) return [];
+  const query = demand.query || '';
+  const result = searchSemanticIndex({
+    jobDir,
+    query,
+    itemTypes: ['memory', 'review_finding', 'watch_iteration', 'team_blueprint'],
+    limit: Math.max(1, Math.floor(Number(maxItems) || 4)),
+    includeInactive: false,
+    useVector: true,
+    minScore: 0.035,
+  });
+  return (result.items || []).map((row) => ({
+    kind: 'semantic_memory',
+    source: `semantic_index:${row.item_type}:${row.source_ref || row.item_id}`,
+    text: clip([row.title, row.display_text || row.text_original, row.canonical_text_en].filter(Boolean).join('\n'), 640, { mode: 'middle' }),
+    score: Number(row.semantic_score || row.vector_score || row.lexical_semantic_score || 0) * 10,
+    retrieval_backend: row.retrieval_backend || result.vector_backend || 'semantic_index',
+  }));
+}
+
 function appendDemandEvent(jobDir = '', event = {}) {
   try {
     if (!jobDir) return;
@@ -356,6 +384,7 @@ export function buildMemoryDemandContext({
     ...retrieveTaskPacket(cleanJobDir, demand, runMeta),
     ...retrieveUserFacts(cleanJobDir, demand),
     ...retrieveArtifacts(cleanJobDir, demand),
+    ...retrieveSemanticMemory(cleanJobDir, demand, { maxItems: 4 }),
     ...retrieveTurns(cleanJobDir, demand, { maxItems: demand.needsContinuity ? 8 : 5 }),
     ...retrieveSummary(cleanJobDir, demand),
     ...retrieveSharedWork(cleanJobDir, demand, { maxDocs: demand.needsSharedWork ? 4 : 2 }),
@@ -401,7 +430,7 @@ export function buildMemoryDemandContext({
       source_types: Array.isArray(demand.routerMemoryPlan?.source_types) ? demand.routerMemoryPlan.source_types : [...new Set(items.map((item) => String(item.kind || '').trim()).filter(Boolean))],
       surface_ids: Array.isArray(demand.routerMemoryPlan?.surface_ids) ? demand.routerMemoryPlan.surface_ids : [],
       matching: {
-        strategy: demand.routerMemoryPlan?.classifier ? 'router_memory_plan' : 'runtime_token_scoring',
+        strategy: items.some((item) => item.kind === 'semantic_memory') ? 'semantic_vector_plus_runtime_scoring' : (demand.routerMemoryPlan?.classifier ? 'router_memory_plan' : 'runtime_token_scoring'),
         item_count: items.length,
         sources: result.sources,
         demand_reasons: demand.reasons,
