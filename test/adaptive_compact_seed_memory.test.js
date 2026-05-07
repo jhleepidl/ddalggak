@@ -7,6 +7,8 @@ import path from 'node:path';
 import { Jobs } from '../src/jobs.js';
 import { Tracking } from '../src/tracking.js';
 import { deriveInitialKnowledgeBaseDesign, resolveKnowledgeDocName } from '../src/knowledge_base/profile.js';
+import { buildChatGPTNextStepPrompt, orchestratorNotes } from '../src/prompts.js';
+import { planMemoryTopology } from '../src/application/memory_topology.js';
 
 test('initial adaptive compact seed maps semantic memory slots to one core file', () => {
   const design = deriveInitialKnowledgeBaseDesign({ goal: '여행 일정을 기억하고 도와줘' });
@@ -71,7 +73,6 @@ test('Tracking syncToGoc=false suppresses append hook for bootstrap/local-only w
   }
 });
 
-import { orchestratorNotes } from '../src/prompts.js';
 
 test('orchestrator notes deduplicate adaptive compact tracking files by concrete file name', () => {
   const design = deriveInitialKnowledgeBaseDesign({ goal: '여행 일정을 기억하고 도와줘' });
@@ -81,7 +82,6 @@ test('orchestrator notes deduplicate adaptive compact tracking files by concrete
   assert.match(coreLines[0], /semantic slots: plan, research, progress, decisions, artifacts/);
 });
 
-import { planMemoryTopology } from '../src/application/memory_topology.js';
 
 test('Tracking files section is regenerated from current memory topology instead of appended', () => {
   const prevRunsDir = process.env.RUNS_DIR;
@@ -117,4 +117,26 @@ test('Tracking files section is regenerated from current memory topology instead
     else process.env.RUNS_DIR = prevRunsDir;
     fs.rmSync(runsDir, { recursive: true, force: true });
   }
+});
+
+
+test('orchestrator prompts without an explicit profile no longer seed legacy plan/research/progress paths', () => {
+  const notes = orchestratorNotes({ goal: 'continue implementation' });
+  assert.match(notes, /core_memory\.md/);
+  assert.doesNotMatch(notes, /plan\.md/);
+  assert.doesNotMatch(notes, /research\.md/);
+  assert.doesNotMatch(notes, /progress\.md/);
+
+  const prompt = buildChatGPTNextStepPrompt({
+    jobId: 'job-1',
+    goal: 'continue implementation',
+    question: 'next',
+    contextDocsText: '',
+    convoText: '',
+  });
+  assert.match(prompt, /core_memory\.md/);
+  assert.doesNotMatch(prompt, /plan\.md/);
+  assert.doesNotMatch(prompt, /research\.md/);
+  assert.doesNotMatch(prompt, /progress\.md/);
+  assert.doesNotMatch(prompt, /artifacts\.md/);
 });

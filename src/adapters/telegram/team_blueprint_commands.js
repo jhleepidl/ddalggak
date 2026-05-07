@@ -1,4 +1,5 @@
 import { buildTeamBlueprint, installTeamBlueprintToSession, normalizeTeamBlueprint } from '../../application/team_blueprint_runtime.js';
+import { buildTeamPublishCandidate, formatTeamPublishCandidateReview } from '../../application/team_publish_candidate.js';
 import { buildTeamInstallProposal, formatTeamInstallProposalMessage } from '../../application/install_proposal.js';
 import { buildInstallProposalPrompt, createPendingInstallProposalState, getPendingInstallProposal, archivePendingInstallProposal, shouldResumeInstallProposal } from '../../application/install_proposal_state.js';
 import { formatManifestRequirementLines, normalizeManifestRequirements } from '../../shared/manifest_requirements.js';
@@ -57,7 +58,7 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
     resolveLiveJobIdForChat,
     jobs,
   } = context;
-  if (!['proposal','install-plan','requirements','export','install','import','pull','push'].includes(sub)) return false;
+  if (!['proposal','install-plan','requirements','export','publish-preview','publish-candidate','install','import','pull','push'].includes(sub)) return false;
 
   if (sub === 'proposal' || sub === 'install-plan') {
     const proposalAction = clean(rest[1] || '').toLowerCase();
@@ -188,6 +189,34 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
       credentialBindingState: getCredentialBindingState(chatSessionStore, chatId),
     });
     await sendLong(bot, chatId, JSON.stringify(manifest, null, 2));
+    return true;
+  }
+
+
+  if (sub === 'publish-preview' || sub === 'publish-candidate') {
+    const baseTeam = currentTeamForManifest(teamState);
+    if (!baseTeam) {
+      await bot.sendMessage(chatId, '검토할 팀이 없습니다. 먼저 /team suggest <목적> 또는 /team create <자연어 팀 설명> 을 실행해 주세요.');
+      return true;
+    }
+    const threadId = getCurrentThreadId(runtimeForTeam);
+    if (threadId && memoryModeWithFallback?.() === 'goc' && typeof requireGocClient === 'function' && /--server\b/i.test(rawArgs)) {
+      try {
+        const serverCandidate = await requireGocClient().buildTeamPublishCandidate({ threadId }, { include_knowledge_preview: true });
+        await sendLong(bot, chatId, formatTeamPublishCandidateReview(serverCandidate));
+        return true;
+      } catch (e) {
+        await bot.sendMessage(chatId, `⚠️ GoC publish preview 실패, local preview로 대체합니다: ${String(e?.message ?? e)}`);
+      }
+    }
+    const manifest = buildManifestWithSessionState(baseTeam, {
+      runtime: runtimeForTeam,
+      applyState: parseApplyStateTokens(rest.slice(1)),
+      source: 'telegram_publish_preview',
+      sessionInstallProposal: getPendingInstallProposal(chatSessionStore, chatId) || chatSessionStore.get(chatId)?.last_install_proposal || null,
+      credentialBindingState: getCredentialBindingState(chatSessionStore, chatId),
+    });
+    await sendLong(bot, chatId, formatTeamPublishCandidateReview(buildTeamPublishCandidate(manifest, { visibility: 'private_review' })));
     return true;
   }
 

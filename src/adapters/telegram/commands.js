@@ -40,6 +40,9 @@ import { syncRawHistoryToGoC } from '../../application/goc_raw_history_sync.js';
 import { inspectAndPrepareImprovementJob, loadImprovementExecutionContext, runImprovementAutomation, runImprovementCanary, runImprovementEvalGate, runImprovementReview, runImprovementRollback, runImprovementTests, markImprovementPromotion } from '../../application/improvement_orchestrator.js';
 import { writeIdleCompactionCandidate, formatIdleCompactionCandidateForTelegram } from '../../application/idle_compaction.js';
 import { formatMemoryTopologyForTelegram, planMemoryTopology } from '../../application/memory_topology.js';
+import { formatMemoryMaterializationPlanForTelegram, loadLatestMemoryMaterializationPlan, planMemoryMaterialization } from '../../application/memory_materialization_planner.js';
+import { createShadowMemoryModule, findMaterializationCandidate, formatShadowMemoryModuleListForTelegram, formatShadowMemoryModuleResultForTelegram, listShadowMemoryModules } from '../../application/memory_materialization_store.js';
+import { buildClaimEvidenceLedger, buildPressureOverview, buildRuntimeReviewQueue, formatClaimEvidenceForTelegram, formatPressureOverviewForTelegram, formatReviewQueueForTelegram } from '../../application/runtime_review_inspector.js';
 import { listModelNodes } from '../../application/model_node_registry.js';
 import { listModelNodesWithHealth } from '../../application/model_node_health.js';
 import { readRecentModelNodeUsage } from '../../application/model_node_usage_log.js';
@@ -68,7 +71,7 @@ const ADVANCED_HELP_TEXT = [
   "- /whoami: 현재 chat_id / user_id 확인",
   "- /running: 실행/대기 job 목록 확인",
   "- /credential ...: credential 바인딩/확인",
-  "- /memory ... 또는 /settings ...: adaptive memory topology와 런타임 메모리/KB 조회·수정",
+  "- /memory ... 또는 /settings ...: topology, pressure, evidence, proposal queue, materialization과 런타임 메모리/KB 조회·수정",
   "- /skills: 현재/예정 agent roster와 대표 skill 보기",
   "- /models: 연결된 로컬/API model node 보기",
   "- /tools: 현재 job의 tool 상태 보기",
@@ -700,6 +703,79 @@ export function createTelegramCommandHandler(deps = {}) {
           await sendLong(bot, chatId, formatMemoryTopologyForTelegram(topology));
         } catch (e) {
           await bot.sendMessage(chatId, `❌ memory topology 생성 실패: ${String(e?.message ?? e)}`);
+        }
+        return true;
+      }
+
+      if (sub === "pressure" || sub === "evidence" || sub === "claims" || sub === "proposals" || sub === "review") {
+        const currentJobId = resolveLiveJobIdForChat(chatId);
+        if (!currentJobId) {
+          await bot.sendMessage(chatId, "현재 job이 없어 review/pressure를 표시할 수 없습니다. /chat 또는 /run 으로 job을 먼저 시작하세요.");
+          return true;
+        }
+        const jobDir = jobs.jobDir(currentJobId);
+        try {
+          if (sub === "pressure") {
+            await sendLong(bot, chatId, formatPressureOverviewForTelegram(buildPressureOverview({ jobDir, persist: true })));
+            return true;
+          }
+          if (sub === "evidence" || sub === "claims") {
+            await sendLong(bot, chatId, formatClaimEvidenceForTelegram(buildClaimEvidenceLedger({ jobDir, persist: true })));
+            return true;
+          }
+          await sendLong(bot, chatId, formatReviewQueueForTelegram(buildRuntimeReviewQueue({ jobDir, persist: true })));
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ memory review 생성 실패: ${String(e?.message ?? e)}`);
+        }
+        return true;
+      }
+
+      if (sub === "materialize-preview" || sub === "materialization" || sub === "materialize" || sub === "modules") {
+        const currentJobId = resolveLiveJobIdForChat(chatId);
+        if (!currentJobId) {
+          await bot.sendMessage(chatId, "현재 job이 없어 memory materialization을 표시할 수 없습니다. /chat 또는 /run 으로 job을 먼저 시작하세요.");
+          return true;
+        }
+        const jobDir = jobs.jobDir(currentJobId);
+        const materializeTokens = rest.slice(1).filter((x) => !/^--/.test(String(x || '')));
+        const action = materializeTokens[0] || (sub === 'modules' ? 'list' : 'preview');
+        if (sub === 'modules' || action === 'modules' || action === 'list') {
+          await sendLong(bot, chatId, formatShadowMemoryModuleListForTelegram(listShadowMemoryModules({ jobDir })));
+          return true;
+        }
+        if (sub === 'materialize' && ['shadow', 'create', 'module'].includes(String(action || '').toLowerCase())) {
+          try {
+            const selector = materializeTokens[1] || '';
+            const latest = loadLatestMemoryMaterializationPlan({ jobDir }) || planMemoryMaterialization({ jobDir, persist: true, reason: 'telegram_shadow_module_candidate_refresh' });
+            const candidate = findMaterializationCandidate(latest, selector);
+            if (!candidate) {
+              await bot.sendMessage(chatId, `shadow module로 만들 candidate를 찾지 못했습니다. 먼저 /memory materialize-preview를 실행하세요.${selector ? ` selector=${selector}` : ''}`);
+              return true;
+            }
+            const result = createShadowMemoryModule({ jobDir, candidate, reason: 'telegram_memory_materialize_shadow' });
+            await sendLong(bot, chatId, formatShadowMemoryModuleResultForTelegram(result));
+          } catch (e) {
+            await bot.sendMessage(chatId, `❌ shadow memory module 생성 실패: ${String(e?.message ?? e)}`);
+          }
+          return true;
+        }
+        const useServer = /--server\b/i.test(rest.slice(1).join(' '));
+        const session = chatSessionStore?.get?.(chatId) || {};
+        const threadId = session?.runtime?.threadId || session?.runtime?.map?.threadId || session?.map?.threadId || '';
+        if (useServer && threadId && memoryModeWithFallback?.() === 'goc' && typeof requireGocClient === 'function') {
+          try {
+            const serverPlan = await requireGocClient().previewMemoryMaterialization(threadId, { include_backfill_preview: true });
+            await sendLong(bot, chatId, formatMemoryMaterializationPlanForTelegram(serverPlan));
+            return true;
+          } catch (e) {
+            await bot.sendMessage(chatId, `⚠️ GoC materialization preview 실패, local preview로 대체합니다: ${String(e?.message ?? e)}`);
+          }
+        }
+        try {
+          const plan = planMemoryMaterialization({ jobDir, persist: true, reason: 'telegram_memory_materialization_preview' });
+          await sendLong(bot, chatId, formatMemoryMaterializationPlanForTelegram(plan));
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ memory materialization preview 생성 실패: ${String(e?.message ?? e)}`);
         }
         return true;
       }

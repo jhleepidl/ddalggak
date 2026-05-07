@@ -100,6 +100,17 @@ export async function validateTeamBlueprintApi(client, threadTarget, blueprint =
   });
 }
 
+export async function buildTeamPublishCandidateApi(client, threadTarget, options = {}) {
+  const threadId = requireThreadId(summarizeTeamTarget(threadTarget, { client }));
+  return await client._requestAny({
+    method: 'POST',
+    attempts: [
+      { path: `/api/threads/${encodeURIComponent(threadId)}/team/blueprint/publish_candidate`, body: options && typeof options === 'object' ? options : {} },
+      { path: `/threads/${encodeURIComponent(threadId)}/team/blueprint/publish_candidate`, body: options && typeof options === 'object' ? options : {} },
+    ],
+  });
+}
+
 export async function installTeamBlueprintApi(client, threadTarget, blueprint = {}, applyState = 'active') {
   const threadId = requireThreadId(summarizeTeamTarget(threadTarget, { client }));
   return await client._requestAny({

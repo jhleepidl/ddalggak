@@ -2,6 +2,7 @@ import {
   getTeamConfigApi,
   getTeamBlueprintApi,
   installTeamBlueprintApi,
+  buildTeamPublishCandidateApi,
   setTeamConfigApi,
   validateTeamBlueprintApi,
 } from './goc_client_team_api.js';
@@ -164,6 +165,32 @@ function normalizeApiBaseUrl(rawBase = '') {
   } catch {
     return trimmed.replace(/\/api$/i, '');
   }
+}
+
+const LEGACY_GOC_EXACT_API_PATHS = new Set([
+  '/api/thread',
+  '/api/threads:ensure',
+  // Historical global graph aliases. Current GoC backend exposes these as
+  // thread-scoped routes: /api/threads/:thread_id/{nodes,edges,messages,resources}.
+  '/api/nodes',
+  '/api/edges',
+  '/api/messages',
+  '/api/resources',
+  '/api/nodes/edges',
+]);
+
+function isLegacyGocApiPath(pathname = '') {
+  const pathOnly = String(pathname || '').trim().split('?')[0].replace(/\/+$/, '') || '/';
+  if (!pathOnly.startsWith('/api/')) return true;
+  if (LEGACY_GOC_EXACT_API_PATHS.has(pathOnly)) return true;
+  if (pathOnly.startsWith('/api/thread/')) return true;
+  return false;
+}
+
+function filterLegacyGocAttempts(attempts = [], { allowLegacy = false } = {}) {
+  const rows = Array.isArray(attempts) ? attempts : [];
+  if (allowLegacy) return rows;
+  return rows.filter((attempt) => !isLegacyGocApiPath(attempt?.path));
 }
 
 function sanitizeScopeMaterializationSnapshot(snapshot = {}) {
@@ -737,7 +764,7 @@ function buildAgentCatalogPayload(def = {}, { requireName = false, forPatch = fa
 }
 
 export class GocClient {
-  constructor({ apiBase, serviceKey, actorTelegramUserId, requestTimeoutMs } = {}) {
+  constructor({ apiBase, serviceKey, actorTelegramUserId, requestTimeoutMs, allowLegacyApiPaths } = {}) {
     const base = String(apiBase || process.env.GOC_API_BASE || "").trim();
     const key = String(serviceKey || process.env.GOC_SERVICE_KEY || "").trim();
     if (!base) throw new Error("Missing GOC_API_BASE");
@@ -755,6 +782,12 @@ export class GocClient {
     this.serviceKey = key;
     this.actorTelegramUserId = String(actorTelegramUserId || "").trim();
     this.requestTimeoutMs = clampInteger(requestTimeoutMs || process.env.GOC_REQUEST_TIMEOUT_MS, 15000, { min: 1000, max: 120000 });
+    this.allowLegacyApiPaths = parseBooleanLike(
+      typeof allowLegacyApiPaths === 'undefined'
+        ? (process.env.GOC_ENABLE_LEGACY_API_PATHS ?? process.env.GOC_ALLOW_LEGACY_API_PATHS)
+        : allowLegacyApiPaths,
+      false,
+    );
   }
 
   setActorTelegramUserId(telegramUserId) {
@@ -812,8 +845,10 @@ export class GocClient {
   }
 
   async _requestAny({ method, attempts = [] }) {
+    const plannedAttempts = filterLegacyGocAttempts(attempts, { allowLegacy: this.allowLegacyApiPaths });
+    const skippedLegacyCount = Math.max(0, (Array.isArray(attempts) ? attempts.length : 0) - plannedAttempts.length);
     const errors = [];
-    for (const attempt of attempts) {
+    for (const attempt of plannedAttempts) {
       try {
         return await this._request({
           method,
@@ -827,6 +862,12 @@ export class GocClient {
         if (!isRetryableStatus(status)) break;
       }
     }
+    if (plannedAttempts.length === 0 && skippedLegacyCount > 0) {
+      const err = new Error('GoC API call has only legacy routes; set GOC_ENABLE_LEGACY_API_PATHS=1 to re-enable them');
+      err.status = 404;
+      err.attempts = [];
+      throw err;
+    }
     if (errors.length) {
       const last = errors[errors.length - 1]?.error || new Error("GoC API call failed");
       const attempted = errors
@@ -836,7 +877,10 @@ export class GocClient {
           return `${index + 1}) ${method} ${path} -> ${Number.isFinite(status) ? status : 'error'}`;
         })
         .join('; ');
-      const message = `${String(last?.message || 'GoC API call failed')}; attempted fallback routes: ${attempted}`;
+      const omitted = skippedLegacyCount > 0
+        ? `; skipped ${skippedLegacyCount} legacy route${skippedLegacyCount === 1 ? '' : 's'} (set GOC_ENABLE_LEGACY_API_PATHS=1 to re-enable)`
+        : '';
+      const message = `${String(last?.message || 'GoC API call failed')}; attempted routes: ${attempted}${omitted}`;
       const err = new Error(message);
       err.status = last.status;
       err.data = last.data;
@@ -1042,6 +1086,58 @@ export class GocClient {
         { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/memory/demand`, body },
         { path: `/threads/${encodeURIComponent(cleanThreadId)}/memory/demand`, body },
         { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/memory/demand`, body },
+      ],
+    });
+  }
+
+  async previewMemoryMaterialization(threadId, body = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("previewMemoryMaterialization requires threadId");
+    return await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/memory/materialization/preview`, body },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/memory/materialization/preview`, body },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/memory/materialization/preview`, body },
+      ],
+    });
+  }
+
+  async saveMemoryMaterializationCandidates(threadId, body = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("saveMemoryMaterializationCandidates requires threadId");
+    return await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/memory/materialization/candidates`, body },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/memory/materialization/candidates`, body },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/memory/materialization/candidates`, body },
+      ],
+    });
+  }
+
+  async listMemoryMaterializationModules(threadId) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("listMemoryMaterializationModules requires threadId");
+    return await this._requestAny({
+      method: "GET",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/memory/materialization/modules` },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/memory/materialization/modules` },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/memory/materialization/modules` },
+      ],
+    });
+  }
+
+  async createMemoryMaterializationShadowModule(threadId, body = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) throw new Error("createMemoryMaterializationShadowModule requires threadId");
+    return await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/threads/${encodeURIComponent(cleanThreadId)}/memory/materialization/modules/shadow`, body },
+        { path: `/threads/${encodeURIComponent(cleanThreadId)}/memory/materialization/modules/shadow`, body },
+        { path: `/v1/threads/${encodeURIComponent(cleanThreadId)}/memory/materialization/modules/shadow`, body },
       ],
     });
   }
@@ -1691,10 +1787,10 @@ export class GocClient {
     const data = await this._requestAny({
       method: "POST",
       attempts: [
+        { path: `/api/threads/${encodeURIComponent(tid)}/resources`, body: payload },
         { path: "/api/resources", body: { thread_id: tid, ...payload } },
         { path: "/resources", body: { thread_id: tid, ...payload } },
         { path: "/v1/resources", body: { thread_id: tid, ...payload } },
-        { path: `/api/threads/${encodeURIComponent(tid)}/resources`, body: payload },
         { path: `/threads/${encodeURIComponent(tid)}/resources`, body: payload },
       ],
     });
@@ -1712,10 +1808,10 @@ export class GocClient {
     const data = await this._requestAny({
       method: "POST",
       attempts: [
+        { path: `/api/threads/${encodeURIComponent(tid)}/nodes`, body: payload },
         { path: "/api/nodes", body: { thread_id: tid, ...payload } },
         { path: "/nodes", body: { thread_id: tid, ...payload } },
         { path: "/v1/nodes", body: { thread_id: tid, ...payload } },
-        { path: `/api/threads/${encodeURIComponent(tid)}/nodes`, body: payload },
         { path: `/threads/${encodeURIComponent(tid)}/nodes`, body: payload },
       ],
     });
@@ -1800,11 +1896,11 @@ export class GocClient {
       const data = await this._requestAny({
         method: "GET",
         attempts: [
+          { path: `/api/threads/${encodeURIComponent(tid)}/resources`, query: { resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
           { path: "/api/resources", query: { thread_id: tid, resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
           { path: "/api/resources", query: { threadId: tid, resourceKind: resourceKind || undefined, contextSetId: contextSetId || undefined } },
           { path: "/resources", query: { thread_id: tid, resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
           { path: "/v1/resources", query: { thread_id: tid, resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
-          { path: `/api/threads/${encodeURIComponent(tid)}/resources`, query: { resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
           { path: `/threads/${encodeURIComponent(tid)}/resources`, query: { resource_kind: resourceKind || undefined, context_set_id: contextSetId || undefined } },
         ],
       });
@@ -1847,11 +1943,11 @@ export class GocClient {
       const data = await this._requestAny({
         method: "GET",
         attempts: [
+          { path: `/api/threads/${encodeURIComponent(tid)}/nodes`, query: { context_set_id: contextSetId || undefined } },
           { path: "/api/nodes", query: { thread_id: tid, context_set_id: contextSetId || undefined } },
           { path: "/api/nodes", query: { threadId: tid, contextSetId: contextSetId || undefined } },
           { path: "/nodes", query: { thread_id: tid, context_set_id: contextSetId || undefined } },
           { path: "/v1/nodes", query: { thread_id: tid, context_set_id: contextSetId || undefined } },
-          { path: `/api/threads/${encodeURIComponent(tid)}/nodes`, query: { context_set_id: contextSetId || undefined } },
           { path: `/threads/${encodeURIComponent(tid)}/nodes`, query: { context_set_id: contextSetId || undefined } },
         ],
       });
@@ -2406,6 +2502,10 @@ export class GocClient {
 
   async validateTeamBlueprint(threadTarget, blueprint = {}, applyState = 'active') {
     return await validateTeamBlueprintApi(this, threadTarget, blueprint, applyState);
+  }
+
+  async buildTeamPublishCandidate(threadTarget, options = {}) {
+    return await buildTeamPublishCandidateApi(this, threadTarget, options);
   }
 
   async installTeamBlueprint(threadTarget, blueprint = {}, applyState = 'active') {

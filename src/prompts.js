@@ -29,10 +29,11 @@ export function orchestratorNotes({ goal, knowledgeBaseProfile = null }) {
   const docs = Array.isArray(profile?.docs) && profile.docs.length > 0
     ? profile.docs
     : [
-      { file_name: 'research.md', purpose: '조사/근거/링크' },
-      { file_name: 'plan.md', purpose: '구현 단계/체크리스트/리스크' },
-      { file_name: 'progress.md', purpose: '실행 로그/결과' },
-      { file_name: 'decisions.md', purpose: '최종 결론/트레이드오프' },
+      {
+        file_name: 'core_memory.md',
+        purpose: 'Compact memory surface. Semantic slots: plan, research, progress, decisions, artifacts.',
+        doc_id: 'core',
+      },
     ];
   const trackingDocs = uniqueTrackingDocs(docs);
   const docLines = trackingDocs.map((doc) => {
@@ -73,11 +74,12 @@ export function buildChatGPTNextStepPrompt({
     ? `\n## 에이전트 라우팅 기준\n${routerPrompt}\n`
     : "";
   const profile = knowledgeBaseProfile ? normalizeKnowledgeBaseProfile(knowledgeBaseProfile) : null;
-  const planDoc = getKnowledgeDocEntry(profile || {}, 'plan')?.file_name || 'plan.md';
-  const researchDoc = getKnowledgeDocEntry(profile || {}, 'research')?.file_name || 'research.md';
-  const progressDoc = getKnowledgeDocEntry(profile || {}, 'progress')?.file_name || 'progress.md';
-  const decisionsDoc = getKnowledgeDocEntry(profile || {}, 'decisions')?.file_name || 'decisions.md';
-  const artifactsDoc = getKnowledgeDocEntry(profile || {}, 'artifacts')?.file_name || 'artifacts.md';
+  const defaultMemoryDoc = 'core_memory.md';
+  const planDoc = profile ? (getKnowledgeDocEntry(profile, 'plan')?.file_name || defaultMemoryDoc) : defaultMemoryDoc;
+  const researchDoc = profile ? (getKnowledgeDocEntry(profile, 'research')?.file_name || defaultMemoryDoc) : defaultMemoryDoc;
+  const progressDoc = profile ? (getKnowledgeDocEntry(profile, 'progress')?.file_name || defaultMemoryDoc) : defaultMemoryDoc;
+  const decisionsDoc = profile ? (getKnowledgeDocEntry(profile, 'decisions')?.file_name || defaultMemoryDoc) : defaultMemoryDoc;
+  const artifactsDoc = profile ? (getKnowledgeDocEntry(profile, 'artifacts')?.file_name || defaultMemoryDoc) : defaultMemoryDoc;
   const kbBlock = profile
     ? [
         '## Knowledge Base contract',
