@@ -57,7 +57,7 @@ import {
   normalizeRoomAgentRoles,
   upsertAgentRoomProfile,
 } from '../../application/agent_room_profile.js';
-import { buildTeamCreationSignals } from '../../application/team_signal_extractor.js';
+import { extractTeamCreationSignals } from '../../application/team_signal_extractor.js';
 import { buildTeamWorkflowContract, summarizeTeamWorkflowContract } from '../../application/team_workflow_contract.js';
 import {
   buildWatchTaskContract,
@@ -217,7 +217,7 @@ export function createTelegramCommandHandler(deps = {}) {
   const teamOps = deps.teamOps || {};
 
   const bot = telegramUi.bot || deps.bot;
-  const sendLong = telegramUi.sendLong || deps.sendLong;
+  const sendLong = telegramUi.sendLong || deps.sendLong || ((bot, chatId, text, options) => bot.sendMessage(chatId, text, options));
   const sendContextInfo = telegramUi.sendContextInfo || deps.sendContextInfo;
   const sendRouterAckMessage = telegramUi.sendRouterAckMessage || deps.sendRouterAckMessage;
   const clip = telegramUi.clip || deps.clip;
@@ -245,7 +245,7 @@ export function createTelegramCommandHandler(deps = {}) {
   const chatRunManager = sessionOps.chatRunManager || deps.chatRunManager;
   const jobAbortControllers = sessionOps.jobAbortControllers || deps.jobAbortControllers;
 
-  const resolveLiveJobIdForChat = fileOps.resolveLiveJobIdForChat || deps.resolveLiveJobIdForChat;
+  const resolveLiveJobIdForChat = fileOps.resolveLiveJobIdForChat || deps.resolveLiveJobIdForChat || (() => null);
   const parseClampedInt = fileOps.parseClampedInt || deps.parseClampedInt;
   const collectWorkspaceFileEntries = fileOps.collectWorkspaceFileEntries || deps.collectWorkspaceFileEntries;
   const formatWorkspaceFileListText = fileOps.formatWorkspaceFileListText || deps.formatWorkspaceFileListText;
@@ -1155,7 +1155,7 @@ export function createTelegramCommandHandler(deps = {}) {
           return true;
         }
         const { runtime: runtimeForTeam } = await loadRuntimeForCurrentJob(chatId, userId, { includeContext: false });
-        const signals = buildTeamCreationSignals({ taskText: goal, runtime: runtimeForTeam });
+        const signals = extractTeamCreationSignals({ request: goal, goal, runtime: runtimeForTeam });
         const workflowContract = buildTeamWorkflowContract({ signals, goal });
         const { activeTeam, roomProfile } = await suggestAndApplyAgentRoomTeam({ chatId, userId, goal, runtimeForTeam, autoApply: true });
         setPendingTaskControl(chatId, {

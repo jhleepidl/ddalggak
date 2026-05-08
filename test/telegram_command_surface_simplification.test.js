@@ -22,13 +22,15 @@ test('/help shows compact command surface and points to /help more', async () =>
 
   assert.equal(handled, true)
   assert.match(sent[0].text, /\/chat <text>/)
-  assert.match(sent[0].text, /\/team suggest <목적>/)
+  assert.match(sent[0].text, /\/task loop <목표>/)
+  assert.match(sent[0].text, /\/agents suggest <목표>/)
+  assert.match(sent[0].text, /\/review/)
   assert.match(sent[0].text, /\/help more/)
-  assert.doesNotMatch(sent[0].text, /\/agents/)
+  assert.doesNotMatch(sent[0].text, /\/team suggest/)
   assert.doesNotMatch(sent[0].text, /\/outputs/)
 })
 
-test('legacy aliases return compact migration guidance', async () => {
+test('public agent room and legacy artifact aliases return compact guidance', async () => {
   const sent = []
   const handler = createTelegramCommandHandler({
     bot: makeBot(sent),
@@ -38,7 +40,8 @@ test('legacy aliases return compact migration guidance', async () => {
   await handler({ msg: { chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/outputs', chatId: 'chat-1', userId: 'user-1' })
   await handler({ msg: { chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/sendfile foo.txt', chatId: 'chat-1', userId: 'user-1' })
 
-  assert.match(sent[0].text, /\/team/)
+  assert.match(sent[0].text, /Agent Room/)
+  assert.match(sent[0].text, /\/agents suggest/)
   assert.match(sent[1].text, /\/artifacts/)
   assert.match(sent[2].text, /\/send <번호\|path>/)
 })
@@ -74,10 +77,10 @@ test('/team defaults to a compact summary and details are explicit', async () =>
 
   await handler({ msg: { chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/team', chatId: 'chat-1', userId: 'user-1' })
 
-  assert.ok(sent[0].text.startsWith('Team\n'))
+  assert.ok(sent[0].text.startsWith('Advanced team topology'))
   assert.match(sent[0].text, /active: starter_team/)
   assert.match(sent[0].text, /pending: review_team/)
-  assert.ok(sent[0].text.includes('More\n- /team details\n- /team more'))
+  assert.match(sent[0].text, /\/agents 권장/)
   assert.doesNotMatch(sent[0].text, /Team commands:/)
 })
 
@@ -108,5 +111,6 @@ test('/team details still exposes the fuller state view', async () => {
   await handler({ msg: { chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/team details', chatId: 'chat-1', userId: 'user-1' })
 
   assert.match(sent[0].text, /Runtime state/)
-  assert.match(sent[0].text, /Team commands:/)
+  assert.match(sent[0].text, /Team commands/)
+  assert.match(sent[0].text, /advanced alias/)
 })
