@@ -47,18 +47,39 @@ import { buildClaimEvidenceLedger, buildPressureOverview, buildRuntimeReviewQueu
 import { listModelNodes } from '../../application/model_node_registry.js';
 import { listModelNodesWithHealth } from '../../application/model_node_health.js';
 import { readRecentModelNodeUsage } from '../../application/model_node_usage_log.js';
+import {
+  buildAgentRoomProfile,
+  buildAgentRoomSuggestionMessage,
+  buildOperationalControlRedirectMessage,
+  formatAgentRoomProfile,
+  getAgentRoomProfile,
+  isOperationalControlText,
+  normalizeRoomAgentRoles,
+  upsertAgentRoomProfile,
+} from '../../application/agent_room_profile.js';
+import { buildTeamCreationSignals } from '../../application/team_signal_extractor.js';
+import { buildTeamWorkflowContract, summarizeTeamWorkflowContract } from '../../application/team_workflow_contract.js';
+import {
+  buildWatchTaskContract,
+  ensureWatchTaskContract,
+  readWatchTaskState,
+  setWatchTaskStatus,
+  summarizeWatchTaskState,
+} from '../../application/watch_task_store.js';
 
 const HELP_TEXT = [
   "Commands:",
-  "- /chat <text>: 질문/작업 시작",
+  "- /chat <text>: 질문/일회성 작업",
+  "- /task: 장기 작업/loop 상태 보기",
+  "- /task loop <목표>: 반복 점검·개선 작업 시작",
+  "- /agents: 이 채팅방의 Agent Room 보기",
+  "- /agents suggest <목표>: 목표에 맞는 agent 구성 추천",
+  "- /review: 승인/검토가 필요한 항목 보기",
   "- /memory: memory topology/pressure/proposal 상태 요약",
   "- /rule <자연어 지침>: 명시적 runtime rule 추가",
-  "- /skill: skill/agent roster 상태 보기",
-  "- /team: 현재 team 상태 보기",
+  "- /skill: skill 상태 보기",
   "- /goc: GoC sync/review 링크와 상태 보기",
   "- /status: 지금 진행 상황 보기",
-  "- /models: 연결된 로컬/API model node 보기",
-  "- /context: 현재 작업과 GoC 링크 보기",
   "- /artifacts [limit]: 결과물 보기",
   "- /send <번호|path>: 결과물 전송",
   "- /files [all|workspace|uploads] [limit]: 파일 보기",
@@ -71,6 +92,12 @@ const ADVANCED_HELP_TEXT = [
   "- /whoami: 현재 chat_id / user_id 확인",
   "- /running: 실행/대기 job 목록 확인",
   "- /credential ...: credential 바인딩/확인",
+  "- /task pause|resume|stop|approve: active loop task 제어",
+  "- /agents use <roles>: Agent Room 기본 역할 적용",
+  "- /agents reset: Agent Room 설정 초기화",
+  "- /team: legacy/advanced alias. 일반 사용은 /agents 권장",
+  "- /team more: team topology 고급 명령 보기",
+  "- /review approve|reject <reason>: 대기 중인 검토/승인 항목 처리",
   "- /memory: topology, pressure, proposal/materialization 상태 요약",
   "- /memory debug <show|md|kb|topology|pressure|evidence|review|materialize-preview|modules>: 개발/진단용 상세 조회",
   "- /settings ...: legacy alias, 가능하면 /memory 또는 GoC 사용",
@@ -78,7 +105,6 @@ const ADVANCED_HELP_TEXT = [
   "- /models: 연결된 로컬/API model node 보기",
   "- /tools: 현재 job의 tool 상태 보기",
   "- /upload (+파일 첨부) [메모]: 실행 없이 업로드만 저장",
-  "- /team more: team의 고급 명령 보기",
   "- /chat [--debug] <message>|reset: supervisor chat 실행 또는 세션 초기화",
   "- /rule <자연어 지침>: chat-level agent/runtime 지침 반영 (상세 편집은 GoC)",
   "- /run <goal>: goal 기반 실행 시작",
@@ -95,16 +121,19 @@ const ADVANCED_HELP_TEXT = [
   "- /improve promote <jobId>: restart/promote hook 실행",
   "- /commit <jobId> <message>: 작업 결과 커밋",
   "",
-  "Legacy aliases removed:",
-  "- /agents → /team",
+  "Command model:",
+  "- /chat = content plane",
+  "- /task = work/control plane",
+  "- /agents = Agent Room setup",
+  "- /review = user decision queue",
   "- /outputs → /artifacts",
   "- /sendfile → /send",
   "- /attach → /upload",
 ].join("\n");
 
 const TEAM_CORE_HELP_TEXT = [
-  "Team commands:",
-  "- /team: 현재 team 상태 보기",
+  "Team commands (advanced alias; 일반 사용은 /agents 권장):",
+  "- /team: 현재 low-level team 상태 보기",
   "- /team suggest <목적>: LLM planner로 목적 기반 team 제안 받기",
   "- /team create <설명>: 자연어로 team 만들기",
   "- /team refine <수정>: 현재/대기 team 수정하기",
@@ -143,6 +172,33 @@ const TEAM_TEMPLATE_DEPRECATED_TEXT = [
   "",
   "개발자용 benchmark template 목록은:",
   "- /team debug templates",
+].join("\n");
+
+const TASK_HELP_TEXT = [
+  "Task commands:",
+  "- /task: active task/loop 상태 보기",
+  "- /task loop <목표>: 반복 점검·개선 작업 시작",
+  "- /task pause: active loop 일시정지",
+  "- /task resume: active loop 재개",
+  "- /task stop: active loop 중단",
+  "- /task approve: approval 대기 상태 해제",
+].join("\n");
+
+const AGENTS_HELP_TEXT = [
+  "Agent Room commands:",
+  "- /agents: 이 채팅방의 Agent Room 보기",
+  "- /agents suggest <목표>: 목표에 맞는 agent 구성 추천",
+  "- /agents use planner,builder,reviewer: 기본 agent 역할 적용",
+  "- /agents reset: Agent Room 초기화",
+  "- /team: legacy/advanced alias. 일반 사용은 /agents 권장",
+].join("\n");
+
+const REVIEW_HELP_TEXT = [
+  "Review commands:",
+  "- /review: 승인/검토가 필요한 항목 보기",
+  "- /review approve: 현재 approval 대기 상태 승인",
+  "- /review reject <reason>: 현재 approval 대기 상태 거절/방향 수정",
+  "- 상세 proposal 편집은 GoC Review Inbox에서 처리하세요.",
 ].join("\n");
 
 const TEAM_DEBUG_HELP_TEXT = [
@@ -568,6 +624,94 @@ export function createTelegramCommandHandler(deps = {}) {
     return chatSessionStore.upsert(chatId, (session) => ({ ...session, runtime_rules: [] }));
   }
 
+  function getCurrentJobDirForChat(chatId) {
+    const jobId = resolveLiveJobIdForChat(chatId);
+    if (!jobId || !jobs || typeof jobs.jobDir !== 'function') return { jobId: null, jobDir: null };
+    try { return { jobId, jobDir: jobs.jobDir(jobId) }; } catch { return { jobId, jobDir: null }; }
+  }
+
+  async function loadRuntimeForCurrentJob(chatId, userId, { includeContext = false } = {}) {
+    const currentJobId = resolveLiveJobIdForChat(chatId);
+    if (!currentJobId || typeof loadSupervisorRuntime !== 'function') return { currentJobId: currentJobId || null, runtime: null };
+    try {
+      return {
+        currentJobId,
+        runtime: await loadSupervisorRuntime(currentJobId, { telegramUserId: userId, includeContext, includeGlobal: false }),
+      };
+    } catch {
+      return { currentJobId, runtime: null };
+    }
+  }
+
+  async function suggestAndApplyAgentRoomTeam({ chatId, userId, goal = '', runtimeForTeam = null, autoApply = false } = {}) {
+    let teamState = getSessionTeamState(chatSessionStore, chatId);
+    let proposal;
+    try {
+      proposal = await createFreeformTeamConfigurationAdvanced({
+        description: `Agent Room for this task. Goal: ${goal}. Prefer planner, builder, reviewer/verifier, and risk/evidence reviewer when relevant.`,
+        runtime: runtimeForTeam,
+        jobId: resolveLiveJobIdForChat(chatId),
+      });
+    } catch (error) {
+      proposal = {
+        ...suggestTeamConfiguration({ taskText: goal, runtime: runtimeForTeam }),
+        planner_metadata: {
+          planner_type: 'heuristic_rule_based',
+          planning_source: 'agent_room_suggest_exception_fallback',
+          reasoning_summary: [String(error?.message || error || 'LLM planner failed').slice(0, 180)],
+        },
+      };
+    }
+    const fallbackProposal = suggestTeamConfiguration({ taskText: goal, runtime: runtimeForTeam });
+    const portfolio = buildTeamSelectionPortfolio({
+      taskText: goal,
+      runtime: runtimeForTeam,
+      primaryTeam: proposal,
+      fallbackTeam: fallbackProposal,
+      activeTeam: teamState.active_team,
+    });
+    proposal = portfolio.selected_team || proposal;
+    storePendingTeam(chatSessionStore, chatId, proposal, { portfolio });
+    let activeTeam = proposal;
+    if (autoApply) {
+      try {
+        activeTeam = await applyPendingTeam({ sessionStore: chatSessionStore, chatId, runtime: runtimeForTeam });
+      } catch {
+        activeTeam = proposal;
+      }
+    }
+    const roomProfile = buildAgentRoomProfile({
+      chatId,
+      roomName: 'Agent Workspace',
+      goal,
+      team: activeTeam,
+      source: autoApply ? 'task_loop_auto_agent_room' : 'agents_suggest',
+    });
+    upsertAgentRoomProfile(chatSessionStore, chatId, roomProfile);
+    return { proposal, portfolio, activeTeam, roomProfile };
+  }
+
+  function setPendingTaskControl(chatId, payload = {}) {
+    let saved = null;
+    chatSessionStore.upsert(chatId, (session = {}) => {
+      const now = new Date().toISOString();
+      saved = {
+        kind: 'agent_room_task_control_v1',
+        status: 'active',
+        created_at: session.pending_task_control?.created_at || now,
+        updated_at: now,
+        ...payload,
+      };
+      return { ...session, pending_task_control: saved };
+    });
+    return saved;
+  }
+
+  function getPendingTaskControl(chatId) {
+    if (!chatSessionStore || typeof chatSessionStore.get !== 'function') return null;
+    return chatSessionStore.get(chatId)?.pending_task_control || null;
+  }
+
   return async function handleTelegramCommand({ msg, text, chatId, userId }) {
     if (!String(text || "").startsWith("/")) return false;
 
@@ -956,6 +1100,149 @@ export function createTelegramCommandHandler(deps = {}) {
       return true;
     }
 
+    if (cmd === "/task") {
+      const sub = String(rest[0] || '').trim().toLowerCase();
+      const taskArgs = String(rawArgs || '').replace(/^\S+\s*/i, '').trim();
+      const { jobId: currentJobId, jobDir } = getCurrentJobDirForChat(chatId);
+
+      if (!sub || ['status', 'show', 'list'].includes(sub)) {
+        const watchSummary = jobDir ? summarizeWatchTaskState(jobDir) : null;
+        const roomProfile = getAgentRoomProfile(chatSessionStore, chatId);
+        const pendingTask = getPendingTaskControl(chatId);
+        const lines = ['Task / Loop status'];
+        if (watchSummary) {
+          lines.push(`- watch: ${watchSummary.status} · iteration ${watchSummary.current_iteration}/${watchSummary.max_iterations} · ${watchSummary.workflow_kind}`);
+          if (watchSummary.required_passes?.length) lines.push(`- passes: ${watchSummary.required_passes.join(' → ')}`);
+          if (watchSummary.approval_boundary) lines.push('- approval: risky/large changes require approval');
+        } else {
+          lines.push('- watch: no active persisted loop task');
+        }
+        if (pendingTask?.goal) lines.push(`- pending task goal: ${pendingTask.goal}`);
+        lines.push('', formatAgentRoomProfile(roomProfile, { includeHelp: false }), '', TASK_HELP_TEXT);
+        await sendLong(bot, chatId, lines.join('\n'));
+        return true;
+      }
+
+      if (['help', 'more'].includes(sub)) {
+        await sendLong(bot, chatId, TASK_HELP_TEXT);
+        return true;
+      }
+
+      if (['pause', 'resume', 'stop', 'approve'].includes(sub)) {
+        if (!jobDir) {
+          await bot.sendMessage(chatId, '현재 active job이 없어 task 상태를 변경할 수 없습니다. /task loop <목표>로 작업을 먼저 시작하세요.');
+          return true;
+        }
+        const statusMap = { pause: 'paused', resume: 'active', stop: 'stopped', approve: 'active' };
+        const result = setWatchTaskStatus({
+          jobDir,
+          status: statusMap[sub],
+          reason: sub === 'approve' ? 'telegram_task_approve' : `telegram_task_${sub}`,
+          actor: String(userId || chatId || 'telegram_user'),
+        });
+        if (!result.ok) {
+          await bot.sendMessage(chatId, `task 상태 변경 실패: ${result.reason || 'unknown'}`);
+          return true;
+        }
+        await bot.sendMessage(chatId, `✅ task 상태를 ${statusMap[sub]} 로 변경했습니다.`);
+        return true;
+      }
+
+      if (sub === 'loop' || sub === 'start' || sub === 'watch') {
+        const goal = taskArgs || String(rawArgs || '').replace(/^(loop|start|watch)\s*/i, '').trim();
+        if (!goal) {
+          await bot.sendMessage(chatId, 'Usage: /task loop <목표>');
+          return true;
+        }
+        const { runtime: runtimeForTeam } = await loadRuntimeForCurrentJob(chatId, userId, { includeContext: false });
+        const signals = buildTeamCreationSignals({ taskText: goal, runtime: runtimeForTeam });
+        const workflowContract = buildTeamWorkflowContract({ signals, goal });
+        const { activeTeam, roomProfile } = await suggestAndApplyAgentRoomTeam({ chatId, userId, goal, runtimeForTeam, autoApply: true });
+        setPendingTaskControl(chatId, {
+          goal,
+          command: '/task loop',
+          workflow_contract: workflowContract,
+          team_roles: roomProfile.default_agents,
+          source: 'telegram_task_loop',
+        });
+        await sendLong(bot, chatId, [
+          '🔁 Task loop를 시작합니다.',
+          '',
+          `workflow: ${summarizeTeamWorkflowContract(workflowContract)}`,
+          `agents: ${(roomProfile.default_agents || []).join(', ') || '-'}`,
+          'policy: small safe changes auto · risky/large changes approval-required',
+          '',
+          '이제 Agent Room 설정을 적용하고 작업 실행을 시작합니다.',
+        ].join('\n'));
+        const taskMessage = [
+          'CONTROL PLANE TASK: Start a bounded agent-room loop for the following goal.',
+          `Workflow contract: ${JSON.stringify(workflowContract)}`,
+          `Agent room roles: ${(roomProfile.default_agents || []).join(', ')}`,
+          '',
+          goal,
+        ].join('\n');
+        await sendRouterAckMessage(bot, chatId, { replyToMessageId: msg.message_id });
+        await chatRunManager.handleIncoming({
+          chatId,
+          userId,
+          text: taskMessage,
+          kind: 'task_loop',
+          telegramMessageId: msg.message_id,
+          userReplyToMessageId: Number.isFinite(Number(msg?.reply_to_message?.message_id)) ? Number(msg.reply_to_message.message_id) : null,
+          teamConfig: activeTeam || null,
+          chatInfo: {
+            chat_id: String(chatId || ''),
+            title: String(msg.chat?.title || msg.chat?.username || '').trim(),
+            type: String(msg.chat?.type || '').trim(),
+          },
+        });
+        return true;
+      }
+
+      await bot.sendMessage(chatId, `알 수 없는 /task 명령입니다.\n\n${TASK_HELP_TEXT}`);
+      return true;
+    }
+
+    if (cmd === "/review") {
+      const sub = String(rest[0] || '').trim().toLowerCase();
+      const { jobDir } = getCurrentJobDirForChat(chatId);
+      if (['help', 'more'].includes(sub)) {
+        await bot.sendMessage(chatId, REVIEW_HELP_TEXT);
+        return true;
+      }
+      if (sub === 'approve' || sub === 'reject') {
+        if (!jobDir) {
+          await bot.sendMessage(chatId, '현재 active job이 없어 승인/거절할 task를 찾지 못했습니다. GoC Review Inbox도 확인해 주세요.');
+          return true;
+        }
+        const result = setWatchTaskStatus({
+          jobDir,
+          status: sub === 'approve' ? 'active' : 'paused',
+          reason: sub === 'approve' ? 'telegram_review_approve' : `telegram_review_reject:${String(rawArgs || '').slice(0, 160)}`,
+          actor: String(userId || chatId || 'telegram_user'),
+        });
+        await bot.sendMessage(chatId, result.ok
+          ? `✅ review ${sub} 처리했습니다. 상태=${sub === 'approve' ? 'active' : 'paused'}`
+          : `review 처리 실패: ${result.reason || 'unknown'}`);
+        return true;
+      }
+      if (!jobDir) {
+        await bot.sendMessage(chatId, `현재 active job이 없습니다.\n\n${REVIEW_HELP_TEXT}`);
+        return true;
+      }
+      try {
+        const reviewQueue = buildRuntimeReviewQueue({ jobDir, persist: true });
+        const watch = readWatchTaskState(jobDir);
+        const approvalLine = watch?.state?.status === 'awaiting_approval' || watch?.contract?.status === 'awaiting_approval'
+          ? 'approval: 대기 중 · /review approve 또는 /review reject <reason>'
+          : 'approval: 현재 대기 항목 없음';
+        await sendLong(bot, chatId, [approvalLine, '', formatReviewQueueForTelegram(reviewQueue), '', REVIEW_HELP_TEXT].join('\n'));
+      } catch (e) {
+        await bot.sendMessage(chatId, `review 상태 조회 실패: ${String(e?.message ?? e)}`);
+      }
+      return true;
+    }
+
     if (cmd === "/status") {
       const detailArg = String(rest[0] || '').trim().toLowerCase();
       const detail = ['full', 'detail', 'details', 'verbose'].includes(detailArg)
@@ -968,7 +1255,65 @@ export function createTelegramCommandHandler(deps = {}) {
     }
 
     if (cmd === "/agents") {
-      await bot.sendMessage(chatId, '이제 /agents 는 제거되었습니다. team 관련 작업은 /team 을 사용해 주세요.');
+      const sub = String(rest[0] || '').trim().toLowerCase();
+      const argsAfterSub = String(rawArgs || '').replace(/^\S+\s*/i, '').trim();
+      const { runtime: runtimeForTeam } = await loadRuntimeForCurrentJob(chatId, userId, { includeContext: false });
+      if (!sub || ['status', 'show', 'list'].includes(sub)) {
+        await sendLong(bot, chatId, `${formatAgentRoomProfile(getAgentRoomProfile(chatSessionStore, chatId))}\n\n${AGENTS_HELP_TEXT}`);
+        return true;
+      }
+      if (['help', 'more'].includes(sub)) {
+        await sendLong(bot, chatId, AGENTS_HELP_TEXT);
+        return true;
+      }
+      if (sub === 'suggest') {
+        const goal = argsAfterSub;
+        if (!goal) {
+          await bot.sendMessage(chatId, 'Usage: /agents suggest <목표>');
+          return true;
+        }
+        const profile = buildAgentRoomProfile({ chatId, goal, source: 'telegram_agents_suggest' });
+        await sendLong(bot, chatId, buildAgentRoomSuggestionMessage({ goal, profile }));
+        return true;
+      }
+      if (sub === 'use' || sub === 'set') {
+        const roleText = argsAfterSub;
+        const roles = normalizeRoomAgentRoles(roleText);
+        if (!roles.length) {
+          await bot.sendMessage(chatId, 'Usage: /agents use planner,builder,reviewer');
+          return true;
+        }
+        const profile = buildAgentRoomProfile({ chatId, goal: `Use agent roles: ${roles.join(', ')}`, roles, source: 'telegram_agents_use' });
+        upsertAgentRoomProfile(chatSessionStore, chatId, profile);
+        let proposal = null;
+        try {
+          proposal = await createFreeformTeamConfigurationAdvanced({
+            description: `Use this Agent Room roster for future tasks: ${roles.join(', ')}. Keep responsibilities distinct and route review/verification separately from implementation.`,
+            runtime: runtimeForTeam,
+            jobId: resolveLiveJobIdForChat(chatId),
+          });
+        } catch {
+          proposal = suggestTeamConfiguration({ taskText: `Use agent roles: ${roles.join(', ')}`, runtime: runtimeForTeam });
+        }
+        storePendingTeam(chatSessionStore, chatId, proposal);
+        let applied = null;
+        try { applied = await applyPendingTeam({ sessionStore: chatSessionStore, chatId, runtime: runtimeForTeam }); } catch {}
+        await sendLong(bot, chatId, [
+          '✅ Agent Room 기본 역할을 적용했습니다.',
+          '',
+          formatAgentRoomProfile(profile, { includeHelp: false }),
+          '',
+          applied ? 'team: active team에도 적용됨' : 'team: pending team으로 저장됨. 필요하면 /team apply 를 사용하세요.',
+        ].join('\n'));
+        return true;
+      }
+      if (sub === 'reset') {
+        upsertAgentRoomProfile(chatSessionStore, chatId, { status: 'reset', default_agents: [], default_workflow: 'task_adaptive', current_goal: '', reasons: [], source: 'telegram_agents_reset' });
+        await resetTeamConfiguration(chatSessionStore, chatId, { runtime: runtimeForTeam }).catch(() => null);
+        await bot.sendMessage(chatId, '✅ Agent Room 설정을 초기화했습니다. /agents suggest <목표> 또는 /task loop <목표>로 다시 시작하세요.');
+        return true;
+      }
+      await bot.sendMessage(chatId, `알 수 없는 /agents 명령입니다.\n\n${AGENTS_HELP_TEXT}`);
       return true;
     }
 
@@ -987,7 +1332,7 @@ export function createTelegramCommandHandler(deps = {}) {
         teamState = getSessionTeamState(chatSessionStore, chatId);
       }
       if (!sub) {
-        await bot.sendMessage(chatId, buildCompactTeamStatusMessage(teamState, { chatId, runtime: runtimeForTeam }));
+        await bot.sendMessage(chatId, ['Advanced team topology (/agents 권장)', '', buildCompactTeamStatusMessage(teamState, { chatId, runtime: runtimeForTeam })].join('\n'));
         return true;
       }
       if (sub === 'help') {
@@ -1676,6 +2021,10 @@ size=${formatByteSize(sentBundle.size)}`
       if (embeddedRule) {
         addRuntimeRule(chatId, embeddedRule, { source: 'user', origin: 'chat_inline_rule' });
         await bot.sendMessage(chatId, '✅ 운영 지침에 반영했어요. 자세한 편집/비활성화/히스토리는 GoC에서 다룹니다.');
+        return true;
+      }
+      if (isOperationalControlText(message)) {
+        await sendLong(bot, chatId, buildOperationalControlRedirectMessage(message));
         return true;
       }
       maybeLearnRuntimeRule(chatId, message);
