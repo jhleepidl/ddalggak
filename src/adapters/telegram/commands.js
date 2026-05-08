@@ -275,6 +275,9 @@ export function createTelegramCommandHandler(deps = {}) {
 
   const sendChatStatus = teamOps.sendChatStatus || deps.sendChatStatus;
   const sendAgentOrToolListQuick = teamOps.sendAgentOrToolListQuick || deps.sendAgentOrToolListQuick;
+  const createAgentRoomTeamConfiguration = teamOps.createAgentRoomTeamConfiguration
+    || deps.createAgentRoomTeamConfiguration
+    || createFreeformTeamConfigurationAdvanced;
 
   function parseApplyStateTokens(tokens = []) {
     for (const raw of tokens) {
@@ -643,11 +646,64 @@ export function createTelegramCommandHandler(deps = {}) {
     }
   }
 
-  async function suggestAndApplyAgentRoomTeam({ chatId, userId, goal = '', runtimeForTeam = null, autoApply = false } = {}) {
+
+  function summarizeAgentRoomPlannerMetadata(team = null) {
+    const metadata = team && typeof team === 'object' && team.planner_metadata && typeof team.planner_metadata === 'object'
+      ? team.planner_metadata
+      : {};
+    const type = String(metadata.planner_type || '').trim() || 'unknown';
+    const model = String(metadata.planner_model || '').trim();
+    const source = String(metadata.planning_source || '').trim();
+    const engine = [type, model].filter(Boolean).join(' · ') || 'unknown';
+    const fallback = /heuristic|fallback|template|rule_based/i.test(`${type} ${source}`);
+    return {
+      engine,
+      source,
+      fallback,
+      reasoning: Array.isArray(metadata.reasoning_summary)
+        ? metadata.reasoning_summary.map((row) => String(row || '').trim()).filter(Boolean).slice(0, 3)
+        : [],
+    };
+  }
+
+  function formatAgentRoomPlannerDetails(team = null, { portfolio = null } = {}) {
+    const row = team && typeof team === 'object' ? team : {};
+    const metadata = summarizeAgentRoomPlannerMetadata(row);
+    const agents = Array.isArray(row.agents) ? row.agents : [];
+    const lines = [
+      'LLM planner result',
+      `- engine: ${metadata.engine}`,
+      metadata.source ? `- source: ${metadata.source}` : null,
+      metadata.fallback
+        ? '- status: LLM planner를 사용할 수 없거나 실패해서 heuristic fallback이 적용되었습니다.'
+        : '- status: LLM planner 기반 제안을 사용했습니다.',
+    ].filter(Boolean);
+    if (metadata.reasoning.length > 0) {
+      lines.push('- reasoning:', ...metadata.reasoning.map((entry) => `  - ${entry}`));
+    }
+    if (agents.length > 0) {
+      lines.push(
+        '- planned agents:',
+        ...agents.slice(0, 8).map((agent) => {
+          const name = String(agent?.name || agent?.agent_id || agent?.id || agent?.role || 'agent').trim();
+          const role = String(agent?.role || agent?.role_id || agent?.roleId || 'agent').trim();
+          const model = String(agent?.model || '').trim();
+          const provider = String(agent?.provider || '').trim();
+          const runtime = [provider, model].filter(Boolean).join('/');
+          return `  - ${name} (${role}${runtime ? ` · ${runtime}` : ''})`;
+        }),
+      );
+    }
+    const selectedCandidateId = portfolio && typeof portfolio === 'object' ? String(portfolio.selected_candidate_id || '').trim() : '';
+    if (selectedCandidateId) lines.push(`- portfolio selection: ${selectedCandidateId}`);
+    return lines.join('\n');
+  }
+
+  async function suggestAndApplyAgentRoomTeam({ chatId, userId, goal = '', runtimeForTeam = null, autoApply = false, preferPlannerProposal = false } = {}) {
     let teamState = getSessionTeamState(chatSessionStore, chatId);
     let proposal;
     try {
-      proposal = await createFreeformTeamConfigurationAdvanced({
+      proposal = await createAgentRoomTeamConfiguration({
         description: `Agent Room for this task. Goal: ${goal}. Prefer planner, builder, reviewer/verifier, and risk/evidence reviewer when relevant.`,
         runtime: runtimeForTeam,
         jobId: resolveLiveJobIdForChat(chatId),
@@ -670,7 +726,9 @@ export function createTelegramCommandHandler(deps = {}) {
       fallbackTeam: fallbackProposal,
       activeTeam: teamState.active_team,
     });
-    proposal = portfolio.selected_team || proposal;
+    const plannerMetadata = summarizeAgentRoomPlannerMetadata(proposal);
+    const shouldKeepPlannerProposal = preferPlannerProposal && !plannerMetadata.fallback && plannerMetadata.engine !== 'unknown';
+    proposal = shouldKeepPlannerProposal ? proposal : (portfolio.selected_team || proposal);
     storePendingTeam(chatSessionStore, chatId, proposal, { portfolio });
     let activeTeam = proposal;
     if (autoApply) {
@@ -1272,8 +1330,19 @@ export function createTelegramCommandHandler(deps = {}) {
           await bot.sendMessage(chatId, 'Usage: /agents suggest <목표>');
           return true;
         }
-        const profile = buildAgentRoomProfile({ chatId, goal, source: 'telegram_agents_suggest' });
-        await sendLong(bot, chatId, buildAgentRoomSuggestionMessage({ goal, profile }));
+        const { proposal, portfolio, roomProfile } = await suggestAndApplyAgentRoomTeam({
+          chatId,
+          userId,
+          goal,
+          runtimeForTeam,
+          autoApply: false,
+          preferPlannerProposal: true,
+        });
+        await sendLong(bot, chatId, [
+          buildAgentRoomSuggestionMessage({ goal, profile: roomProfile }),
+          '',
+          formatAgentRoomPlannerDetails(proposal, { portfolio }),
+        ].join('\n'));
         return true;
       }
       if (sub === 'use' || sub === 'set') {
