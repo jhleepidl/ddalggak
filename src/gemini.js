@@ -1200,8 +1200,12 @@ async function runGeminiPromptInternal({
     })
     : originalWorkspacePath;
   const workspacePath = commandCwd;
-  if (contextMode !== "isolated") {
-    ensureGeminiWorkspaceConfig(workspacePath, { overwritePolicy: settingsOverwrite, patchSettings: workspaceSettingsPatch });
+  ensureGeminiWorkspaceConfig(workspacePath, { overwritePolicy: settingsOverwrite, patchSettings: workspaceSettingsPatch });
+  if (contextMode === "isolated" && path.resolve(originalWorkspacePath) !== path.resolve(commandCwd)) {
+    const hasExplicitWorkspacePatch = Object.keys(asObject(workspaceSettingsPatch)).length > 0;
+    if (hasExplicitWorkspacePatch || String(settingsOverwrite || "").trim()) {
+      ensureGeminiWorkspaceConfig(originalWorkspacePath, { overwritePolicy: settingsOverwrite, patchSettings: workspaceSettingsPatch });
+    }
   }
   const baseEnv = {
     GEMINI_WORKSPACE_PATH: workspacePath,

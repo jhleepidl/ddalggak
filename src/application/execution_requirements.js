@@ -23,6 +23,73 @@ function has(text = '', re) {
 }
 
 
+function cleanId(value = '') {
+  return clean(value).toLowerCase().replace(/[^a-z0-9_.-]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+function asObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+export function isTaskLoopRuntimeExecutionPolicy(runtimeExecutionPolicy = {}) {
+  const policy = asObject(runtimeExecutionPolicy);
+  const taskLoop = asObject(policy.task_loop || policy.taskLoop);
+  const workflow = asObject(policy.workflow_contract || policy.workflowContract);
+  const mode = cleanId(policy.execution_mode || policy.executionMode || taskLoop.execution_mode || taskLoop.executionMode || '');
+  const workflowKind = cleanId(workflow.workflow_kind || workflow.workflowKind || '');
+  return mode === 'task_loop' || workflowKind === 'bounded_continuous_loop' || policy.continuous_improvement?.enabled === true && cleanId(policy.continuous_improvement?.mode || '').includes('bounded_watch_loop');
+}
+
+function isLikelyInheritedNoArtifactPolicy(text = '') {
+  const src = String(text || '');
+  return has(src, /\[TASK OUTPUT POLICY\]/i)
+    || has(src, /No explicit file deliverable requested/i)
+    || has(src, /do not create\/update\/send workspace artifacts/i)
+    || has(src, /direct file writes disabled for this provider/i)
+    || has(src, /명시적 delivery requirement/i)
+    || has(src, /파일\/산출물 생성·업데이트·전달을 하지 말라/i)
+    || has(src, /artifact manifest 생성, artifact index 갱신을 수행하지 않았/i);
+}
+
+export function resolveExecutionRequirementsForRuntime(requirements = {}, {
+  runtimeExecutionPolicy = {},
+  roleId = '',
+  taskText = '',
+} = {}) {
+  const base = requirements && typeof requirements === 'object'
+    ? { ...requirements }
+    : extractExecutionRequirements(String(requirements || ''));
+  const taskLoop = isTaskLoopRuntimeExecutionPolicy(runtimeExecutionPolicy);
+  if (!taskLoop) return base;
+  const raw = [base.raw_text, taskText].map((v) => String(v || '')).join('\n');
+  const inheritedNoArtifact = isLikelyInheritedNoArtifactPolicy(raw);
+  const roleKey = cleanId(roleId || '');
+  const workflow = asObject(runtimeExecutionPolicy.workflow_contract || runtimeExecutionPolicy.workflowContract);
+  const requiredPasses = Array.isArray(workflow.required_passes || workflow.requiredPasses)
+    ? (workflow.required_passes || workflow.requiredPasses).map((v) => cleanId(v))
+    : [];
+  const implementationPass = requiredPasses.includes('implement_or_diagnose') || requiredPasses.includes('implement') || requiredPasses.includes('verify');
+  const builderLike = ['builder', 'coder', 'implementation', 'operator', 'verifier'].includes(roleKey) || roleKey.includes('builder') || roleKey.includes('coder');
+  const absoluteUserForbid = base.artifact_delivery_forbidden === true && !inheritedNoArtifact;
+  const resolved = {
+    ...base,
+    task_loop_workspace_write_allowed: !absoluteUserForbid && (builderLike || implementationPass),
+    task_loop_runtime_policy: true,
+  };
+  if (inheritedNoArtifact && !absoluteUserForbid) {
+    resolved.artifact_delivery_forbidden = false;
+    resolved.memory_only_requested = false;
+    resolved.summary = [resolved.summary, 'task loop: ignored inherited no-artifact chat policy'].filter(Boolean).join(' · ');
+  }
+  if (resolved.task_loop_workspace_write_allowed) {
+    resolved.workspace_write_requested = true;
+    resolved.direct_execution_requested = resolved.direct_execution_requested || builderLike;
+    resolved.summary = [resolved.summary, 'task loop: workspace write allowed'].filter(Boolean).join(' · ');
+  }
+  return resolved;
+}
+
+
 function extractRuntimeRulePolicy(raw = '') {
   const text = String(raw || '');
   if (!text.trim()) {
@@ -40,14 +107,15 @@ function extractRuntimeRulePolicy(raw = '') {
   };
 }
 
-export function applyRuntimeRulePolicy(requirements = {}, runtimeRulesText = '') {
+export function applyRuntimeRulePolicy(requirements = {}, runtimeRulesText = '', options = {}) {
   const base = requirements && typeof requirements === 'object'
     ? { ...requirements }
     : extractExecutionRequirements(String(requirements || ''));
   const policy = extractRuntimeRulePolicy(runtimeRulesText);
   if (!runtimeRulesText || (!policy.artifact_default_forbidden && !policy.artifact_absolute_forbidden && !policy.memory_only_default)) return base;
-  const explicitDelivery = base.artifact_delivery_requested === true || base.artifact_build_requested === true;
-  if (policy.artifact_absolute_forbidden || (policy.artifact_default_forbidden && !explicitDelivery)) {
+  const taskLoop = isTaskLoopRuntimeExecutionPolicy(options.runtimeExecutionPolicy || options.runtime_execution_policy || {});
+  const explicitDelivery = base.artifact_delivery_requested === true || base.artifact_build_requested === true || base.workspace_write_requested === true || base.task_loop_workspace_write_allowed === true;
+  if (policy.artifact_absolute_forbidden || (!taskLoop && policy.artifact_default_forbidden && !explicitDelivery)) {
     base.artifact_delivery_forbidden = true;
     base.artifact_delivery_requested = false;
     base.artifact_build_requested = false;
@@ -176,6 +244,7 @@ export function formatExecutionRequirementsBlock(requirements = {}) {
   if (row.direct_execution_requested) lines.push('- 사용자가 직접 로컬 실행/빌드를 명시적으로 요청했다.');
   if (row.shell_execution_requested) lines.push('- 필요한 bounded shell command를 직접 실행할 수 있으면 실행하라.');
   if (row.artifact_delivery_forbidden) lines.push('- 이번 턴은 파일/산출물 생성·업데이트·전달을 하지 말고, 필요한 기록은 runtime memory에만 반영하라.');
+  if (row.task_loop_workspace_write_allowed || row.workspace_write_requested) lines.push('- task loop 구현/검증 범위 안에서 workspace 내부 파일 생성·수정은 허용된다. 단, 배포·credential/API 연결·파괴적 변경·금융 추천 로직은 승인 경계를 따른다.');
   if (row.artifact_build_requested) lines.push('- 코드 수정만이 아니라 실제 빌드/패키징 산출까지 확인해야 한다.');
   if (row.artifact_delivery_requested && !row.artifact_delivery_forbidden) lines.push('- 생성된 파일 경로/이름을 artifact index와 최종 응답에 명시하라.');
   if (Array.isArray(row.expected_artifact_kinds) && row.expected_artifact_kinds.length > 0 && !row.artifact_delivery_forbidden) {

@@ -166,3 +166,74 @@ test('/agents suggest uses the LLM-backed team planner path instead of static ro
   assert.match(sent[0].text, /Goal Researcher \(researcher · gemini\/gemini-3-flash-preview\)/)
   assert.doesNotMatch(sent[0].text, /heuristic fallback이 적용되었습니다/)
 })
+
+test('/agents export and clone support portable agent packages without private memory copy', async () => {
+  const sent = []
+  const tmp = await import('node:os').then(({ default: os }) => import('node:fs').then(({ default: fs }) => ({ os, fs })))
+  const pathMod = await import('node:path')
+  const dir = tmp.fs.mkdtempSync(pathMod.default.join(tmp.os.tmpdir(), 'ddalggak-telegram-pkg-'))
+  const oldRegistry = process.env.AGENT_PACKAGE_REGISTRY_PATH
+  process.env.AGENT_PACKAGE_REGISTRY_PATH = pathMod.default.join(dir, 'agent_packages.json')
+
+  const backing = new Map()
+  const sessionStore = {
+    get: (key) => backing.get(String(key)) || {},
+    upsert: (key, patcher) => {
+      const current = backing.get(String(key)) || {}
+      const next = typeof patcher === 'function' ? patcher(current) : { ...current, ...patcher }
+      backing.set(String(key), next)
+      return next
+    },
+  }
+  sessionStore.upsert('chat-source', () => ({
+    agent_room_profile: {
+      kind: 'agent_room_profile_v1',
+      name: 'Portable Risk Room',
+      default_agents: ['planner', 'builder', 'reviewer'],
+      current_goal: 'Reusable risk review workflow',
+      memory_scope: 'room',
+    },
+    team_config: {
+      active_team: {
+        team_name: 'portable_team',
+        agents: [{ agent_id: 'reviewer', name: 'Reviewer', role: 'reviewer', provider: 'ollama', model: 'qwen' }],
+      },
+    },
+  }))
+
+  const handler = createTelegramCommandHandler({
+    bot: makeBot(sent),
+    sendLong: async (_bot, chatId, text) => {
+      sent.push({ chatId, text })
+      return { message_id: sent.length }
+    },
+    chatSessionStore: sessionStore,
+    resolveLiveJobIdForChat: () => null,
+  })
+
+  try {
+    await handler({ msg: { chat: { id: 'chat-source' }, from: { id: 'user-1' } }, text: '/agents export', chatId: 'chat-source', userId: 'user-1' })
+    assert.match(sent.at(-1).text, /Agent package를 생성/)
+    assert.match(sent.at(-1).text, /copies_private_memory=false/)
+    const match = sent.at(-1).text.match(/"package_id": "([^"]+)"/)
+    assert.ok(match?.[1])
+
+    await handler({ msg: { chat: { id: 'chat-target' }, from: { id: 'user-1' } }, text: `/agents clone ${match[1]}`, chatId: 'chat-target', userId: 'user-1' })
+    assert.match(sent.at(-1).text, /source private memory는 복사하지 않았고/)
+    const targetSession = sessionStore.get('chat-target')
+    assert.equal(targetSession.agent_room_profile.package_id, match[1])
+    assert.equal(targetSession.team_config.pending_team.team_name, 'portable_team')
+  } finally {
+    if (oldRegistry === undefined) delete process.env.AGENT_PACKAGE_REGISTRY_PATH
+    else process.env.AGENT_PACKAGE_REGISTRY_PATH = oldRegistry
+  }
+})
+
+test('advanced help no longer advertises legacy ChatGPT paste commands', async () => {
+  const sent = []
+  const handler = createTelegramCommandHandler({ bot: makeBot(sent) })
+  await handler({ msg: { chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/help more', chatId: 'chat-1', userId: 'user-1' })
+  assert.doesNotMatch(sent[0].text, /gptapply/)
+  assert.doesNotMatch(sent[0].text, /gptprompt/)
+  assert.match(sent[0].text, /agents export\|publish-candidate\|packages\|clone/)
+})

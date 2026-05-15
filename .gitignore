@@ -146,3 +146,6 @@ runs/
 .self_improve/
 
 commands.md
+# Generated model discovery state
+config/model_nodes.discovered.json
+config/model_catalog_refresh_state.json

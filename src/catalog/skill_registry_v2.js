@@ -5,6 +5,7 @@ import {
   normalizeSkillPackageList,
 } from "../domain/skill_packages.js";
 import { roleCompatibleWithList } from "../compatibility/legacy_roles.js";
+import { mergeSkillPerformanceIntoPackage, readSkillRulePerformanceStore } from "../application/skill_rule_performance.js";
 
 function asArray(raw) {
   return Array.isArray(raw) ? raw : [];
@@ -34,8 +35,12 @@ export class SkillRegistryV2 {
   constructor({
     skillsDir = path.resolve(process.cwd(), "skills"),
     logger = null,
+    performancePath = "",
+    rootDir = process.cwd(),
   } = {}) {
     this.skillsDir = skillsDir;
+    this.performancePath = performancePath;
+    this.rootDir = rootDir;
     this.logger = typeof logger === "function" ? logger : null;
     this.skills = [];
     this.byId = new Map();
@@ -68,7 +73,12 @@ export class SkillRegistryV2 {
         skillDir,
       }));
     }
-    const normalized = normalizeSkillPackageList(asArray(manifests));
+    const performanceStore = readSkillRulePerformanceStore({
+      rootDir: this.rootDir,
+      filePath: this.performancePath,
+    });
+    const normalized = normalizeSkillPackageList(asArray(manifests))
+      .map((skill) => mergeSkillPerformanceIntoPackage(skill, { store: performanceStore }));
     this.skills = normalized;
     this.byId = new Map(normalized.map((skill) => [skill.id, skill]));
     this.bySlug = new Map(normalized.map((skill) => [skill.slug, skill]));

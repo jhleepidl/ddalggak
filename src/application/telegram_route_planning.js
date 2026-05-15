@@ -131,6 +131,7 @@ import { ChatRunManager } from "../chat/run_manager.js";
 import { GocExecutionGraphRecorder } from "../chat/goc_execution_graph.js";
 import { updateAgentStatus } from "./agent_status_store.js";
 import { internalLanguagePolicyBlock, resolveUserSurfaceLocale } from "./language_policy.js";
+import { isChatGptManualFallbackEnabled, resolveChatGptProviderBridge } from "./chatgpt_provider_bridge.js";
 
 import * as runtimeState from "./telegram_runtime_state.js";
 import * as runtimeIo from "./telegram_runtime_io.js";
@@ -147,6 +148,7 @@ const {
   AGENT_STATUS_MESSAGE_THROTTLE_MS,
   TELEGRAM_PROGRESS_DETAIL_MODE,
   agentStatusMessageStateByChat,
+  runDir,
   runWorkspaceDir,
   resolveAgentId,
   findAgentConfig,
@@ -356,7 +358,7 @@ async function decideRunRoute(jobId, { mode, goal, seedInstruction = "", signal 
 
 async function reflectAutoSuggest(jobId, trigger, question, signal = null) {
   if (!AUTO_SUGGEST_ENABLED) {
-    return { shouldAsk: false, reason: "AUTO_SUGGEST_GPT_PROMPT=false" };
+    return { shouldAsk: false, reason: "AUTO_SUGGEST_GPT_PROMPT is disabled" };
   }
 
   const goal = getGoalFromResearch(jobId);
@@ -450,22 +452,36 @@ async function suggestNextPrompt(bot, chatId, jobId, question, trigger = "run", 
 }
 
 async function sendChatGPTPrompt(bot, chatId, jobId, question) {
+  const bridge = resolveChatGptProviderBridge();
+  if (!isChatGptManualFallbackEnabled()) {
+    await bot.sendMessage(
+      chatId,
+      [
+        "ChatGPT 수동 붙여넣기 fallback은 기본 비활성화되어 있어요.",
+        bridge.mode === 'codex'
+          ? "현재 설정에서는 chatgpt 역할을 Codex CLI bridge로 직접 실행합니다. /models 또는 /status에서 provider 상태를 확인하세요."
+          : "직접 실행하려면 CHATGPT_PROVIDER_BRIDGE=codex를 설정하세요. 정말 legacy 복붙을 쓰려면 CHATGPT_MANUAL_FALLBACK_ENABLED=true를 명시해야 합니다.",
+      ].join("\n")
+    );
+    return;
+  }
+
   const goal = getGoalFromResearch(jobId);
-  const docs = await loadRoleScopedContextDocs(jobId, { provider: "chatgpt", roleId: "operator", fallbackDocIds: ["research", "plan", "progress"], maxCharsPerDoc: 3000 });
-  const convo = jobs.tailConversation(jobId, 60);
+  const docs = await loadRoleScopedContextDocs(jobId, { provider: "chatgpt", roleId: "operator", fallbackDocIds: ["research", "plan", "progress"], maxCharsPerDoc: 1200 });
+  const convo = jobs.tailConversation(jobId, 24);
   const prompt = buildChatGPTNextStepPrompt({
     jobId,
     goal,
     question,
     contextDocsText: docs,
-    convoText: convoToText(convo),
+    convoText: clip(convoToText(convo), 6000),
     routerPrompt: memory.getRouterPrompt(),
     agentRolesText: getAgentRolesText(),
     knowledgeBaseProfile: tracking.loadProfile(jobId),
   });
   await bot.sendMessage(
     chatId,
-    "🧩 다음 단계 결정을 위해 ChatGPT 프롬프트를 생성했어요.\n답변을 받은 뒤 아래 버튼으로 붙여넣기 모드를 시작하세요.",
+    "🧩 Legacy ChatGPT 수동 프롬프트를 생성했어요. 가능하면 Codex bridge나 model node를 사용하세요.\n답변을 받은 뒤 아래 버튼으로 붙여넣기 모드를 시작하세요.",
     {
       reply_markup: {
         inline_keyboard: [[
@@ -474,7 +490,18 @@ async function sendChatGPTPrompt(bot, chatId, jobId, question) {
       },
     }
   );
-  await sendLong(bot, chatId, prompt);
+  const promptPath = path.join(runDir(jobId), 'local_memory', 'chatgpt_manual_prompt.md');
+  try {
+    fs.mkdirSync(path.dirname(promptPath), { recursive: true });
+    fs.writeFileSync(promptPath, prompt, 'utf8');
+  } catch {}
+  if (typeof bot.sendDocument === 'function') {
+    try {
+      await bot.sendDocument(chatId, promptPath, { caption: 'ChatGPT manual prompt (.md)' });
+      return;
+    } catch {}
+  }
+  await sendLong(bot, chatId, clip(prompt, 3500));
 }
 
 function normalizeActionShape(raw) {

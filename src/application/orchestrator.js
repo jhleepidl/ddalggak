@@ -408,6 +408,96 @@ function ensureWorkflowRequiredRoles({ teamPlan = null, runtimeAgents = [], task
   };
 }
 
+
+function ensureImplementationReviewAndSynthesisRoles({ teamPlan = null, runtimeAgents = [], taskInterpretation = null, goal = "" } = {}) {
+  const nextSlots = [...asArray(teamPlan?.slots)];
+  const nextAgents = [...asArray(runtimeAgents)];
+  const roleSet = new Set(nextSlots.map((slot) => normalizeText(slot?.role_id || slot?.roleId, { lower: true })).filter(Boolean));
+  const agentRoleSet = new Set(nextAgents.map((agent) => normalizeText(agent?.role_id || agent?.roleId || agent?.role_label || agent?.roleLabel, { lower: true })).filter(Boolean));
+  const taskType = normalizeText(taskInterpretation?.task_type || taskInterpretation?.taskType, { lower: true });
+  const wantsCode = taskInterpretation?.wants_code === true || taskInterpretation?.wantsCode === true || taskType === 'code_change';
+  const upstreamCount = nextSlots.filter((slot) => normalizeText(slot?.role_id || slot?.roleId, { lower: true }) !== 'synthesizer').length;
+  const shouldAddReviewer = wantsCode && roleSet.has('builder') && !roleSet.has('reviewer');
+  const shouldAddSynthesizer = upstreamCount > 1 && !roleSet.has('synthesizer');
+  const addRole = ({ role, label, purpose, authorityProfileId, parallelizable = false, reason }) => {
+    let suffix = nextSlots.length + 1;
+    let slotId = `slot_${role}_${suffix}`;
+    const usedSlotIds = new Set(nextSlots.map((slot) => normalizeText(slot?.slot_id || slot?.slotId)).filter(Boolean));
+    while (usedSlotIds.has(slotId)) {
+      suffix += 1;
+      slotId = `slot_${role}_${suffix}`;
+    }
+    const slot = {
+      slot_id: slotId,
+      role_id: role,
+      purpose,
+      authority_profile_id: authorityProfileId,
+      parallelizable,
+      reviewer_required: false,
+      selection_reason: reason,
+      status: 'ready',
+    };
+    nextSlots.push(slot);
+    roleSet.add(role);
+    if (!agentRoleSet.has(role)) {
+      nextAgents.push({
+        instance_id: `inst_${role}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+        slot_id: slotId,
+        role_id: role,
+        role_label: role,
+        display_label: label,
+        synthesized: true,
+        fallback: true,
+        ephemeral: true,
+        status: 'ready',
+        attached_skill_ids: [],
+        attached_skills: [],
+        authority_profile_id: authorityProfileId,
+        selection_reason: reason,
+        assigned_goal: goal,
+      });
+      agentRoleSet.add(role);
+    }
+  };
+  let changed = false;
+  if (shouldAddReviewer) {
+    addRole({
+      role: 'reviewer',
+      label: 'Implementation Reviewer',
+      purpose: 'Review implementation changes before final delivery',
+      authorityProfileId: 'worker_readonly_review',
+      parallelizable: false,
+      reason: 'code_change_requires_review',
+    });
+    changed = true;
+  }
+  if (shouldAddSynthesizer) {
+    addRole({
+      role: 'synthesizer',
+      label: 'Delivery Synthesizer',
+      purpose: 'Assemble upstream findings into a concise final output',
+      authorityProfileId: 'worker_publish_guarded',
+      parallelizable: false,
+      reason: 'multiple_upstream_roles_require_synthesis',
+    });
+    changed = true;
+  }
+  if (!changed) return { team_plan: teamPlan, runtime_agents: runtimeAgents, changed: false };
+  return {
+    team_plan: normalizeTeamPlan({
+      ...(teamPlan || {}),
+      slots: nextSlots,
+      runtime_agents: nextAgents,
+      selection_explanations: [
+        ...asArray(teamPlan?.selection_explanations),
+        { subject_id: 'team_plan', reason: 'role_repair:review_or_synthesis' },
+      ],
+    }),
+    runtime_agents: nextAgents,
+    changed: true,
+  };
+}
+
 function ensureParallelResearchSlots({ teamPlan = null, runtimeAgents = [], taskInterpretation = null, goal = "" } = {}) {
   const interpretation = taskInterpretation && typeof taskInterpretation === "object" ? taskInterpretation : {};
   const demandGraph = interpretation.team_graph_librarian?.demand_graph
@@ -753,6 +843,7 @@ export function buildRuntimeOrchestration({
       goal: effectiveGoal,
       registry,
       availableToolIds: collectedToolIds,
+      auditOptions: jobId && runsDir ? { rootDir: process.cwd(), jobDir: `${runsDir}/${jobId}`, jobId } : null,
     })
     : {
       runtime_agents: teamBuild.runtime_agents,
@@ -994,6 +1085,59 @@ export function buildRuntimeOrchestration({
   if (parallelResearchRepair.changed) {
     teamPlan = reconcileTeamPlanRuntimeBindings(parallelResearchRepair.team_plan, { runtimeAgents: parallelResearchRepair.runtime_agents });
     runtimeAgents = asArray(teamPlan.runtime_agents);
+  }
+
+  const defaultRoleRepair = ensureImplementationReviewAndSynthesisRoles({
+    teamPlan,
+    runtimeAgents,
+    taskInterpretation: planningTaskInterpretation,
+    goal: effectiveGoal,
+  });
+  if (defaultRoleRepair.changed) {
+    teamPlan = reconcileTeamPlanRuntimeBindings(defaultRoleRepair.team_plan, { runtimeAgents: defaultRoleRepair.runtime_agents });
+    runtimeAgents = asArray(teamPlan.runtime_agents);
+  }
+
+  if (asArray(teamPlan?.slots).length === 0) {
+    let fallbackTeamBuild = asArray(teamBuild?.team_plan?.slots).length > 0
+      ? teamBuild
+      : buildTeamFromRegistry({
+          goal: effectiveGoal,
+          routeContext: normalizedRoute,
+          registry,
+          preferredRoles: synthesizedPreferredRoles.length > 0 ? synthesizedPreferredRoles : preferredRoles,
+          maxAgents: Math.max(1, Math.min(Math.floor(Number(maxAgents) || 6), 6)),
+          mode,
+          taskInterpretation: planningTaskInterpretation,
+        });
+    if (asArray(fallbackTeamBuild?.team_plan?.slots).length === 0) {
+      fallbackTeamBuild = buildTeamFromRegistry({
+        goal: effectiveGoal,
+        routeContext: normalizedRoute,
+        registry,
+        preferredRoles: synthesizedPreferredRoles.length > 0 ? synthesizedPreferredRoles : preferredRoles,
+        maxAgents: Math.max(1, Math.min(Math.floor(Number(maxAgents) || 6), 6)),
+        mode,
+        taskInterpretation: null,
+      });
+    }
+    const fallbackRuntimeAgents = runtimeAgents.length > 0
+      ? runtimeAgents
+      : asArray(presetResolution.runtime_agents).length > 0
+        ? presetResolution.runtime_agents
+        : asArray(fallbackTeamBuild.runtime_agents);
+    if (asArray(fallbackTeamBuild?.team_plan?.slots).length > 0) {
+      teamPlan = reconcileTeamPlanRuntimeBindings({
+        ...fallbackTeamBuild.team_plan,
+        task_interpretation: planningTaskInterpretation,
+        conversation_preferences: conversationPreferences || undefined,
+        runtime_agents: fallbackRuntimeAgents,
+        selection_explanations: combinedSelectionExplanations,
+      }, {
+        runtimeAgents: fallbackRuntimeAgents,
+      });
+      runtimeAgents = asArray(teamPlan.runtime_agents);
+    }
   }
 
   const validation = validateNormalizedTeamPlan(teamPlan);

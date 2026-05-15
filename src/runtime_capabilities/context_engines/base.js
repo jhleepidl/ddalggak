@@ -120,16 +120,18 @@ export class ContextEngineBase {
     return dir;
   }
 
-  appendLocalLog(jobId, fileName, record = {}) {
+  appendLocalLog(jobId, fileName, record = {}, { force = false } = {}) {
     const dir = this.ensureLocalMemoryDir(jobId);
     if (!dir) return;
     const name = String(fileName || "").trim() || "context_meta.jsonl";
-    if (!shouldWriteLocalLog(name)) return;
+    if (!force && !shouldWriteLocalLog(name)) return;
+    const rowSource = asObject(record);
     const p = path.join(dir, name);
     const row = {
       ts: new Date().toISOString(),
-      ...asObject(record),
+      ...rowSource,
     };
+    delete row.__force_write;
     try {
       fs.appendFileSync(p, `${JSON.stringify(row)}\n`, "utf8");
     } catch {}
@@ -170,7 +172,7 @@ export class ContextEngineBase {
       goal: String(goal || "").trim() || undefined,
       run_meta: asObject(runMeta),
       context_meta: asObject(meta),
-    });
+    }, { force: true });
     return true;
   }
 }

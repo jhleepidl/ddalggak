@@ -1,12 +1,12 @@
 {
   "nodes": [
     {
-      "id": "local_gemma4",
-      "label": "Local Gemma 4",
+      "id": "local_ollama_gemma3",
+      "label": "Local Ollama Gemma 3",
       "provider": "openai_compatible",
       "runtime": "ollama",
-      "base_url": "http://localhost:11434/v1",
-      "model": "gemma4:31b",
+      "base_url": "http://localhost:11434",
+      "model": "gemma3:12b",
       "enabled": false,
       "capabilities": {
         "chat": true,
@@ -16,7 +16,7 @@
       "limits": {
         "context_tokens": 32768,
         "max_concurrent": 1,
-        "timeout_ms": 90000
+        "timeout_ms": 120000
       },
       "permissions": {
         "memory_read": "project_scoped",
@@ -24,7 +24,167 @@
         "workspace_read": true,
         "workspace_write": false
       },
-      "role_bias": ["research", "review", "draft", "local_private_reasoning"]
+      "cost_profile": {
+        "tier": "free",
+        "billing": "local",
+        "notes": "Local hardware cost only"
+      },
+      "latency_profile": {
+        "tier": "medium",
+        "startup": "cold_start_possible"
+      },
+      "quality_profile": {
+        "tier": "standard",
+        "coding": "standard"
+      },
+      "privacy_profile": {
+        "tier": "local_private",
+        "data_boundary": "local_device",
+        "sends_context_off_device": false
+      },
+      "routing": {
+        "priority": 70,
+        "prefer_for": [
+          "private_context",
+          "review",
+          "draft",
+          "researcher",
+          "reviewer"
+        ],
+        "avoid_for": [
+          "deployment"
+        ]
+      },
+      "role_bias": [
+        "research",
+        "review",
+        "draft",
+        "local_private_reasoning"
+      ]
+    },
+    {
+      "id": "remote_ollama_coder",
+      "label": "Remote Ollama Coder Box",
+      "provider": "openai_compatible",
+      "runtime": "ollama",
+      "base_url": "http://192.168.1.50:11434",
+      "model": "qwen2.5-coder:14b",
+      "enabled": false,
+      "capabilities": {
+        "chat": true,
+        "structured_json": true,
+        "code": true
+      },
+      "limits": {
+        "context_tokens": 32768,
+        "max_concurrent": 1,
+        "timeout_ms": 180000
+      },
+      "permissions": {
+        "memory_read": "project_scoped",
+        "memory_write": "write_intent_only",
+        "workspace_read": true,
+        "workspace_write": false
+      },
+      "cost_profile": {
+        "tier": "free",
+        "billing": "local_network"
+      },
+      "latency_profile": {
+        "tier": "slow"
+      },
+      "quality_profile": {
+        "tier": "good",
+        "coding": "good"
+      },
+      "privacy_profile": {
+        "tier": "trusted_private",
+        "data_boundary": "user_controlled_remote",
+        "sends_context_off_device": true,
+        "trusted_context": true,
+        "allow_private_context": true,
+        "network_scope": "lan_or_vpn"
+      },
+      "routing": {
+        "priority": 60,
+        "prefer_for": [
+          "private_context",
+          "code_review",
+          "builder",
+          "reviewer"
+        ],
+        "avoid_for": [
+          "public_internet_without_auth"
+        ]
+      },
+      "role_bias": [
+        "builder",
+        "review",
+        "code"
+      ],
+      "model_catalog": {
+        "parameter_size": "14B-ish",
+        "confidence": "operator_estimate"
+      }
+    },
+    {
+      "id": "cheap_api_small",
+      "label": "Cheap API Small Model",
+      "provider": "openai_compatible",
+      "runtime": "openai_compatible",
+      "base_url": "https://api.example.com/v1",
+      "model": "small-chat-model",
+      "enabled": false,
+      "capabilities": {
+        "chat": true,
+        "structured_json": true,
+        "code": false
+      },
+      "limits": {
+        "context_tokens": 8192,
+        "max_concurrent": 2,
+        "timeout_ms": 60000
+      },
+      "permissions": {
+        "memory_read": "scoped_projection_only",
+        "memory_write": "write_intent_only",
+        "workspace_read": false,
+        "workspace_write": false
+      },
+      "cost_profile": {
+        "tier": "cheap",
+        "billing": "metered",
+        "input_per_1m_usd": 0.15,
+        "output_per_1m_usd": 0.6
+      },
+      "latency_profile": {
+        "tier": "fast"
+      },
+      "quality_profile": {
+        "tier": "draft"
+      },
+      "privacy_profile": {
+        "tier": "external_api",
+        "data_boundary": "external_provider",
+        "sends_context_off_device": true
+      },
+      "routing": {
+        "priority": 40,
+        "prefer_for": [
+          "draft",
+          "summary",
+          "low_risk"
+        ],
+        "avoid_for": [
+          "private_context",
+          "credential",
+          "high_risk_claim"
+        ]
+      },
+      "role_bias": [
+        "draft",
+        "summary"
+      ]
     }
   ]
 }

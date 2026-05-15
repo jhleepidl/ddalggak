@@ -180,6 +180,7 @@ import {
   extractExecutionRequirements,
   formatExecutionRequirementsBlock,
   mergeExecutionRequirements,
+  resolveExecutionRequirementsForRuntime,
 } from "./execution_requirements.js";
 import { normalizeRuntimeExecutionPolicy } from "./runtime_execution_policy.js";
 import { resolveProviderRuntimeOptions } from "./provider_runtime_policy.js";
@@ -198,6 +199,11 @@ import * as gocRuntime from "./telegram_goc_runtime.js";
 import * as runtimeUi from "./telegram_runtime_ui.js";
 import * as runtimeUiHelpers from "./telegram_status_notifications.js";
 import { runAgentProviderExecution } from "./telegram_provider_execution.js";
+import { appendAgentActivityEvent, appendAgentHandoffEvent, appendExecutionPolicyResolution } from "./agent_activity_stream.js";
+import { compileAgentContextProjection, attachCompiledProjectionToPreparedContext } from "./context_projection_compiler.js";
+import { extractContextWriteIntentsFromAgentResult } from "./context_write_intent_extractor.js";
+import { commitContextWriteIntentsBatch } from "./context_write_batcher.js";
+import { buildHandoffDeltaFromAgentResult, appendHandoffDelta } from "./handoff_delta_store.js";
 import { createGocTrackingIo } from "./telegram_goc_tracking_io.js";
 
 function normalizeForceMode(raw) {
@@ -981,10 +987,21 @@ function buildDirectAnswerOutputGuide(rawGuide = '', { userLocale = 'ko' } = {})
   ].join('\\n');
 }
 
-function buildArtifactTurnPolicyBlock(requirements = {}, { hasArtifactContract = false } = {}) {
+function buildArtifactTurnPolicyBlock(requirements = {}, { hasArtifactContract = false, runtimeExecutionPolicy = null, roleId = '' } = {}) {
   const row = requirements && typeof requirements === 'object' ? requirements : {};
   if (hasArtifactContract) return '';
+  const policy = normalizeRuntimeExecutionPolicy(runtimeExecutionPolicy || {});
+  const taskLoop = policy.execution_mode === 'task_loop' || policy.workflow_contract?.workflow_kind === 'bounded_continuous_loop';
   const strictMemoryOnly = row.artifact_delivery_forbidden || row.memory_only_requested;
+  if (taskLoop && !strictMemoryOnly) {
+    return [
+      '[TASK OUTPUT POLICY]',
+      '- Task-loop mode: workspace-internal code/file changes are allowed when needed for implementation, diagnosis, tests, or verification.',
+      '- Artifact delivery/publish is allowed only when the task/build actually requires it; otherwise report changed paths and verification notes in chat.',
+      '- Approval boundary still applies to deployment, credential/API binding, destructive writes, large irreversible changes, financial recommendation logic, and canonical memory switches.',
+      roleId ? `- active_role: ${String(roleId || '').trim().toLowerCase()}` : '',
+    ].filter(Boolean).join('\n');
+  }
   return [
     '[TASK OUTPUT POLICY]',
     strictMemoryOnly
@@ -1026,7 +1043,8 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const concurrencyKey = String(opts.concurrencyKey || "").trim() || `job:${String(jobId || "").trim()}`;
   const preferredModel = String(opts.model || "").trim();
   const providedRoleMemo = String(opts.roleMemo || opts.role_memo || '').trim();
-  const roleMemo = providedRoleMemo || memory.getAgentRole("gemini");
+  const boundGeminiRoleMemo = memory.getAgentRole("gemini");
+  const roleMemo = providedRoleMemo || boundGeminiRoleMemo;
   const roleKey = String(opts.roleId || 'researcher').trim().toLowerCase();
   const agentKey = String(opts.agentId || 'gemini').trim().toLowerCase() || 'gemini';
   const cleanUserRequest = String(opts.userRequest || opts.user_request || extractLatestUserRequestFromTaskText(goal) || '').trim();
@@ -1056,11 +1074,23 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
       provider: "gemini",
       workspaceRoot: workspacePath,
     });
-  const artifactOutputRequirements = applyRuntimeRulePolicy(mergeExecutionRequirements(
-    extractExecutionRequirements(cleanUserRequest),
-    extractExecutionRequirements(rawGoal),
-  ), opts.chatRuntimeRules || opts.chat_runtime_rules || '');
-  const artifactPolicyBlock = buildArtifactTurnPolicyBlock(artifactOutputRequirements, { hasArtifactContract: artifactOutputRequirements.artifact_delivery_requested === true });
+  const artifactOutputRequirements = resolveExecutionRequirementsForRuntime(
+    applyRuntimeRulePolicy(mergeExecutionRequirements(
+      extractExecutionRequirements(cleanUserRequest),
+      extractExecutionRequirements(rawGoal),
+    ), opts.chatRuntimeRules || opts.chat_runtime_rules || '', { runtimeExecutionPolicy }),
+    { runtimeExecutionPolicy, roleId: roleKey, taskText: `${cleanUserRequest}\n${rawGoal}` },
+  );
+  const artifactPolicyBlock = buildArtifactTurnPolicyBlock(artifactOutputRequirements, { hasArtifactContract: artifactOutputRequirements.artifact_delivery_requested === true, runtimeExecutionPolicy, roleId: roleKey });
+  appendExecutionPolicyResolution({
+    jobDir: runDir(jobId),
+    source: 'geminiResearch',
+    agentId: agentKey,
+    roleId: roleKey,
+    runtimeExecutionPolicy,
+    requirements: artifactOutputRequirements,
+    decision: artifactOutputRequirements.task_loop_workspace_write_allowed ? 'task_loop_workspace_write_allowed' : (artifactOutputRequirements.artifact_delivery_forbidden ? 'artifact_forbidden' : 'chat_default'),
+  });
   const includeArtifactContext = artifactOutputRequirements.artifact_delivery_requested === true;
   const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, {
     limitPerBucket: 3,
@@ -1225,8 +1255,20 @@ async function codexImplement(jobId, instruction, signal = null, opts = {}) {
   const workspacePath = runWorkspaceDir(jobId);
   const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, { limitPerBucket: 5 });
   const kbContract = buildAgentKnowledgeBaseBlock(jobId, { provider: "codex", roleId: String(opts.roleId || 'builder').trim().toLowerCase(), agentId: String(opts.agentId || 'codex').trim().toLowerCase() || 'codex', detailLevel: "compact" });
-  const executionRequirements = mergeExecutionRequirements(extractExecutionRequirements(instruction), extractExecutionRequirements(opts.goal || ''));
-  const allowDirectExecution = executionRequirements.direct_execution_requested || executionRequirements.shell_execution_requested || executionRequirements.artifact_build_requested;
+  const executionRequirements = resolveExecutionRequirementsForRuntime(
+    mergeExecutionRequirements(extractExecutionRequirements(instruction), extractExecutionRequirements(opts.goal || '')),
+    { runtimeExecutionPolicy, roleId: String(opts.roleId || 'builder').trim().toLowerCase(), taskText: `${instruction}\n${opts.goal || ''}` },
+  );
+  const allowDirectExecution = executionRequirements.direct_execution_requested || executionRequirements.shell_execution_requested || executionRequirements.artifact_build_requested || executionRequirements.task_loop_workspace_write_allowed === true || executionRequirements.workspace_write_requested === true;
+  appendExecutionPolicyResolution({
+    jobDir: runDir(jobId),
+    source: 'codexImplement',
+    agentId: String(opts.agentId || 'codex').trim().toLowerCase() || 'codex',
+    roleId: String(opts.roleId || 'builder').trim().toLowerCase() || 'builder',
+    runtimeExecutionPolicy,
+    requirements: executionRequirements,
+    decision: allowDirectExecution ? 'direct_workspace_execution_allowed' : 'verification_deferred',
+  });
   const cliSupport = ensureCliWorkspaceSupportFiles(jobId, { provider: "codex", roleMemo, kbContract, instruction, goal: instruction, runtimeExecutionPolicy, providerOptions, allowDirectExecution });
   const compactInstruction = compactTaskText(instruction, { maxChars: 2800 });
   const executionRequirementsBlock = formatExecutionRequirementsBlock(executionRequirements);
@@ -1342,11 +1384,23 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
     audienceLabel: 'agent failover assist',
     runtimePolicy: opts.runtime?.harnessRuntimePolicy || opts.runtime?.openharnessInstallState?.runtime_policy || null,
   });
-  const executionRequirements = applyRuntimeRulePolicy(mergeExecutionRequirements(
-    extractExecutionRequirements(cleanUserRequest),
-    extractExecutionRequirements(instruction),
-  ), opts.chatRuntimeRules || opts.chat_runtime_rules || '');
-  const artifactPolicyBlock = buildArtifactTurnPolicyBlock(executionRequirements, { hasArtifactContract: executionRequirements.artifact_delivery_requested === true });
+  const executionRequirements = resolveExecutionRequirementsForRuntime(
+    applyRuntimeRulePolicy(mergeExecutionRequirements(
+      extractExecutionRequirements(cleanUserRequest),
+      extractExecutionRequirements(instruction),
+    ), opts.chatRuntimeRules || opts.chat_runtime_rules || '', { runtimeExecutionPolicy }),
+    { runtimeExecutionPolicy, roleId: roleKey, taskText: `${cleanUserRequest}\n${instruction}` },
+  );
+  const artifactPolicyBlock = buildArtifactTurnPolicyBlock(executionRequirements, { hasArtifactContract: executionRequirements.artifact_delivery_requested === true, runtimeExecutionPolicy, roleId: roleKey });
+  appendExecutionPolicyResolution({
+    jobDir: runDir(jobId),
+    source: 'codexAssist',
+    agentId: agentKey,
+    roleId: roleKey,
+    runtimeExecutionPolicy,
+    requirements: executionRequirements,
+    decision: executionRequirements.task_loop_workspace_write_allowed ? 'task_loop_workspace_write_allowed' : (executionRequirements.artifact_delivery_forbidden ? 'artifact_forbidden' : 'chat_default'),
+  });
   const includeArtifactContext = executionRequirements.artifact_delivery_requested === true;
   const activeArtifactContext = includeArtifactContext ? formatActiveArtifactContext(runDir(jobId), { maxChars: 1200, limit: 4 }) : '';
   const activeUserFactContext = formatActiveUserFactContext(runDir(jobId), { maxChars: 1600 });
@@ -2312,6 +2366,40 @@ function buildSupervisorExecutionCallbacks({
         slotId,
         scopeId,
       });
+    let activePreparedContext = prepared;
+    try {
+      const agentConfigForProjection = cleanAgentId
+        ? (findAgentConfigInRuntime(cleanAgentId, runtime) || findAgentConfig(cleanAgentId) || null)
+        : null;
+      const modelNodeForProjection = [
+        String(agentConfigForProjection?.provider || '').trim(),
+        String(agentConfigForProjection?.model || '').trim(),
+      ].filter(Boolean).join(':');
+      const compiledProjection = compileAgentContextProjection({
+        jobId,
+        chatId: String(chatId || ''),
+        threadId,
+        agentId: cleanAgentId,
+        roleId: roleKey || cleanAgentId,
+        taskType: actionInputs?.task_type || actionInputs?.taskType || '',
+        modelNode: modelNodeForProjection,
+        goal: cleanGoal,
+        baseContextText: String(prepared?.final_prompt || '').trim(),
+        baseContextInfo: prepared?.context_info && typeof prepared.context_info === 'object' ? prepared.context_info : {},
+        budgetTokens: Number(prepared?.context_info?.budgetTokens || prepared?.context_info?.lens_budget_tokens || 1800),
+        rootDir: process.cwd(),
+        runDir: safeRunDir(jobId),
+      });
+      activePreparedContext = attachCompiledProjectionToPreparedContext(prepared, compiledProjection);
+    } catch (projectionError) {
+      activePreparedContext = {
+        ...(prepared || {}),
+        context_info: {
+          ...(prepared?.context_info && typeof prepared.context_info === 'object' ? prepared.context_info : {}),
+          context_projection_error: String(projectionError?.message ?? projectionError),
+        },
+      };
+    }
     const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
     const agencyRoleOverlay = resolveAgencyRoleOverlay(
       actionInputs?.agency_role_overlay,
@@ -2323,15 +2411,27 @@ function buildSupervisorExecutionCallbacks({
       roleId: roleKey,
       runtimeExecutionPolicy,
     });
-    const executionRequirements = applyRuntimeRulePolicy(mergeExecutionRequirements(
-      extractExecutionRequirements(cleanGoal),
-      extractExecutionRequirements(detailContext),
-      extractExecutionRequirements(actionInputs?.user_request || actionInputs?.userRequest || ''),
-    ), actionInputs?._runtime_rules_text || actionInputs?.runtime_rules_text || '');
+    const executionRequirements = resolveExecutionRequirementsForRuntime(
+      applyRuntimeRulePolicy(mergeExecutionRequirements(
+        extractExecutionRequirements(cleanGoal),
+        extractExecutionRequirements(detailContext),
+        extractExecutionRequirements(actionInputs?.user_request || actionInputs?.userRequest || ''),
+      ), actionInputs?._runtime_rules_text || actionInputs?.runtime_rules_text || '', { runtimeExecutionPolicy }),
+      { runtimeExecutionPolicy, roleId: roleKey, taskText: `${cleanGoal}\n${detailContext}\n${actionInputs?.user_request || actionInputs?.userRequest || ''}` },
+    );
     const deliveryRequirementsBlock = formatExecutionRequirementsBlock(executionRequirements);
-    const artifactPolicyBlock = buildArtifactTurnPolicyBlock(executionRequirements, { hasArtifactContract: executionRequirements.artifact_delivery_requested === true });
+    const artifactPolicyBlock = buildArtifactTurnPolicyBlock(executionRequirements, { hasArtifactContract: executionRequirements.artifact_delivery_requested === true, runtimeExecutionPolicy, roleId: roleKey });
+    appendExecutionPolicyResolution({
+      jobDir: safeRunDir(jobId),
+      source: 'runSingleAgent',
+      agentId: cleanAgentId,
+      roleId: roleKey,
+      runtimeExecutionPolicy,
+      requirements: executionRequirements,
+      decision: executionRequirements.task_loop_workspace_write_allowed ? 'task_loop_workspace_write_allowed' : (executionRequirements.artifact_delivery_forbidden ? 'artifact_forbidden' : 'chat_default'),
+    });
     const finalPrompt = [
-      String(prepared?.final_prompt || "").trim() || cleanGoal,
+      String(activePreparedContext?.final_prompt || "").trim() || cleanGoal,
       promptRoleSummary ? `[ROLE SUMMARY]\n${clip(promptRoleSummary, 900)}` : "",
       promptIterationDelta ? `[ITERATION DELTA]\n${clip(promptIterationDelta, 700)}` : "",
       deliveryRequirementsBlock ? `[DELIVERY REQUIREMENTS]\n${deliveryRequirementsBlock}` : "",
@@ -2350,8 +2450,8 @@ function buildSupervisorExecutionCallbacks({
             prompt: finalPrompt,
             inputs: {
               ...(actionInputs && typeof actionInputs === "object" ? actionInputs : {}),
-              _prompt_context_info: prepared?.context_info && typeof prepared.context_info === "object"
-                ? prepared.context_info
+              _prompt_context_info: activePreparedContext?.context_info && typeof activePreparedContext.context_info === "object"
+                ? activePreparedContext.context_info
                 : undefined,
             },
           },
@@ -2403,10 +2503,10 @@ function buildSupervisorExecutionCallbacks({
           agent_id: cleanAgentId,
           role_id: roleKey || cleanAgentId,
           prompt_text: finalPrompt,
-          prepared_context_tokens: prepared?.context_info?.compiled_tokens_estimate,
-          prepared_context_chars: prepared?.context_info?.compiled_chars,
+          prepared_context_tokens: activePreparedContext?.context_info?.compiled_tokens_estimate,
+          prepared_context_chars: activePreparedContext?.context_info?.compiled_chars,
           components: {
-            assembled_context: String(prepared?.final_prompt || '').trim() || cleanGoal,
+            assembled_context: String(activePreparedContext?.final_prompt || '').trim() || cleanGoal,
             role_summary: promptRoleSummary,
             agency_overlay: buildAgencyRoleOverlayPromptBlock(agencyRoleOverlay, { maxBullets: 4 }),
             iteration_delta: promptIterationDelta,
@@ -2432,6 +2532,39 @@ function buildSupervisorExecutionCallbacks({
         slotId,
         scopeId,
       });
+      try {
+        const extractedIntents = extractContextWriteIntentsFromAgentResult({
+          agentId: cleanAgentId,
+          roleId: roleKey || cleanAgentId,
+          goal: cleanGoal,
+          result,
+          preparedContext: activePreparedContext,
+          deliveryRequirements: executionRequirements,
+        });
+        if (extractedIntents.length > 0) {
+          commitContextWriteIntentsBatch(extractedIntents, {
+            rootDir: process.cwd(),
+            jobId,
+            runDir: safeRunDir(jobId),
+          });
+        }
+        const handoffDelta = buildHandoffDeltaFromAgentResult({
+          agentId: cleanAgentId,
+          roleId: roleKey || cleanAgentId,
+          goal: cleanGoal,
+          result,
+          preparedContext: activePreparedContext,
+        });
+        if (handoffDelta?.delta?.output_summary) {
+          appendHandoffDelta(handoffDelta, {
+            rootDir: process.cwd(),
+            jobId,
+            runDir: safeRunDir(jobId),
+          });
+        }
+      } catch {
+        // Context-substrate writeback is best-effort; agent execution must remain on the hot path.
+      }
       if (String(result?.output || "").trim()) {
         await sendLong(
           bot,
@@ -5454,6 +5587,16 @@ async function executeAgentRun(
     const rolePrompt = String(agent.prompt || "").trim();
     const roleId = String(act?.inputs?.role_id || act?.inputs?.roleId || agent.role || agent.role_id || agent.roleId || "").trim().toLowerCase();
     const displayLabel = String(act?.inputs?.display_label || act?.inputs?.displayLabel || act?.inputs?.agent_name || act?.inputs?.agentName || agent?.name || agentId).trim();
+    appendAgentActivityEvent({
+      jobDir: safeRunDir(jobId),
+      event: 'agent_start',
+      agentId,
+      roleId,
+      provider,
+      model,
+      summary: displayLabel || agentId,
+      metadata: { action_type: act.type || 'agent_run' },
+    });
     const publishContractCheck = enforceAgentPublishContract(jobId, {
       runtime,
       agentId,
@@ -5536,7 +5679,7 @@ ${output}
       jobs.appendConversation(jobId, agentId, output, { kind: "agent_run", provider, model, mode });
     };
 
-    return await runAgentProviderExecution({
+    const providerResult = await runAgentProviderExecution({
       provider,
       agentId,
       agent,
@@ -5584,6 +5727,25 @@ ${output}
         summarizeUserSafeGocFallbackReason: runtimeUiHelpers.summarizeUserSafeGocFallbackReason,
       },
     });
+    appendAgentActivityEvent({
+      jobDir: safeRunDir(jobId),
+      event: 'agent_complete',
+      agentId,
+      roleId,
+      provider: providerResult?.provider || provider,
+      model: providerResult?.model || model,
+      summary: String(providerResult?.output || '').slice(0, 500),
+      metadata: { mode: providerResult?.mode || undefined, failover: providerResult?.failover || undefined },
+    });
+    appendAgentHandoffEvent({
+      jobDir: safeRunDir(jobId),
+      fromAgent: agentId,
+      toAgent: act?.inputs?.final_synthesis === true ? 'user' : 'next_agent',
+      messageType: act?.inputs?.final_synthesis === true ? 'final_synthesis' : 'agent_output',
+      summary: String(providerResult?.output || '').slice(0, 500),
+      payload: { provider: providerResult?.provider || provider, model: providerResult?.model || model },
+    });
+    return providerResult;
   } finally {
     restoreActor();
   }

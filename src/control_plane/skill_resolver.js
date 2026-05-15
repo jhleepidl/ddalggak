@@ -2,6 +2,7 @@ import { normalizeStringList } from "../shared/normalize.js";
 import { normalizeSkillAttachmentList } from "../domain/skill_attachment.js";
 import { normalizeRoleId } from "../compatibility/legacy_roles.js";
 import { hasExplicitSkillDomainMatch, requiresExplicitDomainMatch } from "../shared/skill_relevance.js";
+import { recordSkillResolutionAudit } from "../application/skill_rule_activation_audit.js";
 
 function asArray(raw) {
   return Array.isArray(raw) ? raw : [];
@@ -40,9 +41,11 @@ function roleCompatibilityScore(role = "", compatibleRoles = []) {
 function historicalScore(skill = {}) {
   const successRate = Number(skill?.ranking_metadata?.success_rate);
   const usageCount = Number(skill?.ranking_metadata?.usage_count);
+  const reuseScore = Number(skill?.ranking_metadata?.reuse_score ?? skill?.performance?.reuse_score);
   const score = (
     (Number.isFinite(successRate) ? Math.max(0, Math.min(1, successRate)) * 12 : 0)
     + (Number.isFinite(usageCount) ? Math.min(8, Math.log10(Math.max(1, usageCount + 1)) * 4) : 0)
+    + (Number.isFinite(reuseScore) ? Math.max(0, Math.min(100, reuseScore)) / 10 : 0)
   );
   return Math.round(score * 10) / 10;
 }
@@ -224,6 +227,8 @@ export class SkillResolver {
     taskInterpretation = {},
     slot = {},
     availableToolIds = [],
+    auditOptions = null,
+    slotId = '',
   } = {}) {
     const normalizedRole = normalizeRoleId(roleType);
     const candidates = this._listSkills(normalizedRole);
@@ -298,13 +303,26 @@ export class SkillResolver {
     }
 
     const pruned = pruneConflicts(selectedRows, this.registry).slice(0, this.maxSkillsPerRole);
+    const attachments = normalizeSkillAttachmentList(pruned.map((row) => row.attachment));
+    const scoredCandidates = scored.slice(0, 8).map((row) => ({
+      skill_id: row.skill.id,
+      score: row.score,
+      reasons: row.reasons,
+      reuse_score: row.skill?.performance?.reuse_score ?? row.skill?.ranking_metadata?.reuse_score,
+    }));
+    if (auditOptions) {
+      recordSkillResolutionAudit({
+        roleId: normalizedRole,
+        slotId,
+        taskType: taskInterpretation?.task_type || taskInterpretation?.taskType || '',
+        selected: attachments,
+        candidates: scoredCandidates,
+        auditOptions,
+      });
+    }
     return {
-      attachments: normalizeSkillAttachmentList(pruned.map((row) => row.attachment)),
-      scored_candidates: scored.slice(0, 8).map((row) => ({
-        skill_id: row.skill.id,
-        score: row.score,
-        reasons: row.reasons,
-      })),
+      attachments,
+      scored_candidates: scoredCandidates,
     };
   }
 
@@ -315,6 +333,7 @@ export class SkillResolver {
     contextHints = [],
     taskInterpretation = {},
     availableToolIds = [],
+    auditOptions = null,
   } = {}) {
     const plan = teamPlan && typeof teamPlan === "object" ? teamPlan : {};
     const slots = Array.isArray(plan.slots) ? plan.slots : [];
@@ -342,6 +361,8 @@ export class SkillResolver {
         taskInterpretation,
         slot,
         availableToolIds,
+        auditOptions,
+        slotId: String(slot.slot_id || roleType),
       });
       slotSkillMap[String(slot.slot_id || roleType)] = resolved.attachments;
       roleSkillMap[roleType] = resolved.attachments;

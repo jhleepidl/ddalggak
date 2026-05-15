@@ -45,8 +45,29 @@ import { formatMemoryMaterializationPlanForTelegram, loadLatestMemoryMaterializa
 import { createShadowMemoryModule, findMaterializationCandidate, formatShadowMemoryModuleListForTelegram, formatShadowMemoryModuleResultForTelegram, listShadowMemoryModules } from '../../application/memory_materialization_store.js';
 import { buildClaimEvidenceLedger, buildPressureOverview, buildRuntimeReviewQueue, formatClaimEvidenceForTelegram, formatPressureOverviewForTelegram, formatReviewQueueForTelegram } from '../../application/runtime_review_inspector.js';
 import { listModelNodes } from '../../application/model_node_registry.js';
+import { summarizeModelCatalogEntry } from '../../application/model_node_catalog.js';
+import { discoverCodexCliModelNodes, discoverGeminiCliModelNodes, discoverOllamaModelNodes } from '../../application/model_node_discovery.js';
+import { refreshModelCatalog } from '../../application/model_catalog_refresh.js';
 import { listModelNodesWithHealth } from '../../application/model_node_health.js';
 import { readRecentModelNodeUsage } from '../../application/model_node_usage_log.js';
+import { listLocalSkillPackages } from '../../application/local_skill_catalog.js';
+import { formatExternalSkillRuleImportResult, importExternalSkillRuleSource } from '../../application/external_skill_rule_importer.js';
+import { formatSkillRulePerformanceSummary, readSkillRulePerformanceStore } from '../../application/skill_rule_performance.js';
+import { formatSemanticBoardCards, formatSemanticBoardSummary, importSemanticBoardSource, mirrorSkillPerformanceToSemanticBoard, mirrorSkillRuleImportToSemanticBoard, mirrorLocalSkillCatalogToSemanticBoard, readSemanticBoard, buildPromptProjectionFromBoard, runtimeRuleToSemanticCard, upsertSemanticBoardCards } from '../../application/semantic_board.js';
+import { buildSemanticBoardConsistencyReport, formatSemanticBoardRepair, formatSemanticBoardValidation, repairSemanticBoardStore, validateSemanticBoardStore } from '../../application/semantic_board_validator.js';
+import { commitContextWriteIntent, compactContextSubstrate, formatContextSubstrateSummary, getContextProjection, listContextOperations, mirrorContextSubstrateToSemanticBoard, mirrorSemanticBoardToContextSubstrate, summarizeContextSubstrate } from '../../application/context_substrate_store.js';
+import { selectModelNodeForTask } from '../../application/model_node_selector.js';
+import { isChatGptManualFallbackEnabled } from '../../application/chatgpt_provider_bridge.js';
+import {
+  buildAgentPackageFromSession,
+  findAgentPackage,
+  formatAgentPackage,
+  formatAgentPackageRegistry,
+  installAgentPackageToSession,
+  readAgentPackageRegistry,
+  saveAgentPackageToRegistry,
+  sanitizeAgentPackage,
+} from '../../application/agent_package_runtime.js';
 import {
   buildAgentRoomProfile,
   buildAgentRoomSuggestionMessage,
@@ -59,6 +80,7 @@ import {
 } from '../../application/agent_room_profile.js';
 import { extractTeamCreationSignals } from '../../application/team_signal_extractor.js';
 import { buildTeamWorkflowContract, summarizeTeamWorkflowContract } from '../../application/team_workflow_contract.js';
+import { buildWorkflowRuntimeExecutionPatch } from '../../application/workflow_execution_contract.js';
 import {
   buildWatchTaskContract,
   ensureWatchTaskContract,
@@ -78,6 +100,8 @@ const HELP_TEXT = [
   "- /memory: memory topology/pressure/proposal 상태 요약",
   "- /rule <자연어 지침>: 명시적 runtime rule 추가",
   "- /skill: skill 상태 보기",
+  "- /board: semantic memory/skill/rule board 요약",
+  "- /context: primitive context substrate/MVCC snapshot 요약",
   "- /goc: GoC sync/review 링크와 상태 보기",
   "- /status: 지금 진행 상황 보기",
   "- /artifacts [limit]: 결과물 보기",
@@ -94,7 +118,10 @@ const ADVANCED_HELP_TEXT = [
   "- /credential ...: credential 바인딩/확인",
   "- /task pause|resume|stop|approve: active loop task 제어",
   "- /agents use <roles>: Agent Room 기본 역할 적용",
-  "- /agents reset: Agent Room 설정 초기화",
+  "- /agents reset: Agent Room 초기화",
+  "- /agents export: 현재 Agent Room을 portable package JSON으로 내보내기",
+  "- /agents packages: 저장된 agent package 목록",
+  "- /agents clone <package_id>: 저장된 package를 이 채팅방에 설치",
   "- /team: legacy/advanced alias. 일반 사용은 /agents 권장",
   "- /team more: team topology 고급 명령 보기",
   "- /review approve|reject <reason>: 대기 중인 검토/승인 항목 처리",
@@ -102,16 +129,19 @@ const ADVANCED_HELP_TEXT = [
   "- /memory debug <show|md|kb|topology|pressure|evidence|review|materialize-preview|modules>: 개발/진단용 상세 조회",
   "- /settings ...: legacy alias, 가능하면 /memory 또는 GoC 사용",
   "- /skills 또는 /skill: 현재/예정 agent roster와 대표 skill 보기",
-  "- /models: 연결된 로컬/API model node 보기",
+  "- /skill list|score|import <path|json>: skill catalog/score/import",
+  "- /board: semantic memory/skill/rule board 요약",
+  "- /context: primitive context substrate/MVCC snapshot 요약",
+  "- /rule import <path|json>: 외부 rule package import",
+  "- /models: 연결된 로컬/API/CLI model node 보기",
   "- /tools: 현재 job의 tool 상태 보기",
   "- /upload (+파일 첨부) [메모]: 실행 없이 업로드만 저장",
   "- /chat [--debug] <message>|reset: supervisor chat 실행 또는 세션 초기화",
   "- /rule <자연어 지침>: chat-level agent/runtime 지침 반영 (상세 편집은 GoC)",
   "- /run <goal>: goal 기반 실행 시작",
   "- /continue <jobId>: 기존 job 이어서 실행",
-  "- /gptprompt <jobId> <question>: GPT 확인용 프롬프트 생성",
-  "- /gptapply [jobId]: GPT 응답 적용",
-  "- /gptdone: GPT paste 대기 모드 종료",
+  "- /models refresh: Gemini/Codex/Ollama catalog 즉시 갱신",
+  "- /agents export|publish-candidate|packages|clone <id>: agent package 공유/설치",
   "- /goc history push: GoC Board용 raw history snapshot 동기화",
   "- /goc candidate approve <nodeId> [publish]: Board candidate 승격",
   "- /improve <ddalggak|goc> <instruction>: forge 기준 self-improvement job 생성",
@@ -189,6 +219,10 @@ const AGENTS_HELP_TEXT = [
   "- /agents: 이 채팅방의 Agent Room 보기",
   "- /agents suggest <목표>: 목표에 맞는 agent 구성 추천",
   "- /agents use planner,builder,reviewer: 기본 agent 역할 적용",
+  "- /agents export: 현재 Agent Room을 portable package JSON으로 내보내기",
+  "- /agents publish-candidate: 공유 전 검토용 package candidate 생성",
+  "- /agents packages: 저장된 agent package 목록",
+  "- /agents clone <package_id>: package를 이 채팅방에 설치",
   "- /agents reset: Agent Room 초기화",
   "- /team: legacy/advanced alias. 일반 사용은 /agents 권장",
 ].join("\n");
@@ -627,6 +661,57 @@ export function createTelegramCommandHandler(deps = {}) {
     return chatSessionStore.upsert(chatId, (session) => ({ ...session, runtime_rules: [] }));
   }
 
+  function formatLocalSkillCatalogMessage({ rootDir = process.cwd() } = {}) {
+    const skills = listLocalSkillPackages({ rootDir });
+    if (skills.length === 0) {
+      return [
+        'Local skill catalog is empty.',
+        '',
+        'Import examples:',
+        '- /skill import /path/to/skill_dir',
+        '- /skill import {"skills":[...],"rules":[...]}',
+      ].join('\n');
+    }
+    const lines = [
+      'Local skill catalog',
+      `- skills: ${skills.length}`,
+      '',
+    ];
+    for (const skill of skills.slice(0, 20)) {
+      const perf = skill.ranking_metadata?.reuse_score ? ` · reuse=${skill.ranking_metadata.reuse_score}` : '';
+      lines.push(`- ${skill.skill_id || skill.id}: ${skill.name || skill.slug}${perf}`);
+      if (skill.description) lines.push(`  ${String(skill.description).slice(0, 140)}`);
+      const tags = Array.isArray(skill.capability_tags) ? skill.capability_tags.slice(0, 6).join(', ') : '';
+      if (tags) lines.push(`  tags: ${tags}`);
+    }
+    if (skills.length > 20) lines.push(`... ${skills.length - 20} more`);
+    return lines.join('\n');
+  }
+
+  function setSkillAutoActivation(chatId, enabled) {
+    chatSessionStore.upsert(chatId, (session = {}) => ({
+      ...session,
+      skill_auto_activation: enabled !== false,
+      updated_at: new Date().toISOString(),
+    }));
+    return enabled !== false;
+  }
+
+  function applyImportedRuntimeRules(chatId, rules = []) {
+    const saved = [];
+    for (const rule of Array.isArray(rules) ? rules : []) {
+      const row = addRuntimeRule(chatId, rule.text || rule.rule || '', {
+        source: rule.source || 'external_import',
+        origin: rule.origin || 'external_import',
+        topic: rule.topic,
+        confidence: rule.confidence,
+        reason: rule.reason || 'imported external rule package',
+      });
+      if (row) saved.push(row);
+    }
+    return saved;
+  }
+
   function getCurrentJobDirForChat(chatId) {
     const jobId = resolveLiveJobIdForChat(chatId);
     if (!jobId || !jobs || typeof jobs.jobDir !== 'function') return { jobId: null, jobDir: null };
@@ -801,8 +886,28 @@ export function createTelegramCommandHandler(deps = {}) {
         await bot.sendMessage(chatId, '✅ 운영 지침을 초기화했어요. 세부 편집과 히스토리 관리는 GoC에서 다룹니다.');
         return true;
       }
+      if (lower.startsWith('import ')) {
+        const source = raw.replace(/^import\s+/i, '').trim();
+        try {
+          const result = importExternalSkillRuleSource(source, { rootDir: process.cwd() });
+          const savedRules = applyImportedRuntimeRules(chatId, result.imported_rules || []);
+          const currentJobId = resolveLiveJobIdForChat(chatId);
+          const boardMirror = mirrorSkillRuleImportToSemanticBoard(result, { rootDir: process.cwd(), jobId: currentJobId || '' });
+          await sendLong(bot, chatId, [
+            formatExternalSkillRuleImportResult(result),
+            '',
+            `Applied runtime rules to this chat: ${savedRules.length}`,
+            `Semantic Board cards mirrored: ${boardMirror.mirrored}`,
+          ].join('\n'));
+        } catch (error) {
+          await bot.sendMessage(chatId, `Rule import failed: ${error?.message || error}`);
+        }
+        return true;
+      }
       const naturalRule = raw.replace(/^(?:add|set|edit|update|추가|수정|변경)\s+/i, '').trim() || raw;
       const saved = addRuntimeRule(chatId, naturalRule, { source: 'user', origin: 'telegram_rule_command' });
+      const currentJobId = resolveLiveJobIdForChat(chatId);
+      upsertSemanticBoardCards([runtimeRuleToSemanticCard(saved || { text: naturalRule }, { source: 'telegram_rule_command' })], { rootDir: process.cwd(), jobId: currentJobId || '' });
       await bot.sendMessage(chatId, [
         '✅ 운영 지침에 반영했어요.',
         saved?.topic && saved.topic !== 'general' ? `분류: ${saved.topic}` : '',
@@ -1098,6 +1203,10 @@ export function createTelegramCommandHandler(deps = {}) {
     }
 
     if (cmd === "/gptdone") {
+      if (!isChatGptManualFallbackEnabled()) {
+        await bot.sendMessage(chatId, "legacy ChatGPT paste 모드는 비활성화되어 있어요. 직접 실행은 CHATGPT_PROVIDER_BRIDGE=codex를 사용하세요.");
+        return true;
+      }
       clearAwait(chatId);
       await bot.sendMessage(chatId, "✅ gpt paste 모드를 종료했어요.");
       return true;
@@ -1105,6 +1214,86 @@ export function createTelegramCommandHandler(deps = {}) {
 
     if (cmd === "/models" || cmd === "/modelnodes") {
       const sub = String(rest[0] || '').trim().toLowerCase();
+      if (sub === 'route' || sub === 'pick' || sub === 'select') {
+        const knownRoles = new Set(['planner', 'researcher', 'builder', 'reviewer', 'verifier', 'synthesizer', 'operator', 'risk_reviewer']);
+        const maybeRole = String(rest[1] || '').trim().toLowerCase();
+        const roleId = knownRoles.has(maybeRole) ? maybeRole : 'researcher';
+        const goal = knownRoles.has(maybeRole) ? rest.slice(2).join(' ').trim() : rest.slice(1).join(' ').trim();
+        if (!goal) {
+          await bot.sendMessage(chatId, 'Usage: /models route [role] <목표>');
+          return true;
+        }
+        const nodes = listModelNodes({ includeDisabled: false });
+        if (!nodes.length) {
+          await bot.sendMessage(chatId, '등록된 model node가 없습니다. config/model_nodes.json 또는 OLLAMA_BASE_URL + OLLAMA_MODEL 환경변수로 추가하세요.');
+          return true;
+        }
+        const selection = selectModelNodeForTask({ nodes, roleId, taskText: goal, policy: 'cheapest_sufficient' });
+        const lines = [`Model routing preview · role=${roleId}`];
+        if (selection.selected) {
+          lines.push(`selected: ${selection.selected.label || selection.selected.id} · ${selection.selected.provider}/${selection.selected.model}`);
+          lines.push(`score=${selection.fit?.score ?? '-'} reasons=${(selection.fit?.reasons || []).join(', ') || '-'}`);
+        }
+        lines.push('', 'ranked:');
+        selection.ranked.slice(0, 8).forEach((fit, index) => {
+          lines.push(`${index + 1}. ${fit.node_id || fit.model} · score=${fit.score} · ${fit.executable ? 'executable' : 'limited'} · ${(fit.reasons || []).join(', ') || '-'}`);
+        });
+        await sendLong(bot, chatId, lines.join('\n'));
+        return true;
+      }
+      if (sub === 'refresh') {
+        try {
+          const result = await refreshModelCatalog({ force: true, reason: 'telegram_models_refresh', logger: console });
+          if (result.skipped) {
+            await bot.sendMessage(chatId, `Model catalog refresh skipped: ${result.reason || 'unknown'}`);
+            return true;
+          }
+          const payload = result.payload || {};
+          const lines = [`Model catalog refreshed · nodes=${payload.nodes?.length || 0}`, `output=${result.outputPath || '-'}`, ''];
+          for (const entry of payload.discovery_results || []) {
+            lines.push(`- ${entry.label}: ${entry.ok ? 'ok' : 'failed'} · count=${entry.count || 0}${entry.error ? ` · ${entry.error}` : ''}`);
+          }
+          await sendLong(bot, chatId, lines.join('\n'));
+        } catch (error) {
+          await bot.sendMessage(chatId, `Model catalog refresh 실패: ${String(error?.message || error).slice(0, 400)}`);
+        }
+        return true;
+      }
+      if (sub === 'discover') {
+        const kind = String(rest[1] || 'ollama').trim().toLowerCase();
+        const url = String(rest[2] || process.env.OLLAMA_BASE_URL || '').trim();
+        const trustArg = String(rest[3] || 'trusted').trim().toLowerCase();
+        const trustedContext = !['untrusted', 'public', 'external', 'false', '0', 'no'].includes(trustArg);
+        try {
+          const common = { timeoutMs: Number(process.env.MODEL_NODE_DISCOVERY_TIMEOUT_MS || process.env.CLI_MODEL_DISCOVERY_TIMEOUT_MS || 12000) || 12000, maxModels: Number(process.env.MODEL_NODE_DISCOVERY_MAX_MODELS || 20) || 20 };
+          const result = kind === 'ollama'
+            ? await discoverOllamaModelNodes({ baseUrl: url, trustedContext, timeoutMs: common.timeoutMs, maxModels: common.maxModels })
+            : kind === 'codex'
+              ? await discoverCodexCliModelNodes(common)
+              : kind === 'gemini'
+                ? await discoverGeminiCliModelNodes(common)
+                : null;
+          if (!result) {
+            await bot.sendMessage(chatId, 'Usage: /models discover <ollama|codex|gemini> [url-for-ollama] [trusted|untrusted]');
+            return true;
+          }
+          if (!result.ok) {
+            await bot.sendMessage(chatId, `Model discovery 실패: ${result.error || result.status || 'unknown error'}`);
+            return true;
+          }
+          const title = kind === 'ollama' ? `Ollama model discovery · ${url}` : `${kind} CLI model discovery`;
+          const lines = [title, kind === 'ollama' ? `trusted_context=${trustedContext}` : 'source=/model best-effort parser', `models=${result.nodes.length}`, '', 'discovered node preview:'];
+          result.nodes.slice(0, 12).forEach((node, index) => {
+            lines.push(`${index + 1}. ${node.id} · ${node.provider}/${node.model}`);
+            lines.push(`   - ${summarizeModelCatalogEntry(node)} · privacy=${node.privacy_profile?.tier || '-'} · boundary=${node.privacy_profile?.data_boundary || '-'}`);
+          });
+          lines.push('', '저장하려면 /models refresh 를 사용하거나 scripts/discover_model_nodes.js --kind <kind> 를 실행하세요.');
+          await sendLong(bot, chatId, lines.join('\n'));
+        } catch (error) {
+          await bot.sendMessage(chatId, `Model discovery 실패: ${String(error?.message || error).slice(0, 400)}`);
+        }
+        return true;
+      }
       if (sub === 'health') {
         const nodes = await listModelNodesWithHealth({ includeDisabled: true, timeoutMs: Number(process.env.MODEL_NODE_HEALTH_TIMEOUT_MS || 4000) || 4000 });
         if (!nodes.length) {
@@ -1131,7 +1320,9 @@ export function createTelegramCommandHandler(deps = {}) {
         rows.forEach((row, index) => {
           const node = row.model_node || {};
           lines.push(`${index + 1}. ${row.timestamp || "-"} · ${node.label || node.id || row.model || "-"} · ${row.ok ? "ok" : "fail"} · ${row.duration_ms || 0}ms`);
-          lines.push(`   - agent=${row.agent_id || "-"} model=${row.model || "-"} prompt=${row.prompt_chars || 0} output=${row.output_chars || 0} trace=${row.trace_id || "-"}`);
+          const tokens = row.token_usage || {};
+          const tokenSummary = tokens.total_tokens ? ` tokens=${tokens.total_tokens} (in=${tokens.prompt_tokens || '-'} out=${tokens.completion_tokens || '-'})` : '';
+          lines.push(`   - agent=${row.agent_id || "-"} model=${row.model || "-"} prompt=${row.prompt_chars || 0} output=${row.output_chars || 0}${tokenSummary} trace=${row.trace_id || "-"}`);
           const access = row.context_access || {};
           if (access.projection_id || access.snapshot_id || access.memory_mode) {
             lines.push(`   - context projection=${access.projection_id || "-"} snapshot=${access.snapshot_id || "-"} memory=${access.memory_mode || "-"}`);
@@ -1145,7 +1336,7 @@ export function createTelegramCommandHandler(deps = {}) {
         await bot.sendMessage(chatId, "등록된 model node가 없습니다. config/model_nodes.json 또는 LOCAL_MODEL_BASE_URL + LOCAL_MODEL 환경변수로 추가할 수 있습니다.");
         return true;
       }
-      const lines = ["Model nodes:", "Usage: /models health · /models usage [limit]"];
+      const lines = ["Model nodes:", "Usage: /models refresh · /models health · /models usage [limit] · /models route [role] <goal> · /models discover <ollama|codex|gemini>"];
       nodes.slice(0, 20).forEach((node, index) => {
         const caps = Object.entries(node.capabilities || {}).filter(([, enabled]) => enabled === true).map(([key]) => key).slice(0, 6).join(", ") || "chat";
         const perms = [node.permissions?.memory_read ? "memory_read=" + node.permissions.memory_read : "", node.permissions?.memory_write ? "memory_write=" + node.permissions.memory_write : "", node.permissions?.workspace_read ? "workspace_read" : "", node.permissions?.workspace_write ? "workspace_write" : ""].filter(Boolean).join(", ") || "scoped_context";
@@ -1153,6 +1344,9 @@ export function createTelegramCommandHandler(deps = {}) {
         lines.push(`   - node_id=${node.id} runtime=${node.runtime || "-"} location=${node.location || "-"}`);
         lines.push(`   - capabilities=${caps}`);
         lines.push(`   - permissions=${perms}`);
+        const profiles = [node.cost_profile?.tier ? `cost=${node.cost_profile.tier}` : '', node.latency_profile?.tier ? `latency=${node.latency_profile.tier}` : '', node.quality_profile?.tier ? `quality=${node.quality_profile.tier}` : '', node.privacy_profile?.tier ? `privacy=${node.privacy_profile.tier}` : '', node.limits?.context_tokens ? `context=${node.limits.context_tokens}` : ''].filter(Boolean).join(', ');
+        if (profiles) lines.push(`   - profiles=${profiles}`);
+        if (node.model_catalog?.parameter_size || node.model_catalog?.quantization_level) lines.push(`   - catalog=${summarizeModelCatalogEntry(node)}`);
       });
       await sendLong(bot, chatId, lines.join("\n"));
       return true;
@@ -1216,6 +1410,15 @@ export function createTelegramCommandHandler(deps = {}) {
         const signals = extractTeamCreationSignals({ request: goal, goal, runtime: runtimeForTeam });
         const workflowContract = buildTeamWorkflowContract({ signals, goal });
         const { activeTeam, roomProfile } = await suggestAndApplyAgentRoomTeam({ chatId, userId, goal, runtimeForTeam, autoApply: true });
+        const taskLoopRuntimeExecution = buildWorkflowRuntimeExecutionPatch(workflowContract, activeTeam?.runtime_execution || activeTeam?.runtimeExecution || runtimeForTeam?.runtime_execution || runtimeForTeam?.runtimeExecution || {});
+        const taskLoopTeamConfig = activeTeam && typeof activeTeam === 'object'
+          ? {
+            ...activeTeam,
+            runtime_execution: taskLoopRuntimeExecution || activeTeam.runtime_execution || activeTeam.runtimeExecution,
+            runtimeExecution: taskLoopRuntimeExecution || activeTeam.runtimeExecution || activeTeam.runtime_execution,
+            task_loop_execution_mode: 'task_loop',
+          }
+          : activeTeam;
         setPendingTaskControl(chatId, {
           goal,
           command: '/task loop',
@@ -1247,7 +1450,7 @@ export function createTelegramCommandHandler(deps = {}) {
           kind: 'task_loop',
           telegramMessageId: msg.message_id,
           userReplyToMessageId: Number.isFinite(Number(msg?.reply_to_message?.message_id)) ? Number(msg.reply_to_message.message_id) : null,
-          teamConfig: activeTeam || null,
+          teamConfig: taskLoopTeamConfig || null,
           chatInfo: {
             chat_id: String(chatId || ''),
             title: String(msg.chat?.title || msg.chat?.username || '').trim(),
@@ -1373,6 +1576,105 @@ export function createTelegramCommandHandler(deps = {}) {
           formatAgentRoomProfile(profile, { includeHelp: false }),
           '',
           applied ? 'team: active team에도 적용됨' : 'team: pending team으로 저장됨. 필요하면 /team apply 를 사용하세요.',
+        ].join('\n'));
+        return true;
+      }
+
+      if (sub === 'export' || sub === 'package-export') {
+        const pkg = buildAgentPackageFromSession({ sessionStore: chatSessionStore, chatId, title: argsAfterSub });
+        const saved = saveAgentPackageToRegistry(pkg);
+        await sendLong(bot, chatId, [
+          '✅ Agent package를 생성하고 local registry에 저장했습니다.',
+          '',
+          formatAgentPackage(saved.package, { detail: true }),
+          '',
+          'JSON:',
+          '```json',
+          JSON.stringify(saved.package, null, 2),
+          '```',
+        ].join('\n'));
+        return true;
+      }
+      if (sub === 'publish-candidate' || sub === 'publish' || sub === 'share') {
+        const pkg = buildAgentPackageFromSession({
+          sessionStore: chatSessionStore,
+          chatId,
+          title: argsAfterSub || '',
+          visibility: 'private_review',
+        });
+        const candidate = sanitizeAgentPackage({
+          ...pkg,
+          visibility: 'private_review',
+          publish_state: 'candidate',
+          review_notes: [
+            'Private memory is not copied; clones start with fresh private memory.',
+            'Credential bindings and provider state are never copied.',
+            'Knowledge packs must be attached separately if public reusable content is needed.',
+          ],
+        });
+        const saved = saveAgentPackageToRegistry(candidate);
+        await sendLong(bot, chatId, [
+          '📦 Agent package publish candidate를 만들었습니다.',
+          '',
+          formatAgentPackage(saved.package, { detail: true }),
+          '',
+          '다른 채팅방에서 사용:',
+          `/agents clone ${saved.package.package_id}`,
+        ].join('\n'));
+        return true;
+      }
+      if (['packages', 'registry', 'list-packages'].includes(sub)) {
+        const registry = readAgentPackageRegistry();
+        await sendLong(bot, chatId, formatAgentPackageRegistry(registry));
+        return true;
+      }
+      if (sub === 'package' || sub === 'show-package') {
+        const packageId = String(argsAfterSub || '').trim();
+        if (!packageId) {
+          await bot.sendMessage(chatId, 'Usage: /agents package <package_id>');
+          return true;
+        }
+        const pkg = findAgentPackage(packageId);
+        if (!pkg) {
+          await bot.sendMessage(chatId, `agent package를 찾지 못했습니다: ${packageId}`);
+          return true;
+        }
+        await sendLong(bot, chatId, formatAgentPackage(pkg, { detail: true }));
+        return true;
+      }
+      if (sub === 'clone' || sub === 'install' || sub === 'import') {
+        const rawInput = String(argsAfterSub || '').trim();
+        if (!rawInput) {
+          await bot.sendMessage(chatId, 'Usage: /agents clone <package_id|package_json>');
+          return true;
+        }
+        let pkg = null;
+        if (rawInput.startsWith('{')) {
+          try { pkg = sanitizeAgentPackage(JSON.parse(rawInput)); } catch (error) {
+            await bot.sendMessage(chatId, `package JSON 파싱 실패: ${String(error?.message || error).slice(0, 200)}`);
+            return true;
+          }
+        } else {
+          pkg = findAgentPackage(rawInput);
+        }
+        if (!pkg) {
+          await bot.sendMessage(chatId, `agent package를 찾지 못했습니다: ${rawInput}`);
+          return true;
+        }
+        const installed = await installAgentPackageToSession({
+          sessionStore: chatSessionStore,
+          chatId,
+          agentPackage: pkg,
+          runtime: runtimeForTeam,
+          applyState: 'pending',
+          source: 'telegram_agents_clone',
+        });
+        await sendLong(bot, chatId, [
+          '✅ Agent package를 이 채팅방에 설치했습니다. source private memory는 복사하지 않았고, 새 room memory로 시작합니다.',
+          '',
+          formatAgentPackage(installed.package, { detail: false }),
+          '',
+          '적용 상태: pending team으로 저장됨. 바로 활성화하려면 /team apply 또는 /agents use <roles>를 사용하세요.',
         ].join('\n'));
         return true;
       }
@@ -1608,8 +1910,9 @@ ${formatTeamProposalMessage(validated, { runtime: runtimeForTeam })}`);
       }
       if (sub === 'apply') {
         try {
-          const confirmApply = /(?:^|\s)confirm(?:\s|$)/i.test(rest || '');
-          const applySelector = String(rest || '').replace(/confirm/i, '').trim();
+          const applyArgs = String(rawArgs || '').replace(/^apply\b/i, '').trim();
+          const confirmApply = /(?:^|\s)confirm(?:\s|$)/i.test(applyArgs);
+          const applySelector = applyArgs.replace(/\bconfirm\b/i, '').trim();
           if (applySelector) {
             const selected = selectPendingTeamCandidate(chatSessionStore, chatId, applySelector, { runtime: runtimeForTeam });
             teamState = getSessionTeamState(chatSessionStore, chatId);
@@ -1665,6 +1968,7 @@ ${buildTeamListMessage({ active_team: applied }, { runtime: runtimeForTeam })}`)
         ].join('\n'));
         return true;
       }
+
       if (sub === 'reset') {
         await resetTeamConfiguration(chatSessionStore, chatId, { runtime: runtimeForTeam });
         await bot.sendMessage(chatId, '✅ 팀 구성을 초기화했습니다. 다시 /team suggest <목적> 또는 /team create <자연어 팀 설명> 으로 시작해 주세요.');
@@ -1691,7 +1995,219 @@ ${buildTeamListMessage({ active_team: applied }, { runtime: runtimeForTeam })}`)
       });
     }
 
+
+    if (cmd === "/context") {
+      const raw = String(args || '').trim();
+      const [subRaw, ...subRest] = raw.split(/\s+/);
+      const sub = String(subRaw || '').trim().toLowerCase();
+      const payload = raw.slice(subRaw ? subRaw.length : 0).trim();
+      const currentJobId = resolveLiveJobIdForChat(chatId);
+      const contextOptions = { rootDir: process.cwd(), jobId: currentJobId || '' };
+      try {
+        if (!raw || ['summary', 'status', 'help'].includes(sub)) {
+          await sendLong(bot, chatId, formatContextSubstrateSummary(summarizeContextSubstrate(contextOptions)));
+          return true;
+        }
+        if (sub === 'ops' || sub === 'operations') {
+          const limit = Number(subRest[0]) || 20;
+          await sendLong(bot, chatId, JSON.stringify({ kind: 'context_operations_tail_v1', operations: listContextOperations(contextOptions, { limit }) }, null, 2));
+          return true;
+        }
+        if (sub === 'proposals' || sub === 'pending') {
+          const limit = Number(subRest[0]) || 20;
+          await sendLong(bot, chatId, JSON.stringify({ kind: 'context_proposals_tail_v1', proposals: listContextOperations(contextOptions, { limit, proposals: true }) }, null, 2));
+          return true;
+        }
+        if (sub === 'projection' || sub === 'prompt') {
+          const role = subRest[0] || '';
+          const taskType = subRest[1] || '';
+          const goal = subRest.slice(2).join(' ');
+          const projection = getContextProjection(contextOptions, { role, task_type: taskType, goal, limit: 24 });
+          await sendLong(bot, chatId, JSON.stringify(projection, null, 2));
+          return true;
+        }
+        if (sub === 'commit' || sub === 'write') {
+          const result = commitContextWriteIntent(JSON.parse(payload), contextOptions);
+          await sendLong(bot, chatId, JSON.stringify(result, null, 2));
+          return true;
+        }
+        if (sub === 'mirror-board') {
+          const result = mirrorSemanticBoardToContextSubstrate(contextOptions);
+          await sendLong(bot, chatId, `Context substrate mirror complete. committed=${result.committed}; proposals=${result.proposals}; board cards=${result.board_card_count}; board links=${result.board_link_count}`);
+          return true;
+        }
+        if (sub === 'mirror-to-board') {
+          const result = mirrorContextSubstrateToSemanticBoard(contextOptions);
+          await sendLong(bot, chatId, `Semantic Board mirror from context complete. cards=${result.cards}; links=${result.links}`);
+          return true;
+        }
+        if (sub === 'compact' || sub === 'snapshot') {
+          const result = compactContextSubstrate(contextOptions);
+          await sendLong(bot, chatId, `Context substrate snapshot created: ${result.snapshot_id} · version=${result.version} · atoms=${result.atom_count} · links=${result.link_count}`);
+          return true;
+        }
+        await sendLong(bot, chatId, [
+          'Context commands:',
+          '- /context',
+          '- /context ops [limit]',
+          '- /context proposals [limit]',
+          '- /context projection [role] [task_type] [goal]',
+          '- /context commit <json-intent>',
+          '- /context mirror-board',
+          '- /context mirror-to-board',
+          '- /context compact',
+        ].join('\n'));
+        return true;
+      } catch (error) {
+        await bot.sendMessage(chatId, `Context Substrate error: ${error?.message || error}`);
+        return true;
+      }
+    }
+
+    if (cmd === "/board") {
+      const raw = String(args || '').trim();
+      const [subRaw, ...subRest] = raw.split(/\s+/);
+      const sub = String(subRaw || '').trim().toLowerCase();
+      const payload = raw.slice(subRaw ? subRaw.length : 0).trim();
+      const currentJobId = resolveLiveJobIdForChat(chatId);
+      const boardOptions = { rootDir: process.cwd(), jobId: currentJobId || '' };
+      try {
+        if (!raw || ['summary', 'status', 'help'].includes(sub)) {
+          mirrorLocalSkillCatalogToSemanticBoard(boardOptions);
+          await sendLong(bot, chatId, formatSemanticBoardSummary(readSemanticBoard(boardOptions)));
+          return true;
+        }
+        if (['cards', 'list'].includes(sub)) {
+          const maybeLimit = Number(subRest[0]);
+          const type = Number.isFinite(maybeLimit) ? subRest[1] : subRest[0];
+          const limit = Number.isFinite(maybeLimit) ? maybeLimit : 20;
+          mirrorLocalSkillCatalogToSemanticBoard(boardOptions);
+          await sendLong(bot, chatId, formatSemanticBoardCards(readSemanticBoard(boardOptions), { limit, type }));
+          return true;
+        }
+        if (sub === 'validate' || sub === 'check') {
+          mirrorLocalSkillCatalogToSemanticBoard(boardOptions);
+          const { validation } = validateSemanticBoardStore(boardOptions);
+          await sendLong(bot, chatId, formatSemanticBoardValidation(validation));
+          return true;
+        }
+        if (sub === 'repair') {
+          mirrorLocalSkillCatalogToSemanticBoard(boardOptions);
+          const result = repairSemanticBoardStore(boardOptions);
+          await sendLong(bot, chatId, formatSemanticBoardRepair(result));
+          return true;
+        }
+        if (sub === 'consistency') {
+          const board = readSemanticBoard(boardOptions);
+          const store = readSkillRulePerformanceStore({ rootDir: process.cwd() });
+          const report = buildSemanticBoardConsistencyReport({ board, performanceStore: store });
+          await sendLong(bot, chatId, JSON.stringify(report, null, 2));
+          return true;
+        }
+        if (sub === 'export') {
+          const board = readSemanticBoard(boardOptions);
+          await sendLong(bot, chatId, JSON.stringify({ kind: 'semantic_board_export_v1', cards: board.cards, links: board.links }, null, 2));
+          return true;
+        }
+        if (sub === 'projection' || sub === 'prompt') {
+          const board = readSemanticBoard(boardOptions);
+          const types = subRest.join(' ').split(',').map((v) => v.trim()).filter(Boolean);
+          await sendLong(bot, chatId, JSON.stringify(buildPromptProjectionFromBoard(board, { cardTypes: types }), null, 2));
+          return true;
+        }
+        if (sub === 'import') {
+          const result = importSemanticBoardSource(payload, boardOptions);
+          await sendLong(bot, chatId, [
+            'Semantic Board import complete.',
+            `- cards imported: ${result.cards_imported}`,
+            `- links imported: ${result.links_imported}`,
+            `- total cards: ${result.board?.card_count ?? 0}`,
+          ].join('\n'));
+          return true;
+        }
+        if (sub === 'mirror') {
+          const store = readSkillRulePerformanceStore({ rootDir: process.cwd() });
+          const skillResult = mirrorLocalSkillCatalogToSemanticBoard(boardOptions);
+          const result = mirrorSkillPerformanceToSemanticBoard(store, boardOptions);
+          await sendLong(bot, chatId, `Semantic Board mirror complete. skill cards=${skillResult.upserted}; performance cards=${result.upserted}`);
+          return true;
+        }
+        await sendLong(bot, chatId, [
+          'Board commands:',
+          '- /board',
+          '- /board cards [limit] [type]',
+          '- /board export',
+          '- /board import <path|json>',
+          '- /board projection [card_type,...]',
+          '- /board mirror',
+          '- /board validate',
+          '- /board repair',
+          '- /board consistency',
+        ].join('\n'));
+        return true;
+      } catch (error) {
+        await bot.sendMessage(chatId, `Semantic Board error: ${error?.message || error}`);
+        return true;
+      }
+    }
+
     if (cmd === "/skill" || cmd === "/skills") {
+      const raw = String(args || '').trim();
+      const [subRaw, ...subRest] = raw.split(/\s+/);
+      const sub = String(subRaw || '').trim().toLowerCase();
+      const payload = raw.slice(subRaw ? subRaw.length : 0).trim();
+      if (!raw || ['help', 'status'].includes(sub)) {
+        await sendLong(bot, chatId, [
+          'Skill commands:',
+          '- /skill list: local skill catalog 보기',
+          '- /skill score: skill/rule performance score 보기',
+          '- /skill import <path|json>: 외부 skill/rule package import',
+          '- /skill auto on|off: score 기반 자동 skill 선택 on/off',
+          '',
+          '기존 roster/agent skill 요약은 /skills roster 를 사용하세요.',
+        ].join('\n'));
+        return true;
+      }
+      if (['list', 'catalog', 'installed'].includes(sub)) {
+        await sendLong(bot, chatId, formatLocalSkillCatalogMessage({ rootDir: process.cwd() }));
+        return true;
+      }
+      if (['score', 'scores', 'performance', 'perf'].includes(sub)) {
+        const store = readSkillRulePerformanceStore({ rootDir: process.cwd() });
+        await sendLong(bot, chatId, formatSkillRulePerformanceSummary(store));
+        return true;
+      }
+      if (sub === 'auto') {
+        const value = String(subRest[0] || '').trim().toLowerCase();
+        const enabled = !['off', 'false', '0', 'disable', 'disabled'].includes(value);
+        setSkillAutoActivation(chatId, enabled);
+        await bot.sendMessage(chatId, `Skill auto activation: ${enabled ? 'on' : 'off'}`);
+        return true;
+      }
+      if (sub === 'import') {
+        const source = payload;
+        try {
+          const result = importExternalSkillRuleSource(source, { rootDir: process.cwd() });
+          const savedRules = applyImportedRuntimeRules(chatId, result.imported_rules || []);
+          const currentJobId = resolveLiveJobIdForChat(chatId);
+          const boardMirror = mirrorSkillRuleImportToSemanticBoard(result, { rootDir: process.cwd(), jobId: currentJobId || '' });
+          await sendLong(bot, chatId, [
+            formatExternalSkillRuleImportResult(result),
+            '',
+            `Applied runtime rules to this chat: ${savedRules.length}`,
+            `Semantic Board cards mirrored: ${boardMirror.mirrored}`,
+            'Imported skills are available to the resolver after the next registry refresh/run.',
+          ].join('\n'));
+        } catch (error) {
+          await bot.sendMessage(chatId, `Skill import failed: ${error?.message || error}`);
+        }
+        return true;
+      }
+      if (sub === 'roster' || sub === 'agents') {
+        const skillsArgs = ["skills", ...subRest].join(" ").trim();
+        await sendAgentOrToolListQuick(bot, chatId, "agent", skillsArgs, { telegramUserId: userId });
+        return true;
+      }
       const skillsArgs = ["skills", ...rest].join(" ").trim();
       await sendAgentOrToolListQuick(bot, chatId, "agent", skillsArgs, { telegramUserId: userId });
       return true;
@@ -2198,6 +2714,10 @@ size=${formatByteSize(sentBundle.size)}`
     }
 
     if (cmd === "/gptprompt") {
+      if (!isChatGptManualFallbackEnabled()) {
+        await bot.sendMessage(chatId, "legacy ChatGPT 수동 프롬프트 생성은 비활성화되어 있어요. chatgpt 역할은 Codex bridge/model node로 직접 실행하세요.");
+        return true;
+      }
       const parts = rest;
       const jobId = parts[0];
       const question = parts.slice(1).join(" ").trim();
@@ -2212,6 +2732,10 @@ size=${formatByteSize(sentBundle.size)}`
     }
 
     if (cmd === "/gptapply") {
+      if (!isChatGptManualFallbackEnabled()) {
+        await bot.sendMessage(chatId, "legacy ChatGPT 붙여넣기 모드는 기본 비활성화되어 있어요. 직접 실행은 CHATGPT_PROVIDER_BRIDGE=codex를 사용하고, 수동 복붙을 꼭 쓰려면 CHATGPT_MANUAL_FALLBACK_ENABLED=true를 설정하세요.");
+        return true;
+      }
       const targetJobId = String(args || resolveLiveJobIdForChat(chatId) || "").trim();
       if (!targetJobId) {
         await bot.sendMessage(chatId, "Usage: /gptapply [jobId]");

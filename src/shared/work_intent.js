@@ -17,7 +17,7 @@ export const CODE_REQUEST_TERMS = [
 ];
 
 export const CODE_ARTIFACT_TERMS = [
-  'notebook', 'jupyter', 'codex', 'script', 'patch', 'commit', 'workspace', 'repo',
+  'notebook', 'jupyter', 'ipynb', 'codex', 'script', 'patch', 'commit', 'workspace', 'repo',
   'repository', 'python', 'javascript', 'typescript', 'sql', 'bash', 'shell', 'pr',
   'pull request', 'web service', 'web app', 'frontend', 'backend', 'api', 'server', 'react',
   'nextjs', 'node', 'express', 'fastapi', 'flask', 'django', '주피터', '노트북', '스크립트',

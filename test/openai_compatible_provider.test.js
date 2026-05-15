@@ -32,3 +32,38 @@ test('OpenAI-compatible provider calls chat completions and extracts text', asyn
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('Ollama native provider calls /api/chat with stream disabled', async () => {
+  const server = http.createServer((req, res) => {
+    if (req.url === '/api/chat' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        const parsed = JSON.parse(body || '{}');
+        assert.equal(parsed.model, 'gemma3:12b');
+        assert.equal(parsed.stream, false);
+        assert.equal(parsed.messages.at(-1).content, 'hello ollama');
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ message: { role: 'assistant', content: 'ollama ok' }, done: true }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end('not found');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = server.address().port;
+    const result = await runOpenAICompatiblePrompt({
+      baseUrl: `http://127.0.0.1:${port}`,
+      model: 'gemma3:12b',
+      runtime: 'ollama',
+      prompt: 'hello ollama',
+      jobId: '',
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.stdout, 'ollama ok');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

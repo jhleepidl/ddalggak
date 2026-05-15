@@ -15,6 +15,7 @@ import {
 } from "./lifecycle.js";
 import { createTelegramUploadService } from "./uploads.js";
 import * as runtimeCore from "../../application/telegram_runtime_ops.js";
+import { startModelCatalogRefreshScheduler } from "../../application/model_catalog_refresh.js";
 import {
   sendChatStatus,
   sendAgentOrToolListQuick,
@@ -222,9 +223,14 @@ export async function startTelegramApp({ token = runtimeCore.TOKEN } = {}) {
     throw error;
   }
 
+  const modelCatalogRefreshScheduler = startModelCatalogRefreshScheduler({ logger: console });
+
   const shutdown = createShutdownHandler({
     bot,
-    releaseLock: singleInstanceLock.release,
+    releaseLock: () => {
+      try { modelCatalogRefreshScheduler.stop(); } catch {}
+      singleInstanceLock.release();
+    },
     processImpl: process,
   });
   registerLifecycleSignals({

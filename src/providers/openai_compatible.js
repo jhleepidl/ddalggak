@@ -19,6 +19,51 @@ function joinUrl(base = '', suffix = '') {
   return `${root}/${tail}`;
 }
 
+function isOllamaNativeNode(node = {}) {
+  const runtime = clean(node.runtime || node.provider || '').toLowerCase();
+  const baseUrl = clean(node.base_url || node.baseUrl || '');
+  if (runtime !== 'ollama') return false;
+  return !/\/v1(?:\/)?$/i.test(baseUrl) && !/\/chat\/completions(?:\/)?$/i.test(baseUrl);
+}
+
+function ollamaApiBase(baseUrl = '') {
+  const root = clean(baseUrl).replace(/\/+$/, '');
+  if (!root) return '';
+  return /\/api$/i.test(root) ? root : `${root}/api`;
+}
+
+function nodeChatCompletionUrl(node = {}) {
+  if (isOllamaNativeNode(node)) return joinUrl(ollamaApiBase(node.base_url), '/chat');
+  return joinUrl(node.base_url, '/chat/completions');
+}
+
+function buildChatBodyForNode({ node = {}, model = '', messages = [], temperature = 0.2, maxTokens = 0 } = {}) {
+  const body = {
+    model,
+    messages,
+    temperature: Number.isFinite(Number(temperature)) ? Number(temperature) : 0.2,
+  };
+  const maxOut = Number(maxTokens || node.limits?.max_output_tokens || 0);
+  if (Number.isFinite(maxOut) && maxOut > 0) {
+    if (isOllamaNativeNode(node)) body.options = { ...(asObject(node.options)), num_predict: Math.floor(maxOut) };
+    else body.max_tokens = Math.floor(maxOut);
+  }
+  if (isOllamaNativeNode(node)) {
+    body.stream = false;
+    const options = { ...(asObject(node.options || node.runtime_options)) };
+    if (Number.isFinite(Number(temperature))) options.temperature = Number(temperature);
+    if (Object.keys(options).length > 0) body.options = { ...(body.options || {}), ...options };
+    delete body.temperature;
+  }
+  return body;
+}
+
+function extractTextFromOllamaChat(json = {}) {
+  if (typeof json?.message?.content === 'string') return json.message.content;
+  if (typeof json?.response === 'string') return json.response;
+  return '';
+}
+
 
 function requestText(url, { method = 'GET', headers = {}, body = '', signal = null, timeoutMs = 0, maxChars = 1024 * 1024 } = {}) {
   return new Promise((resolve, reject) => {
@@ -181,6 +226,7 @@ export async function runOpenAICompatiblePrompt({
   nodeId = '',
   model = '',
   baseUrl = '',
+  runtime = '',
   prompt = '',
   system = '',
   signal = null,
@@ -201,7 +247,7 @@ export async function runOpenAICompatiblePrompt({
     id: clean(configuredNode.id || nodeId || model || 'openai_compatible'),
     label: clean(configuredNode.label || nodeId || model || 'OpenAI-compatible model'),
     provider: clean(configuredNode.provider || 'openai_compatible'),
-    runtime: clean(configuredNode.runtime || 'openai_compatible'),
+    runtime: clean(runtime || configuredNode.runtime || ((baseUrl || configuredNode.base_url || process.env.OLLAMA_BASE_URL || '').includes('11434') ? 'ollama' : 'openai_compatible')),
     base_url: clean(baseUrl || configuredNode.base_url || process.env.OPENAI_COMPATIBLE_BASE_URL || process.env.LOCAL_MODEL_BASE_URL || process.env.OLLAMA_BASE_URL),
     model: clean(model || configuredNode.model || process.env.OPENAI_COMPATIBLE_MODEL || process.env.LOCAL_MODEL || process.env.OLLAMA_MODEL),
     location: clean(configuredNode.location || ''),
@@ -228,14 +274,14 @@ export async function runOpenAICompatiblePrompt({
     const systemText = clean(system);
     if (systemText) messages.push({ role: 'system', content: systemText });
     messages.push({ role: 'user', content: promptText });
-    const body = {
+    const body = buildChatBodyForNode({
+      node: effectiveNode,
       model: effectiveNode.model,
       messages,
-      temperature: Number.isFinite(Number(temperature)) ? Number(temperature) : 0.2,
-    };
-    const maxOut = Number(maxTokens || effectiveNode.limits?.max_output_tokens || 0);
-    if (Number.isFinite(maxOut) && maxOut > 0) body.max_tokens = Math.floor(maxOut);
-    const response = await withNodeConcurrency(effectiveNode, () => requestText(joinUrl(effectiveNode.base_url, '/chat/completions'), {
+      temperature,
+      maxTokens,
+    });
+    const response = await withNodeConcurrency(effectiveNode, () => requestText(nodeChatCompletionUrl(effectiveNode), {
       method: 'POST',
       headers: requestHeaders,
       body: JSON.stringify(body),
@@ -246,7 +292,9 @@ export async function runOpenAICompatiblePrompt({
     const raw = response.text;
     let parsed = null;
     try { parsed = JSON.parse(raw); } catch {}
-    const stdout = parsed ? extractTextFromChatCompletion(parsed) : raw;
+    const stdout = parsed
+      ? (isOllamaNativeNode(effectiveNode) ? extractTextFromOllamaChat(parsed) : extractTextFromChatCompletion(parsed))
+      : raw;
     const result = {
       ok: response.ok,
       exitCode: response.ok ? 0 : response.status,
@@ -256,6 +304,7 @@ export async function runOpenAICompatiblePrompt({
       status: response.status,
       used_model: effectiveNode.model,
       model_node_id: effectiveNode.id,
+      runtime: effectiveNode.runtime,
       response_json: parsed || undefined,
     };
     return finalizeResult({ result, node: effectiveNode, prompt: promptText, jobId, surface, agentId, roleId, cwd, metadata: traceMetadata });
@@ -263,7 +312,7 @@ export async function runOpenAICompatiblePrompt({
     const message = signal?.aborted || requestSignal.aborted
       ? `[openai_compatible] aborted or timed out: ${String(error?.message || error)}`
       : `[openai_compatible] request failed: ${String(error?.message || error)}`;
-    const result = { ok: false, exitCode: -1, stdout: '', stderr: message, durationMs: Date.now() - startedAtMs, used_model: effectiveNode.model, model_node_id: effectiveNode.id };
+    const result = { ok: false, exitCode: -1, stdout: '', stderr: message, durationMs: Date.now() - startedAtMs, used_model: effectiveNode.model, model_node_id: effectiveNode.id, runtime: effectiveNode.runtime };
     return finalizeResult({ result, node: effectiveNode, prompt: promptText, jobId, surface, agentId, roleId, cwd, metadata: traceMetadata });
   } finally {
     finish();
@@ -273,13 +322,28 @@ export async function runOpenAICompatiblePrompt({
 export async function checkOpenAICompatibleHealth(node = {}, { timeoutMs = 5000 } = {}) {
   const baseUrl = clean(node.base_url || node.baseUrl || '');
   if (!baseUrl) return { ok: false, status: 'missing_base_url', error: 'missing base_url' };
+  const effectiveNode = {
+    ...asObject(node),
+    provider: clean(node.provider || 'openai_compatible'),
+    runtime: clean(node.runtime || (baseUrl.includes('11434') ? 'ollama' : 'openai_compatible')),
+    base_url: baseUrl,
+  };
   const { signal, finish } = withTimeoutSignal(timeoutMs, null);
   try {
-    const response = await requestText(joinUrl(baseUrl, '/models'), { method: 'GET', signal, timeoutMs, maxChars: 1000 });
+    const url = isOllamaNativeNode(effectiveNode)
+      ? joinUrl(ollamaApiBase(baseUrl), '/tags')
+      : joinUrl(baseUrl, '/models');
+    const response = await requestText(url, { method: 'GET', signal, timeoutMs, maxChars: 2000 });
     const text = response.text;
-    return { ok: response.ok, status: response.ok ? 'ok' : 'http_error', http_status: response.status, detail: text.slice(0, 1000) };
+    return {
+      ok: response.ok,
+      status: response.ok ? 'ok' : 'http_error',
+      http_status: response.status,
+      runtime: effectiveNode.runtime,
+      detail: text.slice(0, 1000),
+    };
   } catch (error) {
-    return { ok: false, status: 'unreachable', error: String(error?.message || error) };
+    return { ok: false, status: 'unreachable', runtime: effectiveNode.runtime, error: String(error?.message || error) };
   } finally {
     finish();
   }

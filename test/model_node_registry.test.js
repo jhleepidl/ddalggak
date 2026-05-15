@@ -20,6 +20,10 @@ test('model node registry loads OpenAI-compatible local nodes from config', asyn
     enabled: true,
     capabilities: { chat: true, code: true, structured_json: true },
     permissions: { memory_read: 'project_scoped', memory_write: 'write_intent_only', workspace_read: true },
+    cost_profile: { tier: 'free' },
+    latency_profile: { tier: 'medium' },
+    quality_profile: { tier: 'standard' },
+    privacy_profile: { tier: 'local_private', data_boundary: 'local_device', sends_context_off_device: false },
     role_bias: ['review', 'draft'],
   }] }), 'utf8');
   const old = process.env.MODEL_NODES_CONFIG;
@@ -30,7 +34,10 @@ test('model node registry loads OpenAI-compatible local nodes from config', asyn
     assert.equal(nodes[0].provider, 'openai_compatible');
     assert.equal(nodes[0].model, 'gemma4:31b');
     assert.equal(getModelNode('local_gemma4').model, 'gemma4:31b');
-    assert.match(formatModelNodeInventoryForPlanner(), /local_gemma4/);
+    assert.equal(nodes[0].cost_profile.tier, 'free');
+    assert.equal(nodes[0].privacy_profile.tier, 'local_private');
+    assert.match(formatModelNodeInventoryForPlanner(), /cost=free/);
+    assert.match(formatModelNodeInventoryForPlanner(), /privacy=local_private/);
   } finally {
     if (old === undefined) delete process.env.MODEL_NODES_CONFIG;
     else process.env.MODEL_NODES_CONFIG = old;
@@ -67,5 +74,58 @@ test('planner-driven team preserves local model node provider/model', async () =
   } finally {
     if (old === undefined) delete process.env.MODEL_NODES_CONFIG;
     else process.env.MODEL_NODES_CONFIG = old;
+  }
+});
+
+test('model node registry exposes account profile for billing/credential boundaries', () => {
+  const previous = {
+    DDALGGAK_MODEL_NODES_CONFIG: process.env.DDALGGAK_MODEL_NODES_CONFIG,
+    MODEL_NODES_CONFIG: process.env.MODEL_NODES_CONFIG,
+    OLLAMA_BASE_URL: process.env.OLLAMA_BASE_URL,
+    OLLAMA_MODEL: process.env.OLLAMA_MODEL,
+    PROVIDER_ACCOUNT_MODE: process.env.PROVIDER_ACCOUNT_MODE,
+  };
+  delete process.env.DDALGGAK_MODEL_NODES_CONFIG;
+  delete process.env.MODEL_NODES_CONFIG;
+  process.env.OLLAMA_BASE_URL = 'http://localhost:11434';
+  process.env.OLLAMA_MODEL = 'gemma3:12b';
+  process.env.PROVIDER_ACCOUNT_MODE = 'deployment_owner';
+  try {
+    const node = listModelNodes({ includeDisabled: true }).find((row) => row.id === 'local_model');
+    assert.equal(node.account_profile.mode, 'deployment_owner');
+    assert.equal(node.account_profile.billing_owner, 'deployment_owner');
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('remote Ollama env node is treated as user-controlled trusted private by default', () => {
+  const previous = {
+    DDALGGAK_MODEL_NODES_CONFIG: process.env.DDALGGAK_MODEL_NODES_CONFIG,
+    MODEL_NODES_CONFIG: process.env.MODEL_NODES_CONFIG,
+    OLLAMA_BASE_URL: process.env.OLLAMA_BASE_URL,
+    OLLAMA_MODEL: process.env.OLLAMA_MODEL,
+    OLLAMA_TRUSTED_CONTEXT: process.env.OLLAMA_TRUSTED_CONTEXT,
+  };
+  delete process.env.DDALGGAK_MODEL_NODES_CONFIG;
+  delete process.env.MODEL_NODES_CONFIG;
+  process.env.OLLAMA_BASE_URL = 'http://10.0.0.20:11434';
+  process.env.OLLAMA_MODEL = 'qwen2.5-coder:32b';
+  delete process.env.OLLAMA_TRUSTED_CONTEXT;
+  try {
+    const node = listModelNodes({ includeDisabled: true }).find((row) => row.id === 'local_model');
+    assert.equal(node.privacy_profile.tier, 'trusted_private');
+    assert.equal(node.privacy_profile.data_boundary, 'user_controlled_remote');
+    assert.equal(node.privacy_profile.allow_private_context, true);
+    assert.equal(node.cost_profile.tier, 'free');
+    assert.equal(node.quality_profile.coding, 'strong');
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });

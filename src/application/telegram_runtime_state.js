@@ -31,7 +31,7 @@ const approvals = new Approvals(jobs);
 
 const ALLOWED_USERS = (process.env.TELEGRAM_ALLOWED_USER_IDS ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
 const MAX_CONCURRENCY = Number(process.env.MAX_CONCURRENCY ?? 1);
-const AUTO_SUGGEST_ENABLED = String(process.env.AUTO_SUGGEST_GPT_PROMPT ?? "true").toLowerCase() !== "false";
+const AUTO_SUGGEST_ENABLED = String(process.env.AUTO_SUGGEST_GPT_PROMPT ?? "false").toLowerCase() === "true";
 const CHAT_VERBOSE = String(process.env.CHAT_VERBOSE ?? "false").toLowerCase() === "true";
 const TELEGRAM_PROGRESS_DETAIL_MODE = String(process.env.TELEGRAM_PROGRESS_DETAIL_MODE ?? "compact").trim().toLowerCase() === "full" ? "full" : "compact";
 const TELEGRAM_REQUIRE_MENTION_IN_GROUP = String(process.env.TELEGRAM_REQUIRE_MENTION_IN_GROUP ?? "false").toLowerCase() === "true";

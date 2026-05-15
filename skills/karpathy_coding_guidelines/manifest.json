@@ -1,0 +1,75 @@
+{
+  "id": "skill.karpathy_coding_guidelines.v1",
+  "slug": "karpathy_coding_guidelines",
+  "name": "Karpathy Coding Guidelines",
+  "version": "1.0.0",
+  "description": "A compact coder/reviewer operating skill: think first, keep changes simple, edit surgically, and verify before claiming success.",
+  "category": "coding",
+  "kind": "method",
+  "visibility": "public",
+  "status": "active",
+  "trust_level": "reviewed",
+  "side_effect_level": "none",
+  "compatible_roles": ["builder", "coder", "reviewer", "verifier", "operator"],
+  "capability_tags": [
+    "code_change",
+    "bug_fix",
+    "refactor",
+    "test_repair",
+    "scope_control",
+    "verification",
+    "review"
+  ],
+  "trigger_terms": [
+    "code",
+    "coding",
+    "implementation",
+    "implement",
+    "patch",
+    "fix",
+    "bug",
+    "refactor",
+    "test",
+    "build",
+    "verify",
+    "review",
+    "workspace",
+    "코드",
+    "구현",
+    "수정",
+    "패치",
+    "리팩터",
+    "테스트",
+    "검증",
+    "리뷰"
+  ],
+  "instructions_ref": "SKILL.md",
+  "resource_refs": ["checklist.md"],
+  "ranking_metadata": {
+    "success_rate": 0.74,
+    "usage_count": 12,
+    "risk": "low"
+  },
+  "input_contract": {
+    "required": ["task_goal", "existing_code_context"],
+    "optional": ["test_commands", "approval_boundary"]
+  },
+  "output_contract": {
+    "required": ["assumptions", "change_summary", "verification_notes", "next_risks"]
+  },
+  "safety_policy": {
+    "risk_level": "low",
+    "default_activation": "auto_for_nontrivial_code_tasks",
+    "avoid_for": ["pure_question", "one_line_non_code_answer"],
+    "rules_exported": [
+      "no_unrequested_refactor",
+      "no_speculative_abstraction",
+      "verify_before_claiming_done"
+    ]
+  },
+  "source_package": {
+    "type": "external_inspired",
+    "homepage": "https://github.com/forrestchang/andrej-karpathy-skills",
+    "license": "unknown"
+  }
+}

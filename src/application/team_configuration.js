@@ -10,6 +10,7 @@ import { PresetResolver } from '../control_plane/preset_resolver.js';
 import { interpretTask } from '../control_plane/task_interpreter.js';
 import { planFreeformTeamWithCodex, planTeamRefinementWithCodex } from './freeform_team_planner.js';
 import { getModelNode, listModelNodes } from './model_node_registry.js';
+import { selectModelNodeForTask } from './model_node_selector.js';
 import {
   buildDefaultInteractionSpec,
   buildAgentLocalInteractionContract,
@@ -2974,10 +2975,20 @@ function deriveMotifIdFromTeam(team = {}, fallback = 'candidate.team') {
   return roles.length > 0 ? `derived.${roles.join('-')}.${pattern}` : fallback;
 }
 
-function chooseLocalModelForRole(role = '') {
+function chooseLocalModelForRole(role = '', { taskText = '', taskTags = [] } = {}) {
   const roleId = cleanId(role);
-  const nodes = listModelNodes({ enabledOnly: true });
-  const local = asArray(nodes).find((node) => isLocalModelProvider(node?.provider || '') && node?.enabled !== false);
+  const nodes = listModelNodes({ includeDisabled: false }).filter((node) => isLocalModelProvider(node?.provider || '') && node?.enabled !== false);
+  const selection = selectModelNodeForTask({
+    nodes,
+    roleId,
+    taskText,
+    taskTags: ['local', 'private', roleId, ...asArray(taskTags)],
+    privacyRequired: true,
+    costSensitive: true,
+    workspaceWriteRequired: roleId === 'builder',
+    policy: 'cheapest_sufficient',
+  });
+  const local = selection.selected;
   if (!local) return null;
   return {
     provider: cleanId(local.provider || 'openai_compatible') || 'openai_compatible',
@@ -2985,6 +2996,8 @@ function chooseLocalModelForRole(role = '') {
     model_node_id: clean(local.id || ''),
     role_bias: asArray(local.role_bias || local.roleBias).map(cleanId),
     role_id: roleId,
+    selection_score: selection.fit?.score,
+    selection_reasons: selection.fit?.reasons || [],
   };
 }
 
@@ -2994,7 +3007,7 @@ function buildAgentDraftForMotifSlot({ slot = {}, taskText = '', index = 1, seen
   let provider = '';
   let model = '';
   if ((tags.has('local') || tags.has('private')) && ['reviewer', 'researcher'].includes(roleId)) {
-    const local = chooseLocalModelForRole(roleId);
+    const local = chooseLocalModelForRole(roleId, { taskText, taskTags: [...tags] });
     if (local?.model) {
       provider = local.provider;
       model = local.model;

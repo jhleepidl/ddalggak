@@ -17,6 +17,20 @@ function usageLogPath({ cwd = process.cwd(), jobId = '' } = {}) {
   return path.join(root, 'model_node_usage.jsonl');
 }
 
+function extractTokenUsage(result = {}) {
+  const usage = asObject(result?.usage || result?.response_json?.usage || result?.responseJson?.usage);
+  const json = asObject(result?.response_json || result?.responseJson);
+  const prompt = Number(usage.prompt_tokens ?? usage.input_tokens ?? json.prompt_eval_count ?? json.promptEvalCount);
+  const completion = Number(usage.completion_tokens ?? usage.output_tokens ?? json.eval_count ?? json.evalCount);
+  const total = Number(usage.total_tokens);
+  return {
+    prompt_tokens: Number.isFinite(prompt) ? prompt : undefined,
+    completion_tokens: Number.isFinite(completion) ? completion : undefined,
+    total_tokens: Number.isFinite(total) ? total : (Number.isFinite(prompt) || Number.isFinite(completion) ? (Number.isFinite(prompt) ? prompt : 0) + (Number.isFinite(completion) ? completion : 0) : undefined),
+    source: usage && Object.keys(usage).length ? 'usage' : (Number.isFinite(prompt) || Number.isFinite(completion) ? 'ollama_eval_counts' : 'unavailable'),
+  };
+}
+
 function summarizePermissions(permissions = {}) {
   const p = asObject(permissions);
   return {
@@ -71,6 +85,7 @@ export function buildModelNodeUsageEvent({
     },
     prompt_chars: promptText.length,
     output_chars: outputText.length,
+    token_usage: extractTokenUsage(result),
     ok: result?.ok === true,
     exit_code: Number.isFinite(Number(result?.exitCode)) ? Number(result.exitCode) : undefined,
     status: result?.status || undefined,

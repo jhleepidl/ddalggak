@@ -451,14 +451,23 @@ export async function collectWorkspaceDiff({ workspaceRoot = '' } = {}) {
   const lines = statusText.split(/\r?\n/).filter(Boolean);
   const branchLine = lines.find((line) => line.startsWith('## ')) || '';
   const branch = clean(branchLine.replace(/^##\s*/, '').split('...')[0]);
+  const isInternalImprovementArtifact = (file = '') => /^\.self_improve(?:\/|$)/.test(file) || /^\.orchestrator(?:\/|$)/.test(file);
   const changedFiles = Array.from(new Set(
     lines
       .filter((line) => !line.startsWith('## '))
       .map((line) => line.slice(3).trim())
       .map((file) => file.includes(' -> ') ? file.split(' -> ').pop().trim() : file)
-      .filter(Boolean),
+      .filter(Boolean)
+      .filter((file) => !isInternalImprovementArtifact(file)),
   ));
-  const changedSummary = lines.filter((line) => !line.startsWith('## ')).join('\n');
+  const changedSummary = lines
+    .filter((line) => !line.startsWith('## '))
+    .filter((line) => {
+      const rawFile = line.slice(3).trim();
+      const file = rawFile.includes(' -> ') ? rawFile.split(' -> ').pop().trim() : rawFile;
+      return !isInternalImprovementArtifact(file);
+    })
+    .join('\n');
   return {
     ok: true,
     workspace_root: root,

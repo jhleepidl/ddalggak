@@ -51,8 +51,29 @@ export function buildWorkflowRuntimeExecutionPatch(contract = null, baseRuntimeE
     ...(row.stop_conditions || row.stopConditions || []),
     ...(workflowKind === 'bounded_continuous_loop' ? ['user_stop', 'approval_required', 'iteration_budget_exceeded', 'three_consecutive_failures'] : []),
   ], { max: 16 });
+  const isBoundedLoop = workflowKind === 'bounded_continuous_loop';
   return {
     ...normalizedBase,
+    execution_mode: isBoundedLoop ? 'task_loop' : (normalizedBase.execution_mode || 'review_loop'),
+    workspace_write: isBoundedLoop ? 'allowed_in_workspace' : (normalizedBase.workspace_write || 'only_when_explicit'),
+    artifact_delivery: isBoundedLoop ? 'allowed_when_task_requires' : (normalizedBase.artifact_delivery || 'only_when_explicit'),
+    legacy_manual_fallback: isBoundedLoop ? 'disabled' : (normalizedBase.legacy_manual_fallback || 'disabled'),
+    approval_boundary: row.approval_boundary === true || row.approvalBoundary === true || normalizedBase.approval_boundary === true,
+    task_loop: {
+      ...(normalizedBase.task_loop || {}),
+      execution_mode: isBoundedLoop ? 'task_loop' : (normalizedBase.task_loop?.execution_mode || normalizedBase.execution_mode || 'review_loop'),
+      workspace_write: isBoundedLoop ? 'allowed_in_workspace' : (normalizedBase.task_loop?.workspace_write || normalizedBase.workspace_write || 'only_when_explicit'),
+      artifact_delivery: isBoundedLoop ? 'allowed_when_task_requires' : (normalizedBase.task_loop?.artifact_delivery || normalizedBase.artifact_delivery || 'only_when_explicit'),
+      legacy_manual_fallback: isBoundedLoop ? 'disabled' : (normalizedBase.task_loop?.legacy_manual_fallback || normalizedBase.legacy_manual_fallback || 'disabled'),
+      approval_boundary: row.approval_boundary === true || row.approvalBoundary === true || normalizedBase.approval_boundary === true,
+    },
+    approval_matrix: {
+      ...(normalizedBase.approval_matrix || {}),
+      workspace_write: isBoundedLoop ? 'allow' : normalizedBase.approval_matrix?.workspace_write,
+      codex_exec: isBoundedLoop ? 'allow' : normalizedBase.approval_matrix?.codex_exec,
+      verification: isBoundedLoop ? 'allow' : normalizedBase.approval_matrix?.verification,
+      shell_exec: normalizedBase.approval_matrix?.shell_exec || (isBoundedLoop ? 'ask' : undefined),
+    },
     continuous_improvement: {
       ...normalizedBase.continuous_improvement,
       enabled: workflowKind === 'bounded_continuous_loop' ? true : normalizedBase.continuous_improvement.enabled === true,
@@ -99,6 +120,10 @@ export function buildWorkflowContractExecutionMetadata(contract = null, runtimeE
   return {
     workflow_kind: cleanText(row.workflow_kind || row.workflowKind, { lower: true, maxLen: 80 }),
     hard_contract: true,
+    execution_mode: policy.execution_mode,
+    workspace_write: policy.workspace_write,
+    artifact_delivery: policy.artifact_delivery,
+    legacy_manual_fallback: policy.legacy_manual_fallback,
     continuous_improvement_enabled: policy.continuous_improvement.enabled === true,
     continuous_mode: policy.continuous_improvement.mode,
     min_turns: policy.continuous_improvement.min_turns,

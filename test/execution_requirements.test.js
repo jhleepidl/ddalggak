@@ -89,3 +89,58 @@ test('runtime rules can default artifact creation to explicit-only without hardc
   assert.equal(ruled.artifact_delivery_forbidden, true);
   assert.equal(ruled.memory_only_requested, true);
 });
+
+test('task loop runtime allows workspace writes despite inherited chat no-artifact policy', async () => {
+  const mod = await import('../src/application/execution_requirements.js');
+  const runtimeExecutionPolicy = {
+    execution_mode: 'task_loop',
+    workspace_write: 'allowed_in_workspace',
+    artifact_delivery: 'allowed_when_task_requires',
+    workflow_contract: {
+      workflow_kind: 'bounded_continuous_loop',
+      required_passes: ['plan', 'implement_or_diagnose', 'verify', 'review'],
+    },
+  };
+  const stale = mod.extractExecutionRequirements([
+    '[TASK OUTPUT POLICY]',
+    '- No explicit file deliverable requested: answer in chat; do not create/update/send workspace artifacts.',
+    'CONTROL PLANE TASK: Start a bounded agent-room loop for a webapp implementation.',
+  ].join('\n'));
+  assert.equal(stale.artifact_delivery_forbidden, true);
+  const resolved = mod.resolveExecutionRequirementsForRuntime(stale, {
+    runtimeExecutionPolicy,
+    roleId: 'builder',
+    taskText: stale.raw_text,
+  });
+  assert.equal(resolved.artifact_delivery_forbidden, false);
+  assert.equal(resolved.task_loop_workspace_write_allowed, true);
+  assert.equal(resolved.workspace_write_requested, true);
+  const block = mod.formatExecutionRequirementsBlock(resolved);
+  assert.match(block, /workspace 내부 파일 생성·수정은 허용/);
+});
+
+test('task loop runtime does not override an explicit user memory-only prohibition', async () => {
+  const mod = await import('../src/application/execution_requirements.js');
+  const runtimeExecutionPolicy = {
+    execution_mode: 'task_loop',
+    workflow_contract: { workflow_kind: 'bounded_continuous_loop', required_passes: ['implement_or_diagnose'] },
+  };
+  const explicit = mod.extractExecutionRequirements('이번 작업은 파일을 만들지 말고 메모리에만 관리해줘.');
+  const resolved = mod.resolveExecutionRequirementsForRuntime(explicit, { runtimeExecutionPolicy, roleId: 'builder' });
+  assert.equal(resolved.artifact_delivery_forbidden, true);
+  assert.equal(resolved.task_loop_workspace_write_allowed, false);
+});
+
+test('task loop runtime rule default does not block implementation workspace writes', async () => {
+  const mod = await import('../src/application/execution_requirements.js');
+  const runtimeExecutionPolicy = {
+    execution_mode: 'task_loop',
+    workspace_write: 'allowed_in_workspace',
+    workflow_contract: { workflow_kind: 'bounded_continuous_loop', required_passes: ['implement_or_diagnose'] },
+  };
+  const base = mod.extractExecutionRequirements('웹앱을 계속 개선하고 테스트해줘');
+  const ruled = mod.applyRuntimeRulePolicy(base, '산출물은 내가 명시적으로 요청할 때만 만들어줘.', { runtimeExecutionPolicy });
+  const resolved = mod.resolveExecutionRequirementsForRuntime(ruled, { runtimeExecutionPolicy, roleId: 'builder' });
+  assert.equal(resolved.artifact_delivery_forbidden, false);
+  assert.equal(resolved.task_loop_workspace_write_allowed, true);
+});

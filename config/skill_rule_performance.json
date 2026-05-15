@@ -1,0 +1,37 @@
+{
+  "kind": "skill_rule_performance_store_v1",
+  "updated_at": "2026-05-08T00:00:00.000Z",
+  "skills": {
+    "skill.karpathy_coding_guidelines.v1": {
+      "id": "skill.karpathy_coding_guidelines.v1",
+      "kind": "skill",
+      "usage_count": 12,
+      "success_rate": 0.74,
+      "verification_pass_rate": 0.7,
+      "human_override_rate": 0.08,
+      "regression_rate": 0.04,
+      "risk": "low",
+      "reuse_score": 74.4,
+      "scope": {
+        "role": "builder|reviewer|verifier",
+        "task_type": "code_change|bug_fix|refactor|test_repair"
+      },
+      "updated_at": "2026-05-08T00:00:00.000Z"
+    }
+  },
+  "rules": {
+    "rule.no_unrequested_refactor": {
+      "id": "rule.no_unrequested_refactor",
+      "kind": "rule",
+      "usage_count": 8,
+      "success_rate": 0.78,
+      "verification_pass_rate": 0.72,
+      "risk": "low",
+      "reuse_score": 72.9,
+      "scope": {
+        "role": "builder|reviewer"
+      },
+      "updated_at": "2026-05-08T00:00:00.000Z"
+    }
+  }
+}

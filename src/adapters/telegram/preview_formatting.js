@@ -280,7 +280,10 @@ export function buildCompactRoutedDashboardText({ actions = [], agentStatus = {}
   if (runningCount > 0) statusSummaryParts.push(`running ${runningCount}`);
   if (queuedCount > 0) statusSummaryParts.push(`queued ${queuedCount}`);
   if (doneCount > 0) statusSummaryParts.push(`done ${doneCount}`);
-  const agencyLines = Array.isArray(agencySummary.lines) ? agencySummary.lines : [];
+  const agencyLines = (Array.isArray(agencySummary.lines) ? agencySummary.lines : []).map((line) => {
+    const text = String(line || '');
+    return text.replace(/^- 준비 상태:/, '- 라우팅 준비:');
+  });
   const lines = [
     '🧭 이번 턴 계획',
     `- 핵심 agent: ${compactAgents || '(none)'}${overflow > 0 ? ` 외 ${overflow}` : ''}`,
@@ -292,6 +295,7 @@ export function buildCompactRoutedDashboardText({ actions = [], agentStatus = {}
     ...agencyLines.slice(0, 5),
   ];
   if (backendOnlyCount > 0 && !agencyLines.some((line) => String(line || '').includes('숨긴 내부 단계'))) lines.push(`- 숨긴 내부 단계: ${backendOnlyCount}`);
+  lines.push('- 세부 단계는 버튼 또는 /status full에서 확인');
   lines.push('- GoC Run Studio에서 agent 간 handoff/review 흐름 확인');
   return lines.join('\n');
 }

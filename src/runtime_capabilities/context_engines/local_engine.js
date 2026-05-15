@@ -944,7 +944,7 @@ export class LocalContextEngine extends ContextEngineBase {
       goal: clip(String(row.goal || "").trim(), 320) || undefined,
       run_meta: compactRunMetaForContextLog(runMeta),
       context_meta: meta,
-    });
+    }, { force: true });
 
     const userMessageText = String(row.userMessageText || "").trim();
     if (userMessageText) {

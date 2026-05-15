@@ -3,23 +3,28 @@ import assert from 'node:assert/strict';
 
 import { runAgentProviderExecution } from '../src/application/telegram_provider_execution.js';
 
-test('runAgentProviderExecution executes chatgpt provider path and appends local logs', async () => {
+test('runAgentProviderExecution executes chatgpt provider through Codex bridge by default', async () => {
   const calls = [];
   let fallbackStored = 'connect ECONNRESET';
   const bot = { sendMessage: async (...args) => { calls.push(args); return { ok: true }; } };
-  const sent = [];
   const appended = [];
+  const codexCalls = [];
 
   const result = await runAgentProviderExecution({
     provider: 'chatgpt',
     agentId: 'planner',
-    model: 'chatgpt',
+    roleId: 'reviewer',
+    model: 'gpt-5.5',
     bot,
     chatId: 55,
     jobId: 'job-1',
     prompts: { chatQuestion: 'hello there' },
     callbacks: {
-      sendChatGPTPrompt: async (_bot, _chatId, _jobId, prompt) => { sent.push(prompt); },
+      codexAssist: async (_jobId, prompt, _signal, opts) => {
+        codexCalls.push({ prompt, opts });
+        return 'codex bridge answer';
+      },
+      sendChatGPTPrompt: async () => { throw new Error('manual fallback should not be used'); },
       appendLocalLogs: (output, mode) => { appended.push({ output, mode }); },
       memoryModeWithFallback: () => 'local_fallback',
       takeGocFallbackReason: () => {
@@ -30,14 +35,14 @@ test('runAgentProviderExecution executes chatgpt provider path and appends local
     },
   });
 
-  assert.equal(sent[0], 'hello there');
-  assert.equal(result.provider, 'chatgpt');
+  assert.equal(codexCalls[0].prompt, 'hello there');
+  assert.equal(codexCalls[0].opts.providerOptions.sandboxMode, 'read-only');
+  assert.equal(result.provider, 'codex');
   assert.equal(result.mode, 'local_fallback');
-  assert.match(result.output, /ChatGPT prompt generated/);
+  assert.equal(result.output, 'codex bridge answer');
   assert.equal(appended.length, 1);
-  assert.equal(appended[0].mode, 'local_fallback');
-  assert.equal(calls.length, 1);
-  assert.match(calls[0][1], /projection_network_error/);
+  assert.equal(calls.some((row) => /ChatGPT 역할을 Codex CLI bridge/.test(row[1])), true);
+  assert.equal(calls.some((row) => /projection_network_error/.test(row[1])), true);
 });
 
 test('runAgentProviderExecution fails over Gemini capacity errors to Codex assist', async () => {

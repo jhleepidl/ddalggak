@@ -44,6 +44,49 @@ function normalizeApprovalDecision(raw = '', fallback = 'allow') {
   return fallback;
 }
 
+function normalizeChoice(raw = '', fallback = '', allowed = []) {
+  const key = cleanId(raw || fallback);
+  if (!allowed.length) return key || fallback;
+  return allowed.includes(key) ? key : fallback;
+}
+
+function boolValue(raw, fallback = false) {
+  if (raw === true || raw === 'true' || raw === '1' || raw === 1) return true;
+  if (raw === false || raw === 'false' || raw === '0' || raw === 0) return false;
+  return fallback;
+}
+
+function normalizeTaskLoopExecutionPolicy(raw = {}) {
+  const row = asObject(raw);
+  const mode = normalizeChoice(row.execution_mode || row.executionMode || row.mode, 'chat_turn', [
+    'chat_turn',
+    'task_loop',
+    'review_loop',
+    'manual',
+  ]);
+  return {
+    execution_mode: mode,
+    workspace_write: normalizeChoice(row.workspace_write || row.workspaceWrite || row.file_write || row.fileWrite, mode === 'task_loop' ? 'allowed_in_workspace' : 'only_when_explicit', [
+      'forbidden',
+      'only_when_explicit',
+      'allowed_in_workspace',
+      'approval_required',
+    ]),
+    artifact_delivery: normalizeChoice(row.artifact_delivery || row.artifactDelivery || row.delivery, mode === 'task_loop' ? 'allowed_when_task_requires' : 'only_when_explicit', [
+      'forbidden',
+      'only_when_explicit',
+      'allowed_when_task_requires',
+      'approval_required',
+    ]),
+    legacy_manual_fallback: normalizeChoice(row.legacy_manual_fallback || row.legacyManualFallback || row.manual_fallback || row.manualFallback, mode === 'task_loop' ? 'disabled' : 'disabled', [
+      'disabled',
+      'debug_only',
+      'enabled',
+    ]),
+    approval_boundary: boolValue(row.approval_boundary ?? row.approvalBoundary, false),
+  };
+}
+
 function normalizeApprovalMatrix(raw = {}) {
   const row = asObject(raw);
   return {
@@ -134,6 +177,18 @@ export function normalizeProviderRuntimePolicies(raw = {}) {
 export function normalizeRuntimeExecutionPolicy(raw = {}) {
   const row = asObject(raw);
   const providerPolicies = normalizeProviderRuntimePolicies(row.providers || row.provider_policies || row.providerPolicies || row);
+  const workflowContract = row.workflow_contract && typeof row.workflow_contract === 'object'
+    ? row.workflow_contract
+    : (row.workflowContract && typeof row.workflowContract === 'object' ? row.workflowContract : undefined);
+  const workflowKind = cleanId(workflowContract?.workflow_kind || workflowContract?.workflowKind || '');
+  const taskLoopBase = normalizeTaskLoopExecutionPolicy({
+    ...(row.task_loop || row.taskLoop || {}),
+    execution_mode: row.execution_mode || row.executionMode || (workflowKind === 'bounded_continuous_loop' ? 'task_loop' : undefined),
+    workspace_write: row.workspace_write || row.workspaceWrite,
+    artifact_delivery: row.artifact_delivery || row.artifactDelivery,
+    legacy_manual_fallback: row.legacy_manual_fallback || row.legacyManualFallback,
+    approval_boundary: row.approval_boundary ?? row.approvalBoundary ?? workflowContract?.approval_boundary ?? workflowContract?.approvalBoundary,
+  });
   return {
     checkpointing: normalizeCheckpointingPolicy(row.checkpointing || row.checkpoints || {}),
     continuous_improvement: normalizeContinuousImprovementPolicy(row.continuous_improvement || row.continuousImprovement || {}),
@@ -141,9 +196,13 @@ export function normalizeRuntimeExecutionPolicy(raw = {}) {
     providers: providerPolicies,
     codex: providerPolicies.codex,
     gemini: providerPolicies.gemini,
-    workflow_contract: row.workflow_contract && typeof row.workflow_contract === 'object'
-      ? row.workflow_contract
-      : (row.workflowContract && typeof row.workflowContract === 'object' ? row.workflowContract : undefined),
+    execution_mode: taskLoopBase.execution_mode,
+    workspace_write: taskLoopBase.workspace_write,
+    artifact_delivery: taskLoopBase.artifact_delivery,
+    legacy_manual_fallback: taskLoopBase.legacy_manual_fallback,
+    approval_boundary: taskLoopBase.approval_boundary,
+    task_loop: taskLoopBase,
+    workflow_contract: workflowContract,
   };
 }
 
@@ -167,6 +226,11 @@ export function summarizeProviderRuntimePolicy(runtimeExecution = {}) {
     checkpointing: policy.checkpointing,
     continuous_improvement: policy.continuous_improvement,
     approval_matrix: policy.approval_matrix,
+    execution_mode: policy.execution_mode,
+    workspace_write: policy.workspace_write,
+    artifact_delivery: policy.artifact_delivery,
+    legacy_manual_fallback: policy.legacy_manual_fallback,
+    approval_boundary: policy.approval_boundary,
     providers: {
       codex: {
         sandbox_mode: policy.providers.codex.sandbox_mode,
