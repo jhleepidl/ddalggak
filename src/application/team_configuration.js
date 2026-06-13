@@ -48,6 +48,11 @@ import { generateTeamCandidateBlueprints } from './team_candidate_generator.js';
 import { checkTeamCandidateContracts, summarizeCandidateGate } from './team_contract_gate.js';
 import { scoreTeamCandidate, selectTeamCandidate } from './team_candidate_scorer.js';
 import { buildTeamSelectionTrace, appendTeamSelectionTrace } from './team_selection_trace.js';
+import { attachSkeletonAdvisoryToCandidates } from './skeleton_score_fusion.js';
+import { inferUserOrchestrationIntent, summarizeUserOrchestrationIntent, candidateSatisfiesUserOrchestrationIntent } from './team_user_orchestration_intent.js';
+import { buildTaskAttemptPlan, summarizeTaskAttemptPlan, candidateSatisfiesTaskAttempt } from './task_attempt_planner.js';
+import { summarizeMemoryImportIntent } from './team_memory_import_intent.js';
+import { summarizeWorkModeConfig, candidateSatisfiesWorkMode } from './work_mode.js';
 import { hasImplementationLikeIntent, hasWorkspaceDeliveryIntent, hasSoftwareDeliveryIntent, inferExecutionRoleFromText } from '../shared/work_intent.js';
 import {
   buildTeamTransitionGuardrailsImpl,
@@ -3067,10 +3072,15 @@ function buildTeamFromMotifBlueprint(blueprint = {}, { taskText = '', runtime = 
   }, { runtime });
 }
 
-function buildCandidateFromTeam(team = {}, { candidateId = '', source = 'team_candidate', stress = {}, runtime = null, modelNodes = [], selected = false, motifId = '' } = {}) {
+function buildCandidateFromTeam(team = {}, { candidateId = '', source = 'team_candidate', stress = {}, runtime = null, modelNodes = [], selected = false, motifId = '', request = '', userOrchestrationIntent = null, taskAttemptPlan = null, memoryImportIntent = null, workModeConfig = null, targetTeam = '', priorWeight = 1, candidateTags = [] } = {}) {
   const normalized = validateTeamConfiguration(team, { runtime });
   const roles = teamAgentRoles(normalized);
   const resolvedMotifId = clean(motifId || normalized?.planner_metadata?.selected_motif_ids?.[0] || deriveMotifIdFromTeam(normalized, candidateId || 'team_candidate'));
+  const userIntent = summarizeUserOrchestrationIntent(userOrchestrationIntent || inferUserOrchestrationIntent(request || normalized?.task_brief || ''));
+  const attemptPlan = summarizeTaskAttemptPlan(taskAttemptPlan || {});
+  const memoryImport = summarizeMemoryImportIntent(memoryImportIntent || attemptPlan.memory_import || {});
+  const workMode = summarizeWorkModeConfig(workModeConfig || attemptPlan.work_mode || {});
+  const candidateTargetTeam = cleanId(targetTeam || (memoryImport.target_team !== 'general' ? memoryImport.target_team : '') || (roles.includes('builder') ? 'coding' : (roles.includes('synthesizer') && roles.includes('reviewer') ? 'paper' : 'general'))) || 'general';
   const candidate = {
     candidate_id: candidateId || cleanId(`${source}:${motifId}`),
     source,
@@ -3080,24 +3090,36 @@ function buildCandidateFromTeam(team = {}, { candidateId = '', source = 'team_ca
     roles,
     agent_count: asArray(normalized.agents).length,
     coordination_cost: Math.max(0, asArray(normalized.agents).length - 1),
+    prior_weight: Number(priorWeight || 1),
+    tags: uniqueIds(candidateTags, { max: 16 }),
     requires: {
       workspace_write: roles.includes('builder') && Number(stress.workspace_mutation || 0) >= 0.45,
       verifier: roles.includes('reviewer') || Number(stress.verification_need || 0) >= 0.65,
       artifact_delivery: roles.includes('builder') || Number(stress.artifact_pressure || 0) >= 0.55,
     },
     team: normalized,
+    user_orchestration_intent: userIntent,
+    task_attempt_plan: attemptPlan,
+    memory_import_intent: memoryImport,
+    work_mode: workMode,
+    target_team: candidateTargetTeam,
+    previous_result_policy: attemptPlan.previous_result_policy,
     selected,
     rationale: asArray(normalized?.planner_metadata?.reasoning_summary).slice(0, 4),
   };
   const gate = checkTeamCandidateContracts(candidate, { runtime, stress, modelNodes });
-  const score = scoreTeamCandidate({ ...candidate, gate }, { stress, gate });
-  return { ...candidate, gate, score };
+  const score = scoreTeamCandidate({ ...candidate, gate }, { stress, gate, request, userOrchestrationIntent: userIntent, taskAttemptPlan: attemptPlan });
+  return { ...candidate, gate, score, user_intent_satisfaction: candidateSatisfiesUserOrchestrationIntent(candidate, userIntent), task_attempt_satisfaction: candidateSatisfiesTaskAttempt(candidate, attemptPlan), work_mode_satisfaction: candidateSatisfiesWorkMode(candidate, workMode) };
 }
 
 export function buildTeamSelectionPortfolio({ taskText = '', runtime = null, primaryTeam = null, fallbackTeam = null, activeTeam = null, policy = 'cheapest_sufficient', maxCandidates = 6 } = {}) {
   const request = clean(taskText || primaryTeam?.task_brief || fallbackTeam?.task_brief || '');
   const modelNodes = listModelNodes({ enabledOnly: false });
   const stress = estimateTeamStressVector({ request, runtime, modelNodes });
+  const userOrchestrationIntent = summarizeUserOrchestrationIntent(inferUserOrchestrationIntent(request));
+  const taskAttemptPlan = buildTaskAttemptPlan({ request, runtime, userOrchestrationIntent });
+  const workModeConfig = summarizeWorkModeConfig(taskAttemptPlan.work_mode || {});
+  const memoryImportIntent = summarizeMemoryImportIntent(taskAttemptPlan.memory_import || {});
   const candidateMap = new Map();
   const add = (candidate) => {
     if (!candidate) return;
@@ -3105,27 +3127,30 @@ export function buildTeamSelectionPortfolio({ taskText = '', runtime = null, pri
     if (!key || candidateMap.has(key)) return;
     candidateMap.set(key, candidate);
   };
-  if (primaryTeam) add(buildCandidateFromTeam(primaryTeam, { candidateId: 'candidate.llm_or_primary', source: cleanId(primaryTeam?.planner_metadata?.planner_type || 'llm_planner'), stress, runtime, modelNodes }));
-  if (fallbackTeam) add(buildCandidateFromTeam(fallbackTeam, { candidateId: 'candidate.heuristic_fallback', source: 'heuristic_fallback', stress, runtime, modelNodes }));
-  const blueprints = generateTeamCandidateBlueprints({ request, runtime, stress, activeTeam, limit: Math.max(6, maxCandidates + 2) });
+  if (primaryTeam) add(buildCandidateFromTeam(primaryTeam, { candidateId: 'candidate.llm_or_primary', source: cleanId(primaryTeam?.planner_metadata?.planner_type || 'llm_planner'), stress, runtime, modelNodes, request, userOrchestrationIntent, taskAttemptPlan, memoryImportIntent, workModeConfig }));
+  if (fallbackTeam) add(buildCandidateFromTeam(fallbackTeam, { candidateId: 'candidate.heuristic_fallback', source: 'heuristic_fallback', stress, runtime, modelNodes, request, userOrchestrationIntent, taskAttemptPlan, memoryImportIntent, workModeConfig }));
+  const blueprints = generateTeamCandidateBlueprints({ request, runtime, stress, activeTeam, limit: Math.max(6, maxCandidates + 2), userOrchestrationIntent, taskAttemptPlan });
   for (const blueprint of blueprints) {
     const team = buildTeamFromMotifBlueprint(blueprint, { taskText: request, runtime, proposalMode: primaryTeam?.proposal_mode || 'suggest' });
-    add(buildCandidateFromTeam(team, { candidateId: blueprint.candidate_id, source: `motif:${blueprint.source || 'registry'}`, stress, runtime, modelNodes, motifId: blueprint.motif_id }));
+    add(buildCandidateFromTeam(team, { candidateId: blueprint.candidate_id, source: `motif:${blueprint.source || 'registry'}`, stress, runtime, modelNodes, motifId: blueprint.motif_id, request, userOrchestrationIntent: blueprint.user_orchestration_intent || userOrchestrationIntent, taskAttemptPlan: blueprint.task_attempt_plan || taskAttemptPlan, memoryImportIntent: blueprint.memory_import_intent || memoryImportIntent, workModeConfig: blueprint.work_mode || workModeConfig, targetTeam: blueprint.target_team, priorWeight: blueprint.prior_weight || blueprint.default_weight || 1, candidateTags: blueprint.tags || [] }));
   }
   let candidates = [...candidateMap.values()];
+  const advisory = attachSkeletonAdvisoryToCandidates({ request, candidates, stress, runtime, taskAttemptPlan });
+  candidates = advisory.candidates;
   const selected = selectTeamCandidate(candidates, { policy }) || candidates[0] || null;
   candidates = candidates.map((candidate) => ({ ...candidate, selected: selected && candidate.candidate_id === selected.candidate_id }));
+  const effectiveUtility = (candidate) => Number(candidate.score?.advisory_mode === 'rerank' ? (candidate.score?.fused_utility ?? candidate.score?.utility ?? 0) : (candidate.score?.utility ?? 0));
   candidates.sort((a, b) => {
     if (a.selected) return -1;
     if (b.selected) return 1;
-    const au = Number(a.score?.utility || 0);
-    const bu = Number(b.score?.utility || 0);
+    const au = effectiveUtility(a);
+    const bu = effectiveUtility(b);
     if (Math.abs(bu - au) > 0.001) return bu - au;
     return Number(a.score?.estimated_cost || 0) - Number(b.score?.estimated_cost || 0);
   });
   const trimmed = candidates.slice(0, Math.max(1, maxCandidates));
   const selectedCandidate = trimmed.find((candidate) => candidate.selected) || trimmed[0] || null;
-  const trace = buildTeamSelectionTrace({ request, stress, candidates: trimmed, selectedCandidate, policy, source: 'team_configuration' });
+  const trace = buildTeamSelectionTrace({ request, stress, candidates: trimmed, selectedCandidate, policy, source: 'team_configuration', advisorySummary: advisory.summary, userOrchestrationIntent, taskAttemptPlan, memoryImportIntent, workModeConfig });
   appendTeamSelectionTrace(trace);
   const selectedTeam = selectedCandidate?.team || primaryTeam || fallbackTeam || null;
   if (selectedTeam) {
@@ -3139,6 +3164,11 @@ export function buildTeamSelectionPortfolio({ taskText = '', runtime = null, pri
         stress_summary: summarizeStressVector(stress),
         selected_candidate_id: selectedCandidate?.candidate_id || null,
         candidate_count: trimmed.length,
+        skeleton_advisory: advisory.summary,
+        user_orchestration_intent: userOrchestrationIntent,
+        task_attempt_plan: taskAttemptPlan,
+        memory_import_intent: memoryImportIntent,
+        work_mode: workModeConfig,
       },
       reasoning_summary: [
         ...asArray(selectedTeam.planner_metadata?.reasoning_summary || selectedTeam.planner_metadata?.reasoningSummary),
@@ -3157,6 +3187,11 @@ export function buildTeamSelectionPortfolio({ taskText = '', runtime = null, pri
     selected_candidate_id: selectedCandidate?.candidate_id || null,
     candidates: trimmed,
     trace,
+    skeleton_advisory_summary: advisory.summary,
+    user_orchestration_intent: userOrchestrationIntent,
+    task_attempt_plan: taskAttemptPlan,
+    memory_import_intent: memoryImportIntent,
+    work_mode: workModeConfig,
     selected_team: selectedTeam,
   };
 }
@@ -3172,6 +3207,10 @@ export function formatTeamCandidatePortfolioMessage(portfolio = {}, { verbose = 
     `selection=${clean(row.selection_id || '-')}`,
     `policy=${clean(row.policy || 'cheapest_sufficient')}`,
     `stress=${asArray(row.stress_summary).join(', ') || 'low-stress'}`,
+    row.user_orchestration_intent?.team_intent && row.user_orchestration_intent.team_intent !== 'neutral' ? `user_team=${row.user_orchestration_intent.team_intent} · style=${row.user_orchestration_intent.team_style || 'team'}` : '',
+    row.work_mode?.work_mode ? `work_mode=${row.work_mode.work_mode} · loop=${row.work_mode.loop_budget} · review=${row.work_mode.review_policy}` : '',
+    row.task_attempt_plan?.run_mode && row.task_attempt_plan.run_mode !== 'new' ? `attempt=${row.task_attempt_plan.run_mode} · target=${row.task_attempt_plan.target_team || 'general'} · prev=${row.task_attempt_plan.previous_result_policy || 'optional'}` : '',
+    row.memory_import_intent?.import_intent && row.memory_import_intent.import_intent !== 'none' ? `memory=${row.memory_import_intent.import_intent} · profile=${row.memory_import_intent.projection_profile || 'general'} · mode=${row.memory_import_intent.mode || 'snapshot'}` : '',
     '',
   ];
   candidates.forEach((candidate, index) => {
@@ -3179,7 +3218,13 @@ export function formatTeamCandidatePortfolioMessage(portfolio = {}, { verbose = 
     const roles = asArray(candidate.roles).map((role) => roleLabel(role)).join(' → ') || '-';
     lines.push(`${mark} ${index + 1}. ${clean(candidate.label || candidate.candidate_id)} · ${clean(candidate.motif_id || '-')}`);
     lines.push(`   roles=${roles}`);
-    lines.push(`   gate=${summarizeCandidateGate(candidate.gate)} · utility=${Number(candidate.score?.utility || 0).toFixed(3)} · cost=${Number(candidate.score?.estimated_cost || 0).toFixed(2)}`);
+    const userIntent = candidate.user_orchestration_intent?.team_intent && candidate.user_orchestration_intent.team_intent !== 'neutral'
+      ? ` · user_team=${candidate.user_orchestration_intent.team_intent}${candidate.score?.user_intent_match === false ? ' mismatch' : ' match'}`
+      : '';
+    const learned = candidate.skeleton_advisory?.status === 'ok'
+      ? ` · learned=${candidate.skeleton_advisory.labels?.Y_UTIL || '?'} / debt=${candidate.skeleton_advisory.labels?.Y_DEBT || '?'}${candidate.score?.advisory_mode === 'rerank' ? ` · fused=${Number(candidate.score?.fused_utility || 0).toFixed(3)}` : ''}`
+      : (candidate.skeleton_advisory?.status ? ` · learned=${candidate.skeleton_advisory.status}` : '');
+    lines.push(`   gate=${summarizeCandidateGate(candidate.gate)} · utility=${Number(candidate.score?.utility || 0).toFixed(3)} · cost=${Number(candidate.score?.estimated_cost || 0).toFixed(2)}${learned}${userIntent}`);
     if (verbose && asArray(candidate.rationale).length > 0) {
       lines.push(`   rationale=${asArray(candidate.rationale).slice(0, 2).join(' / ')}`);
     }

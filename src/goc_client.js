@@ -3,6 +3,11 @@ import {
   getTeamBlueprintApi,
   installTeamBlueprintApi,
   buildTeamPublishCandidateApi,
+  upsertThreadTeamPackageApi,
+  listThreadTeamPackagesApi,
+  listTeamLibraryApi,
+  getTeamLibraryPackageApi,
+  forkTeamLibraryPackagePreviewApi,
   setTeamConfigApi,
   validateTeamBlueprintApi,
 } from './goc_client_team_api.js';
@@ -2588,6 +2593,26 @@ export class GocClient {
 
   async buildTeamPublishCandidate(threadTarget, options = {}) {
     return await buildTeamPublishCandidateApi(this, threadTarget, options);
+  }
+
+  async upsertThreadTeamPackage(threadTarget, teamPackage = {}) {
+    return await upsertThreadTeamPackageApi(this, threadTarget, teamPackage);
+  }
+
+  async listThreadTeamPackages(threadTarget, options = {}) {
+    return await listThreadTeamPackagesApi(this, threadTarget, options);
+  }
+
+  async listTeamLibrary(options = {}) {
+    return await listTeamLibraryApi(this, options);
+  }
+
+  async getTeamLibraryPackage(packageId = '') {
+    return await getTeamLibraryPackageApi(this, packageId);
+  }
+
+  async forkTeamLibraryPackagePreview(packageId = '', options = {}) {
+    return await forkTeamLibraryPackagePreviewApi(this, packageId, options);
   }
 
   async installTeamBlueprint(threadTarget, blueprint = {}, applyState = 'active') {

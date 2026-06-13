@@ -177,7 +177,12 @@ const TEAM_ADVANCED_HELP_TEXT = [
   "- /team requirements",
   "- /team proposal",
   "- /team export",
-  "- /team install <JSON>",
+  "- /team publish [--public]: 현재 team을 공유 가능한 package로 저장",
+  "- /team library [query]: shared team package 목록/검색",
+  "- /team package <package_id>: package 상세 보기",
+  "- /team clone <package_id>: package를 fresh private memory로 설치",
+  "- /team fork <package_id>: package를 fork해서 새 candidate 만들기",
+  "- /team install <JSON|package_id>",
   "- /team pull",
   "- /team push",
   "- /team debug templates: 개발자용 benchmark template 목록 보기",
@@ -1849,7 +1854,7 @@ ${formatTeamCandidatePortfolioMessage(portfolio)}`);
       });
       if (handledTeamManifestSubcommand) return true;
       // legacy team blueprint subcommand handlers were removed.
-      // /team proposal|install-plan|requirements|export|install|import|pull|push are handled only by handleTelegramTeamBlueprintSubcommand.
+      // /team proposal|install-plan|requirements|export|publish|library|clone|fork|install|import|pull|push are handled only by handleTelegramTeamBlueprintSubcommand.
       if (sub === 'template') {
         await bot.sendMessage(chatId, TEAM_TEMPLATE_DEPRECATED_TEXT);
         return true;

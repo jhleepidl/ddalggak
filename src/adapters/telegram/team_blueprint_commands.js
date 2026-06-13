@@ -1,5 +1,6 @@
 import { buildTeamBlueprint, installTeamBlueprintToSession, normalizeTeamBlueprint } from '../../application/team_blueprint_runtime.js';
 import { buildTeamPublishCandidate, formatTeamPublishCandidateReview } from '../../application/team_publish_candidate.js';
+import { buildSharedTeamPackageFromManifest, saveSharedTeamPackageToRegistry, readSharedTeamPackageRegistry, searchSharedTeamPackages, findSharedTeamPackage, forkSharedTeamPackage, installSharedTeamPackageToSession, formatSharedTeamPackage, formatSharedTeamPackageRegistry } from '../../application/team_package_registry.js';
 import { buildTeamInstallProposal, formatTeamInstallProposalMessage } from '../../application/install_proposal.js';
 import { buildInstallProposalPrompt, createPendingInstallProposalState, getPendingInstallProposal, archivePendingInstallProposal, shouldResumeInstallProposal } from '../../application/install_proposal_state.js';
 import { formatManifestRequirementLines, normalizeManifestRequirements } from '../../shared/manifest_requirements.js';
@@ -58,7 +59,7 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
     resolveLiveJobIdForChat,
     jobs,
   } = context;
-  if (!['proposal','install-plan','requirements','export','publish-preview','publish-candidate','install','import','pull','push'].includes(sub)) return false;
+  if (!['proposal','install-plan','requirements','export','publish-preview','publish-candidate','publish','share','library','packages','registry','package','show-package','clone','fork','install','import','pull','push'].includes(sub)) return false;
 
   if (sub === 'proposal' || sub === 'install-plan') {
     const proposalAction = clean(rest[1] || '').toLowerCase();
@@ -220,6 +221,121 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
     return true;
   }
 
+
+  if (sub === 'publish' || sub === 'share') {
+    const baseTeam = currentTeamForManifest(teamState);
+    if (!baseTeam) {
+      await bot.sendMessage(chatId, '공유할 팀이 없습니다. 먼저 /team suggest <목적> 또는 /team create <자연어 팀 설명> 을 실행해 주세요.');
+      return true;
+    }
+    const publicRequested = /--public\b/i.test(rawArgs);
+    const manifest = buildManifestWithSessionState(baseTeam, {
+      runtime: runtimeForTeam,
+      applyState: parseApplyStateTokens(rest.slice(1)),
+      source: 'telegram_team_publish',
+      sessionInstallProposal: getPendingInstallProposal(chatSessionStore, chatId) || chatSessionStore.get(chatId)?.last_install_proposal || null,
+      credentialBindingState: getCredentialBindingState(chatSessionStore, chatId),
+    });
+    const pkg = buildSharedTeamPackageFromManifest(manifest, {
+      visibility: publicRequested ? 'public' : 'private_review',
+      status: publicRequested ? 'published' : 'candidate',
+      source: 'telegram_team_publish',
+      chatId,
+      threadId: getCurrentThreadId(runtimeForTeam),
+    });
+    const saved = saveSharedTeamPackageToRegistry(pkg);
+    let serverLine = '';
+    const threadId = getCurrentThreadId(runtimeForTeam);
+    if (threadId && memoryModeWithFallback?.() === 'goc' && typeof requireGocClient === 'function' && /--server/i.test(rawArgs)) {
+      try {
+        await requireGocClient().upsertThreadTeamPackage({ threadId }, saved.package);
+        serverLine = 'GoC Team Library에도 package를 업로드했습니다.';
+      } catch (e) {
+        serverLine = `⚠️ GoC Team Library 업로드 실패: ${String(e?.message ?? e)}`;
+      }
+    }
+    await sendLong(bot, chatId, [
+      publicRequested ? '✅ Shared team package를 public/published 상태로 저장했습니다.' : '📦 Shared team package candidate를 만들었습니다.',
+      serverLine,
+      '',
+      formatSharedTeamPackage(saved.package, { detail: true }),
+      '',
+      '다른 채팅방에서 사용:',
+      `/team clone ${saved.package.package_id}`,
+      '',
+      '주의: private memory, credentials, provider state, runtime logs는 package에 복사되지 않습니다.',
+    ].filter(Boolean).join('\n'));
+    return true;
+  }
+
+  if (sub === 'library' || sub === 'packages' || sub === 'registry') {
+    const query = clean(rawArgs.replace(/^(library|packages|registry)\s*/i, ''));
+    const registry = query ? searchSharedTeamPackages({ query }) : readSharedTeamPackageRegistry();
+    await sendLong(bot, chatId, formatSharedTeamPackageRegistry(registry));
+    return true;
+  }
+
+  if (sub === 'package' || sub === 'show-package') {
+    const packageId = clean(rawArgs.replace(/^(package|show-package)\s+/i, ''));
+    if (!packageId) {
+      await bot.sendMessage(chatId, 'Usage: /team package <package_id>');
+      return true;
+    }
+    const pkg = findSharedTeamPackage(packageId);
+    if (!pkg) {
+      await bot.sendMessage(chatId, `shared team package를 찾지 못했습니다: ${packageId}`);
+      return true;
+    }
+    await sendLong(bot, chatId, formatSharedTeamPackage(pkg, { detail: true }));
+    return true;
+  }
+
+  if (sub === 'clone') {
+    const rawInput = clean(rawArgs.replace(/^clone\s+/i, ''));
+    if (!rawInput) {
+      await bot.sendMessage(chatId, 'Usage: /team clone [--apply|--pending] <package_id|package_json>');
+      return true;
+    }
+    const applyState = parseApplyStateTokens(rawInput.split(/\s+/).slice(0, 3));
+    const payload = rawInput.replace(/^--(?:apply|active|pending)\s+/i, '').trim();
+    let pkg = null;
+    if (payload.startsWith('{')) {
+      try { pkg = JSON.parse(payload); } catch (e) {
+        await bot.sendMessage(chatId, `❌ package JSON 파싱 실패: ${String(e?.message ?? e)}`);
+        return true;
+      }
+    } else {
+      pkg = findSharedTeamPackage(payload);
+    }
+    if (!pkg) {
+      await bot.sendMessage(chatId, `shared team package를 찾지 못했습니다: ${payload}`);
+      return true;
+    }
+    try {
+      const installed = await installSharedTeamPackageToSession({ sessionStore: chatSessionStore, chatId, teamPackage: pkg, runtime: runtimeForTeam, applyState });
+      await sendLong(bot, chatId, [`✅ shared team package를 ${applyState === 'active' ? 'active' : 'pending'} team으로 clone했습니다.`, '', formatTeamProposalMessage(installed.team, { runtime: runtimeForTeam }), '', 'clone policy: fresh private memory · credentials never copied · provider state never copied'].join('\n'));
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ shared team package clone 실패: ${String(e?.message ?? e)}`);
+    }
+    return true;
+  }
+
+  if (sub === 'fork') {
+    const rawInput = clean(rawArgs.replace(/^fork\s+/i, ''));
+    if (!rawInput) {
+      await bot.sendMessage(chatId, 'Usage: /team fork <package_id>');
+      return true;
+    }
+    const forked = forkSharedTeamPackage(rawInput, { visibility: 'private_review', status: 'candidate' });
+    if (!forked) {
+      await bot.sendMessage(chatId, `shared team package를 찾지 못했습니다: ${rawInput}`);
+      return true;
+    }
+    const saved = saveSharedTeamPackageToRegistry(forked);
+    await sendLong(bot, chatId, ['✅ shared team package fork를 만들었습니다.', '', formatSharedTeamPackage(saved.package, { detail: true }), '', `/team clone ${saved.package.package_id}`].join('\n'));
+    return true;
+  }
+
   if (sub === 'install' || sub === 'import') {
     const payload = clean(rawArgs.replace(/^(install|import)\s+/i, ''));
     if (!payload) {
@@ -229,11 +345,19 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
     const applyState = parseApplyStateTokens(payload.split(/\s+/).slice(0, 3));
     const jsonPayload = payload.replace(/^--(?:apply|active|pending)\s+/i, '').trim();
     try {
+      if (!jsonPayload.startsWith('{')) {
+        const pkg = findSharedTeamPackage(jsonPayload);
+        if (pkg) {
+          const installed = await installSharedTeamPackageToSession({ sessionStore: chatSessionStore, chatId, teamPackage: pkg, runtime: runtimeForTeam, applyState });
+          await sendLong(bot, chatId, [`✅ shared team package를 ${applyState === 'active' ? 'active' : 'pending'} team으로 설치했습니다.`, '', formatTeamProposalMessage(installed.team, { runtime: runtimeForTeam }), '', 'clone policy: fresh private memory · credentials never copied · provider state never copied'].join('\n'));
+          return true;
+        }
+      }
       const parsed = JSON.parse(jsonPayload);
       const installed = await installTeamBlueprintToSession({ sessionStore: chatSessionStore, chatId, manifest: parsed, runtime: runtimeForTeam, applyState });
       await sendLong(bot, chatId, [`✅ blueprint를 ${applyState === 'active' ? 'active' : 'pending'} team으로 설치했습니다.`, '', formatTeamProposalMessage(installed.team, { runtime: runtimeForTeam })].join('\n'));
     } catch (e) {
-      await bot.sendMessage(chatId, `❌ blueprint 설치 실패: ${String(e?.message ?? e)}`);
+      await bot.sendMessage(chatId, `❌ blueprint/package 설치 실패: ${String(e?.message ?? e)}`);
     }
     return true;
   }

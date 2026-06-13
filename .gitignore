@@ -149,3 +149,13 @@ commands.md
 # Generated model discovery state
 config/model_nodes.discovered.json
 config/model_catalog_refresh_state.json
+
+# Local implementation notes / handoff scratch files
+# Reusable docs are tracked under docs/. Temporary memos live in these ignored folders.
+docs/
+
+
+# Local shared team package registry (exported/candidate packages)
+config/shared_team_packages.json
+
+.antigravitycli/

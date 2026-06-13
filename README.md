@@ -309,11 +309,11 @@ fallback semantics:
   - `skill.run_trace_debugging.v1`
   - `skill.kr_equity_analysis.v1`
 
-새 skill 작성 방법은 [`SKILL_AUTHORING_GUIDE.md`](./SKILL_AUTHORING_GUIDE.md)를 참고하세요.
+새 skill 작성 방법은 [`docs/guides/SKILL_AUTHORING_GUIDE.md`](./docs/guides/SKILL_AUTHORING_GUIDE.md)를 참고하세요.
 
 외부 Telegram 명령 UX(`/run`, `/continue`, `/gptprompt`, `/gptapply`, `/gptdone`, `/commit`, `/context`, `/agents`, `/memory`)은 그대로 유지됩니다.
 
-운영자 UI 가이드는 [`UI_USAGE_GUIDE.md`](./UI_USAGE_GUIDE.md)를 참고하세요.
+운영자 UI 가이드는 [`docs/guides/UI_USAGE_GUIDE.md`](./docs/guides/UI_USAGE_GUIDE.md)를 참고하세요.
 
 ---
 

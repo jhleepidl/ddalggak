@@ -19,7 +19,7 @@ function safeAppendJsonl(filePath = '', row = {}) {
   } catch {}
 }
 
-export function buildTeamSelectionTrace({ request = '', stress = {}, candidates = [], selectedCandidate = null, policy = 'cheapest_sufficient', source = 'team_portfolio' } = {}) {
+export function buildTeamSelectionTrace({ request = '', stress = {}, candidates = [], selectedCandidate = null, policy = 'cheapest_sufficient', source = 'team_portfolio', advisorySummary = null, userOrchestrationIntent = null, taskAttemptPlan = null, memoryImportIntent = null, workModeConfig = null } = {}) {
   const selectedId = clean(selectedCandidate?.candidate_id || selectedCandidate?.id || '');
   return {
     kind: 'team_selection_trace_v1',
@@ -30,6 +30,12 @@ export function buildTeamSelectionTrace({ request = '', stress = {}, candidates 
     stress: asObject(stress),
     policy,
     selected_candidate_id: selectedId || null,
+    advisory_summary: advisorySummary || null,
+    user_orchestration_intent: userOrchestrationIntent || advisorySummary?.user_orchestration_intent || null,
+    task_attempt_plan: taskAttemptPlan || advisorySummary?.task_attempt_plan || null,
+    memory_import_intent: memoryImportIntent || advisorySummary?.memory_import_intent || taskAttemptPlan?.memory_import || null,
+    work_mode: workModeConfig || taskAttemptPlan?.work_mode || advisorySummary?.work_mode || null,
+    cycle_policy: taskAttemptPlan?.cycle_policy || null,
     candidates: asArray(candidates).map((candidate) => buildTeamCandidateSummary(candidate)),
   };
 }

@@ -1,6 +1,85 @@
 {
   "nodes": [
     {
+      "id": "google_ai_antigravity_cli_auto",
+      "label": "Google Antigravity CLI Auto",
+      "provider": "google_ai",
+      "runtime": "antigravity_cli",
+      "base_url": "",
+      "model": "auto",
+      "enabled": false,
+      "status": "requires_probe",
+      "capabilities": {
+        "chat": true,
+        "structured_json": true,
+        "tool_calling": true,
+        "code": true,
+        "vision": true,
+        "subagents": true,
+        "hooks": true,
+        "skills": true,
+        "background_tasks": true
+      },
+      "limits": {
+        "max_concurrent": 1,
+        "timeout_ms": 240000
+      },
+      "permissions": {
+        "memory_read": "project_scoped",
+        "memory_write": "write_intent_only",
+        "workspace_read": true,
+        "workspace_write": false
+      },
+      "cost_profile": {
+        "tier": "unknown",
+        "billing": "plan_or_metered",
+        "notes": "Use check_antigravity_cli.js before routing production traffic."
+      },
+      "latency_profile": {
+        "tier": "medium",
+        "startup": "cli"
+      },
+      "quality_profile": {
+        "tier": "frontier",
+        "reasoning": "frontier",
+        "coding": "strong",
+        "factuality": "strong",
+        "context": "large"
+      },
+      "privacy_profile": {
+        "tier": "external_api",
+        "data_boundary": "google_ai_account",
+        "sends_context_off_device": true,
+        "trusted_context": false,
+        "allow_private_context": false
+      },
+      "routing": {
+        "priority": 68,
+        "prefer_for": [
+          "planner",
+          "researcher",
+          "reviewer",
+          "synthesis",
+          "fast_summary"
+        ],
+        "avoid_for": [
+          "private_context"
+        ]
+      },
+      "role_bias": [
+        "planner",
+        "researcher",
+        "reviewer",
+        "synthesizer"
+      ],
+      "migration": {
+        "replaces": "gemini_cli_for_consumer_accounts",
+        "gemini_cli_consumer_shutdown_date": "2026-06-18",
+        "feature_parity": "not_assumed",
+        "probe_required": true
+      }
+    },
+    {
       "id": "local_ollama_gemma3",
       "label": "Local Ollama Gemma 3",
       "provider": "openai_compatible",

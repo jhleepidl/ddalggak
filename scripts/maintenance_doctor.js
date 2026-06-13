@@ -18,6 +18,11 @@ function checkExists({ root, file, message, level = 'required' }) {
   return { name: file, ok: exists(path.join(root, file)), level, message, matched: false };
 }
 
+function checkExistsAny({ root, files = [], name, message, level = 'required' }) {
+  const ok = files.some((file) => exists(path.join(root, file)));
+  return { name: name || files[0] || 'file', ok, level, message, matched: false };
+}
+
 function readPackageScripts(root) {
   try {
     const parsed = JSON.parse(readText(path.join(root, 'package.json')) || '{}');
@@ -35,8 +40,18 @@ function checkScript({ root, script, message, level = 'recommended' }) {
 export function runMaintenanceDoctor({ cwd = process.cwd() } = {}) {
   const root = path.resolve(clean(cwd) || process.cwd());
   const checks = [
-    checkExists({ root, file: 'AGENCY_FIRST_GUIDE.md', message: 'Agency-first 운영 초점 문서가 있어야 합니다.' }),
-    checkExists({ root, file: 'TRACE_HANDOFF_GUIDE.md', message: 'trace handoff 문서가 있어야 수동 디버깅 루프가 안정적입니다.' }),
+    checkExistsAny({
+      root,
+      name: 'docs/guides/AGENCY_FIRST_GUIDE.md',
+      files: ['docs/guides/AGENCY_FIRST_GUIDE.md', 'AGENCY_FIRST_GUIDE.md'],
+      message: 'Agency-first 운영 초점 문서가 docs/guides 아래에 있어야 합니다.',
+    }),
+    checkExistsAny({
+      root,
+      name: 'docs/guides/TRACE_HANDOFF_GUIDE.md',
+      files: ['docs/guides/TRACE_HANDOFF_GUIDE.md', 'TRACE_HANDOFF_GUIDE.md'],
+      message: 'trace handoff 문서가 docs/guides 아래에 있어야 수동 디버깅 루프가 안정적입니다.',
+    }),
     checkScript({ root, script: 'trace:doctor', message: 'trace 설정 점검 스크립트가 package.json에 연결되어야 합니다.' }),
     checkScript({ root, script: 'trace:bundle', message: 'trace handoff bundle 생성 스크립트가 package.json에 연결되어야 합니다.' }),
     checkScript({ root, script: 'agency:doctor', message: 'agency-first 설정 점검 스크립트가 package.json에 연결되어야 합니다.' }),

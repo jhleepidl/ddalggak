@@ -121,3 +121,54 @@ export async function installTeamBlueprintApi(client, threadTarget, blueprint = 
     ],
   });
 }
+
+export async function upsertThreadTeamPackageApi(client, threadTarget, teamPackage = {}) {
+  const threadId = requireThreadId(summarizeTeamTarget(threadTarget, { client }));
+  return await client._requestAny({
+    method: 'POST',
+    attempts: [
+      { path: `/api/threads/${encodeURIComponent(threadId)}/team-packages`, body: { package: teamPackage, source: 'ddalggak' } },
+    ],
+  });
+}
+
+export async function listThreadTeamPackagesApi(client, threadTarget, { limit = 100 } = {}) {
+  const threadId = requireThreadId(summarizeTeamTarget(threadTarget, { client }));
+  return await client._requestAny({
+    method: 'GET',
+    attempts: [
+      { path: `/api/threads/${encodeURIComponent(threadId)}/team-packages`, query: { limit } },
+    ],
+  });
+}
+
+export async function listTeamLibraryApi(client, { query = '', limit = 100 } = {}) {
+  return await client._requestAny({
+    method: 'GET',
+    attempts: [
+      { path: '/api/team-library', query: { q: query || undefined, limit } },
+    ],
+  });
+}
+
+export async function getTeamLibraryPackageApi(client, packageId = '') {
+  const id = String(packageId || '').trim();
+  if (!id) throw new Error('packageId is required');
+  return await client._requestAny({
+    method: 'GET',
+    attempts: [
+      { path: `/api/team-library/${encodeURIComponent(id)}` },
+    ],
+  });
+}
+
+export async function forkTeamLibraryPackagePreviewApi(client, packageId = '', options = {}) {
+  const id = String(packageId || '').trim();
+  if (!id) throw new Error('packageId is required');
+  return await client._requestAny({
+    method: 'POST',
+    attempts: [
+      { path: `/api/team-library/${encodeURIComponent(id)}/fork-preview`, body: options && typeof options === 'object' ? options : {} },
+    ],
+  });
+}
