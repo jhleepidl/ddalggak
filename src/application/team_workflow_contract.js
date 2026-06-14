@@ -72,5 +72,7 @@ export function summarizeTeamWorkflowContract(contract = null) {
     Number(row.min_iterations || 0) > 1 ? `iterations>=${row.min_iterations}` : '',
     row.approval_boundary ? 'approval-gated' : '',
     row.review_each_iteration ? 'review-each-iteration' : '',
+    row.work_mode?.work_mode ? `work_mode=${row.work_mode.work_mode}` : '',
+    row.work_mode?.loop_budget !== undefined ? `loop=${row.work_mode.loop_budget}` : '',
   ].filter(Boolean).join(' · ');
 }

@@ -9,6 +9,7 @@ import {
   shouldIncludeRoleLocalMemory,
 } from "../../application/memory_topology.js";
 import { runIdleMemoryMaintenance } from "../../application/idle_compaction.js";
+import { runIdleStewardMaintenance } from "../../application/idle_steward.js";
 import { buildChatMemoryAnchorPromptBlock, loadChatMemoryAnchor, updateChatMemoryAnchor } from "../../application/chat_memory_anchor.js";
 import { buildMemoryDemandContext } from "../../application/memory_demand_context.js";
 import { loadCurrentTaskPacket, renderTaskPacket, updateCurrentTaskPacket } from "../../application/task_packet.js";
@@ -894,6 +895,7 @@ export class LocalContextEngine extends ContextEngineBase {
       updateCurrentTaskPacket({ jobDir: resolvedJobDir, currentUserText: userText, runMeta: row.runMeta || {}, persist: true });
     }
     let idleMaintenance = null;
+    let idleSteward = null;
     let chatMemoryAnchor = null;
     if (resolvedJobDir) {
       try {
@@ -921,11 +923,25 @@ export class LocalContextEngine extends ContextEngineBase {
           assistantText: assistantTurnText || assistantSummaryText,
         });
       } catch {}
+      try {
+        idleSteward = runIdleStewardMaintenance({
+          jobDir: resolvedJobDir,
+          jobId,
+          chatId: row.chatId || '',
+          threadId: row.threadId || row.runMeta?.threadId || row.runMeta?.thread_id || '',
+          runId: row.runMeta?.runId || row.runMeta?.run_id || '',
+          force: false,
+          memoryMaintenance: idleMaintenance,
+        });
+      } catch (error) {
+        idleSteward = { ok: false, error: String(error?.message || error || 'unknown') };
+      }
     }
     return {
       ok: true,
       summaryChars: nextSummary.length,
       idleMaintenance,
+      idleSteward,
       chatMemoryAnchor,
     };
   }
