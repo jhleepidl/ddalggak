@@ -946,6 +946,73 @@ export function createTelegramCommandHandler(deps = {}) {
     return !TEAM_TOPOLOGY_SUBCOMMANDS.has(first);
   }
 
+
+  function summarizeAgentLabelsFromTeam(team = null, { max = 8 } = {}) {
+    const agents = Array.isArray(team?.agents) ? team.agents : [];
+    return agents.slice(0, max).map((agent) => {
+      const name = String(agent?.name || agent?.agent_id || agent?.id || agent?.role || 'agent').trim();
+      const role = String(agent?.role || agent?.role_id || agent?.roleId || '').trim();
+      return role && role !== name ? `${name} (${role})` : name;
+    }).filter(Boolean);
+  }
+
+  function buildEphemeralSingleAgentTaskTeam({ chatId, goal = '', runtimeForTeam = null } = {}) {
+    const singleAgentTeam = buildStarterSingleAgentTeamConfiguration({
+      taskText: goal,
+      runtime: runtimeForTeam,
+      source: 'telegram_task_instant_ephemeral_single_agent',
+    });
+    const agentLabels = summarizeAgentLabelsFromTeam(singleAgentTeam);
+    return {
+      activeTeam: singleAgentTeam,
+      roomProfile: {
+        kind: 'agent_room_profile_v1',
+        chat_id: String(chatId || ''),
+        room_name: 'Single Agent Instant Answer',
+        default_agents: agentLabels,
+        source: 'telegram_task_instant_ephemeral_single_agent',
+      },
+      bootstrap: {
+        kind: 'task_agent_bootstrap_v1',
+        work_depth: 'instant',
+        mode: 'single_agent_ephemeral',
+        had_active_team: false,
+        auto_created_team: false,
+        persisted_to_agent_room: false,
+        summary: 'single-agent instant answer; no persistent team was created',
+      },
+    };
+  }
+
+  function buildTaskAgentBootstrapLines({ workDepth = '', bootstrap = {}, roomProfile = {}, teamConfig = null } = {}) {
+    const depth = String(workDepth || '').trim() || 'instant';
+    const agentLabels = summarizeAgentLabelsFromTeam(teamConfig);
+    const fallbackAgents = Array.isArray(roomProfile?.default_agents) ? roomProfile.default_agents : [];
+    const agents = (agentLabels.length ? agentLabels : fallbackAgents).slice(0, 8);
+    if (depth === 'instant') {
+      return [
+        'agent setup: single-agent instant answer',
+        'team policy: /ask does not auto-create or persist an Agent Room team.',
+        `agent: ${agents.join(', ') || 'single agent'}`,
+      ];
+    }
+    const generated = bootstrap?.auto_created_team === true;
+    const lines = [];
+    if (depth === 'team') {
+      lines.push(generated
+        ? 'team setup: no active Agent Room was found, so a task team was generated and applied.'
+        : 'team setup: active Agent Room/team was used or reselected for this team answer.');
+    } else {
+      lines.push(generated
+        ? 'team setup: no active Agent Room was found, so a loop team was generated and applied before starting.'
+        : 'team setup: active Agent Room/team was used or reselected for this loop.');
+      lines.push('loop confirmation policy: auto-start with visible team summary; checkpoint/approval gates still stop the loop when required.');
+      lines.push('GoC handoff: adjust team, loop budget, memory, branch/retry, or promote decisions in GoC.');
+    }
+    lines.push(`agents: ${agents.join(', ') || '-'}`);
+    return lines;
+  }
+
   async function updateTaskLoopStatus({ chatId, userId, sub }) {
     const { jobDir } = getCurrentJobDirForChat(chatId);
     if (!jobDir) {
@@ -986,7 +1053,34 @@ export function createTelegramCommandHandler(deps = {}) {
     const signals = extractTeamCreationSignals({ request: goal, goal, runtime: runtimeWithWorkMode });
     const baseWorkflowContract = buildTeamWorkflowContract({ signals, goal });
     const workflowContract = applyWorkModeToWorkflowContract(baseWorkflowContract, parsed.work_mode, parsed.cycle_policy);
-    const { activeTeam, roomProfile } = await suggestAndApplyAgentRoomTeam({ chatId, userId, goal, runtimeForTeam: runtimeWithWorkMode, autoApply: true });
+    const teamStateBefore = getSessionTeamState(chatSessionStore, chatId);
+    const hadActiveTeamBefore = countConfiguredAgents(teamStateBefore?.active_team) > 0;
+    let activeTeam = null;
+    let roomProfile = null;
+    let teamBootstrap = null;
+    if (parsed.work_mode.work_depth === 'instant') {
+      const instantTeam = buildEphemeralSingleAgentTaskTeam({ chatId, goal, runtimeForTeam: runtimeWithWorkMode });
+      activeTeam = instantTeam.activeTeam;
+      roomProfile = instantTeam.roomProfile;
+      teamBootstrap = instantTeam.bootstrap;
+    } else {
+      const resolvedTeam = await suggestAndApplyAgentRoomTeam({ chatId, userId, goal, runtimeForTeam: runtimeWithWorkMode, autoApply: true });
+      activeTeam = resolvedTeam.activeTeam;
+      roomProfile = resolvedTeam.roomProfile;
+      teamBootstrap = {
+        kind: 'task_agent_bootstrap_v1',
+        work_depth: parsed.work_mode.work_depth,
+        mode: hadActiveTeamBefore ? 'active_or_reselected_team' : 'auto_generated_team',
+        had_active_team: hadActiveTeamBefore,
+        auto_created_team: !hadActiveTeamBefore,
+        persisted_to_agent_room: true,
+        selected_candidate_id: String(resolvedTeam?.portfolio?.selected_candidate_id || '').trim(),
+        planner_fallback: summarizeAgentRoomPlannerMetadata(resolvedTeam?.proposal || {}).fallback === true,
+        summary: hadActiveTeamBefore
+          ? 'active Agent Room/team was available and was used or reselected for this task depth'
+          : 'no active Agent Room/team was available, so a task-specific team was generated and applied',
+      };
+    }
     const taskLoopRuntimeExecution = buildWorkflowRuntimeExecutionPatch(workflowContract, activeTeam?.runtime_execution || activeTeam?.runtimeExecution || runtimeWithWorkMode?.runtime_execution || runtimeWithWorkMode?.runtimeExecution || {});
     const taskLoopTeamConfig = activeTeam && typeof activeTeam === 'object'
       ? {
@@ -1007,6 +1101,7 @@ export function createTelegramCommandHandler(deps = {}) {
       work_mode: parsed.work_mode,
       cycle_policy: parsed.cycle_policy,
       team_roles: roomProfile.default_agents,
+      team_bootstrap: teamBootstrap,
       source: 'telegram_task_depth',
     });
     const modeSummary = formatWorkModeCommandSummary(parsed.work_mode, parsed.cycle_policy);
@@ -1015,13 +1110,20 @@ export function createTelegramCommandHandler(deps = {}) {
       '',
       `task depth: ${modeSummary}`,
       `workflow: ${summarizeTeamWorkflowContract(workflowContract)}`,
-      `agents: ${(roomProfile.default_agents || []).join(', ') || '-'}`,
+      ...buildTaskAgentBootstrapLines({
+        workDepth: parsed.work_mode.work_depth,
+        bootstrap: teamBootstrap,
+        roomProfile,
+        teamConfig: taskLoopTeamConfig,
+      }),
       parsed.work_mode.goc_mode === 'required'
         ? 'GoC: required checkpoint/control-plane review for this depth.'
         : (parsed.work_mode.goc_mode === 'recommended' ? 'GoC: recommended for review/branch decisions.' : 'GoC: optional.'),
       'policy: bounded cycles only · stop/wait at checkpoint or approval boundary',
       '',
-      '이제 Agent Room 설정을 적용하고 작업 실행을 시작합니다.',
+      parsed.work_mode.work_depth === 'instant'
+        ? '이제 단일 agent 즉시답변을 실행합니다.'
+        : '이제 Agent Room 설정을 적용하고 작업 실행을 시작합니다.',
     ].join('\n'));
     const taskMessage = [
       'CONTROL PLANE TASK: Start a bounded agent-room work cycle for the following goal.',

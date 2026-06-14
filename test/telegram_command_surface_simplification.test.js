@@ -312,3 +312,72 @@ test('/team keeps legacy topology subcommands but freeform text starts a team an
   assert.equal(handled.length, 1)
   assert.equal(handled[0].kind, 'task_agent_team')
 })
+
+test('/ask stays single-agent and does not persist an Agent Room team', async () => {
+  const sent = []
+  const handled = []
+  const backing = new Map()
+  const sessionStore = {
+    get: (key) => backing.get(String(key)) || {},
+    upsert: (key, patcher) => {
+      const current = backing.get(String(key)) || {}
+      const next = typeof patcher === 'function' ? patcher(current) : { ...current, ...patcher }
+      backing.set(String(key), next)
+      return next
+    },
+  }
+  const handler = createTelegramCommandHandler({
+    bot: makeBot(sent),
+    sendLong: async (_bot, chatId, text) => {
+      sent.push({ chatId, text })
+      return { message_id: sent.length }
+    },
+    chatSessionStore: sessionStore,
+    chatRunManager: { async handleIncoming(payload) { handled.push(payload) } },
+    resolveLiveJobIdForChat: () => null,
+  })
+
+  await handler({ msg: { message_id: 1, chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/ask 핵심만 설명해줘', chatId: 'chat-1', userId: 'user-1' })
+
+  assert.equal(handled.length, 1)
+  assert.equal(handled[0].kind, 'task_instant_answer')
+  assert.equal(handled[0].teamConfig.agents.length, 1)
+  assert.match(sent[0].text, /team policy: \/ask does not auto-create or persist/)
+  assert.equal(sessionStore.get('chat-1').pending_task_control.team_bootstrap.mode, 'single_agent_ephemeral')
+  assert.equal(sessionStore.get('chat-1').team_config?.active_team, undefined)
+})
+
+test('/loop without an active team auto-generates a visible loop team bootstrap', async () => {
+  const sent = []
+  const handled = []
+  const backing = new Map()
+  const sessionStore = {
+    get: (key) => backing.get(String(key)) || {},
+    upsert: (key, patcher) => {
+      const current = backing.get(String(key)) || {}
+      const next = typeof patcher === 'function' ? patcher(current) : { ...current, ...patcher }
+      backing.set(String(key), next)
+      return next
+    },
+  }
+  const handler = createTelegramCommandHandler({
+    bot: makeBot(sent),
+    sendLong: async (_bot, chatId, text) => {
+      sent.push({ chatId, text })
+      return { message_id: sent.length }
+    },
+    chatSessionStore: sessionStore,
+    chatRunManager: { async handleIncoming(payload) { handled.push(payload) } },
+    resolveLiveJobIdForChat: () => null,
+  })
+
+  await handler({ msg: { message_id: 1, chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/loop --loops 3 소설 1장을 초안 리뷰 개선 순서로 작성해줘', chatId: 'chat-1', userId: 'user-1' })
+
+  assert.equal(handled.length, 1)
+  assert.equal(handled[0].kind, 'task_agent_loop')
+  assert.match(sent[0].text, /no active Agent Room was found, so a loop team was generated and applied/)
+  assert.match(sent[0].text, /loop confirmation policy: auto-start with visible team summary/)
+  assert.match(sent[0].text, /GoC handoff: adjust team, loop budget, memory/)
+  assert.equal(sessionStore.get('chat-1').pending_task_control.team_bootstrap.auto_created_team, true)
+  assert.ok(sessionStore.get('chat-1').team_config?.active_team)
+})
