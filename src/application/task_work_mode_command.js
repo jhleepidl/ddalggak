@@ -8,6 +8,7 @@ function cleanId(value = '') { return clean(value).toLowerCase().replace(/[^a-z0
 function asObject(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
 
 export const TASK_WORK_MODE_SHORTCUTS = Object.freeze({
+  ask: 'quick_answer',
   instant: 'quick_answer',
   single: 'quick_answer',
   quick: 'quick_answer',
@@ -15,10 +16,11 @@ export const TASK_WORK_MODE_SHORTCUTS = Object.freeze({
   assist: 'assisted_task', // legacy alias; hidden from normal help
   assisted: 'assisted_task', // legacy alias
   team: 'team_review',
+  teamrun: 'team_review',
+  team_answer: 'team_review',
   review: 'team_review', // legacy alias
   teamreview: 'team_review',
   team_review: 'team_review',
-  loop: 'project_task',
   loop: 'project_task',
   agent_loop: 'project_task',
   work_loop: 'project_task',
@@ -35,6 +37,7 @@ export const TASK_WORK_MODE_SHORTCUTS = Object.freeze({
 });
 
 const WORK_MODE_ALIASES = Object.freeze({
+  ask: 'quick_answer',
   instant: 'quick_answer',
   immediate: 'quick_answer',
   single: 'quick_answer',
@@ -59,6 +62,8 @@ const WORK_MODE_ALIASES = Object.freeze({
   agent_team: 'team_review',
   review: 'team_review',
   team: 'team_review',
+  teamrun: 'team_review',
+  team_answer: 'team_review',
   team_review: 'team_review',
   teamreview: 'team_review',
   reviewer: 'team_review',

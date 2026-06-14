@@ -21,10 +21,11 @@ test('/help shows compact command surface and points to /help more', async () =>
   const handled = await handler({ msg: { chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/help', chatId: 'chat-1', userId: 'user-1' })
 
   assert.equal(handled, true)
-  assert.match(sent[0].text, /\/chat <text>/)
-  assert.match(sent[0].text, /\/task loop <목표>/)
-  assert.match(sent[0].text, /\/agents suggest <목표>/)
+  assert.match(sent[0].text, /\/ask <질문>/)
+  assert.match(sent[0].text, /\/team <목표>/)
+  assert.match(sent[0].text, /\/loop \[--loops n\|staged\] <목표>/)
   assert.match(sent[0].text, /\/review/)
+  assert.match(sent[0].text, /\/agents/)
   assert.match(sent[0].text, /\/help more/)
   assert.doesNotMatch(sent[0].text, /\/team suggest/)
   assert.doesNotMatch(sent[0].text, /\/outputs/)
@@ -236,4 +237,78 @@ test('advanced help no longer advertises legacy ChatGPT paste commands', async (
   assert.doesNotMatch(sent[0].text, /gptapply/)
   assert.doesNotMatch(sent[0].text, /gptprompt/)
   assert.match(sent[0].text, /agents export\|publish-candidate\|packages\|clone/)
+})
+
+
+test('root /ask, /team, and /loop map to the three task depths', async () => {
+  const sent = []
+  const handled = []
+  const backing = new Map()
+  const sessionStore = {
+    get: (key) => backing.get(String(key)) || {},
+    upsert: (key, patcher) => {
+      const current = backing.get(String(key)) || {}
+      const next = typeof patcher === 'function' ? patcher(current) : { ...current, ...patcher }
+      backing.set(String(key), next)
+      return next
+    },
+  }
+  const handler = createTelegramCommandHandler({
+    bot: makeBot(sent),
+    sendLong: async (_bot, chatId, text) => {
+      sent.push({ chatId, text })
+      return { message_id: sent.length }
+    },
+    chatSessionStore: sessionStore,
+    chatRunManager: {
+      async handleIncoming(payload) {
+        handled.push(payload)
+      },
+    },
+    resolveLiveJobIdForChat: () => null,
+  })
+
+  await handler({ msg: { message_id: 1, chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/ask 요약해줘', chatId: 'chat-1', userId: 'user-1' })
+  await handler({ msg: { message_id: 2, chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/team 여러 관점으로 검토해줘', chatId: 'chat-1', userId: 'user-1' })
+  await handler({ msg: { message_id: 3, chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/loop --loops 3 repo 수정하고 테스트해줘', chatId: 'chat-1', userId: 'user-1' })
+
+  assert.equal(handled.length, 3)
+  assert.equal(handled[0].kind, 'task_instant_answer')
+  assert.equal(handled[1].kind, 'task_agent_team')
+  assert.equal(handled[2].kind, 'task_agent_loop')
+  assert.match(handled[2].text, /"loop_budget":3/)
+  assert.equal(sessionStore.get('chat-1').pending_task_control.work_mode.work_depth, 'loop')
+})
+
+test('/team keeps legacy topology subcommands but freeform text starts a team answer', async () => {
+  const sent = []
+  const handled = []
+  const backing = new Map()
+  const sessionStore = {
+    get: (key) => backing.get(String(key)) || {},
+    upsert: (key, patcher) => {
+      const current = backing.get(String(key)) || {}
+      const next = typeof patcher === 'function' ? patcher(current) : { ...current, ...patcher }
+      backing.set(String(key), next)
+      return next
+    },
+  }
+  const handler = createTelegramCommandHandler({
+    bot: makeBot(sent),
+    sendLong: async (_bot, chatId, text) => {
+      sent.push({ chatId, text })
+      return { message_id: sent.length }
+    },
+    chatSessionStore: sessionStore,
+    chatRunManager: { async handleIncoming(payload) { handled.push(payload) } },
+    resolveLiveJobIdForChat: () => null,
+  })
+
+  await handler({ msg: { message_id: 1, chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/team more', chatId: 'chat-1', userId: 'user-1' })
+  assert.equal(handled.length, 0)
+  assert.match(sent.at(-1).text, /More team commands/)
+
+  await handler({ msg: { message_id: 2, chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/team 포트폴리오 리스크를 검토해줘', chatId: 'chat-1', userId: 'user-1' })
+  assert.equal(handled.length, 1)
+  assert.equal(handled[0].kind, 'task_agent_team')
 })
