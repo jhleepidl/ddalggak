@@ -204,7 +204,6 @@ export function buildSkeletonDslTokens({ request = '', candidate = {}, stress = 
     `RETRY_REASON=${attemptPlan.retry_reason}`,
     `PREV_RESULT=${attemptPlan.previous_result_policy}`,
     `TARGET_TEAM=${attemptPlan.target_team}`,
-    `WORK_DEPTH=${attemptPlan.work_mode?.work_depth || 'instant'}`,
     `WORK_MODE=${attemptPlan.work_mode?.work_mode || 'quick_answer'}`,
     `LOOP_BUDGET=${attemptPlan.work_mode?.loop_budget ?? '0'}`,
     `STOP_CONDITION=${attemptPlan.work_mode?.stop_condition || 'answer_ready'}`,

@@ -82,12 +82,6 @@ import { extractTeamCreationSignals } from '../../application/team_signal_extrac
 import { buildTeamWorkflowContract, summarizeTeamWorkflowContract } from '../../application/team_workflow_contract.js';
 import { buildWorkflowRuntimeExecutionPatch } from '../../application/workflow_execution_contract.js';
 import {
-  TASK_WORK_MODE_SHORTCUTS,
-  applyWorkModeToWorkflowContract,
-  formatWorkModeCommandSummary,
-  parseTaskWorkModeCommand,
-} from '../../application/task_work_mode_command.js';
-import {
   buildWatchTaskContract,
   ensureWatchTaskContract,
   readWatchTaskState,
@@ -96,43 +90,40 @@ import {
 } from '../../application/watch_task_store.js';
 
 const HELP_TEXT = [
-  "Telegram command surface:",
-  "",
-  "Start work",
-  "- /ask <질문>: 단일 agent 즉시답변",
-  "- /team <목표>: agent team 답변/review pass",
-  "- /loop [--loops n|staged] <목표>: bounded agent loop",
-  "",
-  "Control",
-  "- /task: active task/depth 상태 보기",
-  "- /pause · /resume · /approve: active loop 제어",
-  "- /review: 승인/검토 queue 보기",
+  "Commands:",
+  "- /chat <text>: 질문/일회성 작업",
+  "- /task: 장기 작업/loop 상태 보기",
+  "- /task loop <목표>: 반복 점검·개선 작업 시작",
+  "- /agents: 이 채팅방의 Agent Room 보기",
+  "- /agents suggest <목표>: 목표에 맞는 agent 구성 추천",
+  "- /review: 승인/검토가 필요한 항목 보기",
+  "- /memory: memory topology/pressure/proposal 상태 요약",
+  "- /rule <자연어 지침>: 명시적 runtime rule 추가",
+  "- /skill: skill 상태 보기",
+  "- /board: semantic memory/skill/rule board 요약",
+  "- /context: primitive context substrate/MVCC snapshot 요약",
+  "- /goc: GoC sync/review 링크와 상태 보기",
+  "- /status: 지금 진행 상황 보기",
+  "- /artifacts [limit]: 결과물 보기",
+  "- /send <번호|path>: 결과물 전송",
+  "- /files [all|workspace|uploads] [limit]: 파일 보기",
   "- /stop [jobId]: 실행 중지",
-  "",
-  "Setup / inspect",
-  "- /agents: Agent Room 보기/추천/공유",
-  "- /memory: memory topology/pressure/proposal 요약",
-  "- /goc: GoC sync/review 링크와 상태",
-  "- /artifacts [limit] · /send <번호|path> · /files",
-  "",
-  "More",
-  "- /task modes: 3단계 depth 설명",
-  "- /help more: 고급/legacy 명령",
+  "- /help more: 고급/확장 명령 보기",
 ].join("\n");
 
 const ADVANCED_HELP_TEXT = [
-  "Advanced / legacy commands:",
+  "More commands:",
   "- /whoami: 현재 chat_id / user_id 확인",
   "- /running: 실행/대기 job 목록 확인",
   "- /credential ...: credential 바인딩/확인",
-  "- /task start --mode instant|team|loop [--loops n|staged] <목표>: 명시적 depth로 시작",
-  "- /task mode|default instant|team|loop: 채팅방 기본 depth 저장",
-  "- /task modes: 지원하는 3단계 작업 깊이 보기",
   "- /task pause|resume|stop|approve: active loop task 제어",
-  "- /agents suggest|use|reset: Agent Room 추천/적용/초기화",
-  "- /agents export|publish-candidate|packages|clone <id>: agent package 공유/설치",
-  "- /team <목표>: team 답변 shortcut",
-  "- /team more: legacy team topology 고급 명령 보기",
+  "- /agents use <roles>: Agent Room 기본 역할 적용",
+  "- /agents reset: Agent Room 초기화",
+  "- /agents export: 현재 Agent Room을 portable package JSON으로 내보내기",
+  "- /agents packages: 저장된 agent package 목록",
+  "- /agents clone <package_id>: 저장된 package를 이 채팅방에 설치",
+  "- /team: legacy/advanced alias. 일반 사용은 /agents 권장",
+  "- /team more: team topology 고급 명령 보기",
   "- /review approve|reject <reason>: 대기 중인 검토/승인 항목 처리",
   "- /memory: topology, pressure, proposal/materialization 상태 요약",
   "- /memory debug <show|md|kb|topology|pressure|evidence|review|materialize-preview|modules>: 개발/진단용 상세 조회",
@@ -147,21 +138,23 @@ const ADVANCED_HELP_TEXT = [
   "- /upload (+파일 첨부) [메모]: 실행 없이 업로드만 저장",
   "- /chat [--debug] <message>|reset: supervisor chat 실행 또는 세션 초기화",
   "- /rule <자연어 지침>: chat-level agent/runtime 지침 반영 (상세 편집은 GoC)",
-  "- /run <goal>: legacy goal 기반 실행 시작",
+  "- /run <goal>: goal 기반 실행 시작",
   "- /continue <jobId>: 기존 job 이어서 실행",
   "- /models refresh: Gemini/Codex/Ollama catalog 즉시 갱신",
+  "- /agents export|publish-candidate|packages|clone <id>: agent package 공유/설치",
   "- /goc history push: GoC Board용 raw history snapshot 동기화",
   "- /goc candidate approve <nodeId> [publish]: Board candidate 승격",
   "- /improve <ddalggak|goc> <instruction>: forge 기준 self-improvement job 생성",
-  "- /improve status|test|canary|promote <jobId>: improvement lifecycle",
+  "- /improve status <jobId>: improvement job 상태 보기",
+  "- /improve test <jobId>: 테스트 재실행",
+  "- /improve canary <jobId>: canary 재실행",
+  "- /improve promote <jobId>: restart/promote hook 실행",
   "- /commit <jobId> <message>: 작업 결과 커밋",
   "",
   "Command model:",
-  "- /ask = single-agent instant answer",
-  "- /team = team answer when followed by a freeform goal; topology commands stay under /team more",
-  "- /loop = bounded agent loop",
+  "- /chat = content plane",
   "- /task = work/control plane",
-  "- /agents = Agent Room setup/share",
+  "- /agents = Agent Room setup",
   "- /review = user decision queue",
   "- /outputs → /artifacts",
   "- /sendfile → /send",
@@ -217,17 +210,13 @@ const TEAM_TEMPLATE_DEPRECATED_TEXT = [
 ].join("\n");
 
 const TASK_HELP_TEXT = [
-  "Task depth commands:",
-  "- /ask <질문> 또는 /task instant <질문>: 단일 agent 즉시답변",
-  "- /team <목표> 또는 /task team <목표>: agent team 답변/review pass",
-  "- /loop [--loops n|staged] <목표> 또는 /task loop ...: bounded agent loop",
-  "- /task start --mode instant|team|loop [--loops n|staged] <목표>: 명시적 depth로 시작",
-  "- /task mode instant|team|loop: 채팅방 기본 depth 저장",
-  "- /task modes: 3단계 depth 설명",
-  "- /pause · /resume · /approve 또는 /task pause|resume|approve: active loop 제어",
+  "Task commands:",
+  "- /task: active task/loop 상태 보기",
+  "- /task loop <목표>: 반복 점검·개선 작업 시작",
+  "- /task pause: active loop 일시정지",
+  "- /task resume: active loop 재개",
   "- /task stop: active loop 중단",
-  "",
-  "Legacy aliases still work: /task quick, /task assist, /task review, /task project, /task research",
+  "- /task approve: approval 대기 상태 해제",
 ].join("\n");
 
 const AGENTS_HELP_TEXT = [
@@ -871,291 +860,6 @@ export function createTelegramCommandHandler(deps = {}) {
     return chatSessionStore.get(chatId)?.pending_task_control || null;
   }
 
-  function setDefaultTaskWorkMode(chatId, workModeConfig = {}, cyclePolicy = {}) {
-    let saved = null;
-    chatSessionStore.upsert(chatId, (session = {}) => {
-      const now = new Date().toISOString();
-      saved = {
-        kind: 'telegram_task_work_mode_default_v1',
-        work_mode: workModeConfig,
-        cycle_policy: cyclePolicy,
-        updated_at: now,
-      };
-      return { ...session, task_work_mode_default: saved };
-    });
-    return saved;
-  }
-
-  function getDefaultTaskWorkMode(chatId) {
-    if (!chatSessionStore || typeof chatSessionStore.get !== 'function') return null;
-    return chatSessionStore.get(chatId)?.task_work_mode_default || null;
-  }
-
-  function formatTaskWorkModesText() {
-    return [
-      'Task depth is intentionally 3-step:',
-      '',
-      '1) instant',
-      '   /ask <질문> 또는 /task instant <질문>',
-      '   단일 agent · 바로 답하고 종료 · memory minimal',
-      '',
-      '2) team',
-      '   /team <목표> 또는 /task team <목표>',
-      '   agent team 답변 · reviewer/verifier pass · GoC optional/recommended',
-      '',
-      '3) loop',
-      '   /loop --loops 3 <목표> 또는 /task loop --loops 3 <목표>',
-      '   bounded Plan → Act → Report → Stop/Wait · GoC checkpoint 권장/필수',
-      '',
-      'Defaults:',
-      '   /task mode instant|team|loop',
-      '   /task start --mode instant|team|loop [--loops n|staged] <목표>',
-      '',
-      'Internal presets still exist for replay/scoring compatibility:',
-      '   quick_answer/assisted_task → instant, team_review → team, project_task/research_campaign/customize → loop',
-    ].join('\n');
-  }
-
-  const ROOT_TASK_SHORTCUTS = Object.freeze({
-    '/ask': 'instant',
-    '/answer': 'instant',
-    '/loop': 'loop',
-    '/teamrun': 'team',
-    '/teamanswer': 'team',
-  });
-
-  const ROOT_TASK_CONTROL_ALIASES = Object.freeze({
-    '/pause': 'pause',
-    '/resume': 'resume',
-    '/approve': 'approve',
-    '/done': 'approve',
-  });
-
-  const TEAM_TOPOLOGY_SUBCOMMANDS = new Set([
-    '', 'help', 'more', 'details', 'status', 'list',
-    'suggest', 'create', 'refine', 'apply', 'reset',
-    'requirements', 'proposal', 'install-plan', 'export', 'publish',
-    'library', 'package', 'clone', 'fork', 'install', 'import',
-    'pull', 'push', 'debug', 'validate', 'options', 'modes', 'template',
-  ]);
-
-  function shouldTreatTeamCommandAsTaskShortcut(rawArgs = '') {
-    const trimmed = String(rawArgs || '').trim();
-    if (!trimmed) return false;
-    const first = String(trimmed.split(/\s+/)[0] || '').toLowerCase();
-    return !TEAM_TOPOLOGY_SUBCOMMANDS.has(first);
-  }
-
-
-  function summarizeAgentLabelsFromTeam(team = null, { max = 8 } = {}) {
-    const agents = Array.isArray(team?.agents) ? team.agents : [];
-    return agents.slice(0, max).map((agent) => {
-      const name = String(agent?.name || agent?.agent_id || agent?.id || agent?.role || 'agent').trim();
-      const role = String(agent?.role || agent?.role_id || agent?.roleId || '').trim();
-      return role && role !== name ? `${name} (${role})` : name;
-    }).filter(Boolean);
-  }
-
-  function buildEphemeralSingleAgentTaskTeam({ chatId, goal = '', runtimeForTeam = null } = {}) {
-    const singleAgentTeam = buildStarterSingleAgentTeamConfiguration({
-      taskText: goal,
-      runtime: runtimeForTeam,
-      source: 'telegram_task_instant_ephemeral_single_agent',
-    });
-    const agentLabels = summarizeAgentLabelsFromTeam(singleAgentTeam);
-    return {
-      activeTeam: singleAgentTeam,
-      roomProfile: {
-        kind: 'agent_room_profile_v1',
-        chat_id: String(chatId || ''),
-        room_name: 'Single Agent Instant Answer',
-        default_agents: agentLabels,
-        source: 'telegram_task_instant_ephemeral_single_agent',
-      },
-      bootstrap: {
-        kind: 'task_agent_bootstrap_v1',
-        work_depth: 'instant',
-        mode: 'single_agent_ephemeral',
-        had_active_team: false,
-        auto_created_team: false,
-        persisted_to_agent_room: false,
-        summary: 'single-agent instant answer; no persistent team was created',
-      },
-    };
-  }
-
-  function buildTaskAgentBootstrapLines({ workDepth = '', bootstrap = {}, roomProfile = {}, teamConfig = null } = {}) {
-    const depth = String(workDepth || '').trim() || 'instant';
-    const agentLabels = summarizeAgentLabelsFromTeam(teamConfig);
-    const fallbackAgents = Array.isArray(roomProfile?.default_agents) ? roomProfile.default_agents : [];
-    const agents = (agentLabels.length ? agentLabels : fallbackAgents).slice(0, 8);
-    if (depth === 'instant') {
-      return [
-        'agent setup: single-agent instant answer',
-        'team policy: /ask does not auto-create or persist an Agent Room team.',
-        `agent: ${agents.join(', ') || 'single agent'}`,
-      ];
-    }
-    const generated = bootstrap?.auto_created_team === true;
-    const lines = [];
-    if (depth === 'team') {
-      lines.push(generated
-        ? 'team setup: no active Agent Room was found, so a task team was generated and applied.'
-        : 'team setup: active Agent Room/team was used or reselected for this team answer.');
-    } else {
-      lines.push(generated
-        ? 'team setup: no active Agent Room was found, so a loop team was generated and applied before starting.'
-        : 'team setup: active Agent Room/team was used or reselected for this loop.');
-      lines.push('loop confirmation policy: auto-start with visible team summary; checkpoint/approval gates still stop the loop when required.');
-      lines.push('GoC handoff: adjust team, loop budget, memory, branch/retry, or promote decisions in GoC.');
-    }
-    lines.push(`agents: ${agents.join(', ') || '-'}`);
-    return lines;
-  }
-
-  async function updateTaskLoopStatus({ chatId, userId, sub }) {
-    const { jobDir } = getCurrentJobDirForChat(chatId);
-    if (!jobDir) {
-      await bot.sendMessage(chatId, '현재 active job이 없어 task 상태를 변경할 수 없습니다. /loop <목표>로 작업을 먼저 시작하세요.');
-      return true;
-    }
-    const statusMap = { pause: 'paused', resume: 'active', stop: 'stopped', approve: 'active' };
-    const result = setWatchTaskStatus({
-      jobDir,
-      status: statusMap[sub],
-      reason: sub === 'approve' ? 'telegram_task_approve' : `telegram_task_${sub}`,
-      actor: String(userId || chatId || 'telegram_user'),
-    });
-    if (!result.ok) {
-      await bot.sendMessage(chatId, `task 상태 변경 실패: ${result.reason || 'unknown'}`);
-      return true;
-    }
-    await bot.sendMessage(chatId, `✅ task 상태를 ${statusMap[sub]} 로 변경했습니다.`);
-    return true;
-  }
-
-  async function startTelegramTaskDepth({ msg, chatId, userId, sub, rawArgs, commandLabel }) {
-    const defaultMode = sub === 'loop' ? 'project_task' : (TASK_WORK_MODE_SHORTCUTS[sub] || getDefaultTaskWorkMode(chatId)?.work_mode?.work_mode || '');
-    const parsed = parseTaskWorkModeCommand(rawArgs, { defaultMode, defaultSubcommand: sub || 'start' });
-    const goal = parsed.goal || String(rawArgs || '').replace(/^(instant|team|loop|start|watch|ask|answer|teamrun|teamanswer|quick|assist|review|project|research|campaign|custom|customize)\s*/i, '').trim();
-    if (!goal) {
-      await bot.sendMessage(chatId, 'Usage: /ask <질문> · /team <목표> · /loop --loops 3 <목표>');
-      return true;
-    }
-    const { runtime: runtimeForTeam } = await loadRuntimeForCurrentJob(chatId, userId, { includeContext: false });
-    const runtimeWithWorkMode = {
-      ...(runtimeForTeam || {}),
-      work_mode_config: parsed.work_mode,
-      workModeConfig: parsed.work_mode,
-      cycle_policy: parsed.cycle_policy,
-      cyclePolicy: parsed.cycle_policy,
-    };
-    const signals = extractTeamCreationSignals({ request: goal, goal, runtime: runtimeWithWorkMode });
-    const baseWorkflowContract = buildTeamWorkflowContract({ signals, goal });
-    const workflowContract = applyWorkModeToWorkflowContract(baseWorkflowContract, parsed.work_mode, parsed.cycle_policy);
-    const teamStateBefore = getSessionTeamState(chatSessionStore, chatId);
-    const hadActiveTeamBefore = countConfiguredAgents(teamStateBefore?.active_team) > 0;
-    let activeTeam = null;
-    let roomProfile = null;
-    let teamBootstrap = null;
-    if (parsed.work_mode.work_depth === 'instant') {
-      const instantTeam = buildEphemeralSingleAgentTaskTeam({ chatId, goal, runtimeForTeam: runtimeWithWorkMode });
-      activeTeam = instantTeam.activeTeam;
-      roomProfile = instantTeam.roomProfile;
-      teamBootstrap = instantTeam.bootstrap;
-    } else {
-      const resolvedTeam = await suggestAndApplyAgentRoomTeam({ chatId, userId, goal, runtimeForTeam: runtimeWithWorkMode, autoApply: true });
-      activeTeam = resolvedTeam.activeTeam;
-      roomProfile = resolvedTeam.roomProfile;
-      teamBootstrap = {
-        kind: 'task_agent_bootstrap_v1',
-        work_depth: parsed.work_mode.work_depth,
-        mode: hadActiveTeamBefore ? 'active_or_reselected_team' : 'auto_generated_team',
-        had_active_team: hadActiveTeamBefore,
-        auto_created_team: !hadActiveTeamBefore,
-        persisted_to_agent_room: true,
-        selected_candidate_id: String(resolvedTeam?.portfolio?.selected_candidate_id || '').trim(),
-        planner_fallback: summarizeAgentRoomPlannerMetadata(resolvedTeam?.proposal || {}).fallback === true,
-        summary: hadActiveTeamBefore
-          ? 'active Agent Room/team was available and was used or reselected for this task depth'
-          : 'no active Agent Room/team was available, so a task-specific team was generated and applied',
-      };
-    }
-    const taskLoopRuntimeExecution = buildWorkflowRuntimeExecutionPatch(workflowContract, activeTeam?.runtime_execution || activeTeam?.runtimeExecution || runtimeWithWorkMode?.runtime_execution || runtimeWithWorkMode?.runtimeExecution || {});
-    const taskLoopTeamConfig = activeTeam && typeof activeTeam === 'object'
-      ? {
-        ...activeTeam,
-        work_mode: parsed.work_mode,
-        workMode: parsed.work_mode,
-        cycle_policy: parsed.cycle_policy,
-        cyclePolicy: parsed.cycle_policy,
-        runtime_execution: taskLoopRuntimeExecution || activeTeam.runtime_execution || activeTeam.runtimeExecution,
-        runtimeExecution: taskLoopRuntimeExecution || activeTeam.runtimeExecution || activeTeam.runtime_execution,
-        task_loop_execution_mode: parsed.work_mode.work_depth === 'instant' ? 'answer_and_stop' : 'task_loop',
-      }
-      : activeTeam;
-    setPendingTaskControl(chatId, {
-      goal,
-      command: commandLabel || (sub === 'loop' ? '/loop' : `/task ${sub || 'start'}`),
-      workflow_contract: workflowContract,
-      work_mode: parsed.work_mode,
-      cycle_policy: parsed.cycle_policy,
-      team_roles: roomProfile.default_agents,
-      team_bootstrap: teamBootstrap,
-      source: 'telegram_task_depth',
-    });
-    const modeSummary = formatWorkModeCommandSummary(parsed.work_mode, parsed.cycle_policy);
-    await sendLong(bot, chatId, [
-      parsed.work_mode.work_depth === 'instant' ? '⚡ Single Agent 즉시답변을 시작합니다.' : (parsed.work_mode.work_depth === 'team' ? '👥 Agent Team 답변을 시작합니다.' : '🔁 Bounded Agent Loop를 시작합니다.'),
-      '',
-      `task depth: ${modeSummary}`,
-      `workflow: ${summarizeTeamWorkflowContract(workflowContract)}`,
-      ...buildTaskAgentBootstrapLines({
-        workDepth: parsed.work_mode.work_depth,
-        bootstrap: teamBootstrap,
-        roomProfile,
-        teamConfig: taskLoopTeamConfig,
-      }),
-      parsed.work_mode.goc_mode === 'required'
-        ? 'GoC: required checkpoint/control-plane review for this depth.'
-        : (parsed.work_mode.goc_mode === 'recommended' ? 'GoC: recommended for review/branch decisions.' : 'GoC: optional.'),
-      'policy: bounded cycles only · stop/wait at checkpoint or approval boundary',
-      '',
-      parsed.work_mode.work_depth === 'instant'
-        ? '이제 단일 agent 즉시답변을 실행합니다.'
-        : '이제 Agent Room 설정을 적용하고 작업 실행을 시작합니다.',
-    ].join('\n'));
-    const taskMessage = [
-      'CONTROL PLANE TASK: Start a bounded agent-room work cycle for the following goal.',
-      `Work mode: ${JSON.stringify(parsed.work_mode)}`,
-      `Cycle policy: ${JSON.stringify(parsed.cycle_policy)}`,
-      `Workflow contract: ${JSON.stringify(workflowContract)}`,
-      `Agent room roles: ${(roomProfile.default_agents || []).join(', ')}`,
-      '',
-      goal,
-    ].join('\n');
-    if (typeof sendRouterAckMessage === 'function') {
-      await sendRouterAckMessage(bot, chatId, { replyToMessageId: msg?.message_id });
-    }
-    if (chatRunManager && typeof chatRunManager.handleIncoming === 'function') {
-      await chatRunManager.handleIncoming({
-        chatId,
-        userId,
-        text: taskMessage,
-        kind: parsed.work_mode.work_depth === 'instant' ? 'task_instant_answer' : (parsed.work_mode.work_depth === 'team' ? 'task_agent_team' : 'task_agent_loop'),
-        telegramMessageId: msg?.message_id,
-        userReplyToMessageId: Number.isFinite(Number(msg?.reply_to_message?.message_id)) ? Number(msg.reply_to_message.message_id) : null,
-        teamConfig: taskLoopTeamConfig || null,
-        chatInfo: {
-          chat_id: String(chatId || ''),
-          title: String(msg?.chat?.title || msg?.chat?.username || '').trim(),
-          type: String(msg?.chat?.type || '').trim(),
-        },
-      });
-    }
-    return true;
-  }
-
   return async function handleTelegramCommand({ msg, text, chatId, userId }) {
     if (!String(text || "").startsWith("/")) return false;
 
@@ -1173,33 +877,6 @@ export function createTelegramCommandHandler(deps = {}) {
       }
       await bot.sendMessage(chatId, HELP_TEXT);
       return true;
-    }
-
-    if (ROOT_TASK_CONTROL_ALIASES[cmd]) {
-      return updateTaskLoopStatus({ chatId, userId, sub: ROOT_TASK_CONTROL_ALIASES[cmd] });
-    }
-
-    if (ROOT_TASK_SHORTCUTS[cmd]) {
-      const sub = ROOT_TASK_SHORTCUTS[cmd];
-      return startTelegramTaskDepth({
-        msg,
-        chatId,
-        userId,
-        sub,
-        rawArgs: `${sub} ${rawArgs}`.trim(),
-        commandLabel: cmd,
-      });
-    }
-
-    if (cmd === "/team" && shouldTreatTeamCommandAsTaskShortcut(rawArgs)) {
-      return startTelegramTaskDepth({
-        msg,
-        chatId,
-        userId,
-        sub: 'team',
-        rawArgs: `team ${rawArgs}`.trim(),
-        commandLabel: '/team',
-      });
     }
 
     if (cmd === "/rule" || cmd === "/rules") {
@@ -1689,7 +1366,6 @@ export function createTelegramCommandHandler(deps = {}) {
         const watchSummary = jobDir ? summarizeWatchTaskState(jobDir) : null;
         const roomProfile = getAgentRoomProfile(chatSessionStore, chatId);
         const pendingTask = getPendingTaskControl(chatId);
-        const defaultWorkMode = getDefaultTaskWorkMode(chatId);
         const lines = ['Task / Loop status'];
         if (watchSummary) {
           lines.push(`- watch: ${watchSummary.status} · iteration ${watchSummary.current_iteration}/${watchSummary.max_iterations} · ${watchSummary.workflow_kind}`);
@@ -1699,8 +1375,6 @@ export function createTelegramCommandHandler(deps = {}) {
           lines.push('- watch: no active persisted loop task');
         }
         if (pendingTask?.goal) lines.push(`- pending task goal: ${pendingTask.goal}`);
-        if (pendingTask?.work_mode) lines.push(`- pending work mode: ${formatWorkModeCommandSummary(pendingTask.work_mode, pendingTask.cycle_policy || {})}`);
-        if (defaultWorkMode?.work_mode) lines.push(`- default work mode: ${formatWorkModeCommandSummary(defaultWorkMode.work_mode, defaultWorkMode.cycle_policy || {})}`);
         lines.push('', formatAgentRoomProfile(roomProfile, { includeHelp: false }), '', TASK_HELP_TEXT);
         await sendLong(bot, chatId, lines.join('\n'));
         return true;
@@ -1711,35 +1385,84 @@ export function createTelegramCommandHandler(deps = {}) {
         return true;
       }
 
-      if (['modes', 'depths'].includes(sub)) {
-        await sendLong(bot, chatId, formatTaskWorkModesText());
-        return true;
-      }
-
-      if (sub === 'mode' || sub === 'default' || sub === 'depth') {
-        const parsed = parseTaskWorkModeCommand(rawArgs, { defaultSubcommand: 'mode' });
-        if (!parsed.mode || !parsed.work_mode) {
-          await bot.sendMessage(chatId, 'Usage: /task mode <instant|team|loop>  (legacy presets also work)');
+      if (['pause', 'resume', 'stop', 'approve'].includes(sub)) {
+        if (!jobDir) {
+          await bot.sendMessage(chatId, '현재 active job이 없어 task 상태를 변경할 수 없습니다. /task loop <목표>로 작업을 먼저 시작하세요.');
           return true;
         }
-        setDefaultTaskWorkMode(chatId, parsed.work_mode, parsed.cycle_policy);
-        await bot.sendMessage(chatId, `✅ 기본 Work Mode를 저장했습니다: ${formatWorkModeCommandSummary(parsed.work_mode, parsed.cycle_policy)}`);
+        const statusMap = { pause: 'paused', resume: 'active', stop: 'stopped', approve: 'active' };
+        const result = setWatchTaskStatus({
+          jobDir,
+          status: statusMap[sub],
+          reason: sub === 'approve' ? 'telegram_task_approve' : `telegram_task_${sub}`,
+          actor: String(userId || chatId || 'telegram_user'),
+        });
+        if (!result.ok) {
+          await bot.sendMessage(chatId, `task 상태 변경 실패: ${result.reason || 'unknown'}`);
+          return true;
+        }
+        await bot.sendMessage(chatId, `✅ task 상태를 ${statusMap[sub]} 로 변경했습니다.`);
         return true;
       }
 
-      if (['pause', 'resume', 'stop', 'approve'].includes(sub)) {
-        return updateTaskLoopStatus({ chatId, userId, sub });
-      }
-
-      if (sub === 'loop' || sub === 'start' || sub === 'watch' || sub === 'instant' || sub === 'team' || TASK_WORK_MODE_SHORTCUTS[sub]) {
-        return startTelegramTaskDepth({
-          msg,
+      if (sub === 'loop' || sub === 'start' || sub === 'watch') {
+        const goal = taskArgs || String(rawArgs || '').replace(/^(loop|start|watch)\s*/i, '').trim();
+        if (!goal) {
+          await bot.sendMessage(chatId, 'Usage: /task loop <목표>');
+          return true;
+        }
+        const { runtime: runtimeForTeam } = await loadRuntimeForCurrentJob(chatId, userId, { includeContext: false });
+        const signals = extractTeamCreationSignals({ request: goal, goal, runtime: runtimeForTeam });
+        const workflowContract = buildTeamWorkflowContract({ signals, goal });
+        const { activeTeam, roomProfile } = await suggestAndApplyAgentRoomTeam({ chatId, userId, goal, runtimeForTeam, autoApply: true });
+        const taskLoopRuntimeExecution = buildWorkflowRuntimeExecutionPatch(workflowContract, activeTeam?.runtime_execution || activeTeam?.runtimeExecution || runtimeForTeam?.runtime_execution || runtimeForTeam?.runtimeExecution || {});
+        const taskLoopTeamConfig = activeTeam && typeof activeTeam === 'object'
+          ? {
+            ...activeTeam,
+            runtime_execution: taskLoopRuntimeExecution || activeTeam.runtime_execution || activeTeam.runtimeExecution,
+            runtimeExecution: taskLoopRuntimeExecution || activeTeam.runtimeExecution || activeTeam.runtime_execution,
+            task_loop_execution_mode: 'task_loop',
+          }
+          : activeTeam;
+        setPendingTaskControl(chatId, {
+          goal,
+          command: '/task loop',
+          workflow_contract: workflowContract,
+          team_roles: roomProfile.default_agents,
+          source: 'telegram_task_loop',
+        });
+        await sendLong(bot, chatId, [
+          '🔁 Task loop를 시작합니다.',
+          '',
+          `workflow: ${summarizeTeamWorkflowContract(workflowContract)}`,
+          `agents: ${(roomProfile.default_agents || []).join(', ') || '-'}`,
+          'policy: small safe changes auto · risky/large changes approval-required',
+          '',
+          '이제 Agent Room 설정을 적용하고 작업 실행을 시작합니다.',
+        ].join('\n'));
+        const taskMessage = [
+          'CONTROL PLANE TASK: Start a bounded agent-room loop for the following goal.',
+          `Workflow contract: ${JSON.stringify(workflowContract)}`,
+          `Agent room roles: ${(roomProfile.default_agents || []).join(', ')}`,
+          '',
+          goal,
+        ].join('\n');
+        await sendRouterAckMessage(bot, chatId, { replyToMessageId: msg.message_id });
+        await chatRunManager.handleIncoming({
           chatId,
           userId,
-          sub,
-          rawArgs,
-          commandLabel: sub === 'loop' ? '/task loop' : `/task ${sub || 'start'}`,
+          text: taskMessage,
+          kind: 'task_loop',
+          telegramMessageId: msg.message_id,
+          userReplyToMessageId: Number.isFinite(Number(msg?.reply_to_message?.message_id)) ? Number(msg.reply_to_message.message_id) : null,
+          teamConfig: taskLoopTeamConfig || null,
+          chatInfo: {
+            chat_id: String(chatId || ''),
+            title: String(msg.chat?.title || msg.chat?.username || '').trim(),
+            type: String(msg.chat?.type || '').trim(),
+          },
         });
+        return true;
       }
 
       await bot.sendMessage(chatId, `알 수 없는 /task 명령입니다.\n\n${TASK_HELP_TEXT}`);

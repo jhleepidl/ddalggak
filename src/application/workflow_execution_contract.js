@@ -87,12 +87,10 @@ export function buildWorkflowRuntimeExecutionPatch(contract = null, baseRuntimeE
         ? 'Run bounded review-improve-verify iterations until the stop condition is met or approval/user input is required.'
         : ''),
     },
-    work_mode: row.work_mode || normalizedBase.work_mode || normalizedBase.workMode,
-    cycle_policy: row.cycle_policy || normalizedBase.cycle_policy || normalizedBase.cyclePolicy,
     workflow_contract: {
       ...row,
       enforced: true,
-      enforcement_level: workflowKind === 'bounded_continuous_loop' ? 'hard_loop_contract' : (workflowKind === 'staged_research_campaign' ? 'hard_stage_checkpoint_contract' : 'hard_review_contract'),
+      enforcement_level: workflowKind === 'bounded_continuous_loop' ? 'hard_loop_contract' : 'hard_review_contract',
     },
   };
 }

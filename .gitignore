@@ -150,7 +150,8 @@ commands.md
 config/model_nodes.discovered.json
 config/model_catalog_refresh_state.json
 
-# Local docs / handoff notes are distributed through patch bundles, not GitHub main.
+# Local implementation notes / handoff scratch files
+# Reusable docs are tracked under docs/. Temporary memos live in these ignored folders.
 docs/
 
 
@@ -158,6 +159,3 @@ docs/
 config/shared_team_packages.json
 
 .antigravitycli/
-
-# Local provider/runtime state; should live under runs/<run_id>/ when materialized.
-**/.antigravitycli/

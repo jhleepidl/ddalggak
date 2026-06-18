@@ -2631,6 +2631,55 @@ export class GocClient {
     return await this.installTeamBlueprint(threadTarget, manifest, applyState);
   }
 
+  async recordTaskAttemptDecision(attemptId, body = {}) {
+    const aid = String(attemptId || "").trim();
+    if (!aid) throw new Error("recordTaskAttemptDecision requires attemptId");
+    return await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/task-attempts/${encodeURIComponent(aid)}/decision`, body: asObject(body) },
+      ],
+    });
+  }
+
+  async recordTaskAttemptEvaluation(attemptId, body = {}) {
+    const aid = String(attemptId || "").trim();
+    if (!aid) throw new Error("recordTaskAttemptEvaluation requires attemptId");
+    return await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/task-attempts/${encodeURIComponent(aid)}/evaluation`, body: asObject(body) },
+      ],
+    });
+  }
+
+  async generateTaskAttemptResearchVariants(attemptId, body = {}) {
+    const aid = String(attemptId || "").trim();
+    if (!aid) throw new Error("generateTaskAttemptResearchVariants requires attemptId");
+    return await this._requestAny({
+      method: "POST",
+      attempts: [
+        { path: `/api/task-attempts/${encodeURIComponent(aid)}/variants`, body: asObject(body) },
+      ],
+    });
+  }
+
+  async exportTaskAttemptResearchDataset(threadTarget, { taskId = '', includeEvents = true, format = 'json' } = {}) {
+    const target = normalizeConversationTarget(threadTarget);
+    const threadId = target.thread_id || target.conversation_id;
+    if (!threadId) throw new Error("exportTaskAttemptResearchDataset requires threadId");
+    return await this._requestAny({
+      method: "GET",
+      attempts: [
+        {
+          path: `/api/threads/${encodeURIComponent(threadId)}/task-attempts/research-dataset`,
+          query: { task_id: taskId || undefined, include_events: includeEvents ? 'true' : 'false', format: format === 'jsonl' ? 'jsonl' : undefined },
+        },
+      ],
+    });
+  }
+
+
   async listAgents(scope = "") {
     const cleanScope = normalizeAgentsScope(scope);
     const data = await this._requestAny({
