@@ -91,9 +91,12 @@ import {
 
 const HELP_TEXT = [
   "Commands:",
-  "- /chat <text>: 질문/일회성 작업",
+  "- /ask <question>: 빠른 단일-agent 답변",
+  "- /team <goal>: 팀 검토/리뷰 깊이로 답변",
+  "- /loop [--loops n] <goal>: bounded loop 작업 시작",
+  "- /chat <text>: legacy 질문/일회성 작업",
   "- /task: 장기 작업/loop 상태 보기",
-  "- /task loop <목표>: 반복 점검·개선 작업 시작",
+  "- /task loop <목표>: legacy 반복 점검·개선 작업 시작",
   "- /agents: 이 채팅방의 Agent Room 보기",
   "- /agents suggest <목표>: 목표에 맞는 agent 구성 추천",
   "- /review: 승인/검토가 필요한 항목 보기",
@@ -116,7 +119,8 @@ const ADVANCED_HELP_TEXT = [
   "- /whoami: 현재 chat_id / user_id 확인",
   "- /running: 실행/대기 job 목록 확인",
   "- /credential ...: credential 바인딩/확인",
-  "- /task pause|resume|stop|approve: active loop task 제어",
+  "- /pause|/resume|/approve: active loop task 제어",
+  "- /task pause|resume|stop|approve: legacy active loop task 제어",
   "- /agents use <roles>: Agent Room 기본 역할 적용",
   "- /agents reset: Agent Room 초기화",
   "- /agents export: 현재 Agent Room을 portable package JSON으로 내보내기",
@@ -152,8 +156,11 @@ const ADVANCED_HELP_TEXT = [
   "- /commit <jobId> <message>: 작업 결과 커밋",
   "",
   "Command model:",
-  "- /chat = content plane",
-  "- /task = work/control plane",
+  "- /ask = quick answer depth",
+  "- /team = team review depth",
+  "- /loop = bounded loop depth",
+  "- /chat = legacy content plane",
+  "- /task = legacy work/control plane",
   "- /agents = Agent Room setup",
   "- /review = user decision queue",
   "- /outputs → /artifacts",
@@ -212,12 +219,18 @@ const TEAM_TEMPLATE_DEPRECATED_TEXT = [
 const TASK_HELP_TEXT = [
   "Task commands:",
   "- /task: active task/loop 상태 보기",
-  "- /task loop <목표>: 반복 점검·개선 작업 시작",
+  "- /loop [--loops n] <목표>: 일반 사용자용 bounded loop 시작",
+  "- /task loop <목표>: legacy 반복 점검·개선 작업 시작",
   "- /task pause: active loop 일시정지",
   "- /task resume: active loop 재개",
   "- /task stop: active loop 중단",
   "- /task approve: approval 대기 상태 해제",
 ].join("\n");
+
+const USER_TEAM_GOAL_RESERVED_SUBCOMMANDS = new Set([
+  'help', 'details', 'status', 'more', 'suggest', 'create', 'refine', 'apply', 'options', 'roles', 'patterns', 'schema', 'modes', 'reset',
+  'requirements', 'proposal', 'export', 'publish', 'library', 'package', 'clone', 'fork', 'install', 'import', 'pull', 'push', 'debug', 'validate', 'template',
+]);
 
 const AGENTS_HELP_TEXT = [
   "Agent Room commands:",
@@ -860,6 +873,129 @@ export function createTelegramCommandHandler(deps = {}) {
     return chatSessionStore.get(chatId)?.pending_task_control || null;
   }
 
+  function telegramReplyToMessageId(msg = {}) {
+    const n = Number(msg?.reply_to_message?.message_id);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function telegramChatInfo(msg = {}, chatId = '') {
+    return {
+      chat_id: String(chatId || ''),
+      title: String(msg?.chat?.title || msg?.chat?.username || '').trim(),
+      type: String(msg?.chat?.type || '').trim(),
+    };
+  }
+
+  async function safeRouterAck(chatId, msg = {}) {
+    if (typeof sendRouterAckMessage !== 'function') return null;
+    return sendRouterAckMessage(bot, chatId, { replyToMessageId: msg?.message_id });
+  }
+
+  function parseLoopDepthArgs(raw = '') {
+    let text = String(raw || '').trim();
+    let maxLoops = null;
+    let staged = false;
+    text = text.replace(/(?:^|\s)--loops(?:=|\s+)(\d{1,2})(?=\s|$)/i, (_m, n) => {
+      maxLoops = Math.max(1, Math.min(24, Number(n) || 1));
+      return ' ';
+    });
+    text = text.replace(/(?:^|\s)--staged(?=\s|$)/i, () => { staged = true; return ' '; });
+    return { goal: text.replace(/\s+/g, ' ').trim(), maxLoops, staged };
+  }
+
+  function forceBoundedLoopContract(contract = {}, { goal = '', maxLoops = null, staged = false } = {}) {
+    const fallbackPasses = staged
+      ? ['plan', 'research_or_build', 'review', 'revise', 'stop_condition_evaluation']
+      : ['plan', 'implement_or_diagnose', 'verify', 'review', 'stop_condition_evaluation'];
+    const maxIterations = Math.max(1, Math.min(24, Number(maxLoops || contract.max_iterations || contract.maxIterations || (staged ? 5 : 3)) || (staged ? 5 : 3)));
+    const minIterations = Math.min(maxIterations, Math.max(1, Math.min(2, Number(contract.min_iterations || contract.minIterations || 2) || 2)));
+    return {
+      ...contract,
+      workflow_kind: 'bounded_continuous_loop',
+      goal_excerpt: String(contract.goal_excerpt || goal || '').slice(0, 300),
+      required_passes: Array.isArray(contract.required_passes) && contract.required_passes.length ? contract.required_passes : fallbackPasses,
+      min_iterations: minIterations,
+      max_iterations: maxIterations,
+      review_each_iteration: contract.review_each_iteration !== false,
+      stop_conditions: Array.isArray(contract.stop_conditions) && contract.stop_conditions.length
+        ? contract.stop_conditions
+        : ['user_stop', 'iteration_budget_exceeded', 'three_consecutive_failures', 'quality_threshold_met'],
+      source_reasons: [
+        ...new Set([
+          ...(Array.isArray(contract.source_reasons) ? contract.source_reasons : []),
+          'telegram_loop_command',
+          maxLoops ? `telegram_max_loops_${maxLoops}` : '',
+          staged ? 'telegram_staged_loop' : '',
+        ].filter(Boolean)),
+      ],
+    };
+  }
+
+  function isTeamControlSubcommand(sub = '') {
+    return USER_TEAM_GOAL_RESERVED_SUBCOMMANDS.has(String(sub || '').trim().toLowerCase());
+  }
+
+  async function enqueueWorkbenchInput({ chatId, userId, msg = {}, text = '', kind = 'normal', teamConfig = null } = {}) {
+    await safeRouterAck(chatId, msg);
+    await chatRunManager.handleIncoming({
+      chatId,
+      userId,
+      text,
+      kind,
+      telegramMessageId: msg?.message_id,
+      userReplyToMessageId: telegramReplyToMessageId(msg),
+      teamConfig,
+      chatInfo: telegramChatInfo(msg, chatId),
+    });
+  }
+
+  async function startBoundedLoopFromTelegram({ chatId, userId, msg = {}, raw = '', sourceCommand = '/loop' } = {}) {
+    const parsedLoop = parseLoopDepthArgs(raw);
+    const goal = parsedLoop.goal;
+    if (!goal) {
+      await bot.sendMessage(chatId, `Usage: ${sourceCommand} [--loops n] <goal>`);
+      return true;
+    }
+    const { runtime: runtimeForTeam } = await loadRuntimeForCurrentJob(chatId, userId, { includeContext: false });
+    const signals = extractTeamCreationSignals({ request: goal, goal, runtime: runtimeForTeam });
+    const workflowContract = forceBoundedLoopContract(buildTeamWorkflowContract({ signals, goal }), { goal, ...parsedLoop });
+    const { activeTeam, roomProfile } = await suggestAndApplyAgentRoomTeam({ chatId, userId, goal, runtimeForTeam, autoApply: true });
+    const taskLoopRuntimeExecution = buildWorkflowRuntimeExecutionPatch(workflowContract, activeTeam?.runtime_execution || activeTeam?.runtimeExecution || runtimeForTeam?.runtime_execution || runtimeForTeam?.runtimeExecution || {});
+    const taskLoopTeamConfig = activeTeam && typeof activeTeam === 'object'
+      ? {
+        ...activeTeam,
+        runtime_execution: taskLoopRuntimeExecution || activeTeam.runtime_execution || activeTeam.runtimeExecution,
+        runtimeExecution: taskLoopRuntimeExecution || activeTeam.runtimeExecution || activeTeam.runtime_execution,
+        task_loop_execution_mode: 'task_loop',
+      }
+      : activeTeam;
+    setPendingTaskControl(chatId, {
+      goal,
+      command: sourceCommand,
+      workflow_contract: workflowContract,
+      team_roles: roomProfile.default_agents,
+      source: sourceCommand === '/loop' ? 'telegram_loop' : 'telegram_task_loop',
+    });
+    await sendLong(bot, chatId, [
+      '🔁 Bounded loop를 시작합니다.',
+      '',
+      `workflow: ${summarizeTeamWorkflowContract(workflowContract)}`,
+      `agents: ${(roomProfile.default_agents || []).join(', ') || '-'}`,
+      `max loops: ${workflowContract.max_iterations}`,
+      'policy: small safe changes auto · risky/large changes approval-required',
+    ].join('\n'));
+    const taskMessage = [
+      'CONTROL PLANE TASK: Start a bounded agent-room loop for the following goal.',
+      `Work depth: loop`,
+      `Workflow contract: ${JSON.stringify(workflowContract)}`,
+      `Agent room roles: ${(roomProfile.default_agents || []).join(', ')}`,
+      '',
+      goal,
+    ].join('\n');
+    await enqueueWorkbenchInput({ chatId, userId, msg, text: taskMessage, kind: 'task_loop', teamConfig: taskLoopTeamConfig || null });
+    return true;
+  }
+
   return async function handleTelegramCommand({ msg, text, chatId, userId }) {
     if (!String(text || "").startsWith("/")) return false;
 
@@ -876,6 +1012,46 @@ export function createTelegramCommandHandler(deps = {}) {
         return true;
       }
       await bot.sendMessage(chatId, HELP_TEXT);
+      return true;
+    }
+
+    if (cmd === "/ask") {
+      const raw = String(args || '').trim();
+      if (!raw) {
+        await bot.sendMessage(chatId, 'Usage: /ask <question>');
+        return true;
+      }
+      const parsed = parseChatMessageWithFlags(raw);
+      const message = String(parsed.message || '').trim();
+      if (!message) {
+        await bot.sendMessage(chatId, 'Usage: /ask <question>');
+        return true;
+      }
+      await bot.sendMessage(chatId, '⚡ /ask accepted: running a quick single-agent answer.');
+      await enqueueWorkbenchInput({ chatId, userId, msg, text: message, kind: 'quick_answer', teamConfig: null });
+      return true;
+    }
+
+    if (cmd === "/loop") {
+      return startBoundedLoopFromTelegram({ chatId, userId, msg, raw: args, sourceCommand: '/loop' });
+    }
+
+    if (["/pause", "/resume", "/approve"].includes(cmd)) {
+      const { jobDir } = getCurrentJobDirForChat(chatId);
+      if (!jobDir) {
+        await bot.sendMessage(chatId, '현재 active loop job이 없어 상태를 변경할 수 없습니다. /loop <goal>로 작업을 먼저 시작하세요.');
+        return true;
+      }
+      const statusMap = { '/pause': 'paused', '/resume': 'active', '/approve': 'active' };
+      const result = setWatchTaskStatus({
+        jobDir,
+        status: statusMap[cmd],
+        reason: cmd === '/approve' ? 'telegram_top_level_approve' : `telegram_top_level_${cmd.slice(1)}`,
+        actor: String(userId || chatId || 'telegram_user'),
+      });
+      await bot.sendMessage(chatId, result.ok
+        ? `✅ loop 상태를 ${statusMap[cmd]} 로 변경했습니다.`
+        : `loop 상태 변경 실패: ${result.reason || 'unknown'}`);
       return true;
     }
 
@@ -1406,64 +1582,10 @@ export function createTelegramCommandHandler(deps = {}) {
       }
 
       if (sub === 'loop' || sub === 'start' || sub === 'watch') {
-        const goal = taskArgs || String(rawArgs || '').replace(/^(loop|start|watch)\s*/i, '').trim();
-        if (!goal) {
-          await bot.sendMessage(chatId, 'Usage: /task loop <목표>');
-          return true;
-        }
-        const { runtime: runtimeForTeam } = await loadRuntimeForCurrentJob(chatId, userId, { includeContext: false });
-        const signals = extractTeamCreationSignals({ request: goal, goal, runtime: runtimeForTeam });
-        const workflowContract = buildTeamWorkflowContract({ signals, goal });
-        const { activeTeam, roomProfile } = await suggestAndApplyAgentRoomTeam({ chatId, userId, goal, runtimeForTeam, autoApply: true });
-        const taskLoopRuntimeExecution = buildWorkflowRuntimeExecutionPatch(workflowContract, activeTeam?.runtime_execution || activeTeam?.runtimeExecution || runtimeForTeam?.runtime_execution || runtimeForTeam?.runtimeExecution || {});
-        const taskLoopTeamConfig = activeTeam && typeof activeTeam === 'object'
-          ? {
-            ...activeTeam,
-            runtime_execution: taskLoopRuntimeExecution || activeTeam.runtime_execution || activeTeam.runtimeExecution,
-            runtimeExecution: taskLoopRuntimeExecution || activeTeam.runtimeExecution || activeTeam.runtime_execution,
-            task_loop_execution_mode: 'task_loop',
-          }
-          : activeTeam;
-        setPendingTaskControl(chatId, {
-          goal,
-          command: '/task loop',
-          workflow_contract: workflowContract,
-          team_roles: roomProfile.default_agents,
-          source: 'telegram_task_loop',
-        });
-        await sendLong(bot, chatId, [
-          '🔁 Task loop를 시작합니다.',
-          '',
-          `workflow: ${summarizeTeamWorkflowContract(workflowContract)}`,
-          `agents: ${(roomProfile.default_agents || []).join(', ') || '-'}`,
-          'policy: small safe changes auto · risky/large changes approval-required',
-          '',
-          '이제 Agent Room 설정을 적용하고 작업 실행을 시작합니다.',
-        ].join('\n'));
-        const taskMessage = [
-          'CONTROL PLANE TASK: Start a bounded agent-room loop for the following goal.',
-          `Workflow contract: ${JSON.stringify(workflowContract)}`,
-          `Agent room roles: ${(roomProfile.default_agents || []).join(', ')}`,
-          '',
-          goal,
-        ].join('\n');
-        await sendRouterAckMessage(bot, chatId, { replyToMessageId: msg.message_id });
-        await chatRunManager.handleIncoming({
-          chatId,
-          userId,
-          text: taskMessage,
-          kind: 'task_loop',
-          telegramMessageId: msg.message_id,
-          userReplyToMessageId: Number.isFinite(Number(msg?.reply_to_message?.message_id)) ? Number(msg.reply_to_message.message_id) : null,
-          teamConfig: taskLoopTeamConfig || null,
-          chatInfo: {
-            chat_id: String(chatId || ''),
-            title: String(msg.chat?.title || msg.chat?.username || '').trim(),
-            type: String(msg.chat?.type || '').trim(),
-          },
-        });
-        return true;
+        const rawLoopArgs = taskArgs || String(rawArgs || '').replace(/^(loop|start|watch)\s*/i, '').trim();
+        return startBoundedLoopFromTelegram({ chatId, userId, msg, raw: rawLoopArgs, sourceCommand: '/task loop' });
       }
+
 
       await bot.sendMessage(chatId, `알 수 없는 /task 명령입니다.\n\n${TASK_HELP_TEXT}`);
       return true;
@@ -1709,6 +1831,41 @@ export function createTelegramCommandHandler(deps = {}) {
       }
       if (!sub) {
         await bot.sendMessage(chatId, ['Advanced team topology (/agents 권장)', '', buildCompactTeamStatusMessage(teamState, { chatId, runtime: runtimeForTeam })].join('\n'));
+        return true;
+      }
+      if (!isTeamControlSubcommand(sub)) {
+        const goal = String(rawArgs || '').trim();
+        if (!goal) {
+          await bot.sendMessage(chatId, 'Usage: /team <goal>');
+          return true;
+        }
+        const { activeTeam, roomProfile } = await suggestAndApplyAgentRoomTeam({
+          chatId,
+          userId,
+          goal,
+          runtimeForTeam,
+          autoApply: true,
+          preferPlannerProposal: true,
+        });
+        setPendingTaskControl(chatId, {
+          goal,
+          command: '/team',
+          team_roles: roomProfile.default_agents,
+          source: 'telegram_team_review',
+        });
+        await sendLong(bot, chatId, [
+          '👥 /team accepted: running a team-review attempt.',
+          `agents: ${(roomProfile.default_agents || []).join(', ') || '-'}`,
+          'policy: one team pass with review/synthesis; user remains in control.',
+        ].join('\n'));
+        const teamMessage = [
+          'CONTROL PLANE TASK: Run a team-review attempt for the following goal.',
+          'Work depth: team_review',
+          `Agent room roles: ${(roomProfile.default_agents || []).join(', ')}`,
+          '',
+          goal,
+        ].join('\n');
+        await enqueueWorkbenchInput({ chatId, userId, msg, text: teamMessage, kind: 'team_review', teamConfig: activeTeam || null });
         return true;
       }
       if (sub === 'help') {
