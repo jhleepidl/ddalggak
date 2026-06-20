@@ -172,3 +172,74 @@ export async function forkTeamLibraryPackagePreviewApi(client, packageId = '', o
     ],
   });
 }
+
+export async function upsertThreadRoomPackageApi(client, threadTarget, roomPackage = {}) {
+  const threadId = requireThreadId(summarizeTeamTarget(threadTarget, { client }));
+  return await client._requestAny({
+    method: 'POST',
+    attempts: [
+      { path: `/api/threads/${encodeURIComponent(threadId)}/room-packages`, body: { package: roomPackage, source: 'ddalggak' } },
+    ],
+  });
+}
+
+export async function listThreadRoomPackagesApi(client, threadTarget, { limit = 100 } = {}) {
+  const threadId = requireThreadId(summarizeTeamTarget(threadTarget, { client }));
+  return await client._requestAny({
+    method: 'GET',
+    attempts: [
+      { path: `/api/threads/${encodeURIComponent(threadId)}/room-packages`, query: { limit } },
+    ],
+  });
+}
+
+export async function listRoomLibraryApi(client, { query = '', limit = 100 } = {}) {
+  return await client._requestAny({
+    method: 'GET',
+    attempts: [
+      { path: '/api/room-library', query: { q: query || undefined, limit } },
+    ],
+  });
+}
+
+export async function getRoomLibraryPackageApi(client, packageId = '') {
+  const id = String(packageId || '').trim();
+  if (!id) throw new Error('packageId is required');
+  return await client._requestAny({
+    method: 'GET',
+    attempts: [
+      { path: `/api/room-library/${encodeURIComponent(id)}` },
+    ],
+  });
+}
+
+export async function forkRoomLibraryPackagePreviewApi(client, packageId = '', options = {}) {
+  const id = String(packageId || '').trim();
+  if (!id) throw new Error('packageId is required');
+  return await client._requestAny({
+    method: 'POST',
+    attempts: [
+      { path: `/api/room-library/${encodeURIComponent(id)}/fork-preview`, body: options && typeof options === 'object' ? options : {} },
+    ],
+  });
+}
+
+export async function recordThreadRoomUsageEventApi(client, threadTarget, event = {}) {
+  const threadId = requireThreadId(summarizeTeamTarget(threadTarget, { client }));
+  return await client._requestAny({
+    method: 'POST',
+    attempts: [
+      { path: `/api/threads/${encodeURIComponent(threadId)}/room-usage-events`, body: { event } },
+    ],
+  });
+}
+
+export async function listThreadRoomUsageEventsApi(client, threadTarget, { limit = 200 } = {}) {
+  const threadId = requireThreadId(summarizeTeamTarget(threadTarget, { client }));
+  return await client._requestAny({
+    method: 'GET',
+    attempts: [
+      { path: `/api/threads/${encodeURIComponent(threadId)}/room-usage-events`, query: { limit } },
+    ],
+  });
+}

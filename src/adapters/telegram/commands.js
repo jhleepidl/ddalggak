@@ -82,6 +82,22 @@ import { extractTeamCreationSignals } from '../../application/team_signal_extrac
 import { buildTeamWorkflowContract, summarizeTeamWorkflowContract } from '../../application/team_workflow_contract.js';
 import { buildWorkflowRuntimeExecutionPatch } from '../../application/workflow_execution_contract.js';
 import {
+  buildRoomPackage,
+  buildRoomProfileFromGoal,
+  formatRoomPackageSummary,
+  parseRoomPackageInput,
+  renderRoomMarkdown,
+  roomPackageToProfilePatch,
+} from '../../application/room_package.js';
+import {
+  formatRoomGranularityRecommendation,
+  recommendRoomGranularity,
+} from '../../application/room_granularity_advisor.js';
+import {
+  appendRoomUsageEvent,
+  buildRoomUsageEvent,
+} from '../../application/room_usage_events.js';
+import {
   buildWatchTaskContract,
   ensureWatchTaskContract,
   readWatchTaskState,
@@ -94,6 +110,7 @@ const HELP_TEXT = [
   "- /ask <question>: 빠른 단일-agent 답변",
   "- /team <goal>: 팀 검토/리뷰 깊이로 답변",
   "- /loop [--loops n] <goal>: bounded loop 작업 시작",
+  "- /room: 이 채팅방의 AI Room / Room Package 설정 보기",
   "- /chat <text>: legacy 질문/일회성 작업",
   "- /task: 장기 작업/loop 상태 보기",
   "- /task loop <목표>: legacy 반복 점검·개선 작업 시작",
@@ -161,7 +178,8 @@ const ADVANCED_HELP_TEXT = [
   "- /loop = bounded loop depth",
   "- /chat = legacy content plane",
   "- /task = legacy work/control plane",
-  "- /agents = Agent Room setup",
+  "- /room = shareable AI Room setup",
+  "- /agents = Agent roster setup",
   "- /review = user decision queue",
   "- /outputs → /artifacts",
   "- /sendfile → /send",
@@ -234,6 +252,7 @@ const USER_TEAM_GOAL_RESERVED_SUBCOMMANDS = new Set([
 
 const AGENTS_HELP_TEXT = [
   "Agent Room commands:",
+  "- /room: 공유 가능한 AI Room / Room Package 보기",
   "- /agents: 이 채팅방의 Agent Room 보기",
   "- /agents suggest <목표>: 목표에 맞는 agent 구성 추천",
   "- /agents use planner,builder,reviewer: 기본 agent 역할 적용",
@@ -243,6 +262,21 @@ const AGENTS_HELP_TEXT = [
   "- /agents clone <package_id>: package를 이 채팅방에 설치",
   "- /agents reset: Agent Room 초기화",
   "- /team: legacy/advanced alias. 일반 사용은 /agents 권장",
+].join("\n");
+
+
+const ROOM_HELP_TEXT = [
+  "AI Room commands:",
+  "- /room: 현재 방의 specialization 보기",
+  "- /room suggest <goal>: 반복 작업용 room profile / Room Package 제안",
+  "- /room apply <goal>: 이 방을 해당 목적에 맞게 전문화",
+  "- /room advisor [goal]: broad/specialized/hybrid tradeoff 추천",
+  "- /room manual: 현재 ROOM.md 보기",
+  "- /room export [title]: 공유 가능한 Room Package 생성",
+  "- /room install <package_json>: 공유 Room Package 설치",
+  "- /room reset: room specialization 초기화",
+  "",
+  "Room packages share how a room works; they never copy private memory, credentials, raw chat logs, or uploaded files.",
 ].join("\n");
 
 const REVIEW_HELP_TEXT = [
@@ -804,10 +838,12 @@ export function createTelegramCommandHandler(deps = {}) {
 
   async function suggestAndApplyAgentRoomTeam({ chatId, userId, goal = '', runtimeForTeam = null, autoApply = false, preferPlannerProposal = false } = {}) {
     let teamState = getSessionTeamState(chatSessionStore, chatId);
+    const domainProfile = buildRoomProfileFromGoal({ chatId, goal, source: 'agent_room_team_suggest' });
+    const domainRoles = (domainProfile.default_agents || []).join(', ');
     let proposal;
     try {
       proposal = await createAgentRoomTeamConfiguration({
-        description: `Agent Room for this task. Goal: ${goal}. Prefer planner, builder, reviewer/verifier, and risk/evidence reviewer when relevant.`,
+        description: `Specialized AI Room for this task. Domain: ${domainProfile.domain_label}. Purpose: ${domainProfile.room_purpose}. Use roles: ${domainRoles}. Do not use implementation/build/code pipeline unless the domain is code_review or the user explicitly asks for code/build/test/deploy. Goal: ${goal}`,
         runtime: runtimeForTeam,
         jobId: resolveLiveJobIdForChat(chatId),
       });
@@ -822,6 +858,28 @@ export function createTelegramCommandHandler(deps = {}) {
       };
     }
     const fallbackProposal = suggestTeamConfiguration({ taskText: goal, runtime: runtimeForTeam });
+    if (domainProfile.domain_label && domainProfile.domain_label !== 'code_review') {
+      const roleAgents = (domainProfile.default_agents || []).map((role, index) => ({
+        agent_id: role,
+        id: role,
+        name: role.split('_').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' '),
+        role,
+        purpose: `${role} for ${domainProfile.domain_label} room`,
+        order: index,
+      }));
+      proposal = {
+        ...(proposal || {}),
+        name: domainProfile.name || 'Specialized AI Room Team',
+        description: domainProfile.room_purpose || goal,
+        agents: roleAgents,
+        planner_metadata: {
+          ...(proposal?.planner_metadata || {}),
+          room_domain_label: domainProfile.domain_label,
+          room_specialization: true,
+          implementation_pipeline_suppressed: true,
+        },
+      };
+    }
     const portfolio = buildTeamSelectionPortfolio({
       taskText: goal,
       runtime: runtimeForTeam,
@@ -843,7 +901,7 @@ export function createTelegramCommandHandler(deps = {}) {
     }
     const roomProfile = buildAgentRoomProfile({
       chatId,
-      roomName: 'Agent Workspace',
+      roomName: domainProfile.name || 'AI Work Room',
       goal,
       team: activeTeam,
       source: autoApply ? 'task_loop_auto_agent_room' : 'agents_suggest',
@@ -992,7 +1050,170 @@ export function createTelegramCommandHandler(deps = {}) {
       '',
       goal,
     ].join('\n');
+    recordRoomEvent({ chatId, userId, eventType: 'work_depth_used', command: sourceCommand || '/loop', goal, profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { depth: 'loop', max_iterations: maxIterations } });
     await enqueueWorkbenchInput({ chatId, userId, msg, text: taskMessage, kind: 'task_loop', teamConfig: taskLoopTeamConfig || null });
+    return true;
+  }
+
+
+  function getCurrentRoomPackage(chatId, { title = '' } = {}) {
+    const profile = getAgentRoomProfile(chatSessionStore, chatId);
+    return buildRoomPackage({ profile, chatId, title: title || profile?.name || '', source: 'telegram_room_command' });
+  }
+
+  function recordRoomEvent({ chatId, userId, eventType, command, goal = '', profile = null, recommendation = null, extra = {} }) {
+    try {
+      const event = buildRoomUsageEvent({ chatId, userId, eventType, command, goal, profile, recommendation, extra });
+      appendRoomUsageEvent(event);
+    } catch (err) {
+      console.warn('[room-events] failed to record event:', err?.message || err);
+    }
+  }
+
+  async function handleRoomCommand({ chatId, userId, msg, sub = '', rawArgs = '' }) {
+    const command = String(sub || '').trim().toLowerCase();
+    const argsAfterSub = String(rawArgs || '').replace(/^\S+\s*/i, '').trim();
+    if (!command || ['status', 'show', 'profile'].includes(command)) {
+      const profile = getAgentRoomProfile(chatSessionStore, chatId);
+      if (!profile || !profile.kind) {
+        await sendLong(bot, chatId, [
+          'AI Room이 아직 전문화되지 않았어요.',
+          '',
+          ROOM_HELP_TEXT,
+        ].join('\n'));
+        return true;
+      }
+      const pkg = getCurrentRoomPackage(chatId);
+      await sendLong(bot, chatId, [
+        formatAgentRoomProfile(profile, { includeHelp: false }),
+        '',
+        formatRoomPackageSummary(pkg, { includeExamples: false }),
+        '',
+        ROOM_HELP_TEXT,
+      ].join('\n'));
+      return true;
+    }
+    if (['help', 'more'].includes(command)) {
+      await sendLong(bot, chatId, ROOM_HELP_TEXT);
+      return true;
+    }
+    if (command === 'suggest') {
+      const goal = argsAfterSub;
+      if (!goal) {
+        await bot.sendMessage(chatId, 'Usage: /room suggest <goal>');
+        return true;
+      }
+      const profile = buildRoomProfileFromGoal({ chatId, goal, source: 'telegram_room_suggest' });
+      const pkg = buildRoomPackage({ profile, chatId, goal, title: profile.name, source: 'telegram_room_suggest' });
+      recordRoomEvent({ chatId, userId, eventType: 'room_suggested', command: '/room suggest', goal, profile });
+      await sendLong(bot, chatId, [
+        '추천 AI Room specialization입니다. 아직 적용하지 않았습니다.',
+        '',
+        formatAgentRoomProfile(profile, { includeHelp: false }),
+        '',
+        formatRoomPackageSummary(pkg),
+        '',
+        '적용하려면:',
+        `/room apply ${goal}`,
+      ].join('\n'));
+      return true;
+    }
+    if (command === 'apply' || command === 'specialize' || command === 'set') {
+      const goal = argsAfterSub;
+      if (!goal) {
+        await bot.sendMessage(chatId, 'Usage: /room apply <goal>');
+        return true;
+      }
+      const profile = buildRoomProfileFromGoal({ chatId, goal, source: 'telegram_room_apply' });
+      upsertAgentRoomProfile(chatSessionStore, chatId, profile);
+      recordRoomEvent({ chatId, userId, eventType: 'room_applied', command: '/room apply', goal, profile });
+      await sendLong(bot, chatId, [
+        '✅ 이 채팅방을 specialized AI Room으로 설정했습니다.',
+        '',
+        formatAgentRoomProfile(profile, { includeHelp: false }),
+        '',
+        '공유/포크 가능한 설명서를 보려면 /room manual 또는 /room export 를 사용하세요.',
+      ].join('\n'));
+      return true;
+    }
+    if (['advisor', 'advise', 'tradeoff', 'granularity', 'recommend'].includes(command)) {
+      const goal = argsAfterSub;
+      const profile = getAgentRoomProfile(chatSessionStore, chatId);
+      const recommendation = recommendRoomGranularity({ goal, profile });
+      recordRoomEvent({ chatId, userId, eventType: 'room_granularity_advice', command: '/room advisor', goal, profile, recommendation });
+      await sendLong(bot, chatId, [
+        formatRoomGranularityRecommendation(recommendation),
+        '',
+        'User remains in control: use this as an advisory signal, not an automatic room router.',
+        'Apply specialization with /room apply <goal>, or keep using the current room if the tradeoff is not worth it.',
+      ].join('\n'));
+      return true;
+    }
+    if (command === 'manual' || command === 'md' || command === 'room.md') {
+      const pkg = getCurrentRoomPackage(chatId);
+      recordRoomEvent({ chatId, userId, eventType: 'room_manual_view', command: '/room manual', profile: getAgentRoomProfile(chatSessionStore, chatId) });
+      await sendLong(bot, chatId, ['ROOM.md', '```md', renderRoomMarkdown(pkg), '```'].join('\n'));
+      return true;
+    }
+    if (command === 'export' || command === 'package') {
+      const title = argsAfterSub;
+      const pkg = getCurrentRoomPackage(chatId, { title });
+      recordRoomEvent({ chatId, userId, eventType: 'room_package_exported', command: '/room export', goal: title, profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { package_id: pkg.package_id } });
+      await sendLong(bot, chatId, [
+        '📦 공유 가능한 AI Room Package를 생성했습니다.',
+        '',
+        formatRoomPackageSummary(pkg),
+        '',
+        'ROOM.md',
+        '```md',
+        renderRoomMarkdown(pkg),
+        '```',
+        '',
+        'JSON',
+        '```json',
+        JSON.stringify(pkg, null, 2),
+        '```',
+      ].join('\n'));
+      return true;
+    }
+    if (command === 'install' || command === 'import' || command === 'clone') {
+      const raw = String(argsAfterSub || '').trim();
+      if (!raw) {
+        await bot.sendMessage(chatId, 'Usage: /room install <package_json>');
+        return true;
+      }
+      const pkg = parseRoomPackageInput(raw);
+      if (!pkg) {
+        await bot.sendMessage(chatId, 'ROOM package JSON 파싱에 실패했습니다. /room export 의 JSON 블록을 사용하세요.');
+        return true;
+      }
+      const profilePatch = roomPackageToProfilePatch(pkg, { chatId, source: 'telegram_room_install' });
+      const profile = upsertAgentRoomProfile(chatSessionStore, chatId, profilePatch);
+      recordRoomEvent({ chatId, userId, eventType: 'room_package_installed', command: '/room install', profile, extra: { package_id: pkg.package_id } });
+      await sendLong(bot, chatId, [
+        '✅ 공유 AI Room package를 설치했습니다.',
+        'private memory, credentials, raw chat history, uploaded files는 복사하지 않았고 이 방의 fresh local memory로 시작합니다.',
+        '',
+        formatAgentRoomProfile(profile, { includeHelp: false }),
+      ].join('\n'));
+      return true;
+    }
+    if (command === 'reset') {
+      recordRoomEvent({ chatId, userId, eventType: 'room_reset', command: '/room reset', profile: getAgentRoomProfile(chatSessionStore, chatId) });
+      upsertAgentRoomProfile(chatSessionStore, chatId, {
+        status: 'reset',
+        default_agents: [],
+        default_workflow: 'task_adaptive',
+        default_depth: 'ask',
+        current_goal: '',
+        memory_schema: { object_types: [] },
+        reasons: [],
+        source: 'telegram_room_reset',
+      });
+      await bot.sendMessage(chatId, '✅ AI Room specialization을 초기화했습니다. /room suggest <goal>로 다시 시작하세요.');
+      return true;
+    }
+    await bot.sendMessage(chatId, `알 수 없는 /room 명령입니다.\n\n${ROOM_HELP_TEXT}`);
     return true;
   }
 
@@ -1015,6 +1236,11 @@ export function createTelegramCommandHandler(deps = {}) {
       return true;
     }
 
+    if (cmd === "/room") {
+      const sub = String(rest[0] || "").trim().toLowerCase();
+      return handleRoomCommand({ chatId, userId, msg, sub, rawArgs });
+    }
+
     if (cmd === "/ask") {
       const raw = String(args || '').trim();
       if (!raw) {
@@ -1027,6 +1253,7 @@ export function createTelegramCommandHandler(deps = {}) {
         await bot.sendMessage(chatId, 'Usage: /ask <question>');
         return true;
       }
+      recordRoomEvent({ chatId, userId, eventType: 'work_depth_used', command: '/ask', goal: message, profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { depth: 'ask' } });
       await bot.sendMessage(chatId, '⚡ /ask accepted: running a quick single-agent answer.');
       await enqueueWorkbenchInput({ chatId, userId, msg, text: message, kind: 'quick_answer', teamConfig: null });
       return true;
@@ -1853,8 +2080,23 @@ export function createTelegramCommandHandler(deps = {}) {
           team_roles: roomProfile.default_agents,
           source: 'telegram_team_review',
         });
+        if (roomProfile.setup_only) {
+          await sendLong(bot, chatId, [
+            '👥 /team accepted: specialized room prepared.',
+            `room: ${roomProfile.name || 'AI Work Room'}`,
+            `domain: ${roomProfile.domain_label || 'general'}`,
+            `agents: ${(roomProfile.default_agents || []).join(', ') || '-'}`,
+            '',
+            'setup-only request로 판단했기 때문에 아직 실행하지 않습니다.',
+            '다음 메시지에 실제 줄거리/사진/티커/연구 아이디어/작업 입력을 주면 이 room 설정으로 진행합니다.',
+            '',
+            'ROOM.md를 보려면 /room manual 을 사용하세요.',
+          ].join('\n'));
+          return true;
+        }
         await sendLong(bot, chatId, [
           '👥 /team accepted: running a team-review attempt.',
+          `room: ${roomProfile.name || 'AI Work Room'}`,
           `agents: ${(roomProfile.default_agents || []).join(', ') || '-'}`,
           'policy: one team pass with review/synthesis; user remains in control.',
         ].join('\n'));

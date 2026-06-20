@@ -10,6 +10,13 @@ import {
   forkTeamLibraryPackagePreviewApi,
   setTeamConfigApi,
   validateTeamBlueprintApi,
+  upsertThreadRoomPackageApi,
+  listThreadRoomPackagesApi,
+  listRoomLibraryApi,
+  getRoomLibraryPackageApi,
+  forkRoomLibraryPackagePreviewApi,
+  recordThreadRoomUsageEventApi,
+  listThreadRoomUsageEventsApi,
 } from './goc_client_team_api.js';
 import { normalizeHarnessPackage } from './shared/openharness_contracts.js';
 
@@ -2613,6 +2620,35 @@ export class GocClient {
 
   async forkTeamLibraryPackagePreview(packageId = '', options = {}) {
     return await forkTeamLibraryPackagePreviewApi(this, packageId, options);
+  }
+
+
+  async upsertThreadRoomPackage(threadTarget, roomPackage = {}) {
+    return await upsertThreadRoomPackageApi(this, threadTarget, roomPackage);
+  }
+
+  async listThreadRoomPackages(threadTarget, options = {}) {
+    return await listThreadRoomPackagesApi(this, threadTarget, options);
+  }
+
+  async listRoomLibrary(options = {}) {
+    return await listRoomLibraryApi(this, options);
+  }
+
+  async getRoomLibraryPackage(packageId = '') {
+    return await getRoomLibraryPackageApi(this, packageId);
+  }
+
+  async forkRoomLibraryPackagePreview(packageId = '', options = {}) {
+    return await forkRoomLibraryPackagePreviewApi(this, packageId, options);
+  }
+
+  async recordThreadRoomUsageEvent(threadTarget, event = {}) {
+    return await recordThreadRoomUsageEventApi(this, threadTarget, event);
+  }
+
+  async listThreadRoomUsageEvents(threadTarget, options = {}) {
+    return await listThreadRoomUsageEventsApi(this, threadTarget, options);
   }
 
   async installTeamBlueprint(threadTarget, blueprint = {}, applyState = 'active') {
