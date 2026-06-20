@@ -37,10 +37,10 @@ export function scoreTeamCandidate(candidate = {}, { stress = {}, gate = null, r
   expectedSuccess += Number(candidate.prior_weight || candidate.default_weight || 1) * 0.04;
   let workModeBonus = 0;
   let workModePenalty = 0;
-  if (['team_review', 'project_task', 'research_campaign', 'customize'].includes(workMode.work_mode)) {
-    if (workModeSatisfaction.satisfied) workModeBonus = workMode.work_mode === 'research_campaign' ? 0.14 : 0.09;
-    else workModePenalty = workMode.work_mode === 'research_campaign' ? 0.2 : 0.12;
-  } else if (workMode.work_mode === 'quick_answer' && !workModeSatisfaction.satisfied) {
+  if (['team_task', 'team_loop_task'].includes(workMode.work_mode)) {
+    if (workModeSatisfaction.satisfied) workModeBonus = workMode.work_mode === 'team_loop_task' ? 0.14 : 0.09;
+    else workModePenalty = workMode.work_mode === 'team_loop_task' ? 0.2 : 0.12;
+  } else if (workMode.work_mode === 'ask' && !workModeSatisfaction.satisfied) {
     workModePenalty = workMode.explicit ? 0.18 : 0.04;
   }
   expectedSuccess += workModeBonus - workModePenalty;

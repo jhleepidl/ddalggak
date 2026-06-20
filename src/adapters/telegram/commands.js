@@ -1051,7 +1051,7 @@ export function createTelegramCommandHandler(deps = {}) {
       goal,
     ].join('\n');
     recordRoomEvent({ chatId, userId, eventType: 'work_depth_used', command: sourceCommand || '/loop', goal, profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { depth: 'loop', max_iterations: maxIterations } });
-    await enqueueWorkbenchInput({ chatId, userId, msg, text: taskMessage, kind: 'task_loop', teamConfig: taskLoopTeamConfig || null });
+    await enqueueWorkbenchInput({ chatId, userId, msg, text: taskMessage, kind: 'team_loop_task', teamConfig: taskLoopTeamConfig || null });
     return true;
   }
 
@@ -1255,7 +1255,7 @@ export function createTelegramCommandHandler(deps = {}) {
       }
       recordRoomEvent({ chatId, userId, eventType: 'work_depth_used', command: '/ask', goal: message, profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { depth: 'ask' } });
       await bot.sendMessage(chatId, '⚡ /ask accepted: running a quick single-agent answer.');
-      await enqueueWorkbenchInput({ chatId, userId, msg, text: message, kind: 'quick_answer', teamConfig: null });
+      await enqueueWorkbenchInput({ chatId, userId, msg, text: message, kind: 'ask', teamConfig: null });
       return true;
     }
 
@@ -2102,12 +2102,12 @@ export function createTelegramCommandHandler(deps = {}) {
         ].join('\n'));
         const teamMessage = [
           'CONTROL PLANE TASK: Run a team-review attempt for the following goal.',
-          'Work depth: team_review',
+          'Work depth: team_task',
           `Agent room roles: ${(roomProfile.default_agents || []).join(', ')}`,
           '',
           goal,
         ].join('\n');
-        await enqueueWorkbenchInput({ chatId, userId, msg, text: teamMessage, kind: 'team_review', teamConfig: activeTeam || null });
+        await enqueueWorkbenchInput({ chatId, userId, msg, text: teamMessage, kind: 'team_task', teamConfig: activeTeam || null });
         return true;
       }
       if (sub === 'help') {

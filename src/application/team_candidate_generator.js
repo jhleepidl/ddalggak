@@ -113,8 +113,8 @@ function buildTaskAttemptCandidateBlueprints({ request = '', stress = {}, taskAt
 function buildWorkModeCandidateBlueprints({ request = '', stress = {}, taskAttemptPlan = null } = {}) {
   const plan = summarizeTaskAttemptPlan(taskAttemptPlan || {});
   const workMode = summarizeWorkModeConfig(plan.work_mode || {});
-  const mode = cleanId(workMode.work_mode || 'quick_answer');
-  if (!['team_review', 'project_task', 'research_campaign', 'customize'].includes(mode)) return [];
+  const mode = cleanId(workMode.work_mode || 'ask');
+  if (!['team_task', 'team_loop_task'].includes(mode)) return [];
   const targetTeam = cleanId(plan.target_team || plan.memory_import?.target_team || 'general') || 'general';
   const roles = rolesForWorkMode(mode, { request, targetTeam });
   const roleSlots = roles.map((role, index) => ({
@@ -124,12 +124,10 @@ function buildWorkModeCandidateBlueprints({ request = '', stress = {}, taskAttem
     purpose: `${workMode.label || mode} role for bounded observable work cycle`,
   }));
   const labelMap = {
-    team_review: 'Work Mode: team review',
-    project_task: 'Work Mode: project task team',
-    research_campaign: 'Work Mode: staged research campaign',
-    customize: 'Work Mode: custom governed team',
+    team_task: 'Work Mode: team task',
+    team_loop_task: 'Work Mode: team loop task',
   };
-  const pattern = mode === 'research_campaign' ? 'staged' : (mode === 'team_review' ? 'sequential' : 'sequential');
+  const pattern = mode === 'team_loop_task' ? 'staged' : 'sequential';
   return [{
     candidate_id: cleanId(`work_mode:${mode}:${targetTeam}:${roles.join('_')}`),
     source: 'work_mode',
@@ -149,14 +147,14 @@ function buildWorkModeCandidateBlueprints({ request = '', stress = {}, taskAttem
       targetTeam !== 'general' ? `target_${targetTeam}` : '',
       ...workMode.reason_codes,
     ], 16),
-    task_types: uniq([mode === 'research_campaign' ? 'research' : (targetTeam === 'coding' ? 'implementation' : mode)], 4),
+    task_types: uniq([mode === 'team_loop_task' && targetTeam === 'paper' ? 'research' : (targetTeam === 'coding' ? 'implementation' : mode)], 4),
     coordination_cost: Math.max(1, roles.length - 1),
-    prior_weight: mode === 'research_campaign' ? 2.8 : (mode === 'project_task' ? 2.55 : 2.25),
+    prior_weight: mode === 'team_loop_task' ? 2.75 : 2.25,
     default_weight: 1.8,
     requires: {
       verifier: roles.includes('reviewer') || roles.includes('tester') || roles.includes('artifact_verifier'),
       workspace_write: roles.includes('builder') && Number(stress.workspace_mutation || 0) >= 0.25,
-      artifact_delivery: ['project_task', 'research_campaign'].includes(mode),
+      artifact_delivery: mode === 'team_loop_task',
     },
     work_mode_satisfaction: candidateSatisfiesWorkMode({ roles, agent_count: roles.length }, workMode),
   }];

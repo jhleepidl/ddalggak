@@ -135,7 +135,7 @@ function inferWorkModeDefaults(manifest = {}) {
   const runtime = asObject(blueprint.runtime_policy || team.runtime_policy || team.runtimePolicy || structure.control_policy);
   const control = asObject(structure.control_policy);
   return {
-    work_mode: cleanId(workMode.work_mode || workMode.mode || team.work_mode_id || team.workModeId || 'assisted_task') || 'assisted_task',
+    work_mode: cleanId(workMode.work_mode || workMode.mode || team.work_mode_id || team.workModeId || 'team_task') || 'team_task',
     loop_budget: clean(workMode.loop_budget || workMode.loopBudget || runtime.loop_budget || control.loop_budget || '1', { maxLen: 40 }) || '1',
     review_policy: cleanId(workMode.review_policy || workMode.reviewPolicy || runtime.review_policy || control.review_policy || 'optional') || 'optional',
     stop_condition: cleanId(workMode.stop_condition || workMode.stopCondition || runtime.stop_condition || control.stop_condition || 'answer_ready') || 'answer_ready',

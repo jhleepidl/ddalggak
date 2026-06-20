@@ -23,12 +23,12 @@ function inferDepth({ taskAttemptPlan = {}, workMode = {}, teamCandidate = {} } 
   const candidate = asObject(teamCandidate);
   const explicit = cleanText(plan.depth || wm.depth || wm.work_depth || candidate.depth, 64).toLowerCase();
   if (['ask', 'single', 'single_pass', 'quick_answer'].includes(explicit)) return 'ask';
-  if (['team', 'team_review'].includes(explicit)) return 'team';
-  if (['loop', 'bounded_loop', 'project_task', 'research_campaign', 'customize'].includes(explicit)) return 'loop';
+  if (['team', 'team_task', 'team_review'].includes(explicit)) return 'team';
+  if (['loop', 'team_loop_task', 'bounded_loop', 'project_task', 'research_campaign', 'customize'].includes(explicit)) return 'loop';
   const workModeName = cleanText(wm.work_mode || wm.mode || plan.work_mode, 64).toLowerCase();
-  if (workModeName === 'quick_answer') return 'ask';
-  if (workModeName === 'team_review') return 'team';
-  if (['project_task', 'research_campaign', 'customize'].includes(workModeName)) return 'loop';
+  if (['ask', 'quick_answer'].includes(workModeName)) return 'ask';
+  if (['team_task', 'team_review'].includes(workModeName)) return 'team';
+  if (['team_loop_task', 'project_task', 'research_campaign', 'customize'].includes(workModeName)) return 'loop';
   if (['branch', 'retry', 'parallel_branch'].includes(cleanText(plan.run_mode, 64).toLowerCase())) return 'loop';
   return asArray(candidate.roles).length > 1 ? 'team' : 'ask';
 }

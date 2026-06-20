@@ -137,38 +137,38 @@ test('team portfolio creates GoC branch candidate for paper-team retry and memor
   }
 });
 
-test('research campaign work mode is encoded as bounded-cycle advisory tokens', () => {
+test('team loop task work mode is encoded as bounded-cycle advisory tokens', () => {
   const request = buildSkeletonAdvisoryRequest({
-    request: 'Work Mode: Research Campaign. agent team selection에 대한 survey paper를 단계별로 작성해줘.',
+    request: 'Work Mode: Team Loop Task. agent team selection에 대한 survey paper를 단계별로 작성해줘.',
     stress: { current_info_need: 0.8, context_pressure: 0.8, verification_need: 0.7 },
     candidate: { candidate_id: 'c-research-campaign', roles: ['operator', 'researcher', 'synthesizer', 'reviewer', 'builder'] },
   });
-  assert.ok(request.tokens.includes('WORK_MODE=research_campaign'));
-  assert.ok(request.tokens.includes('LOOP_BUDGET=staged'));
-  assert.ok(request.tokens.includes('STOP_CONDITION=user_checkpoint'));
-  assert.ok(request.tokens.includes('REVIEW_POLICY=stage_gate'));
-  assert.ok(request.tokens.includes('MEMORY_MODE=structured'));
+  assert.ok(request.tokens.includes('WORK_MODE=team_loop_task'));
+  assert.ok(request.tokens.includes('LOOP_BUDGET=bounded'));
+  assert.ok(request.tokens.includes('STOP_CONDITION=checkpoint_or_budget'));
+  assert.ok(request.tokens.includes('REVIEW_POLICY=checkpoint'));
+  assert.ok(request.tokens.includes('MEMORY_MODE=structured_package'));
   assert.ok(request.tokens.includes('GOC_MODE=required'));
-  assert.equal(request.task_attempt_plan.work_mode.work_mode, 'research_campaign');
-  assert.equal(request.task_attempt_plan.cycle_policy.cycle_shape, 'staged_checkpoints');
+  assert.equal(request.task_attempt_plan.work_mode.work_mode, 'team_loop_task');
+  assert.equal(request.task_attempt_plan.cycle_policy.cycle_shape, 'bounded_team_loop');
 });
 
-test('team portfolio creates a Work Mode research campaign candidate and trace metadata', () => {
+test('team portfolio creates a Work Mode team loop task candidate and trace metadata', () => {
   const oldMock = process.env.TEAM_COMPAT_SCORER_MOCK;
   const oldMode = process.env.TEAM_COMPAT_ADVISORY_MODE;
   process.env.TEAM_COMPAT_SCORER_MOCK = '1';
   process.env.TEAM_COMPAT_ADVISORY_MODE = 'shadow';
   try {
     const portfolio = buildTeamSelectionPortfolio({
-      taskText: 'Work Mode: Research Campaign. agent team selection에 대한 survey paper를 staged checkpoints로 작성해줘.',
+      taskText: 'Work Mode: Team Loop Task. agent team selection에 대한 survey paper를 staged checkpoints로 작성해줘.',
       runtime: runtimeWith(['workspace_read']),
       maxCandidates: 6,
     });
-    assert.equal(portfolio.work_mode.work_mode, 'research_campaign');
+    assert.equal(portfolio.work_mode.work_mode, 'team_loop_task');
     assert.equal(portfolio.task_attempt_plan.work_mode.goc_mode, 'required');
-    assert.equal(portfolio.task_attempt_plan.context_policy.loop_budget, 'staged');
+    assert.equal(portfolio.task_attempt_plan.context_policy.loop_budget, 'bounded');
     assert.ok(portfolio.candidates.some((c) => c.source.includes('work_mode') && c.score?.work_mode_match === true));
-    assert.equal(portfolio.trace.work_mode.work_mode, 'research_campaign');
+    assert.equal(portfolio.trace.work_mode.work_mode, 'team_loop_task');
   } finally {
     if (oldMock === undefined) delete process.env.TEAM_COMPAT_SCORER_MOCK; else process.env.TEAM_COMPAT_SCORER_MOCK = oldMock;
     if (oldMode === undefined) delete process.env.TEAM_COMPAT_ADVISORY_MODE; else process.env.TEAM_COMPAT_ADVISORY_MODE = oldMode;

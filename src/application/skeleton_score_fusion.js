@@ -32,9 +32,9 @@ export function fuseCandidateScoreWithAdvisory(candidate = {}, advisory = {}, { 
   const memoryImportBonus = attemptPlan.memory_import?.import_intent === 'explicit'
     ? (attemptSatisfaction.satisfied ? 0.03 : -0.05)
     : 0;
-  const workModeBonus = ['team_review', 'project_task', 'research_campaign', 'customize'].includes(workMode.work_mode)
-    ? (workModeSatisfaction.satisfied ? (workMode.work_mode === 'research_campaign' ? 0.08 : 0.05) : -0.08)
-    : (workMode.work_mode === 'quick_answer' && !workModeSatisfaction.satisfied && workMode.explicit ? -0.08 : 0);
+  const workModeBonus = ['team_task', 'team_loop_task'].includes(workMode.work_mode)
+    ? (workModeSatisfaction.satisfied ? (workMode.work_mode === 'team_loop_task' ? 0.08 : 0.05) : -0.08)
+    : (workMode.work_mode === 'ask' && !workModeSatisfaction.satisfied && workMode.explicit ? -0.08 : 0);
   const fusedUtility = clamp(baseUtility + advisoryDelta - debtPenalty + userIntentBonus + attemptIntentBonus + memoryImportBonus + workModeBonus + gatePenalty, -1, 1);
   const capacityGaps = asArray(advisory.capacity_gaps);
   return {

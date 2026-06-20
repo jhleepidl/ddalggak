@@ -84,7 +84,7 @@ test('/ask enqueues a quick answer without teamConfig', async () => {
   assert.equal(handled, true);
   assert.equal(incoming.length, 1);
   assert.equal(incoming[0].text, 'explain briefly');
-  assert.equal(incoming[0].kind, 'quick_answer');
+  assert.equal(incoming[0].kind, 'ask');
   assert.equal(incoming[0].teamConfig, null);
   assert.match(sent.map((row) => row.text).join('\n'), /quick single-agent answer/);
 });
@@ -118,8 +118,8 @@ test('/team freeform goal starts a team-review attempt while advanced subcommand
 
   assert.equal(handled, true);
   assert.equal(incoming.length, 1);
-  assert.equal(incoming[0].kind, 'team_review');
-  assert.match(incoming[0].text, /Work depth: team_review/);
+  assert.equal(incoming[0].kind, 'team_task');
+  assert.match(incoming[0].text, /Work depth: team_task/);
   assert.match(incoming[0].text, /review this framing/);
   assert.ok(incoming[0].teamConfig);
   assert.match(sent.map((row) => row.text).join('\n'), /team-review attempt/);

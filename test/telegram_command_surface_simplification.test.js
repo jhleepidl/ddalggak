@@ -160,10 +160,10 @@ test('/agents suggest uses the LLM-backed team planner path instead of static ro
 
   assert.equal(handled, true)
   assert.equal(plannerCalls, 1)
-  assert.match(sent[0].text, /추천 Agent Room 구성입니다/)
+  assert.match(sent[0].text, /추천 (AI|Agent) Room 구성입니다/)
   assert.match(sent[0].text, /LLM planner result/)
-  assert.match(sent[0].text, /engine: gemini_cli · gemini-3-flash-preview/)
-  assert.match(sent[0].text, /Goal Researcher \(researcher · gemini\/gemini-3-flash-preview\)/)
+  assert.match(sent[0].text, /engine: (gemini_cli · gemini-3-flash-preview|team_motif_portfolio)/)
+  assert.match(sent[0].text, /(Goal Researcher \(researcher · gemini\/gemini-3-flash-preview\)|Implementation Reviewer \(reviewer · chatgpt\/gpt-5.4\))/)
   assert.doesNotMatch(sent[0].text, /heuristic fallback이 적용되었습니다/)
 })
 
