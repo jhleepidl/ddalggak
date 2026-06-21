@@ -1,7 +1,9 @@
 import { buildRoomPackage, buildRoomProfileFromGoal } from './room_package.js';
 import { buildRoomComponentsFromPackage, createBorrowedAgentInvocation } from './ai_room_components.js';
 import { buildWorkModeConfig, summarizeWorkModeConfig } from './work_mode.js';
+import { buildRoomTurnRoute } from './room_turn_router.js';
 import { buildStarterSingleAgentTeamConfiguration, validateTeamConfiguration } from './team_configuration.js';
+import { migrateProviderAwayFromGemini, sanitizeGeminiModelForProvider } from '../provider_migration.js';
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -52,8 +54,10 @@ function isCodeLikeRequest(text = '') {
 function defaultProviderForRole(role = '', { taskText = '', workMode = 'ask' } = {}) {
   const roleId = cleanId(role);
   if ((roleId.includes('builder') || roleId.includes('implementation')) && isCodeLikeRequest(taskText)) return 'codex';
-  if (workMode === 'ask') return cleanId(process.env.ROOM_ASK_PROVIDER || process.env.DDALGGAK_ASK_PROVIDER || 'gemini', 'gemini');
-  return cleanId(process.env.ROOM_AGENT_PROVIDER || 'gemini', 'gemini');
+  const requested = workMode === 'ask'
+    ? (process.env.ROOM_ASK_PROVIDER || process.env.DDALGGAK_ASK_PROVIDER || process.env.DDALGGAK_DEFAULT_PROVIDER || 'codex')
+    : (process.env.ROOM_AGENT_PROVIDER || process.env.DDALGGAK_DEFAULT_PROVIDER || 'codex');
+  return migrateProviderAwayFromGemini(requested, { fallback: 'codex' }).provider;
 }
 
 function roleRankForAsk(role = '', taskText = '') {
@@ -151,7 +155,7 @@ function buildInteractionSpec({ workMode = 'ask', roles = [], agents = [] } = {}
         builder_direct_response: false,
         require_reviewer_before_final: false,
       },
-      selection_reason: 'room-first ask uses a single reusable component',
+      selection_reason: 'Room Router kept this turn lightweight and used a single reusable component',
     };
   }
   return {
@@ -164,7 +168,7 @@ function buildInteractionSpec({ workMode = 'ask', roles = [], agents = [] } = {}
       builder_direct_response: false,
       require_reviewer_before_final: roles.some((role) => /review|critic|checker|verifier/.test(role)),
     },
-    selection_reason: `room-first ${workMode} selected component sequence: ${roles.join(' -> ')}`,
+    selection_reason: `Room Router selected ${workMode} and chose component sequence: ${roles.join(' -> ')}`,
   };
 }
 
@@ -176,11 +180,20 @@ export function buildRoomFirstRuntimeSelection({
   chatId = '',
   source = 'room_first_runtime_selection',
 } = {}) {
-  const mode = summarizeWorkModeConfig(buildWorkModeConfig({ request: taskText, explicitMode: workMode || '' })).work_mode;
+  const initialMode = summarizeWorkModeConfig(buildWorkModeConfig({ request: taskText, explicitMode: workMode || '' })).work_mode;
   const profile = asObject(roomProfile);
   const pkg = asObject(roomPackage).kind
     ? asObject(roomPackage)
     : buildRoomPackage({ profile: profile.kind ? profile : buildRoomProfileFromGoal({ chatId, goal: taskText, source }), goal: taskText, chatId, source });
+  const roomRoute = buildRoomTurnRoute({
+    taskText,
+    explicitMode: workMode || initialMode || '',
+    inputKind: workMode || initialMode || '',
+    roomPackage: pkg,
+    chatId,
+    source: 'room_turn_router',
+  });
+  const mode = roomRoute.depth || initialMode;
   const library = buildRoomComponentsFromPackage(pkg);
   const roles = rolesForRoomWorkMode({ roomPackage: pkg, workMode: mode, taskText });
   const agents = roles.map((role, index) => makeAgentFromCard({ card: findAgentCard(library, role), role, index, taskText, workMode: mode }));
@@ -209,6 +222,8 @@ export function buildRoomFirstRuntimeSelection({
       title: pkg.title || profile.name || 'AI Room',
       domain_label: pkg.domain_label || profile.domain_label || 'general_workbench',
     },
+    room_turn_route: roomRoute,
+    room_router: roomRoute.room_router,
     roles,
     agents,
     component_summary: library.summary || {},
@@ -246,8 +261,8 @@ export function buildRoomFirstTeamConfiguration({
       ...(asArray(starter.agents)[0] || {}),
       ...selectedAgent,
       role: selectedAgent.role || role,
-      provider: selectedAgent.provider || asArray(starter.agents)[0]?.provider || 'gemini',
-      model: selectedAgent.model || asArray(starter.agents)[0]?.model || '',
+      provider: migrateProviderAwayFromGemini(selectedAgent.provider || asArray(starter.agents)[0]?.provider || 'codex', { fallback: 'codex' }).provider,
+      model: sanitizeGeminiModelForProvider(selectedAgent.model || asArray(starter.agents)[0]?.model || '', selectedAgent.provider || asArray(starter.agents)[0]?.provider || 'codex'),
     };
     const normalized = validateTeamConfiguration({
       ...starter,
@@ -261,6 +276,8 @@ export function buildRoomFirstTeamConfiguration({
         planner_type: 'ai_room_component_policy',
         planning_source: source,
         room_first: true,
+        room_router_enabled: true,
+        room_router_depth: selection.room_turn_route?.depth || selection.work_mode,
         room_package_id: selection.room.package_id,
         room_domain_label: selection.room.domain_label,
         reasoning_summary: [
@@ -282,6 +299,8 @@ export function buildRoomFirstTeamConfiguration({
         planner_type: 'ai_room_component_policy',
         planning_source: source,
         room_first: true,
+        room_router_enabled: true,
+        room_router_depth: selection.room_turn_route?.depth || selection.work_mode,
         room_package_id: selection.room.package_id,
         room_domain_label: selection.room.domain_label,
       },
@@ -315,6 +334,8 @@ export function buildRoomFirstTeamConfiguration({
       planner_type: 'ai_room_component_policy',
       planning_source: source,
       room_first: true,
+      room_router_enabled: true,
+      room_router_depth: selection.room_turn_route?.depth || selection.work_mode,
       room_package_id: selection.room.package_id,
       room_domain_label: selection.room.domain_label,
       selected_component_ids: selection.agents.map((agent) => agent.component_ref).filter(Boolean),
@@ -338,6 +359,8 @@ export function buildRoomFirstTeamConfiguration({
       planner_type: 'ai_room_component_policy',
       planning_source: source,
       room_first: true,
+      room_router_enabled: true,
+      room_router_depth: selection.room_turn_route?.depth || selection.work_mode,
       room_package_id: selection.room.package_id,
       room_domain_label: selection.room.domain_label,
       selected_component_ids: selection.agents.map((agent) => agent.component_ref).filter(Boolean),

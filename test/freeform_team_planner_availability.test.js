@@ -48,7 +48,7 @@ test('isCodexPlannerEnabled returns false in auto mode when PATH has no codex bi
 });
 
 
-test('isLlmTeamPlannerEnabled detects Gemini planner binary in auto mode', () => {
+test('isLlmTeamPlannerEnabled does not treat Gemini planner binary as available in auto mode', () => {
   const prevPath = process.env.PATH;
   const prevMode = process.env.TEAM_CREATE_PLANNER_MODE;
   const prevProvider = process.env.TEAM_PLANNER_PROVIDER;
@@ -61,7 +61,7 @@ test('isLlmTeamPlannerEnabled detects Gemini planner binary in auto mode', () =>
   delete process.env.TEAM_PLANNER_PROVIDER;
   resetFreeformPlannerAvailabilityCache();
   try {
-    assert.equal(isLlmTeamPlannerEnabled('create'), true);
+    assert.equal(isLlmTeamPlannerEnabled('create'), false);
   } finally {
     process.env.PATH = prevPath;
     if (prevMode === undefined) delete process.env.TEAM_CREATE_PLANNER_MODE;

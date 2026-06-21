@@ -13,23 +13,18 @@ import { resolveRoutingContractSummary, resolveRouteContractHeuristic, alignPlan
 import { buildSupervisorOutputSchemaLines, buildSupervisorRuleLines } from "./supervisor_prompt_fragments.js";
 import { attachMemoryRoutingToRawPlan, buildRouterMemoryRoutingInstruction, normalizeRouterMemoryRouting } from "../application/router_memory_plan.js";
 import { internalLanguagePolicyBlock, normalizeLocale } from "../application/language_policy.js";
+import { migrateProviderAwayFromGemini, normalizeRuntimeProvider } from "../provider_migration.js";
 
 function asObject(v) {
   return v && typeof v === "object" ? v : {};
 }
 
 function normalizeProvider(raw) {
-  const key = String(raw || "").trim().toLowerCase();
-  if (["chatgpt", "gpt", "openai"].includes(key)) return "chatgpt";
-  if (["codex"].includes(key)) return "codex";
-  if (["gemini"].includes(key)) return "gemini";
-  return "gemini";
+  return normalizeRuntimeProvider(raw || 'codex', 'codex');
 }
 
 function pickDefaultAgent(agents = []) {
   const rows = Array.isArray(agents) ? agents : [];
-  const gemini = rows.find((row) => normalizeProvider(row?.provider) === "gemini");
-  if (gemini?.id) return String(gemini.id).trim().toLowerCase();
   const nonChatgpt = rows.find((row) => normalizeProvider(row?.provider) !== "chatgpt");
   if (nonChatgpt?.id) return String(nonChatgpt.id).trim().toLowerCase();
   const first = rows[0];
@@ -567,8 +562,8 @@ function fallbackPlan(message, { agents = [], tools = [], jobConfig = {}, parall
           id: requestedId,
           name: requestedId,
           description: "created from /chat fallback",
-          provider: "gemini",
-          model: "gemini",
+          provider: "codex",
+          model: "codex",
           prompt: msg,
           tools: [],
           meta: {},
@@ -917,12 +912,12 @@ function isSupervisorGeminiToolLeakCircuitOpen() {
 
 function supervisorProviderOrder() {
   const raw = String(process.env.CHAT_SUPERVISOR_PROVIDER || process.env.CHAT_ROUTER_PROVIDER || 'auto').trim().toLowerCase();
-  if (['codex', 'codex_cli'].includes(raw)) return ['codex'];
-  if (['gemini', 'gemini_cli'].includes(raw)) return ['gemini'];
-  if (['auto', 'fallback', 'failover', ''].includes(raw)) {
-    return isSupervisorGeminiToolLeakCircuitOpen() ? ['codex', 'gemini'] : ['gemini', 'codex'];
-  }
-  return isSupervisorGeminiToolLeakCircuitOpen() ? ['codex', 'gemini'] : ['gemini', 'codex'];
+  if (['off', 'disabled', 'none'].includes(raw)) return [];
+  const migrated = migrateProviderAwayFromGemini(raw, { fallback: 'codex' }).provider;
+  if (['codex', 'codex_cli'].includes(migrated)) return ['codex'];
+  if (['antigravity', 'google_ai'].includes(migrated)) return ['antigravity'];
+  if (['auto', 'fallback', 'failover', ''].includes(raw)) return ['codex'];
+  return ['codex'];
 }
 
 function codexRouterProfile() {
@@ -951,7 +946,23 @@ async function runSupervisorRouterProvider({
   onGeminiGiveUp = null,
   routerTimeoutMs = 30000,
 } = {}) {
-  const cleanProvider = String(provider || '').trim().toLowerCase();
+  const cleanProvider = migrateProviderAwayFromGemini(provider || 'codex', { fallback: 'codex' }).provider;
+  if (cleanProvider === 'antigravity') {
+    const { runAntigravityPrompt } = await import('../antigravity.js');
+    return await runAntigravityPrompt({
+      workspaceRoot,
+      cwd: path.resolve(cwd || workspaceRoot || process.cwd()),
+      prompt,
+      signal,
+      jobId: String(currentJobId || '').trim(),
+      model: process.env.ANTIGRAVITY_ROUTER_MODEL || process.env.ANTIGRAVITY_MODEL || '',
+      timeoutMs: positiveInt(process.env.CHAT_SUPERVISOR_ANTIGRAVITY_TIMEOUT_MS || process.env.CHAT_ROUTER_ANTIGRAVITY_TIMEOUT_MS, 60000, { min: 5000, max: 180000 }),
+      surface: 'supervisor_router',
+      agentId: 'supervisor_router',
+      roleId: 'supervisor',
+      traceMetadata: { surface_role: 'supervisor_router', router_provider: 'antigravity' },
+    });
+  }
   if (cleanProvider === 'codex') {
     return await runCodexExec({
       workspaceRoot,
@@ -986,7 +997,7 @@ async function runSupervisorRouterProvider({
     roleId: 'supervisor',
     workspaceSettingsPatch: { surface: 'supervisor_router' },
     extraEnv: { DDALGGAK_GEMINI_SURFACE: 'supervisor_router' },
-    traceMetadata: { surface_role: 'supervisor_router', timeout_ms: routerTimeoutMs, router_provider: 'gemini', toolless_router: true },
+    traceMetadata: { surface_role: 'supervisor_router', timeout_ms: routerTimeoutMs, router_provider: 'migrated_from_gemini', toolless_router: true },
   });
 }
 
@@ -1089,7 +1100,7 @@ export async function routeWithSupervisor(message, {
         kind: 'supervisor_prompt',
         surface_id: 'supervisor_router',
         surface_label: 'supervisor_router',
-        provider: 'gemini',
+        provider: supervisorProviderOrder()[0] || 'codex',
         model: geminiModel || '',
         agent_id: 'supervisor_router',
         role_id: 'supervisor',
@@ -1115,7 +1126,7 @@ export async function routeWithSupervisor(message, {
   }
 
   try {
-    const routerTimeoutMs = positiveInt(process.env.CHAT_SUPERVISOR_GEMINI_TIMEOUT_MS, 30000, { min: 2000, max: 60000 });
+    const routerTimeoutMs = positiveInt(process.env.CHAT_SUPERVISOR_CODEX_TIMEOUT_MS || process.env.CHAT_SUPERVISOR_GEMINI_TIMEOUT_MS, 30000, { min: 2000, max: 60000 });
     const providerAttempts = supervisorProviderOrder();
     let parsed = null;
     let lastRouterFailure = null;

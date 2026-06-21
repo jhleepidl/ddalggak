@@ -37,7 +37,7 @@ function inferRoleType(raw = {}) {
   if (id && DEFAULT_ROLE_BY_ID[id]) return DEFAULT_ROLE_BY_ID[id];
   const systemKey = String(raw.system_key || raw.systemKey || "").trim().toLowerCase();
   if (systemKey && DEFAULT_ROLE_BY_ID[systemKey]) return DEFAULT_ROLE_BY_ID[systemKey];
-  const provider = normalizeProviderName(raw.provider || raw.model || "gemini");
+  const provider = normalizeProviderName(raw.provider || raw.model || "codex");
   if (provider === "codex") return "builder";
   return "researcher";
 }
@@ -62,7 +62,7 @@ export function normalizeAgentTemplate(raw = {}) {
   const id = String(row.id || row.agent_id || row.agentId || "").trim().toLowerCase();
   if (!id) return null;
 
-  const provider = normalizeProviderName(row.provider || row.model || "gemini");
+  const provider = normalizeProviderName(row.provider || row.model || "codex");
   const model = String(row.model || provider).trim() || provider;
   const roleType = inferRoleType(row);
   const tools = normalizeStringList(row.tools ?? row.tool_ids ?? row.toolIds ?? [], {
@@ -151,7 +151,7 @@ export function createRuntimeAgentInstance({
 } = {}) {
   const tpl = template && typeof template === "object" ? template : null;
   const cleanTemplateId = String(templateId || tpl?.id || "").trim().toLowerCase();
-  const cleanProvider = String(provider || tpl?.provider || "gemini").trim().toLowerCase() || "gemini";
+  const cleanProvider = String(provider || tpl?.provider || "codex").trim().toLowerCase() || "codex";
   const cleanModel = String(model || tpl?.model || cleanProvider).trim() || cleanProvider;
   const cleanRoleLabel = String(roleLabel || tpl?.role_type || tpl?.name || cleanTemplateId || "runtime_role").trim();
   const normalizedRoleId = normalizeRoleId(cleanRoleLabel || tpl?.role_type || cleanTemplateId);

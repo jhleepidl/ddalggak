@@ -1,9 +1,18 @@
+import { normalizeRuntimeProvider } from "../provider_migration.js";
+
 const PROVIDER_ALIASES = {
   gpt: "chatgpt",
   openai: "chatgpt",
   chatgpt: "chatgpt",
   codex: "codex",
   gemini: "gemini",
+  gemini_cli: "gemini",
+  "gemini-cli": "gemini",
+  antigravity: "antigravity",
+  anti_gravity: "antigravity",
+  "anti-gravity": "antigravity",
+  google_ai: "antigravity",
+  "google-ai": "antigravity",
   local: "openai_compatible",
   local_model: "openai_compatible",
   openai_compatible: "openai_compatible",
@@ -17,9 +26,10 @@ export function asObject(v) {
   return v && typeof v === "object" ? v : {};
 }
 
-export function normalizeProviderName(raw, fallback = "gemini") {
+export function normalizeProviderName(raw, fallback = "codex") {
   const key = String(raw || "").trim().toLowerCase();
-  return PROVIDER_ALIASES[key] || fallback;
+  const aliased = PROVIDER_ALIASES[key] || key || fallback;
+  return normalizeRuntimeProvider(aliased, fallback || "codex");
 }
 
 export function normalizeStringList(raw, { max = 24, lower = false } = {}) {

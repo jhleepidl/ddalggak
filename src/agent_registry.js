@@ -1,4 +1,5 @@
 import { loadAgents } from "./agents.js";
+import { normalizeRuntimeProvider } from "./provider_migration.js";
 import { ensureAgentsThread, ensurePublicLibraryThreadId } from "./goc_mapping.js";
 import {
   getLegacyAliasesForRole,
@@ -11,6 +12,8 @@ const PROVIDER_ALIASES = {
   openai: "chatgpt",
   codex: "codex",
   gemini: "gemini",
+  antigravity: "antigravity",
+  google_ai: "antigravity",
   chatgpt: "chatgpt",
 };
 
@@ -35,7 +38,7 @@ function normalizeStringArray(raw) {
 
 function normalizeProvider(raw) {
   const key = String(raw || "").trim().toLowerCase();
-  return PROVIDER_ALIASES[key] || "gemini";
+  return normalizeRuntimeProvider(PROVIDER_ALIASES[key] || key || "codex", "codex");
 }
 
 function normalizeAgent(raw) {
@@ -328,8 +331,8 @@ function serializeAgentProfileYaml(agent) {
     `id: ${quoteYamlString(agent.id)}`,
     `name: ${quoteYamlString(agent.name || agent.id)}`,
     `description: ${quoteYamlString(agent.description || "")}`,
-    `provider: ${quoteYamlString(agent.provider || "gemini")}`,
-    `model: ${quoteYamlString(agent.model || agent.provider || "gemini")}`,
+    `provider: ${quoteYamlString(agent.provider || "codex")}`,
+    `model: ${quoteYamlString(agent.model || agent.provider || "codex")}`,
   ];
   const prompt = String(agent.prompt || "");
   if (!prompt.includes("\n")) {
@@ -445,8 +448,8 @@ function parsePublicBlueprintFromResource(resource) {
       id: fallbackAgentId || `agent_${publicNodeId}`,
       name: payloadBlueprint.name || fallbackAgentId || `agent_${publicNodeId}`,
       description,
-      provider: payloadBlueprint.provider || agent?.provider || "gemini",
-      model: payloadBlueprint.model || agent?.model || payloadBlueprint.provider || agent?.provider || "gemini",
+      provider: payloadBlueprint.provider || agent?.provider || "codex",
+      model: payloadBlueprint.model || agent?.model || payloadBlueprint.provider || agent?.provider || "codex",
       prompt: payloadBlueprint.prompt || agent?.prompt || "",
       meta: payloadBlueprint.meta && typeof payloadBlueprint.meta === "object" ? payloadBlueprint.meta : {},
     }, null, 2)}\n`;
@@ -513,8 +516,8 @@ export async function installBlueprint(client, blueprintNode, { agentsThreadId, 
       id: parsed.agent_id || `agent_${parsed.blueprint_id}`,
       name: parsed.title || parsed.agent_id || parsed.blueprint_id,
       description: parsed.description || "",
-      provider: parsed.provider || "gemini",
-      model: parsed.model || parsed.provider || "gemini",
+      provider: parsed.provider || "codex",
+      model: parsed.model || parsed.provider || "codex",
       prompt: parsed.prompt || "",
       meta: {},
     };

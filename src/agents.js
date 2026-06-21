@@ -18,8 +18,8 @@ const DEFAULT_AGENTS = [
     role_type: "researcher",
     description: "Research, evidence gathering, and risk analysis.",
     capability_tags: ["research", "analysis", "fact_check"],
-    provider: "gemini",
-    model: "gemini",
+    provider: "codex",
+    model: "codex",
     prompt: [
       "Role: Research Agent",
       "- Identify implementation prerequisites, risks, evidence, and verification points before changes.",
@@ -60,8 +60,8 @@ const DEFAULT_AGENTS = [
     role_type: "reviewer",
     description: "Change review, QA, regression-risk inspection, and verification.",
     capability_tags: ["review", "qa", "verification"],
-    provider: "gemini",
-    model: "gemini",
+    provider: "codex",
+    model: "codex",
     prompt: [
       "Role: Reviewer Agent",
       "- Inspect changes for bugs, regression risk, missing tests, and policy violations.",
@@ -81,8 +81,8 @@ const DEFAULT_AGENTS = [
     role_type: "synthesizer",
     description: "Final synthesis, briefing, and user-facing handoff.",
     capability_tags: ["summary", "briefing", "handoff"],
-    provider: "gemini",
-    model: "gemini",
+    provider: "codex",
+    model: "codex",
     prompt: [
       "Role: Synthesis Agent",
       "- Convert upstream research, implementation, and review results into a clear final response.",
@@ -102,8 +102,8 @@ const DEFAULT_AGENTS = [
     role_type: "operator",
     description: "Workflow, context, and runtime-state operations.",
     capability_tags: ["operations", "context", "runtime"],
-    provider: "gemini",
-    model: "gemini",
+    provider: "codex",
+    model: "codex",
     prompt: [
       "Role: Operations Context Agent",
       "- Coordinate workflow shape, context loading, runtime state, and required handoffs.",
@@ -123,7 +123,7 @@ function normalizeAgent(raw) {
   if (!raw || typeof raw !== "object") return null;
   const id = String(raw.id || "").trim().toLowerCase();
   if (!id) return null;
-  const provider = normalizeProviderName(raw.provider || raw.model || "gemini");
+  const provider = normalizeProviderName(raw.provider || raw.model || "codex");
   const roleType = String(raw.role_type || raw.roleType || id).trim().toLowerCase() || id;
   const capabilityTags = normalizeStringList(raw.capability_tags ?? raw.capabilityTags ?? [], {
     max: 32,

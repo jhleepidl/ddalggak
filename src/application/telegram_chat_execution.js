@@ -8,6 +8,7 @@ import { Approvals } from "../approvals.js";
 import { runCommand } from "../proc.js";
 import { runCodexExec } from "../codex.js";
 import { runGeminiPrompt } from "../gemini.js";
+import { migrateProviderAwayFromGemini, sanitizeGeminiModelForProvider } from "../provider_migration.js";
 import { OrchestratorMemory } from "../settings.js";
 import { orchestratorNotes, buildChatGPTNextStepPrompt } from "../prompts.js";
 import { clip, extractCodexInstruction, extractJsonPlan } from "../textutil.js";
@@ -1056,14 +1057,14 @@ function formatChatRuntimeRulesBlock(session = null, { maxRules = 6, maxChars = 
 
 async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const runtimeExecutionPolicy = normalizeRuntimeExecutionPolicy(opts.runtimeExecutionPolicy || {});
-  const sectionTitle = String(opts.sectionTitle || "Gemini notes");
+  const sectionTitle = String(opts.sectionTitle || "Research notes");
   const surfaceLocale = resolveUserSurfaceLocale({ message: opts.userRequest || opts.user_request || goal, runtime: opts.runtime || null, fallback: opts.userLocale || opts.user_locale || 'ko' });
   const outputGuide = buildDirectAnswerOutputGuide(opts.outputGuide || opts.output_guide || '', { userLocale: surfaceLocale });
   const concurrencyKey = String(opts.concurrencyKey || "").trim() || `job:${String(jobId || "").trim()}`;
   const preferredModel = String(opts.model || "").trim();
   const providedRoleMemo = String(opts.roleMemo || opts.role_memo || '').trim();
-  const boundGeminiRoleMemo = memory.getAgentRole("gemini");
-  const roleMemo = providedRoleMemo || boundGeminiRoleMemo;
+  const boundResearchRoleMemo = memory.getAgentRole("researcher") || memory.getAgentRole("codex") || memory.getAgentRole("gemini");
+  const roleMemo = providedRoleMemo || boundResearchRoleMemo;
   const roleKey = String(opts.roleId || 'researcher').trim().toLowerCase();
   const agentKey = String(opts.agentId || 'gemini').trim().toLowerCase() || 'gemini';
   const cleanUserRequest = String(opts.userRequest || opts.user_request || extractLatestUserRequestFromTaskText(goal) || '').trim();
@@ -1077,7 +1078,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const ctxMaxChars = clampInteger(process.env.CHAT_GEMINI_CONTEXT_DOC_MAX_CHARS, 900, { min: 0, max: 2600 });
   const ctx = ctxMaxChars > 0
     ? await runtimeIo.loadRoleScopedContextDocs(jobId, {
-      provider: 'gemini',
+      provider: migrateProviderAwayFromGemini(opts.provider || 'codex', { fallback: 'codex' }).provider,
       roleId: roleKey,
       fallbackDocIds: ['plan', 'research'],
       maxCharsPerDoc: ctxMaxChars,
@@ -1090,7 +1091,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     ? opts.providerOptions
     : resolveProviderRuntimeOptions({
       runtimeExecutionPolicy,
-      provider: "gemini",
+      provider: migrateProviderAwayFromGemini(opts.provider || "codex", { fallback: "codex" }).provider,
       workspaceRoot: workspacePath,
     });
   const artifactOutputRequirements = resolveExecutionRequirementsForRuntime(
@@ -1103,7 +1104,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const artifactPolicyBlock = buildArtifactTurnPolicyBlock(artifactOutputRequirements, { hasArtifactContract: artifactOutputRequirements.artifact_delivery_requested === true, runtimeExecutionPolicy, roleId: roleKey });
   appendExecutionPolicyResolution({
     jobDir: runDir(jobId),
-    source: 'geminiResearch',
+    source: 'researchProvider',
     agentId: agentKey,
     roleId: roleKey,
     runtimeExecutionPolicy,
@@ -1135,12 +1136,12 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     ].join("\n")
     : "";
   const kbContract = buildAgentKnowledgeBaseBlock(jobId, {
-    provider: "gemini",
+    provider: migrateProviderAwayFromGemini(opts.provider || "codex", { fallback: "codex" }).provider,
     roleId: roleKey,
     agentId: agentKey,
     detailLevel: "minimal",
   });
-  ensureCliWorkspaceSupportFiles(jobId, { provider: "gemini", roleMemo, kbContract, goal: cleanUserRequest || rawGoal, runtimeExecutionPolicy, providerOptions });
+  ensureCliWorkspaceSupportFiles(jobId, { provider: migrateProviderAwayFromGemini(opts.provider || "codex", { fallback: "codex" }).provider, roleMemo, kbContract, goal: cleanUserRequest || rawGoal, runtimeExecutionPolicy, providerOptions });
   const prompt = [
     internalLanguagePolicyBlock({ surfaceLocale }),
     'You are an agent invoked by Telegram /chat.',
@@ -1167,8 +1168,8 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     sharedDir: runSharedDir(jobId),
     row: {
       kind: 'provider_prompt',
-      provider: 'gemini',
-      model: preferredModel || '',
+      provider: migrateProviderAwayFromGemini(opts.provider || 'codex', { fallback: 'codex' }).provider,
+      model: sanitizeGeminiModelForProvider(preferredModel || '', migrateProviderAwayFromGemini(opts.provider || 'codex', { fallback: 'codex' }).provider),
       agent_id: agentKey,
       role_id: roleKey,
       prompt_text: prompt,
@@ -1212,6 +1213,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     },
   });
   const effectiveGeminiResult = r;
+  const effectiveResearchProvider = String(r?.provider || migrateProviderAwayFromGemini(opts.provider || 'codex', { fallback: 'codex' }).provider || 'codex').trim().toLowerCase();
   const out = (r.stdout || r.stderr || "");
   const materialization = artifactOutputRequirements.artifact_delivery_requested
     ? materializeArtifactsFromLlmOutput({
@@ -1224,11 +1226,11 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     try { runtimeIo.refreshArtifactIndex(jobId, { maxFiles: 12 }); } catch {}
   }
   try {
-    recordArtifactObservationFromAgentOutput(runDir(jobId), out, { source: `gemini:${agentKey}` });
+    recordArtifactObservationFromAgentOutput(runDir(jobId), out, { source: `${effectiveResearchProvider}:${agentKey}` });
   } catch {}
   const researchPurpose = ['reviewer', 'critic'].includes(roleKey) ? 'review' : 'research';
   appendRoleAwareTracking(jobId, `## ${sectionTitle}\n\n${out}\n`, {
-    provider: 'gemini',
+    provider: effectiveResearchProvider,
     roleId: roleKey,
     purpose: researchPurpose,
     fallbackDoc: 'research',
@@ -1249,12 +1251,12 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
         : '검증: provider-side 파일쓰기 제한 이후 LLM 출력물을 파싱해 workspace에 저장했습니다.',
     ].join('\n')
     : out;
-  jobs.appendConversation(jobId, "gemini", userFacingOut, { kind: "research", provider: 'gemini', model: effectiveGeminiResult.used_model || preferredModel || 'gemini' });
-  if (!acceptedProviderFileLimitation && !acceptedTimedPartial) ensureCommandOk("Gemini", effectiveGeminiResult);
+  jobs.appendConversation(jobId, effectiveResearchProvider, userFacingOut, { kind: "research", provider: effectiveResearchProvider, model: effectiveGeminiResult.used_model || sanitizeGeminiModelForProvider(preferredModel, effectiveResearchProvider) || effectiveResearchProvider });
+  if (!acceptedProviderFileLimitation && !acceptedTimedPartial) ensureCommandOk(effectiveResearchProvider === "codex" ? "Codex" : effectiveResearchProvider === "antigravity" ? "Antigravity" : "Research provider", effectiveGeminiResult);
   return {
     output: userFacingOut,
-    provider: 'gemini',
-    model: String(effectiveGeminiResult.used_model || preferredModel || 'gemini').trim() || 'gemini',
+    provider: effectiveResearchProvider,
+    model: String(effectiveGeminiResult.used_model || sanitizeGeminiModelForProvider(preferredModel, effectiveResearchProvider) || effectiveResearchProvider).trim() || effectiveResearchProvider,
     llm_trace_id: effectiveGeminiResult.llm_trace_id || undefined,
   };
 }
@@ -1687,7 +1689,7 @@ async function synthesizeChatReply(message, routePlan, execution = {}) {
       if (execution && typeof execution === 'object') {
         execution._response_model_badge = {
           ...(execution._response_model_badge && typeof execution._response_model_badge === 'object' ? execution._response_model_badge : {}),
-          final: { provider: 'gemini', model: String(r.used_model || r.model || '').trim() || 'gemini' },
+          final: { provider: String(r.provider || 'codex'), model: String(r.used_model || r.model || r.provider || 'codex').trim() || 'codex' },
         };
       }
       const reply = clip(out, 3800);
@@ -5626,8 +5628,8 @@ async function executeAgentRun(
       });
     }
 
-    const provider = String(agent.provider || "gemini").trim().toLowerCase();
-    const model = String(agent.model || provider).trim() || provider;
+    const provider = migrateProviderAwayFromGemini(agent.provider || "codex", { fallback: "codex" }).provider;
+    const model = sanitizeGeminiModelForProvider(agent.model || provider, provider) || provider;
     const rolePrompt = String(agent.prompt || "").trim();
     const roleId = String(act?.inputs?.role_id || act?.inputs?.roleId || agent.role || agent.role_id || agent.roleId || "").trim().toLowerCase();
     const displayLabel = String(act?.inputs?.display_label || act?.inputs?.displayLabel || act?.inputs?.agent_name || act?.inputs?.agentName || agent?.name || agentId).trim();

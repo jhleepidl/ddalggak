@@ -4,6 +4,7 @@ import { resolveChatGptCodexProviderOptions, resolveChatGptProviderBridge } from
 import { getModelNode } from './model_node_registry.js';
 import { formatProviderFailoverNote, resolveProviderFailoverDecision } from './provider_failover_policy.js';
 import { isTaskLoopRuntimeExecutionPolicy } from './execution_requirements.js';
+import { migrateProviderAwayFromGemini, sanitizeGeminiModelForProvider } from '../provider_migration.js';
 
 export async function runAgentProviderExecution({
   provider = '',
@@ -26,7 +27,9 @@ export async function runAgentProviderExecution({
   prompts = {},
   callbacks = {},
 } = {}) {
-  const cleanProvider = String(provider || '').trim().toLowerCase();
+  const providerMigration = migrateProviderAwayFromGemini(provider || 'codex', { fallback: 'codex' });
+  const cleanProvider = providerMigration.provider;
+  const cleanModel = sanitizeGeminiModelForProvider(model || '', cleanProvider);
   const {
     codexImplement,
     geminiResearch,
@@ -48,12 +51,42 @@ export async function runAgentProviderExecution({
       mode: typeof memoryModeWithFallback === 'function' ? memoryModeWithFallback() : 'default',
       agent,
       provider: String(overrides.provider || cleanProvider || '').trim().toLowerCase(),
-      model: String(overrides.model || model || '').trim(),
+      model: String(overrides.model || cleanModel || '').trim(),
       failover: overrides.failover || undefined,
     };
   };
 
   if (cleanProvider === 'codex') {
+    if (providerMigration.migrated_from_gemini && typeof codexAssist === 'function') {
+      const migrationDecision = { from_provider: 'gemini', to_provider: 'codex', reason: 'gemini_cli_disabled', type: 'provider_failover' };
+      const migrationNote = '[provider_failover] gemini CLI disabled; executing migrated role through codex assist.';
+      if (typeof appendLocalLogs === 'function') appendLocalLogs(migrationNote, typeof memoryModeWithFallback === 'function' ? memoryModeWithFallback() : 'default');
+      if (notify && bot && chatId) {
+        try { await bot.sendMessage(chatId, `🔁 Gemini CLI가 비활성화되어 Codex로 실행합니다. (${agentId || 'agent'})`); } catch {}
+      }
+      const output = await codexAssist(jobId, String(prompts.chatQuestion || prompts.goal || prompts.instruction || ''), signal, {
+        runtimeExecutionPolicy,
+        providerOptions: {
+          ...providerOptions,
+          sandboxMode: providerOptions.sandboxMode || providerOptions.sandbox_mode || process.env.CODEX_ASSIST_SANDBOX_MODE || 'read-only',
+          approvalPolicy: providerOptions.approvalPolicy || providerOptions.approval_policy || process.env.CODEX_ASSIST_APPROVAL_POLICY || 'never',
+          profile: providerOptions.profile || process.env.CODEX_ASSIST_PROFILE || process.env.CODEX_PROFILE || '',
+        },
+        chatId,
+        agentId,
+        roleId,
+        roleMemo: String(prompts.roleMemo || prompts.role_memo || '').trim(),
+        userRequest: String(prompts.userRequest || prompts.user_request || act?.inputs?.user_request || act?.inputs?.userRequest || '').trim(),
+        chatRuntimeRules: String(prompts.chatRuntimeRules || prompts.chat_runtime_rules || act?.inputs?._runtime_rules_text || act?.inputs?.runtime_rules_text || '').trim(),
+        outputGuide: String(prompts.outputGuide || prompts.output_guide || act?.inputs?.output_guide || act?.inputs?.outputGuide || '').trim(),
+        preparedContextInfo: act?.inputs?._prompt_context_info && typeof act.inputs._prompt_context_info === 'object'
+          ? act.inputs._prompt_context_info
+          : {},
+        failoverDecision: migrationDecision,
+      });
+      return finalize(output, { provider: 'codex', model: providerOptions.profile || process.env.CODEX_PROFILE || 'codex', failover: migrationDecision });
+    }
+    if (typeof codexImplement !== 'function') throw new Error('codex provider is selected but codexImplement callback is unavailable');
     const output = await codexImplement(jobId, String(prompts.instruction || ''), signal, {
       runtimeExecutionPolicy,
       providerOptions,
@@ -66,6 +99,28 @@ export async function runAgentProviderExecution({
       finalSynthesis: act?.inputs?.final_synthesis === true,
     });
     return finalize(output);
+  }
+
+  if (cleanProvider === 'antigravity') {
+    const { runAntigravityPrompt } = await import('../antigravity.js');
+    const promptText = String(prompts.instruction || prompts.goal || prompts.chatQuestion || '');
+    const result = await runAntigravityPrompt({
+      workspaceRoot: providerOptions.workspaceRoot || providerOptions.workspace_root || process.cwd(),
+      cwd: providerOptions.cwd || process.cwd(),
+      prompt: promptText,
+      signal,
+      jobId,
+      model: cleanModel || process.env.ANTIGRAVITY_MODEL || process.env.GOOGLE_AI_MODEL || '',
+      surface: 'agent_provider_execution',
+      agentId,
+      roleId,
+      timeoutMs: Number(providerOptions.timeoutMs || providerOptions.timeout_ms || process.env.ANTIGRAVITY_TIMEOUT_MS || 0),
+      traceMetadata: { provider: cleanProvider, migrated_from_provider: providerMigration.migrated_from_gemini ? 'gemini' : undefined },
+    });
+    if (!result.ok) throw new Error(result.stderr || `Antigravity provider failed for agent ${agentId}`);
+    const output = result.stdout || '';
+    if (typeof appendLocalLogs === 'function') appendLocalLogs(output, typeof memoryModeWithFallback === 'function' ? memoryModeWithFallback() : 'default');
+    return finalize(output, { provider: 'antigravity', model: result.used_model || cleanModel || 'auto' });
   }
 
   if (cleanProvider === 'gemini') {
@@ -81,7 +136,7 @@ export async function runAgentProviderExecution({
           ? act.inputs._prompt_context_info
           : {},
         outputGuide: String(prompts.outputGuide || prompts.output_guide || act?.inputs?.output_guide || act?.inputs?.outputGuide || '').trim(),
-        model,
+        model: cleanModel,
         concurrencyKey: geminiConcurrencyKey || `job:${String(jobId || '').trim()}`,
         onGeminiRetry,
         onGeminiModelSwitch,

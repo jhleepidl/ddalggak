@@ -3,6 +3,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { runCodexExec } from '../codex.js';
+import { migrateProviderAwayFromGemini, normalizeRuntimeProvider } from '../provider_migration.js';
 import { runGeminiPrompt } from '../gemini.js';
 import { parseJsonObjectFromText } from '../shared/json_extract.js';
 import { listSupportedModels } from '../catalog/model_catalog.js';
@@ -78,7 +79,7 @@ function normalizedPlannerMode() {
   const value = cleanId(process.env.TEAM_CREATE_PLANNER_MODE || process.env.TEAM_PLANNER_MODE || 'auto');
   if (value === 'off' || value === 'disabled' || value === 'false' || value === '0' || value === 'none') return 'off';
   if (value === 'on' || value === 'enabled' || value === 'true' || value === '1') return 'auto';
-  if (['auto', 'codex', 'gemini', 'llm'].includes(value)) return value;
+  if (['auto', 'codex', 'gemini', 'antigravity', 'google_ai', 'llm'].includes(value)) return value;
   return 'auto';
 }
 
@@ -86,12 +87,10 @@ function plannerProviderPreference(kind = 'create') {
   const specific = kind === 'refine' ? process.env.TEAM_REFINE_PLANNER_PROVIDER : process.env.TEAM_CREATE_PLANNER_PROVIDER;
   const raw = cleanId(specific || process.env.TEAM_PLANNER_PROVIDER || 'auto');
   if (raw === 'off' || raw === 'disabled' || raw === 'none') return [];
-  if (raw === 'gemini') return ['gemini'];
-  if (raw === 'codex' || raw === 'chatgpt' || raw === 'openai') return ['codex'];
-  // Team design is a reasoning task, not a code-writing task. Prefer Gemini when
-  // available so /team suggest does not silently degrade to static templates on
-  // servers where Codex is only installed for workspace execution or is absent.
-  return ['gemini', 'codex'];
+  const migrated = migrateProviderAwayFromGemini(raw, { fallback: 'codex' }).provider;
+  if (migrated === 'antigravity') return ['antigravity'];
+  if (migrated === 'codex' || raw === 'chatgpt' || raw === 'openai') return ['codex'];
+  return ['codex'];
 }
 
 function isPlannerProviderAvailable(provider = '') {
@@ -100,10 +99,12 @@ function isPlannerProviderAvailable(provider = '') {
   const mode = normalizedPlannerMode();
   if (mode === 'off') return false;
   if (mode === 'codex' && key !== 'codex') return false;
-  if (mode === 'gemini' && key !== 'gemini') return false;
+  if (mode === 'gemini' && key !== migrateProviderAwayFromGemini('gemini', { fallback: 'codex' }).provider) return false;
+  if ((mode === 'antigravity' || mode === 'google_ai') && key !== 'antigravity') return false;
   const cacheKey = mode + ':' + key + ':' + (process.env.PATH || '');
   if (plannerAvailabilityCache.has(cacheKey)) return plannerAvailabilityCache.get(cacheKey);
-  const binary = key === 'gemini' ? 'gemini' : key === 'codex' ? 'codex' : '';
+  const effectiveKey = migrateProviderAwayFromGemini(key, { fallback: 'codex' }).provider;
+  const binary = effectiveKey === 'antigravity' ? (process.env.ANTIGRAVITY_CLI_COMMAND || process.env.GOOGLE_AI_CLI_COMMAND || 'antigravity') : effectiveKey === 'codex' ? 'codex' : '';
   const available = Boolean(binary && hasExecutableOnPath(binary));
   plannerAvailabilityCache.set(cacheKey, available);
   return available;
@@ -425,12 +426,11 @@ function plannerModelForProvider(provider = '', kind = 'create') {
   const specific = kind === 'refine'
     ? process.env.TEAM_REFINE_PLANNER_MODEL
     : process.env.TEAM_CREATE_PLANNER_MODEL;
-  if (key === 'gemini') {
-    return clean((kind === 'refine' ? process.env.TEAM_REFINE_GEMINI_PLANNER_MODEL : process.env.TEAM_CREATE_GEMINI_PLANNER_MODEL)
-      || process.env.TEAM_GEMINI_PLANNER_MODEL
-      || (/^gemini/i.test(clean(specific)) ? specific : '')
-      || process.env.GEMINI_MODEL
-      || 'gemini-3-flash-preview');
+  if (key === 'antigravity') {
+    return clean((kind === 'refine' ? process.env.TEAM_REFINE_ANTIGRAVITY_PLANNER_MODEL : process.env.TEAM_CREATE_ANTIGRAVITY_PLANNER_MODEL)
+      || process.env.TEAM_ANTIGRAVITY_PLANNER_MODEL
+      || process.env.ANTIGRAVITY_MODEL
+      || 'auto');
   }
   if (key === 'codex') {
     return clean((kind === 'refine' ? process.env.TEAM_REFINE_CODEX_PLANNER_MODEL : process.env.TEAM_CREATE_CODEX_PLANNER_MODEL)
@@ -452,7 +452,7 @@ function plannerTimeoutMs(kind = 'create') {
 function plannerSourceForProvider(provider = '', kind = 'create') {
   const key = cleanId(provider);
   const suffix = kind === 'refine' ? '_refine' : '';
-  if (key === 'gemini') return 'gemini_cli_team_planner' + suffix;
+  if (key === 'antigravity') return 'antigravity_cli_team_planner' + suffix;
   if (key === 'codex') return 'codex_cli_team_planner' + suffix;
   return 'llm_team_planner' + suffix;
 }
@@ -491,9 +491,24 @@ function appendPlannerPromptTelemetry({ kind = 'create', provider = '', model = 
 }
 
 async function runPlannerProvider({ provider = '', kind = 'create', prompt = '', workspaceRoot = process.cwd(), jobId = '' } = {}) {
-  const key = cleanId(provider);
+  const key = migrateProviderAwayFromGemini(provider, { fallback: 'codex' }).provider;
   const model = plannerModelForProvider(key, kind);
   const timeoutMs = plannerTimeoutMs(kind);
+  if (key === 'antigravity') {
+    const { runAntigravityPrompt } = await import('../antigravity.js');
+    return await runAntigravityPrompt({
+      workspaceRoot,
+      cwd: workspaceRoot,
+      prompt,
+      jobId: kind === 'refine' ? 'team-refine-planner' : 'team-create-planner',
+      model,
+      timeoutMs,
+      surface: kind === 'refine' ? 'team_refine_planner' : 'team_create_planner',
+      agentId: kind === 'refine' ? 'team_refine_planner' : 'team_create_planner',
+      roleId: 'planner',
+      traceMetadata: { planner_provider: key, requested_job_id: clean(jobId) || null },
+    });
+  }
   if (key === 'gemini') {
     return await runGeminiPrompt({
       workspaceRoot,

@@ -7,6 +7,7 @@ import {
   discoverOllamaModelNodes,
   discoverOpenAICompatibleModelNodes,
 } from './model_node_discovery.js';
+import { geminiCliDisabledByDefault } from '../provider_migration.js';
 
 function clean(value = '') {
   return String(value || '').trim();
@@ -99,7 +100,7 @@ async function safeDiscover(label, fn) {
   }
 }
 
-export async function discoverConfiguredModelCatalog({ includeOllama = envFlag('OLLAMA_DISCOVERY_ENABLED', !!clean(process.env.OLLAMA_BASE_URL)), includeOpenAICompatible = envFlag('OPENAI_COMPATIBLE_DISCOVERY_ENABLED', !!clean(process.env.OPENAI_COMPATIBLE_BASE_URL)), includeCodex = envFlag('CODEX_CLI_MODEL_DISCOVERY_ENABLED', true), includeGemini = envFlag('GEMINI_CLI_MODEL_DISCOVERY_ENABLED', true), timeoutMs = numberEnv('CLI_MODEL_DISCOVERY_TIMEOUT_MS', 12000), maxModels = numberEnv('MODEL_NODE_DISCOVERY_MAX_MODELS', 80), runner } = {}) {
+export async function discoverConfiguredModelCatalog({ includeOllama = envFlag('OLLAMA_DISCOVERY_ENABLED', !!clean(process.env.OLLAMA_BASE_URL)), includeOpenAICompatible = envFlag('OPENAI_COMPATIBLE_DISCOVERY_ENABLED', !!clean(process.env.OPENAI_COMPATIBLE_BASE_URL)), includeCodex = envFlag('CODEX_CLI_MODEL_DISCOVERY_ENABLED', true), includeGemini = envFlag('GEMINI_CLI_MODEL_DISCOVERY_ENABLED', false) && !geminiCliDisabledByDefault(), timeoutMs = numberEnv('CLI_MODEL_DISCOVERY_TIMEOUT_MS', 12000), maxModels = numberEnv('MODEL_NODE_DISCOVERY_MAX_MODELS', 80), runner } = {}) {
   const discoveries = [];
   if (includeOllama) {
     discoveries.push(await safeDiscover('ollama', () => discoverOllamaModelNodes({

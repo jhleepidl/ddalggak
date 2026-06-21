@@ -415,8 +415,8 @@ ${contractLines.join('\n')}`);
               id: fallbackAgentId,
               name: fallbackAgentId,
               description: "",
-              provider: "gemini",
-              model: "gemini",
+              provider: "codex",
+              model: "codex",
               prompt: "",
               meta: {},
             }
@@ -427,7 +427,7 @@ ${contractLines.join('\n')}`);
             return;
           }
           const agentId = String(draftProfile.id || "").trim().toLowerCase();
-          const providerModel = `${String(draftProfile.provider || "gemini").trim() || "gemini"}/${String(draftProfile.model || draftProfile.provider || "gemini").trim() || "gemini"}`;
+          const providerModel = `${String(draftProfile.provider || "codex").trim() || "codex"}/${String(draftProfile.model || draftProfile.provider || "codex").trim() || "codex"}`;
           const namePreview = clip(String(draftProfile.name || agentId), 120);
           const descriptionPreview = clip(
             String(draftProfile.description || "")

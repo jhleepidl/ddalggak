@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { geminiCliDisabledByDefault, geminiCliDisabledMessage, normalizeGeminiReplacementProvider, sanitizeGeminiModelForProvider } from "./provider_migration.js";
 import os from "node:os";
 import path from "node:path";
 import { runCommand } from "./proc.js";
@@ -1550,7 +1551,76 @@ async function runGeminiPromptInternal({
 }
 
 
+async function runGeminiReplacementPrompt(options = {}) {
+  const replacement = normalizeGeminiReplacementProvider();
+  const workspaceRoot = options?.workspaceRoot || options?.cwd || process.cwd();
+  const cwd = options?.cwd || workspaceRoot;
+  const prompt = String(options?.prompt || '');
+  const jobId = options?.jobId || (String(options?.concurrencyKey || '').startsWith('job:') ? String(options?.concurrencyKey || '').slice(4).trim() : '');
+  const surface = options?.surface || 'gemini_migrated_prompt';
+  const agentId = options?.agentId || '';
+  const roleId = options?.roleId || '';
+  const timeoutMs = Number(options?.timeoutMs || 0) || 0;
+  const migrationMetadata = {
+    migrated_from_provider: 'gemini',
+    replacement_provider: replacement,
+    gemini_cli_disabled: true,
+    original_model: String(options?.model || '').trim() || undefined,
+    ...(options?.traceMetadata && typeof options.traceMetadata === 'object' ? options.traceMetadata : {}),
+  };
+  if (replacement === 'codex') {
+    const { runCodexExec } = await import('./codex.js');
+    const res = await runCodexExec({
+      workspaceRoot,
+      cwd,
+      prompt,
+      signal: options?.signal,
+      jobId,
+      model: sanitizeGeminiModelForProvider(options?.model || '', 'codex') || process.env.CODEX_MODEL || '',
+      surface,
+      agentId,
+      roleId,
+      timeoutMs: timeoutMs || Number(process.env.CODEX_EXEC_TIMEOUT_MS || 0) || 0,
+      sandboxMode: surface === 'supervisor_router' ? (process.env.CHAT_SUPERVISOR_CODEX_SANDBOX_MODE || 'read-only') : undefined,
+      approvalPolicy: surface === 'supervisor_router' ? (process.env.CHAT_SUPERVISOR_CODEX_APPROVAL_POLICY || 'never') : undefined,
+      traceMetadata: migrationMetadata,
+    });
+    return { ...(res && typeof res === 'object' ? res : {}), provider: 'codex', migrated_from_provider: 'gemini' };
+  }
+  if (replacement === 'antigravity') {
+    const { runAntigravityPrompt } = await import('./antigravity.js');
+    const res = await runAntigravityPrompt({
+      workspaceRoot,
+      cwd,
+      prompt,
+      signal: options?.signal,
+      jobId,
+      model: sanitizeGeminiModelForProvider(options?.model || '', 'antigravity') || process.env.ANTIGRAVITY_MODEL || process.env.GOOGLE_AI_MODEL || '',
+      surface,
+      agentId,
+      roleId,
+      timeoutMs: timeoutMs || Number(process.env.ANTIGRAVITY_TIMEOUT_MS || 0) || 0,
+      traceMetadata: migrationMetadata,
+      env: options?.extraEnv && typeof options.extraEnv === 'object' ? options.extraEnv : {},
+    });
+    return { ...(res && typeof res === 'object' ? res : {}), provider: 'antigravity', migrated_from_provider: 'gemini' };
+  }
+  return {
+    ok: false,
+    exitCode: -1,
+    stdout: '',
+    stderr: `${geminiCliDisabledMessage()} Replacement provider is ${replacement || 'disabled'}.`,
+    durationMs: 0,
+    used_model: replacement || 'disabled',
+    provider: replacement || 'disabled',
+    migrated_from_provider: 'gemini',
+  };
+}
+
 export async function runGeminiPrompt(options = {}) {
+  if (geminiCliDisabledByDefault()) {
+    return await runGeminiReplacementPrompt(options);
+  }
   const traceStartedAtMs = Date.now();
   const traceStartedAt = new Date(traceStartedAtMs).toISOString();
   const result = await runGeminiPromptInternal(options);

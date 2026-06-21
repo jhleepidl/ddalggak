@@ -11,6 +11,7 @@ import { interpretTask } from '../control_plane/task_interpreter.js';
 import { planFreeformTeamWithCodex, planTeamRefinementWithCodex } from './freeform_team_planner.js';
 import { getModelNode, listModelNodes } from './model_node_registry.js';
 import { selectModelNodeForTask } from './model_node_selector.js';
+import { migrateProviderAwayFromGemini, sanitizeGeminiModelForProvider } from '../provider_migration.js';
 import {
   buildDefaultInteractionSpec,
   buildAgentLocalInteractionContract,
@@ -737,7 +738,7 @@ function buildFallbackRuntime() {
   const catalog = asArray(registry?.agents).map((row) => ({
     id: cleanId(row?.id || row?.agent_id || row?.agentId),
     name: clean(row?.name),
-    provider: cleanId(row?.provider || inferProviderForModel(row?.model || '') || 'gemini'),
+    provider: migrateProviderAwayFromGemini(row?.provider || inferProviderForModel(row?.model || '') || 'codex', { fallback: 'codex' }).provider,
     model: clean(row?.model || ''),
     role: cleanId(row?.role || row?.system_key || row?.id),
     tools: asArray(row?.tools),
@@ -770,7 +771,7 @@ function runtimeCatalog(runtime = null) {
       ...row,
       id: cleanId(row?.id || row?.agent_id || row?.agentId),
       name: clean(row?.name),
-      provider: cleanId(row?.provider || inferProviderForModel(row?.model || '') || ''),
+      provider: migrateProviderAwayFromGemini(row?.provider || inferProviderForModel(row?.model || '') || 'codex', { fallback: 'codex' }).provider,
       model: clean(row?.model || ''),
       role: cleanId(row?.role || row?.system_key || row?.role_id || row?.id),
       skills: asArray(row?.skills).map((entry) => cleanId(entry?.id || entry)).filter(Boolean),
@@ -799,13 +800,13 @@ function buildKnowledgeBaseMemoryMapLines(profileOrPlan = null, { maxLines = 7 }
 function defaultModelForRole(role = '', provider = '') {
   const roleId = cleanId(role);
   const providerId = cleanId(provider);
-  if (providerId === 'gemini') return 'gemini-3-flash-preview';
+  if (providerId === 'antigravity') return process.env.ANTIGRAVITY_MODEL || 'auto';
   if (isLocalModelProvider(providerId)) return listModelNodes()[0]?.model || 'local-model';
   if ((providerId === 'openai' || providerId === 'chatgpt') && roleId === 'builder') return 'gpt-5.5';
   if ((providerId === 'openai' || providerId === 'codex') && roleId === 'builder') return 'gpt-5-codex';
   if (roleId === 'builder') return 'gpt-5-codex';
   if (roleId === 'reviewer' || roleId === 'synthesizer') return 'gpt-5.4';
-  return 'gemini-3-flash-preview';
+  return 'gpt-5.4';
 }
 
 function userExplicitlyRequestedGeminiPro(text = '') {
@@ -819,7 +820,7 @@ function sanitizePlannerExecutableModel(model = '', provider = '', { taskText = 
   const resolved = resolveSupportedModel(model || '') || clean(model);
   const effectiveProvider = cleanId(providerId || inferProviderForModel(resolved || '') || inferLocalProviderForModel(resolved || ''));
   if (effectiveProvider === 'gemini' && /^gemini-2\.5-pro$/i.test(resolved) && !userExplicitlyRequestedGeminiPro(taskText)) {
-    return 'gemini-3-flash-preview';
+    return 'gpt-5.4';
   }
   return resolved || defaultModelForRole(role, effectiveProvider);
 }
@@ -1451,13 +1452,13 @@ function defaultAgentsFromCatalog(runtime = {}, taskText = '') {
     agent_id: cleanId(row.id || row.agent_id),
     name: clean(row.name || row.id),
     role: cleanId(row.role || row.system_key || row.id),
-    model: sanitizePlannerExecutableModel(row.model || '', row.provider, { taskText, role: row.role }) || defaultModelForRole(row.role, row.provider),
+    model: sanitizeGeminiModelForProvider(sanitizePlannerExecutableModel(row.model || '', row.provider, { taskText, role: row.role }), row.provider) || defaultModelForRole(row.role, migrateProviderAwayFromGemini(row.provider || 'codex', { fallback: 'codex' }).provider),
     purpose: clean(taskText),
     skills: asArray(row.skills).map((skill) => cleanId(skill?.id || skill)),
-    provider: cleanId(row.provider || inferProviderForModel(row.model || '') || inferLocalProviderForModel(row.model || '') || ''),
+    provider: migrateProviderAwayFromGemini(row.provider || inferProviderForModel(row.model || '') || inferLocalProviderForModel(row.model || '') || 'codex', { fallback: 'codex' }).provider,
   })).filter((row) => row.agent_id);
   if (picked.length > 0) return picked;
-  return [{ agent_id: 'researcher', name: 'Researcher', role: 'researcher', model: 'gemini-3-flash-preview', purpose: clean(taskText), skills: [], provider: 'gemini' }];
+  return [{ agent_id: 'researcher', name: 'Researcher', role: 'researcher', model: defaultModelForRole('researcher', 'codex'), purpose: clean(taskText), skills: [], provider: 'codex' }];
 }
 
 export function getSessionTeamState(sessionStore, chatId) {
@@ -2425,7 +2426,7 @@ export function buildStarterSingleAgentTeamConfiguration({ taskText = '', runtim
     name: starterRole === 'builder' ? 'Builder' : 'Research Lead',
     role: starterRole,
     purpose: cleanTask,
-    provider: starterRole === 'builder' ? 'codex' : 'gemini',
+    provider: 'codex',
   }, { seen, taskText: cleanTask || 'starter chat', index: 1 }), buildPlanningContext(cleanTask, effectiveRuntime));
   return normalizeTeamConfig({
     team_name: `starter_${starterRole || 'agent'}`,
