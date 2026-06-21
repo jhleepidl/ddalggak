@@ -39,6 +39,34 @@ function buildTelegramBotOptions() {
   return options;
 }
 
+
+function commandLabelFromInputKind(inputKind = '') {
+  const kind = String(inputKind || '').trim().toLowerCase();
+  if (kind === 'ask') return '/ask';
+  if (kind === 'team_task' || kind === 'team') return '/team';
+  if (kind === 'team_loop_task' || kind === 'loop') return '/loop';
+  return '/chat';
+}
+
+function isLikelyGocConnectionError(error) {
+  const msg = String(error?.message ?? error ?? '').trim();
+  if (!msg) return false;
+  return /fetch failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|GoC is not ready|\/api\/threads|GOC_API_BASE/i.test(msg);
+}
+
+function formatRunErrorMessage(inputKind = '', error = null) {
+  const label = commandLabelFromInputKind(inputKind);
+  const raw = String(error?.message ?? error ?? 'unknown error').trim();
+  if (runtimeCore.MEMORY_MODE === 'goc' && isLikelyGocConnectionError(error)) {
+    return [
+      `❌ ${label} 실패: GoC backend에 연결할 수 없습니다.`,
+      'GoC backend/frontend를 실행하고 GOC_API_BASE, GOC_SERVICE_KEY 설정을 확인한 뒤 다시 시도해 주세요.',
+      `원인: ${raw.slice(0, 500)}`,
+    ].join('\n');
+  }
+  return `❌ ${label} 실패: ${raw}`;
+}
+
 function createAppChatRunManager(bot) {
   return new ChatRunManager({
     sessionStore: runtimeCore.chatSessionStore,
@@ -51,15 +79,15 @@ function createAppChatRunManager(bot) {
         await bot.sendMessage(chatId, "⛔️ 중단했어요. 다음 지시를 주세요.");
       }
     },
-    onRunError: async ({ chatId, error }) => {
+    onRunError: async ({ chatId, inputKind, error }) => {
       if (runtimeCore.isCancelledError(error)) return;
       try {
-        await bot.sendMessage(chatId, `❌ /chat 실패: ${String(error?.message ?? error)}`);
+        await bot.sendMessage(chatId, formatRunErrorMessage(inputKind, error));
       } catch (sendError) {
-        console.error(`[telegram] failed to send /chat error message: ${String(sendError?.message || sendError)}`);
+        console.error(`[telegram] failed to send run error message: ${String(sendError?.message || sendError)}`);
       }
     },
-    runChat: async ({ chatId, userId, message, inputKind, pendingCount, telegramMessageId, userReplyToMessageId, forceMode, chatInfo }) => {
+    runChat: async ({ chatId, userId, message, inputKind, pendingCount, telegramMessageId, userReplyToMessageId, forceMode, chatInfo, teamConfig }) => {
       await runtimeCore.runSupervisorChat(
         bot,
         chatId,
@@ -74,6 +102,7 @@ function createAppChatRunManager(bot) {
           telegramMessageId,
           userReplyToMessageId,
           forceMode: runtimeCore.normalizeForceMode(forceMode),
+          teamConfig: teamConfig && typeof teamConfig === "object" ? teamConfig : null,
         }
       );
     },

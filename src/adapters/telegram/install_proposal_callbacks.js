@@ -48,7 +48,7 @@ export async function handleTelegramInstallProposalCallback({ q, bot, chatId, us
     ].filter(Boolean).join('\n'));
     return true;
   }
-  if (action === 'install_pending') {
+  if (action === 'keep_pending') {
     const baseTeam = teamState.pending_team || teamState.active_team || null;
     if (baseTeam) {
       const patched = applyInstallProposalActionsToTeam(baseTeam, proposalState.proposal || {}).team;
@@ -58,7 +58,7 @@ export async function handleTelegramInstallProposalCallback({ q, bot, chatId, us
     }
     archivePendingInstallProposal(chatSessionStore, chatId, 'installed_pending', { apply_state: 'pending' });
     await bot.answerCallbackQuery(q.id, { text: 'stored as pending' });
-    await bot.sendMessage(chatId, '✅ capability proposal을 pending 상태로 보관했습니다.');
+    await bot.sendMessage(chatId, '✅ capability proposal을 나중에 검토할 항목으로 보관했습니다.');
     return true;
   }
   if (action === 'apply_active_resume') {

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { extractRoomLearningSignals } from './room_evolution.js';
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -16,6 +17,15 @@ function safeId(value = '') {
 
 export function buildRoomUsageEvent({ chatId = '', userId = '', eventType = 'room_event', command = '', goal = '', profile = null, recommendation = null, extra = {} } = {}) {
   const prof = asObject(profile);
+  const ex = asObject(extra);
+  const signalPack = extractRoomLearningSignals({
+    text: goal,
+    command,
+    workMode: ex.depth || ex.work_mode || ex.workMode || '',
+    attachments: ex.attachments || [],
+    userFeedback: ex.user_feedback || ex.userFeedback || '',
+    currentRoom: prof,
+  });
   return {
     kind: 'room_usage_event_v1',
     ts: new Date().toISOString(),
@@ -33,7 +43,15 @@ export function buildRoomUsageEvent({ chatId = '', userId = '', eventType = 'roo
       package_id: prof.package_id || '',
     } : null,
     recommendation: recommendation || null,
-    extra: asObject(extra),
+    signal_pack: signalPack,
+    evolution: {
+      formation_mode: 'emergent_from_interactions',
+      ai_role: 'architect_advisor_proposer_not_controller',
+      auto_apply: false,
+      schema_is_dynamic: true,
+      private_content_export: 'never_by_default',
+    },
+    extra: ex,
   };
 }
 
@@ -55,7 +73,8 @@ export function summarizeRoomUsage(events = []) {
   for (const row of rows) {
     const ev = asObject(row);
     if (ev.room?.domain_label) domains.add(ev.room.domain_label);
-    if (/correction|retry|reject|branch/i.test(ev.event_type || ev.command || '')) corrections += 1;
+    const pack = asObject(ev.signal_pack);
+    if (/correction|retry|reject|branch/i.test(ev.event_type || ev.command || '') || pack.correction_signal) corrections += 1;
     if (/approve|promote|accept|apply/i.test(ev.event_type || ev.command || '')) approvals += 1;
   }
   return {
@@ -64,4 +83,22 @@ export function summarizeRoomUsage(events = []) {
     approval_count: approvals,
     distinct_domains: domains.size,
   };
+}
+
+export function readRoomUsageEvents(chatId = 'unknown', { rootDir = process.env.DDALGGAK_ROOM_EVENTS_DIR || 'runs/room_events', limit = 200 } = {}) {
+  const safeChatId = safeId(chatId || 'unknown');
+  const file = path.resolve(process.cwd(), rootDir, safeChatId, 'events.jsonl');
+  if (!fs.existsSync(file)) return [];
+  const rows = [];
+  const raw = fs.readFileSync(file, 'utf8');
+  for (const line of raw.split(/\r?\n/)) {
+    const text = line.trim();
+    if (!text) continue;
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object') rows.push(parsed);
+    } catch {}
+  }
+  const n = Math.max(1, Math.min(Number(limit) || 200, 2000));
+  return rows.length > n ? rows.slice(rows.length - n) : rows;
 }

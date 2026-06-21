@@ -222,13 +222,13 @@ export function buildInstallProposalPrompt(state = {}, { hasPendingTeam = false,
       (resumeOnApply
         ? `- ${applyLabel}: pending team requirement를 active로 반영하고, blocking gap이면 같은 요청을 재개`
         : `- ${applyLabel}: pending team requirement를 active로 반영 (실제 runtime tool 설치는 자동이 아닐 수 있음)`),
-      '- Install pending: 현재 requirement 제안을 pending 상태로 보관',
+      '- Keep pending: 현재 requirement 제안을 나중에 검토하도록 보관',
       ...(coverage.missing_keys.length > 0 ? ['- Credential help: 필요한 secret 바인딩 방법 보기'] : []),
       '- Dismiss: 제안을 닫기',
     ].join('\n'),
     keyboard: [[
       { text: applyLabel, callback_data: 'team_install:apply_active_resume' },
-      { text: 'Install pending', callback_data: 'team_install:install_pending' },
+      { text: 'Keep pending', callback_data: 'team_install:keep_pending' },
       ...(coverage.missing_keys.length > 0 ? [{ text: 'Credential help', callback_data: 'team_install:credential_help' }] : []),
       { text: 'Dismiss', callback_data: 'team_install:dismiss' },
     ]],

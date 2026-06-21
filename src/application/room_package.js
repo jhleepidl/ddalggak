@@ -1,3 +1,9 @@
+import {
+  augmentRoomPackageWithComponents,
+  buildRoomComponentsFromPackage,
+  formatRoomComponentLibrary,
+} from './ai_room_components.js';
+
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
@@ -335,7 +341,7 @@ export function sanitizeRoomPackage(raw = {}) {
       room: cleanText(row.room || row.output || row.response || '', { maxLen: 700 }),
     };
   }).filter((row) => row.user || row.room);
-  return {
+  return augmentRoomPackageWithComponents({
     ...source,
     kind: 'shared_room_package_v1',
     schema_version: 1,
@@ -381,7 +387,7 @@ export function sanitizeRoomPackage(raw = {}) {
       credentials: 'never_copy',
       user_must_approve_memory_import: true,
     },
-  };
+  });
 }
 
 export function buildRoomPackage({ profile = null, goal = '', title = '', chatId = '', visibility = 'private_review', source = 'ddalggak_room_export' } = {}) {
@@ -449,6 +455,14 @@ export function renderRoomMarkdown(roomPackage = {}) {
   lines.push('## Agent team');
   for (const agent of pkg.agents) lines.push(`- ${agent}`);
   lines.push('');
+  lines.push('## Composable components');
+  lines.push('- Room packages are module bundles, not monoliths.');
+  lines.push('- Agent cards, memory schema cards, prompt/context/approval policies, and evaluation criteria can be borrowed, installed, or forked.');
+  lines.push('- Borrowed agents receive only target-room context projections and cannot read source-room private memory.');
+  lines.push('- Borrowed agents can propose memory updates, but direct writes require the target room approval policy.');
+  const componentLibrary = buildRoomComponentsFromPackage(pkg);
+  for (const agent of componentLibrary.agents) lines.push(`- agent_card: ${agent.local_id || agent.role} · borrow=${agent.install_policy?.can_borrow !== false}`);
+  lines.push('');
   lines.push('## Memory schema');
   for (const objectType of asArray(pkg.memory_schema.object_types)) lines.push(`- ${objectType}`);
   lines.push('');
@@ -489,6 +503,8 @@ export function formatRoomPackageSummary(roomPackage = {}, { includeExamples = t
     `- domain: ${pkg.domain_label}`,
     `- default depth: ${pkg.default_depth}`,
     `- agents: ${pkg.agents.join(', ') || '-'}`,
+    `- components: ${asObject(pkg.components?.summary).total_components || buildRoomComponentsFromPackage(pkg).summary.total_components}`,
+    `- reusable agents: ${asObject(pkg.components?.summary).reusable_agent_count || buildRoomComponentsFromPackage(pkg).summary.reusable_agent_count}`,
     `- memory objects: ${asArray(pkg.memory_schema.object_types).join(', ') || '-'}`,
     `- private memory copied: no`,
   ];
@@ -511,3 +527,5 @@ export function parseRoomPackageInput(raw = '') {
     return null;
   }
 }
+
+export { buildRoomComponentsFromPackage, formatRoomComponentLibrary };

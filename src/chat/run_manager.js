@@ -16,10 +16,16 @@ function normalizePendingEntry(raw = {}) {
   const row = raw && typeof raw === "object" ? raw : {};
   const text = String(row.text || "").trim();
   if (!text) return null;
+  const kind = String(row.kind || row.input_kind || row.inputKind || "normal").trim().toLowerCase() || "normal";
+  const teamConfig = row.team_config && typeof row.team_config === "object"
+    ? row.team_config
+    : (row.teamConfig && typeof row.teamConfig === "object" ? row.teamConfig : null);
   return {
     ts: String(row.ts || nowIso()),
     user_id: String(row.user_id || row.userId || "").trim(),
     text,
+    kind,
+    team_config: teamConfig,
     force_mode: normalizeForceMode(row.force_mode || row.forceMode || "normal"),
     telegram_message_id: Number.isFinite(Number(row.telegram_message_id))
       ? Number(row.telegram_message_id)
@@ -135,11 +141,13 @@ export class ChatRunManager {
     }));
   }
 
-  _appendPending(chatId, { userId = "", text = "", forceMode = "normal", telegramMessageId = null, userReplyToMessageId = null } = {}) {
+  _appendPending(chatId, { userId = "", text = "", kind = "normal", forceMode = "normal", telegramMessageId = null, userReplyToMessageId = null, teamConfig = null } = {}) {
     const normalized = normalizePendingEntry({
       ts: nowIso(),
       user_id: String(userId || "").trim(),
       text,
+      kind,
+      team_config: teamConfig && typeof teamConfig === "object" ? teamConfig : null,
       force_mode: normalizeForceMode(forceMode),
       telegram_message_id: telegramMessageId,
       user_reply_to_message_id: userReplyToMessageId,
@@ -243,6 +251,7 @@ export class ChatRunManager {
       const slot = this._slot(chatId);
       const sessionBeforeRun = this.sessionStore.get(chatId);
       const inputKind = slot.nextInputKind
+        || String(merged.latest?.kind || "").trim().toLowerCase()
         || ((sessionBeforeRun?.pending_user_request && !sessionBeforeRun?.pending_approval)
           ? "user_response"
           : (merged.count > 1 ? "interrupt_update" : "chat_message"));
@@ -272,12 +281,14 @@ export class ChatRunManager {
           userReplyToMessageId: merged.latest?.user_reply_to_message_id || null,
           forceMode,
           chatInfo,
+          teamConfig: merged.latest?.team_config || null,
         });
       } catch (e) {
         if (typeof this.onRunError === "function") {
           await this.onRunError({
             chatId,
             message: merged.text,
+            inputKind,
             error: e,
           });
         }
@@ -340,6 +351,7 @@ export class ChatRunManager {
     chatInfo = null,
     kind = "normal",
     forceMode = "normal",
+    teamConfig = null,
   } = {}) {
     const cleanText = String(text || "").trim();
     if (!cleanText) return { status: "ignored" };
@@ -356,9 +368,11 @@ export class ChatRunManager {
     this._appendPending(chatId, {
       userId,
       text: cleanText,
+      kind: incomingKind,
       forceMode: cleanForceMode,
       telegramMessageId,
       userReplyToMessageId,
+      teamConfig,
     });
 
     const session = this.sessionStore.get(chatId);

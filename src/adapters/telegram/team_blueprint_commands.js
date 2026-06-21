@@ -92,7 +92,7 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
       autoInstallRuntimeSupport({ proposal: state?.proposal || {}, jobs, jobId: resolveLiveJobIdForChat?.(chatId) });
       const archived = state || getPendingInstallProposal(chatSessionStore, chatId);
       if (archived) archivePendingInstallProposal(chatSessionStore, chatId, 'installed_pending', { apply_state: 'pending' });
-      await bot.sendMessage(chatId, '✅ capability proposal을 pending 상태로 보관했습니다. 필요하면 /team apply 후 다시 시도해 주세요.');
+      await bot.sendMessage(chatId, '✅ capability proposal을 나중에 검토할 항목으로 보관했습니다. 필요하면 /team apply 후 다시 시도해 주세요.');
       return true;
     }
     if (proposalAction === 'apply' || proposalAction === 'active' || proposalAction === 'resume') {

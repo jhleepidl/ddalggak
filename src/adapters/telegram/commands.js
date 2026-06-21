@@ -10,7 +10,6 @@ import {
   createFreeformTeamConfiguration,
   createFreeformTeamConfigurationAdvanced,
   buildTeamListMessage,
-  buildStarterSingleAgentTeamConfiguration,
   formatSupportedModelLines,
   formatTeamProposalMessage,
   getSessionTeamState,
@@ -28,6 +27,8 @@ import {
   selectPendingTeamCandidate,
 } from "../../application/team_configuration.js";
 import { buildTeamBlueprint, installTeamBlueprintToSession, normalizeTeamBlueprint } from '../../application/team_blueprint_runtime.js';
+import { buildRoomFirstTeamConfiguration } from '../../application/ai_room_runtime_selection.js';
+import { formatRoomEvolutionSnapshot, proposeRoomEvolution } from '../../application/room_evolution.js';
 import { buildTeamInstallProposal, formatTeamInstallProposalMessage } from '../../application/install_proposal.js';
 import { buildInstallProposalPrompt, createPendingInstallProposalState, getPendingInstallProposal, archivePendingInstallProposal } from '../../application/install_proposal_state.js';
 import { formatManifestRequirementLines, normalizeManifestRequirements } from '../../shared/manifest_requirements.js';
@@ -85,6 +86,7 @@ import {
   buildRoomPackage,
   buildRoomProfileFromGoal,
   formatRoomPackageSummary,
+  formatRoomComponentLibrary,
   parseRoomPackageInput,
   renderRoomMarkdown,
   roomPackageToProfilePatch,
@@ -96,6 +98,7 @@ import {
 import {
   appendRoomUsageEvent,
   buildRoomUsageEvent,
+  readRoomUsageEvents,
 } from '../../application/room_usage_events.js';
 import {
   buildWatchTaskContract,
@@ -271,6 +274,7 @@ const ROOM_HELP_TEXT = [
   "- /room suggest <goal>: 반복 작업용 room profile / Room Package 제안",
   "- /room apply <goal>: 이 방을 해당 목적에 맞게 전문화",
   "- /room advisor [goal]: broad/specialized/hybrid tradeoff 추천",
+  "- /room evolution: 반복 상호작용에서 emergent schema/agent/gateway 제안 보기",
   "- /room manual: 현재 ROOM.md 보기",
   "- /room export [title]: 공유 가능한 Room Package 생성",
   "- /room install <package_json>: 공유 Room Package 설치",
@@ -836,60 +840,35 @@ export function createTelegramCommandHandler(deps = {}) {
     return lines.join('\n');
   }
 
-  async function suggestAndApplyAgentRoomTeam({ chatId, userId, goal = '', runtimeForTeam = null, autoApply = false, preferPlannerProposal = false } = {}) {
+  async function suggestAndApplyAgentRoomTeam({ chatId, userId, goal = '', runtimeForTeam = null, autoApply = false, preferPlannerProposal = false, workMode = 'team_task' } = {}) {
     let teamState = getSessionTeamState(chatSessionStore, chatId);
     const domainProfile = buildRoomProfileFromGoal({ chatId, goal, source: 'agent_room_team_suggest' });
-    const domainRoles = (domainProfile.default_agents || []).join(', ');
-    let proposal;
-    try {
-      proposal = await createAgentRoomTeamConfiguration({
-        description: `Specialized AI Room for this task. Domain: ${domainProfile.domain_label}. Purpose: ${domainProfile.room_purpose}. Use roles: ${domainRoles}. Do not use implementation/build/code pipeline unless the domain is code_review or the user explicitly asks for code/build/test/deploy. Goal: ${goal}`,
-        runtime: runtimeForTeam,
-        jobId: resolveLiveJobIdForChat(chatId),
-      });
-    } catch (error) {
-      proposal = {
-        ...suggestTeamConfiguration({ taskText: goal, runtime: runtimeForTeam }),
-        planner_metadata: {
-          planner_type: 'heuristic_rule_based',
-          planning_source: 'agent_room_suggest_exception_fallback',
-          reasoning_summary: [String(error?.message || error || 'LLM planner failed').slice(0, 180)],
-        },
-      };
-    }
-    const fallbackProposal = suggestTeamConfiguration({ taskText: goal, runtime: runtimeForTeam });
-    if (domainProfile.domain_label && domainProfile.domain_label !== 'code_review') {
-      const roleAgents = (domainProfile.default_agents || []).map((role, index) => ({
-        agent_id: role,
-        id: role,
-        name: role.split('_').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' '),
-        role,
-        purpose: `${role} for ${domainProfile.domain_label} room`,
-        order: index,
-      }));
-      proposal = {
-        ...(proposal || {}),
-        name: domainProfile.name || 'Specialized AI Room Team',
-        description: domainProfile.room_purpose || goal,
-        agents: roleAgents,
-        planner_metadata: {
-          ...(proposal?.planner_metadata || {}),
-          room_domain_label: domainProfile.domain_label,
-          room_specialization: true,
-          implementation_pipeline_suppressed: true,
-        },
-      };
-    }
-    const portfolio = buildTeamSelectionPortfolio({
+    const packageForSelection = buildRoomPackage({ profile: domainProfile, goal, chatId, source: 'telegram_team_room_first' });
+    let proposal = buildRoomFirstTeamConfiguration({
       taskText: goal,
+      workMode,
+      roomProfile: domainProfile,
+      roomPackage: packageForSelection,
+      chatId,
       runtime: runtimeForTeam,
-      primaryTeam: proposal,
-      fallbackTeam: fallbackProposal,
-      activeTeam: teamState.active_team,
+      source: `telegram_${workMode}_room_first`,
     });
-    const plannerMetadata = summarizeAgentRoomPlannerMetadata(proposal);
-    const shouldKeepPlannerProposal = preferPlannerProposal && !plannerMetadata.fallback && plannerMetadata.engine !== 'unknown';
-    proposal = shouldKeepPlannerProposal ? proposal : (portfolio.selected_team || proposal);
+    const portfolio = {
+      kind: 'team_selection_portfolio_v1',
+      selected_candidate_id: 'ai_room_component_policy',
+      selected_team: proposal,
+      candidates: [{
+        candidate_id: 'ai_room_component_policy',
+        source: 'ai_room_component_policy',
+        team: proposal,
+        sufficient: true,
+        utility: 1,
+      }],
+      notes: [
+        'AI Room component policy is authoritative for /team and /loop runtime selection.',
+        'Legacy implementation builder/reviewer fallback is suppressed unless room domain is code_review or user asks for workspace mutation.',
+      ],
+    };
     storePendingTeam(chatSessionStore, chatId, proposal, { portfolio });
     let activeTeam = proposal;
     if (autoApply) {
@@ -904,9 +883,13 @@ export function createTelegramCommandHandler(deps = {}) {
       roomName: domainProfile.name || 'AI Work Room',
       goal,
       team: activeTeam,
-      source: autoApply ? 'task_loop_auto_agent_room' : 'agents_suggest',
+      source: autoApply ? `${workMode}_auto_agent_room` : 'agents_suggest',
     });
-    upsertAgentRoomProfile(chatSessionStore, chatId, roomProfile);
+    upsertAgentRoomProfile(chatSessionStore, chatId, {
+      ...roomProfile,
+      package_id: packageForSelection.package_id,
+      room_runtime_selection: activeTeam?.room_runtime_selection || activeTeam?.ai_room_selection || null,
+    });
     return { proposal, portfolio, activeTeam, roomProfile };
   }
 
@@ -942,6 +925,17 @@ export function createTelegramCommandHandler(deps = {}) {
       title: String(msg?.chat?.title || msg?.chat?.username || '').trim(),
       type: String(msg?.chat?.type || '').trim(),
     };
+  }
+
+  function rememberCommandAck(chatId, sent = null) {
+    const messageId = Number(sent?.message_id || 0);
+    if (Number.isFinite(messageId) && messageId > 0) {
+      chatSessionStore.upsert(chatId, {
+        current_turn_ack_message_id: messageId,
+        current_turn_plan_message_id: null,
+      });
+    }
+    return messageId > 0 ? messageId : null;
   }
 
   async function safeRouterAck(chatId, msg = {}) {
@@ -993,8 +987,8 @@ export function createTelegramCommandHandler(deps = {}) {
     return USER_TEAM_GOAL_RESERVED_SUBCOMMANDS.has(String(sub || '').trim().toLowerCase());
   }
 
-  async function enqueueWorkbenchInput({ chatId, userId, msg = {}, text = '', kind = 'normal', teamConfig = null } = {}) {
-    await safeRouterAck(chatId, msg);
+  async function enqueueWorkbenchInput({ chatId, userId, msg = {}, text = '', kind = 'normal', teamConfig = null, ackAlreadySent = false } = {}) {
+    if (!ackAlreadySent) await safeRouterAck(chatId, msg);
     await chatRunManager.handleIncoming({
       chatId,
       userId,
@@ -1017,7 +1011,7 @@ export function createTelegramCommandHandler(deps = {}) {
     const { runtime: runtimeForTeam } = await loadRuntimeForCurrentJob(chatId, userId, { includeContext: false });
     const signals = extractTeamCreationSignals({ request: goal, goal, runtime: runtimeForTeam });
     const workflowContract = forceBoundedLoopContract(buildTeamWorkflowContract({ signals, goal }), { goal, ...parsedLoop });
-    const { activeTeam, roomProfile } = await suggestAndApplyAgentRoomTeam({ chatId, userId, goal, runtimeForTeam, autoApply: true });
+    const { activeTeam, roomProfile } = await suggestAndApplyAgentRoomTeam({ chatId, userId, goal, runtimeForTeam, autoApply: true, workMode: 'team_loop_task' });
     const taskLoopRuntimeExecution = buildWorkflowRuntimeExecutionPatch(workflowContract, activeTeam?.runtime_execution || activeTeam?.runtimeExecution || runtimeForTeam?.runtime_execution || runtimeForTeam?.runtimeExecution || {});
     const taskLoopTeamConfig = activeTeam && typeof activeTeam === 'object'
       ? {
@@ -1149,6 +1143,35 @@ export function createTelegramCommandHandler(deps = {}) {
       ].join('\n'));
       return true;
     }
+    if (['components', 'component', 'cards', 'compose'].includes(command)) {
+      const pkg = getCurrentRoomPackage(chatId);
+      recordRoomEvent({ chatId, userId, eventType: 'room_components_view', command: '/room components', profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { package_id: pkg.package_id } });
+      await sendLong(bot, chatId, [
+        formatRoomComponentLibrary(pkg),
+        '',
+        'Component reuse:',
+        '- borrow: use an agent card for one attempt with projected context only',
+        '- install: add a reusable agent card as a resident room member',
+        '- fork: adapt an agent/policy/schema card for this room',
+        '',
+        'Private memory is never copied by a Room Package or borrowed agent.',
+      ].join('\n'));
+      return true;
+    }
+    if (['evolution', 'learn', 'learning', 'grow', 'growth'].includes(command)) {
+      const profile = getAgentRoomProfile(chatSessionStore, chatId);
+      const events = readRoomUsageEvents(chatId, { limit: 200 });
+      const snapshot = proposeRoomEvolution({ events, roomPackage: getCurrentRoomPackage(chatId) });
+      recordRoomEvent({ chatId, userId, eventType: 'room_evolution_view', command: '/room evolution', profile, extra: { maturity: snapshot.maturity, proposal_count: (snapshot.proposals || []).length } });
+      await sendLong(bot, chatId, [
+        '🌱 AI Room evolution',
+        '',
+        formatRoomEvolutionSnapshot(snapshot),
+        '',
+        '이 제안들은 자동 적용되지 않습니다. AI는 설계자/제안자이고, GoC 또는 사용자가 승인해야 schema/agent/tool/gateway가 실제 room state에 반영됩니다.',
+      ].join('\n'));
+      return true;
+    }
     if (command === 'manual' || command === 'md' || command === 'room.md') {
       const pkg = getCurrentRoomPackage(chatId);
       recordRoomEvent({ chatId, userId, eventType: 'room_manual_view', command: '/room manual', profile: getAgentRoomProfile(chatSessionStore, chatId) });
@@ -1254,8 +1277,16 @@ export function createTelegramCommandHandler(deps = {}) {
         return true;
       }
       recordRoomEvent({ chatId, userId, eventType: 'work_depth_used', command: '/ask', goal: message, profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { depth: 'ask' } });
-      await bot.sendMessage(chatId, '⚡ /ask accepted: running a quick single-agent answer.');
-      await enqueueWorkbenchInput({ chatId, userId, msg, text: message, kind: 'ask', teamConfig: null });
+      const ack = await bot.sendMessage(chatId, '⚡ /ask accepted: running a quick single-agent answer.');
+      rememberCommandAck(chatId, ack);
+      const askTeamConfig = buildRoomFirstTeamConfiguration({
+        taskText: message,
+        workMode: 'ask',
+        roomProfile: getAgentRoomProfile(chatSessionStore, chatId),
+        chatId,
+        source: 'telegram_ask_room_first',
+      });
+      await enqueueWorkbenchInput({ chatId, userId, msg, text: message, kind: 'ask', teamConfig: askTeamConfig, ackAlreadySent: true });
       return true;
     }
 
@@ -1894,6 +1925,7 @@ export function createTelegramCommandHandler(deps = {}) {
           runtimeForTeam,
           autoApply: false,
           preferPlannerProposal: true,
+          workMode: 'team_task',
         });
         await sendLong(bot, chatId, [
           buildAgentRoomSuggestionMessage({ goal, profile: roomProfile }),
@@ -2073,6 +2105,7 @@ export function createTelegramCommandHandler(deps = {}) {
           runtimeForTeam,
           autoApply: true,
           preferPlannerProposal: true,
+          workMode: 'team_task',
         });
         setPendingTaskControl(chatId, {
           goal,
@@ -2107,7 +2140,7 @@ export function createTelegramCommandHandler(deps = {}) {
           '',
           goal,
         ].join('\n');
-        await enqueueWorkbenchInput({ chatId, userId, msg, text: teamMessage, kind: 'team_task', teamConfig: activeTeam || null });
+        await enqueueWorkbenchInput({ chatId, userId, msg, text: teamMessage, kind: 'team_task', teamConfig: activeTeam || null, ackAlreadySent: true });
         return true;
       }
       if (sub === 'help') {

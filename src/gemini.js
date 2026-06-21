@@ -37,6 +37,7 @@ const DEFAULT_GEMINI_SETTINGS_OVERWRITE = "merge";
 const DEFAULT_GEMINI_DEBUG_LOG = "gemini_debug.log";
 const DEFAULT_GEMINI_FORCE_FILE_STORAGE = "true";
 const DEFAULT_GEMINI_CLI_TRUST_WORKSPACE = "true";
+const GEMINI_GNU_SCREEN_RE = /GNU screen detected|\bSTY=|screen-.*keyboard|keyboard input.*screen/i;
 // Sticky success is intentionally an operational default, not a sample .env knob.
 // In GEMINI_MODEL=auto/pool mode, the last successful concrete model is tried
 // first on the next matching surface. Hidden env switches remain for emergency
@@ -796,12 +797,25 @@ function makeGeminiIsolatedWorkspace({ jobId = "", surface = "", originalCwd = "
 }
 
 function buildGeminiCliRuntimeEnv({ model = "", extraEnv = {} } = {}) {
+  const userEnv = asObject(extraEnv);
   return {
+    // Gemini CLI can mis-detect GNU screen/tmux as an interactive keyboard surface
+    // and exit before processing stdin. DdalGgak always drives it non-interactively,
+    // so force a dumb CI terminal and blank screen-specific markers unless the caller
+    // explicitly overrides them in extraEnv.
+    TERM: "dumb",
+    CI: "1",
+    NO_COLOR: "1",
+    FORCE_COLOR: "0",
+    STY: "",
+    WINDOW: "",
+    TERMCAP: "",
+    TMUX: "",
     GEMINI_FORCE_FILE_STORAGE: envValueOrDefault("GEMINI_FORCE_FILE_STORAGE", DEFAULT_GEMINI_FORCE_FILE_STORAGE),
     GEMINI_CLI_TRUST_WORKSPACE: envValueOrDefault("GEMINI_CLI_TRUST_WORKSPACE", DEFAULT_GEMINI_CLI_TRUST_WORKSPACE),
     ...(model ? { GEMINI_MODEL: model } : {}),
     GEMINI_DISABLE_DIRTREE: String(process.env.GEMINI_DISABLE_DIRTREE || "1").trim() || "1",
-    ...asObject(extraEnv),
+    ...userEnv,
   };
 }
 
@@ -904,6 +918,39 @@ async function invokeGemini({ promptText, approvalMode, commandCwd, timeoutMs, s
     return firstRun;
   }
   if (signal?.aborted) return makeAbortedResult();
+
+  if (GEMINI_GNU_SCREEN_RE.test(String(firstRun.stderr || "") + "\n" + String(firstRun.stdout || ""))) {
+    const retryEnv = {
+      ...asObject(extraEnv),
+      TERM: "dumb",
+      CI: "1",
+      NO_COLOR: "1",
+      FORCE_COLOR: "0",
+      STY: "",
+      WINDOW: "",
+      TERMCAP: "",
+      TMUX: "",
+      GEMINI_CLI_NON_INTERACTIVE: "1",
+    };
+    const retryNoScreen = await runGeminiOnce({
+      promptText,
+      approvalMode,
+      commandCwd,
+      timeoutMs,
+      signal,
+      model,
+      includeModelArg: canUseModelArg,
+      extraEnv: retryEnv,
+    });
+    return {
+      ...retryNoScreen,
+      stderr: makeCombinedStderr([
+        firstRun.stderr,
+        retryNoScreen.stderr,
+        "[gemini] GNU screen/tmux interactive warning detected; retried with non-interactive terminal env",
+      ]),
+    };
+  }
 
   if (canUseModelArg && model && MODEL_FLAG_UNSUPPORTED_RE.test(String(firstRun.stderr || ""))) {
     modelFlagAvailability = false;

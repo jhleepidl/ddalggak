@@ -35,3 +35,20 @@ test('Gemini CLI subprocess env respects explicit overrides', () => {
     else process.env.GEMINI_CLI_TRUST_WORKSPACE = oldTrust;
   }
 });
+
+
+test('Gemini CLI subprocess env neutralizes GNU screen/tmux markers for non-interactive stdin runs', () => {
+  const env = getGeminiCliRuntimeEnvDefaults();
+  assert.equal(env.TERM, 'dumb');
+  assert.equal(env.CI, '1');
+  assert.equal(env.NO_COLOR, '1');
+  assert.equal(env.FORCE_COLOR, '0');
+  assert.equal(env.STY, '');
+  assert.equal(env.TMUX, '');
+});
+
+test('Gemini CLI subprocess env allows explicit terminal overrides when needed', () => {
+  const env = getGeminiCliRuntimeEnvDefaults({ TERM: 'xterm-256color', STY: 'custom-screen' });
+  assert.equal(env.TERM, 'xterm-256color');
+  assert.equal(env.STY, 'custom-screen');
+});

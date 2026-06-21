@@ -30,3 +30,13 @@ test('resolveProviderFailoverDecision does not fail over credential gaps', () =>
   assert.equal(decision.should_failover, false);
   assert.equal(decision.failure.category, 'credential_gap');
 });
+
+
+test('classifyProviderFailure treats Gemini GNU screen CLI failure as safe failover environment issue', () => {
+  const failure = classifyProviderFailure({
+    provider: 'gemini',
+    error: new Error('Gemini failed (exit=1)\nWarning: GNU screen detected. Some keyboard input may not work'),
+  });
+  assert.equal(failure.category, 'provider_cli_environment');
+  assert.equal(failure.safe_to_failover, true);
+});

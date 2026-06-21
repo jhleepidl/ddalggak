@@ -205,9 +205,28 @@ import { extractContextWriteIntentsFromAgentResult } from "./context_write_inten
 import { commitContextWriteIntentsBatch } from "./context_write_batcher.js";
 import { buildHandoffDeltaFromAgentResult, appendHandoffDelta } from "./handoff_delta_store.js";
 import { createGocTrackingIo } from "./telegram_goc_tracking_io.js";
+import { buildRoomFirstTeamConfiguration } from "./ai_room_runtime_selection.js";
+import { getAgentRoomProfile } from "./agent_room_profile.js";
 
 function normalizeForceMode(raw) {
   return normalizeForceModeDomain(raw);
+}
+
+function normalizeInputKind(raw = '') {
+  return String(raw || '').trim().toLowerCase();
+}
+
+function isAskInputKind(raw = '') {
+  const kind = normalizeInputKind(raw);
+  return kind === 'ask' || kind === 'quick_answer' || kind === 'single' || kind === 'single_agent';
+}
+
+function shouldShowPlanPreviewForInputKind(raw = '') {
+  return !isAskInputKind(raw);
+}
+
+function shouldOfferCapabilityProposalForInputKind(raw = '') {
+  return !isAskInputKind(raw);
 }
 
 function uniqueLowerList(values = []) {
@@ -3672,6 +3691,9 @@ async function runSupervisorChat(
   const currentTurnStartedAtMs = Date.now();
   const verbose = !!(debug || CHAT_VERBOSE);
   const cleanForceMode = normalizeForceMode(forceMode);
+  if (runtimeState.MEMORY_MODE === 'goc' && memoryModeWithFallback() !== 'goc') {
+    throw new Error(runtimeState.gocInitError || 'GoC backend is required because MEMORY_MODE=goc, but GoC is not ready');
+  }
   let currentJobId = resolveCurrentJobIdForChat(chatId);
   let createdNewJob = false;
   if (currentJobId) {
@@ -3683,9 +3705,11 @@ async function runSupervisorChat(
   }
   if (!currentJobId) {
     const preflightTeamState = getSessionTeamState(chatSessionStore, chatId);
-    const seedTeamConfig = preflightTeamState?.active_team && typeof preflightTeamState.active_team === 'object'
-      ? preflightTeamState.active_team
-      : null;
+    const seedTeamConfig = teamConfig && typeof teamConfig === 'object'
+      ? teamConfig
+      : (!isAskInputKind(inputKind) && preflightTeamState?.active_team && typeof preflightTeamState.active_team === 'object'
+        ? preflightTeamState.active_team
+        : null);
     const job = await createJob(message, { ownerUserId: userId, ownerChatId: chatId, teamConfig: seedTeamConfig });
     currentJobId = String(job.jobId);
     createdNewJob = true;
@@ -3776,16 +3800,32 @@ async function runSupervisorChat(
     });
     setRuntimeCurrentTurn(runtime, currentJobId);
     const lockedTeamState = await hydrateSessionTeamStateFromConversationStore({ sessionStore: chatSessionStore, chatId, runtime }).catch(() => getSessionTeamState(chatSessionStore, chatId));
+    const roomWorkModeForTurn = isAskInputKind(inputKind)
+      ? 'ask'
+      : (normalizeInputKind(inputKind) === 'team_loop_task' || normalizeInputKind(inputKind) === 'loop' ? 'team_loop_task'
+        : (normalizeInputKind(inputKind) === 'team_task' || normalizeInputKind(inputKind) === 'team' ? 'team_task' : ''));
     let activeTeamConfig = teamConfig && typeof teamConfig === 'object'
       ? teamConfig
-      : (lockedTeamState?.active_team && typeof lockedTeamState.active_team === 'object' ? lockedTeamState.active_team : null);
+      : (!isAskInputKind(inputKind) && lockedTeamState?.active_team && typeof lockedTeamState.active_team === 'object' ? lockedTeamState.active_team : null);
     if (!activeTeamConfig) {
       if (isExplicitTeamConfigurationIntentMessage(message)) {
         throw new Error('이 요청은 team 구성을 직접 지정하는 성격입니다. /team suggest 또는 /team create 로 team을 먼저 정의해 주세요.');
       }
-      const starterTeam = buildStarterSingleAgentTeamConfiguration({ taskText: message, runtime, source: 'chat_autostart' });
-      storePendingTeam(chatSessionStore, chatId, starterTeam);
-      activeTeamConfig = await applyPendingTeam({ sessionStore: chatSessionStore, chatId, runtime }).catch(() => starterTeam);
+      const roomProfile = getAgentRoomProfile(chatSessionStore, chatId);
+      const starterTeam = buildRoomFirstTeamConfiguration({
+        taskText: message,
+        workMode: roomWorkModeForTurn || 'ask',
+        roomProfile,
+        chatId,
+        runtime,
+        source: isAskInputKind(inputKind) ? 'chat_runtime_ask_room_first' : 'chat_runtime_room_first_autostart',
+      });
+      if (!isAskInputKind(inputKind) && starterTeam?.ephemeral !== true) {
+        storePendingTeam(chatSessionStore, chatId, starterTeam);
+        activeTeamConfig = await applyPendingTeam({ sessionStore: chatSessionStore, chatId, runtime }).catch(() => starterTeam);
+      } else {
+        activeTeamConfig = starterTeam;
+      }
     }
     const normalizedActiveTeamConfig = validateTeamConfiguration(activeTeamConfig, { runtime });
     applyTeamConfigurationToRuntime(runtime, normalizedActiveTeamConfig);
@@ -3859,7 +3899,9 @@ async function runSupervisorChat(
         Number.isFinite(Number(currentTurnAckMessageId)) ? { reply_to_message_id: Number(currentTurnAckMessageId) } : undefined,
       ).catch(() => null);
     }
-    await syncTeamConfigurationToConversationStore({ runtime, teamConfig: normalizedActiveTeamConfig, source: 'chat_runtime_bootstrap' }).catch(() => null);
+    if (!isAskInputKind(inputKind) && normalizedActiveTeamConfig?.ephemeral !== true) {
+      await syncTeamConfigurationToConversationStore({ runtime, teamConfig: normalizedActiveTeamConfig, source: 'chat_runtime_bootstrap' }).catch(() => null);
+    }
     const runtimeCapabilities = runtime?.capabilities && typeof runtime.capabilities === "object"
       ? runtime.capabilities
       : composeCapabilitiesForRun({ jobId: currentJobId, runtime }).capabilities;
@@ -4521,17 +4563,19 @@ async function runSupervisorChat(
           final_response_style: routePlan.final_response_style || runtime.jobConfig?.final_response_style || "concise",
         },
       });
-      const planPreviewMessageId = await sendPlanPreviewMessage(bot, chatId, {
-        actions: planActions,
-        replyToMessageId: currentTurnAckMessageId,
-        activeTeam: runtime?.activeTeamConfig || null,
-        runtimeTeamSnapshot,
-        routeReason: routePlan.reason || "",
-      });
-      if (Number.isFinite(Number(planPreviewMessageId)) && Number(planPreviewMessageId) > 0) {
-        chatSessionStore.upsert(chatId, {
-          current_turn_plan_message_id: Number(planPreviewMessageId),
+      if (shouldShowPlanPreviewForInputKind(inputKind)) {
+        const planPreviewMessageId = await sendPlanPreviewMessage(bot, chatId, {
+          actions: planActions,
+          replyToMessageId: currentTurnAckMessageId,
+          activeTeam: runtime?.activeTeamConfig || null,
+          runtimeTeamSnapshot,
+          routeReason: routePlan.reason || "",
         });
+        if (Number.isFinite(Number(planPreviewMessageId)) && Number(planPreviewMessageId) > 0) {
+          chatSessionStore.upsert(chatId, {
+            current_turn_plan_message_id: Number(planPreviewMessageId),
+          });
+        }
       }
 
       if (verbose) {
@@ -4959,7 +5003,7 @@ async function runSupervisorChat(
       patternRecoveryState = compatibilityRecovery;
       chatSessionStore.upsert(chatId, { pattern_recovery: compatibilityRecovery });
     }
-    if (!mergedExecution.pendingApproval) {
+    if (!mergedExecution.pendingApproval && shouldOfferCapabilityProposalForInputKind(inputKind)) {
       const teamStateForInstall = getSessionTeamState(chatSessionStore, chatId);
       installProposalState = buildInstallProposalStateFromExecution({
         team: normalizedActiveTeamConfig,

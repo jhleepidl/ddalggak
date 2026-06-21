@@ -70,7 +70,7 @@ test('public help exposes /ask, /team, and /loop as primary commands', () => {
   assert.match(source, /if \(cmd === "\/loop"\)/);
 });
 
-test('/ask enqueues a quick answer without teamConfig', async () => {
+test('/ask enqueues a quick answer with an isolated single-agent teamConfig', async () => {
   const sent = [];
   const incoming = [];
   const handler = makeHandler({ sent, incoming });
@@ -85,7 +85,8 @@ test('/ask enqueues a quick answer without teamConfig', async () => {
   assert.equal(incoming.length, 1);
   assert.equal(incoming[0].text, 'explain briefly');
   assert.equal(incoming[0].kind, 'ask');
-  assert.equal(incoming[0].teamConfig, null);
+  assert.equal(incoming[0].teamConfig?.agents?.length, 1);
+  assert.equal(incoming[0].teamConfig?.agents?.[0]?.role, 'researcher');
   assert.match(sent.map((row) => row.text).join('\n'), /quick single-agent answer/);
 });
 

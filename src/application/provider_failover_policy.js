@@ -12,6 +12,7 @@ const CAPACITY_PATTERNS = [
 const RATE_LIMIT_429_RE = /\b429\b|Too Many Requests|rateLimitExceeded/i;
 const TIMEOUT_RE = /\btimeout\b|timed?\s*out|ETIMEDOUT|killed after/i;
 const CREDENTIAL_RE = /credential|login|auth|unauthori[sz]ed|permission denied|api[_\s-]*key/i;
+const CLI_ENVIRONMENT_RE = /GNU screen detected|keyboard input.*screen|GEMINI_CLI_NON_INTERACTIVE|non-interactive terminal env/i;
 
 function clean(value = '') {
   return String(value || '').trim();
@@ -72,6 +73,15 @@ export function classifyProviderFailure({ provider = '', error = null, result = 
       transient: true,
       safe_to_failover: true,
       summary: 'Provider timeout',
+    };
+  }
+  if (providerKey === 'gemini' && CLI_ENVIRONMENT_RE.test(text)) {
+    return {
+      category: 'provider_cli_environment',
+      provider: providerKey,
+      transient: true,
+      safe_to_failover: true,
+      summary: 'Gemini CLI terminal environment failure',
     };
   }
   if (CREDENTIAL_RE.test(text)) {
