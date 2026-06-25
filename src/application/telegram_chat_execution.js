@@ -319,6 +319,94 @@ function safeRunWorkspaceDir(jobId = '') {
   }
 }
 
+function safeMemoryAgentRole(name = '') {
+  try {
+    return memory.getAgentRole(name);
+  } catch {
+    return '';
+  }
+}
+
+function objectKeysCount(value = null) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value).length : 0;
+}
+
+function isEphemeralAskRoomContract(source = null) {
+  if (!source || typeof source !== 'object') return false;
+  const workMode = String(source.room_runtime_selection?.work_mode || source.ai_room_selection?.work_mode || source.roomRuntimeSelection?.workMode || '').trim().toLowerCase();
+  const plannerType = String(source.planner_metadata?.planner_type || source.plannerMetadata?.plannerType || '').trim().toLowerCase();
+  return source.ephemeral === true || workMode === 'ask' || (plannerType === 'ai_room_component_policy' && workMode === 'ask');
+}
+
+function hasExplicitRuntimePublishContract(runtime = null) {
+  if (!runtime || typeof runtime !== 'object') return false;
+  const activeTeam = runtime.activeTeamConfig || runtime.active_team_config || null;
+  const activeTeamIsEphemeralAsk = isEphemeralAskRoomContract(activeTeam);
+  const candidates = [
+    runtime.activeTeamConfig,
+    runtime.active_team_config,
+    runtime.team_config,
+    runtime.teamConfig,
+    runtime.runtimeTeamSnapshot,
+    runtime.runtime_team_snapshot,
+    runtime.runtimeTeamSnapshot?.team_plan,
+    runtime.runtime_team_snapshot?.team_plan,
+    runtime.runtimeTeamSnapshot?.teamPlan,
+    runtime.runtime_team_snapshot?.teamPlan,
+  ].filter((value) => value && typeof value === 'object');
+  for (const source of candidates) {
+    if (isEphemeralAskRoomContract(source)) continue;
+    const structure = source.structure_v2 || source.structureV2 || source.structure || null;
+    const memoryPlan = source.memory_plan || source.memoryPlan || structure?.memory_plan || structure?.memoryPlan || null;
+    const kbProfile = source.knowledge_base_profile || source.knowledgeBaseProfile || source.knowledge_surface || source.knowledgeSurface || null;
+    if (objectKeysCount(memoryPlan) > 0 || objectKeysCount(kbProfile) > 0) return true;
+  }
+  const runtimeAgents = [
+    ...(Array.isArray(runtime.agentsCatalog) ? runtime.agentsCatalog : []),
+    ...(Array.isArray(runtime.agents) ? runtime.agents : []),
+    ...(!activeTeamIsEphemeralAsk && Array.isArray(runtime.activeTeamConfig?.agents) ? runtime.activeTeamConfig.agents : []),
+    ...(!activeTeamIsEphemeralAsk && Array.isArray(runtime.active_team_config?.agents) ? runtime.active_team_config.agents : []),
+  ];
+  return runtimeAgents.some((agent) => objectKeysCount(agent?.memory_contract || agent?.memoryContract || agent?.context_policy || agent?.contextPolicy) > 0);
+}
+
+function collectRuntimeFinalOwnerIds(runtime = null) {
+  if (!runtime || typeof runtime !== 'object') return [];
+  const out = [];
+  const push = (value = '') => {
+    const clean = String(value || '').trim().toLowerCase();
+    if (clean && !out.includes(clean)) out.push(clean);
+  };
+  const sources = [
+    runtime.activeTeamConfig,
+    runtime.active_team_config,
+    runtime.team_config,
+    runtime.teamConfig,
+    runtime.runtimeTeamSnapshot,
+    runtime.runtime_team_snapshot,
+    runtime.runtimeTeamSnapshot?.team_plan,
+    runtime.runtime_team_snapshot?.team_plan,
+    runtime.runtimeTeamSnapshot?.teamPlan,
+    runtime.runtime_team_snapshot?.teamPlan,
+  ].filter((value) => value && typeof value === 'object');
+  for (const source of sources) {
+    const structure = source.structure_v2 || source.structureV2 || source.structure || source.execution_graph || null;
+    push(source.final_answer_owner_participant_id || source.finalAnswerOwnerParticipantId || source.final_participant_id || source.finalParticipantId || source.final_answer_owner || source.finalAnswerOwner);
+    push(structure?.control_policy?.final_answer_owner_participant_id || structure?.control_policy?.finalAnswerOwnerParticipantId);
+    push(structure?.topology?.final_participant_id || structure?.topology?.finalParticipantId);
+    push(structure?.execution_graph?.final_participant_id || structure?.executionGraph?.finalParticipantId);
+    push(structure?.final_participant_id || structure?.finalParticipantId);
+  }
+  return out;
+}
+
+function runtimeDeclaresAgentAsFinalOwner(runtime = null, { agentId = '', displayLabel = '', roleId = '' } = {}) {
+  const owners = collectRuntimeFinalOwnerIds(runtime);
+  if (owners.length === 0) return false;
+  const candidates = uniqueLowerList([agentId, resolveAgentId(agentId), displayLabel, roleId]);
+  return candidates.some((candidate) => owners.includes(candidate));
+}
+
 function sendLong(bot, chatId, text, options = undefined) {
   return runtimeUiHelpers.sendLong(bot, chatId, text, options);
 }
@@ -422,18 +510,25 @@ function enforceAgentPublishContract(jobId, { runtime = null, agentId = '', agen
   const enforcement = summarizeRoleMemoryEnforcement({ profile, provider, roleId });
   const targetSurface = String(requestedSurface || '').trim().toLowerCase();
   const finalRequested = finalSynthesis === true || targetSurface === 'final_answer';
-  const roleCanPublishTarget = targetSurface
+  const hasPublishContractContext = declaredPublishTargets.length > 0 || hasExplicitRuntimePublishContract(runtime);
+  const roleCanPublishTarget = targetSurface && hasPublishContractContext
     ? canRolePublishSurface({ profile, provider, roleId, surfaceId: targetSurface })
     : false;
-  const roleCanPublishFinal = canRolePublishSurface({ profile, provider, roleId, surfaceId: 'final_answer' });
-  const declaredFinalPublisher = declaredPublishTargets.includes('final_answer');
+  const roleCanPublishFinal = hasPublishContractContext
+    ? canRolePublishSurface({ profile, provider, roleId, surfaceId: 'final_answer' })
+    : false;
+  const declaredFinalPublisher = declaredPublishTargets.includes('final_answer')
+    || runtimeDeclaresAgentAsFinalOwner(runtime, { agentId, displayLabel, roleId });
+  const declaredTargetPublisher = targetSurface
+    ? (declaredPublishTargets.includes(targetSurface) || (targetSurface === 'final_answer' && declaredFinalPublisher))
+    : false;
   let allowed = true;
   let summary = 'allowed';
 
-  if (finalRequested && !(roleCanPublishFinal || declaredFinalPublisher)) {
+  if (hasPublishContractContext && finalRequested && !(roleCanPublishFinal || declaredFinalPublisher)) {
     allowed = false;
     summary = 'publish contract blocked: final synthesis는 final_answer surface가 선언된 agent만 수행할 수 있습니다';
-  } else if (targetSurface && !(roleCanPublishTarget || declaredPublishTargets.includes(targetSurface))) {
+  } else if (hasPublishContractContext && targetSurface && !(roleCanPublishTarget || declaredTargetPublisher)) {
     allowed = false;
     summary = `publish contract blocked: ${displayLabel || agentId || roleId || 'agent'} cannot publish to ${targetSurface}`;
   }
@@ -1063,7 +1158,11 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   const concurrencyKey = String(opts.concurrencyKey || "").trim() || `job:${String(jobId || "").trim()}`;
   const preferredModel = String(opts.model || "").trim();
   const providedRoleMemo = String(opts.roleMemo || opts.role_memo || '').trim();
-  const boundResearchRoleMemo = memory.getAgentRole("researcher") || memory.getAgentRole("codex") || memory.getAgentRole("gemini");
+  const runtimeAgentForRoleMemo = findAgentConfigInRuntime(opts.agentId || opts.agent_id || 'gemini', opts.runtime || null) || {};
+  const boundResearchRoleMemo = safeMemoryAgentRole("researcher")
+    || safeMemoryAgentRole("codex")
+    || safeMemoryAgentRole("gemini")
+    || String(runtimeAgentForRoleMemo.prompt || runtimeAgentForRoleMemo.system_prompt || runtimeAgentForRoleMemo.systemPrompt || '').trim();
   const roleMemo = providedRoleMemo || boundResearchRoleMemo;
   const roleKey = String(opts.roleId || 'researcher').trim().toLowerCase();
   const agentKey = String(opts.agentId || 'gemini').trim().toLowerCase() || 'gemini';

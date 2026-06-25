@@ -24,7 +24,9 @@ exit 0
 
   const prevPath = process.env.PATH;
   const prevMode = process.env.GEMINI_CONTEXT_MODE;
+  const prevAllowGeminiCli = process.env.DDALGGAK_ALLOW_GEMINI_CLI;
   process.env.PATH = `${binDir}:${prevPath}`;
+  process.env.DDALGGAK_ALLOW_GEMINI_CLI = '1';
   delete process.env.GEMINI_CONTEXT_MODE;
   try {
     const result = await runGeminiPrompt({
@@ -47,6 +49,8 @@ exit 0
     process.env.PATH = prevPath;
     if (typeof prevMode === 'undefined') delete process.env.GEMINI_CONTEXT_MODE;
     else process.env.GEMINI_CONTEXT_MODE = prevMode;
+    if (typeof prevAllowGeminiCli === 'undefined') delete process.env.DDALGGAK_ALLOW_GEMINI_CLI;
+    else process.env.DDALGGAK_ALLOW_GEMINI_CLI = prevAllowGeminiCli;
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
@@ -67,7 +71,9 @@ exit 0
 
   const prevPath = process.env.PATH;
   const prevMode = process.env.GEMINI_CONTEXT_MODE;
+  const prevAllowGeminiCli = process.env.DDALGGAK_ALLOW_GEMINI_CLI;
   process.env.PATH = `${binDir}:${prevPath}`;
+  process.env.DDALGGAK_ALLOW_GEMINI_CLI = '1';
   process.env.GEMINI_CONTEXT_MODE = 'workspace';
   try {
     const result = await runGeminiPrompt({
@@ -85,6 +91,8 @@ exit 0
     process.env.PATH = prevPath;
     if (typeof prevMode === 'undefined') delete process.env.GEMINI_CONTEXT_MODE;
     else process.env.GEMINI_CONTEXT_MODE = prevMode;
+    if (typeof prevAllowGeminiCli === 'undefined') delete process.env.DDALGGAK_ALLOW_GEMINI_CLI;
+    else process.env.DDALGGAK_ALLOW_GEMINI_CLI = prevAllowGeminiCli;
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });

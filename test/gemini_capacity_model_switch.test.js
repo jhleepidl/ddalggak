@@ -34,6 +34,7 @@ console.log('OK via ' + model);
     GEMINI_CAPACITY_SWITCH_AFTER: process.env.GEMINI_CAPACITY_SWITCH_AFTER,
     GEMINI_MAX_RETRIES: process.env.GEMINI_MAX_RETRIES,
     GEMINI_CONTEXT_MODE: process.env.GEMINI_CONTEXT_MODE,
+    DDALGGAK_ALLOW_GEMINI_CLI: process.env.DDALGGAK_ALLOW_GEMINI_CLI,
   };
   process.env.PATH = `${binDir}:${prev.PATH}`;
   process.env.GEMINI_MIN_INTERVAL_MS = '0';
@@ -41,6 +42,7 @@ console.log('OK via ' + model);
   process.env.GEMINI_CAPACITY_SWITCH_AFTER = '1';
   process.env.GEMINI_MAX_RETRIES = '2';
   process.env.GEMINI_CONTEXT_MODE = 'isolated';
+  process.env.DDALGGAK_ALLOW_GEMINI_CLI = '1';
   try {
     const result = await runGeminiPrompt({
       workspaceRoot: tempDir,

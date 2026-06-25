@@ -6,7 +6,35 @@ import { spawnSync } from 'node:child_process';
 const root = process.cwd();
 const outDir = path.resolve(process.argv[2] || '/tmp/ddalggak_release');
 const version = process.argv[3] || new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
-const excludes = ['.git/', 'node_modules/', 'runs/', '.self_improve/', 'coverage/', '*.zip', '*.tar.gz', '*.tgz', '*.log', '.env', '.env.*'];
+const excludes = [
+  '.git/',
+  'node_modules/',
+  'runs/',
+  'data/',
+  'models/',
+  'reports/',
+  'outputs/',
+  'checkpoints/',
+  'wandb/',
+  'mlruns/',
+  '.self_improve/',
+  '.cache/',
+  '.pytest_cache/',
+  '__pycache__/',
+  'coverage/',
+  'chat_sessions.json',
+  'chat_sessions.jsonl',
+  '*.zip',
+  '*.tar.gz',
+  '*.tgz',
+  '*.log',
+  '*.pyc',
+  '.env',
+  '.env.local',
+  '.env.production',
+  '.env.development',
+  '.env.test',
+];
 const liteExcludes = [...excludes, 'test_fixtures/', 'package-lock.json'];
 fs.mkdirSync(outDir, { recursive: true });
 function run(cmd, args) {

@@ -853,7 +853,7 @@ export function createTelegramCommandHandler(deps = {}) {
       runtime: runtimeForTeam,
       source: `telegram_${workMode}_room_first`,
     });
-    const portfolio = {
+    let portfolio = {
       kind: 'team_selection_portfolio_v1',
       selected_candidate_id: 'ai_room_component_policy',
       selected_team: proposal,
@@ -869,6 +869,50 @@ export function createTelegramCommandHandler(deps = {}) {
         'Legacy implementation builder/reviewer fallback is suppressed unless room domain is code_review or user asks for workspace mutation.',
       ],
     };
+
+    if (preferPlannerProposal) {
+      try {
+        const planned = await createAgentRoomTeamConfiguration({
+          description: `Agent Room for this task: ${goal}`,
+          runtime: runtimeForTeam,
+          jobId: '',
+        });
+        if (planned && typeof planned === 'object' && Array.isArray(planned.agents) && planned.agents.length > 0) {
+          proposal = {
+            ...planned,
+            composition_mode: planned.composition_mode || 'freeform',
+            proposal_mode: planned.proposal_mode || 'suggest',
+            task_brief: planned.task_brief || planned.taskBrief || `Agent Room for this task: ${goal}`,
+          };
+          portfolio = {
+            kind: 'team_selection_portfolio_v1',
+            selected_candidate_id: 'llm_planner_agent_room',
+            selected_team: proposal,
+            candidates: [{
+              candidate_id: 'llm_planner_agent_room',
+              source: proposal?.planner_metadata?.planning_source || 'llm_planner_agent_room',
+              team: proposal,
+              sufficient: true,
+              utility: 1,
+            }],
+            notes: [
+              'LLM-backed agent room planner proposal is preferred for /agents suggest.',
+            ],
+          };
+        }
+      } catch (error) {
+        proposal = {
+          ...proposal,
+          planner_metadata: {
+            ...(proposal?.planner_metadata && typeof proposal.planner_metadata === 'object' ? proposal.planner_metadata : {}),
+            planner_type: proposal?.planner_metadata?.planner_type || 'heuristic_rule_based',
+            planning_source: proposal?.planner_metadata?.planning_source || 'agent_room_planner_exception_fallback',
+            reasoning_summary: [String(error?.message || error || 'planner unavailable').trim()].filter(Boolean),
+          },
+        };
+      }
+    }
+
     storePendingTeam(chatSessionStore, chatId, proposal, { portfolio });
     let activeTeam = proposal;
     if (autoApply) {

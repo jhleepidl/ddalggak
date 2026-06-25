@@ -800,6 +800,7 @@ function buildKnowledgeBaseMemoryMapLines(profileOrPlan = null, { maxLines = 7 }
 function defaultModelForRole(role = '', provider = '') {
   const roleId = cleanId(role);
   const providerId = cleanId(provider);
+  if (providerId === 'gemini') return 'gemini-3-flash-preview';
   if (providerId === 'antigravity') return process.env.ANTIGRAVITY_MODEL || 'auto';
   if (isLocalModelProvider(providerId)) return listModelNodes()[0]?.model || 'local-model';
   if ((providerId === 'openai' || providerId === 'chatgpt') && roleId === 'builder') return 'gpt-5.5';
@@ -820,7 +821,7 @@ function sanitizePlannerExecutableModel(model = '', provider = '', { taskText = 
   const resolved = resolveSupportedModel(model || '') || clean(model);
   const effectiveProvider = cleanId(providerId || inferProviderForModel(resolved || '') || inferLocalProviderForModel(resolved || ''));
   if (effectiveProvider === 'gemini' && /^gemini-2\.5-pro$/i.test(resolved) && !userExplicitlyRequestedGeminiPro(taskText)) {
-    return 'gpt-5.4';
+    return 'gemini-3-flash-preview';
   }
   return resolved || defaultModelForRole(role, effectiveProvider);
 }

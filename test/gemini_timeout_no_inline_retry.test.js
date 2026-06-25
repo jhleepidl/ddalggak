@@ -25,8 +25,10 @@ exit 1
   const prevPath = process.env.PATH;
   const prevMinInterval = process.env.GEMINI_MIN_INTERVAL_MS;
   const prevInline = process.env.GEMINI_INLINE_RETRY_ON_STDIN_FAILURE;
+  const prevAllowGeminiCli = process.env.DDALGGAK_ALLOW_GEMINI_CLI;
   process.env.PATH = `${binDir}:${prevPath}`;
   process.env.GEMINI_MIN_INTERVAL_MS = '0';
+  process.env.DDALGGAK_ALLOW_GEMINI_CLI = '1';
   delete process.env.GEMINI_INLINE_RETRY_ON_STDIN_FAILURE;
   try {
     const result = await runGeminiPrompt({
@@ -50,6 +52,8 @@ exit 1
     else process.env.GEMINI_MIN_INTERVAL_MS = prevMinInterval;
     if (typeof prevInline === 'undefined') delete process.env.GEMINI_INLINE_RETRY_ON_STDIN_FAILURE;
     else process.env.GEMINI_INLINE_RETRY_ON_STDIN_FAILURE = prevInline;
+    if (typeof prevAllowGeminiCli === 'undefined') delete process.env.DDALGGAK_ALLOW_GEMINI_CLI;
+    else process.env.DDALGGAK_ALLOW_GEMINI_CLI = prevAllowGeminiCli;
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });

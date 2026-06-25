@@ -70,6 +70,7 @@ console.log('OK via ' + model);
     GEMINI_MAX_RETRIES: '2',
     GEMINI_CONTEXT_MODE: 'isolated',
     GEMINI_CONTEXT_REUSE: 'stable',
+    DDALGGAK_ALLOW_GEMINI_CLI: '1',
   }, async () => {
     const first = await runGeminiPrompt({
       workspaceRoot: workspaceDir,

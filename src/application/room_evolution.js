@@ -1,3 +1,4 @@
+import { buildRoomSkillDiscoveryBundle } from './room_skill_discovery.js';
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
@@ -375,6 +376,7 @@ export function proposeRoomEvolution({ events = [], roomPackage = null, policy =
   const gateway = buildGatewayProposal({ counts, topObjects: aggregate.top_objects });
   if (gateway) proposals.push(gateway);
 
+  const skillDiscovery = buildRoomSkillDiscoveryBundle({ aggregate, proposals, roomPackage });
   const domain = aggregate.top_domains[0]?.id || asObject(roomPackage).domain_label || 'emergent_room';
   return {
     kind: 'room_evolution_snapshot_v1',
@@ -387,6 +389,8 @@ export function proposeRoomEvolution({ events = [], roomPackage = null, policy =
     maturity: inferMaturityStage(counts),
     aggregate,
     proposals: proposals.filter(Boolean),
+    skill_discovery: skillDiscovery,
+    paper4_trial_plan: skillDiscovery.paper4_memory_schema_trial_plan,
     governance: {
       ai_role: 'architect_advisor_proposer_not_controller',
       auto_apply: false,
@@ -451,6 +455,9 @@ export function formatRoomEvolutionSnapshot(snapshot = {}) {
   ];
   const topObjects = asArray(aggregate.top_objects).slice(0, 5).map((item) => `${asObject(item).id}(${asObject(item).count})`);
   if (topObjects.length) lines.push(`- candidate memory objects: ${topObjects.join(', ')}`);
+  const skillDiscovery = asObject(row.skill_discovery);
+  const probeCount = asArray(asObject(skillDiscovery.probe_suite).probes).length;
+  if (probeCount) lines.push(`- probe suite: ${probeCount} room-specific probes for schema/component trials`);
   const proposals = asArray(row.proposals).slice(0, 8);
   if (proposals.length) {
     lines.push('- pending proposals:');

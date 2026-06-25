@@ -11,11 +11,15 @@ import { buildPendingApprovalPrompt } from "../src/adapters/telegram/formatting.
 
 function withPatchedPath(binDir, fn) {
   const originalPath = process.env.PATH || "";
+  const originalAllowGeminiCli = process.env.DDALGGAK_ALLOW_GEMINI_CLI;
   process.env.PATH = `${binDir}${path.delimiter}${originalPath}`;
+  process.env.DDALGGAK_ALLOW_GEMINI_CLI = '1';
   return Promise.resolve()
     .then(fn)
     .finally(() => {
       process.env.PATH = originalPath;
+      if (typeof originalAllowGeminiCli === 'undefined') delete process.env.DDALGGAK_ALLOW_GEMINI_CLI;
+      else process.env.DDALGGAK_ALLOW_GEMINI_CLI = originalAllowGeminiCli;
     });
 }
 

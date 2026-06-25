@@ -1,0 +1,92 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+
+const targets = process.argv.slice(2);
+if (!targets.length) targets.push(process.cwd());
+
+const forbiddenPatterns = [
+  /(^|\/)runs(\/|$)/,
+  /(^|\/)ddalggak-main\/docs(\/|$)/,
+  /(^|\/)ddalggak\/docs(\/|$)/,
+  /(^|\/)graph-of-context-ui-main\/docs(\/|$)/,
+  /(^|\/)goc\/docs(\/|$)/,
+  /(^|\/)chat_sessions\.jsonl?$/,
+  /(^|\/)paper4_data(\/|$)/,
+  /(^|\/)paper4-memory-schema-trials\/results(\/|$)/,
+  /(^|\/)paper4-memory-schema-trials\/build(\/|$)/,
+  /(^|\/)paper4-memory-schema-trials\/dist(\/|$)/,
+  /(^|\/)paper4\/results(\/|$)/,
+  /(^|\/)paper4\/build(\/|$)/,
+  /(^|\/)paper4\/dist(\/|$)/,
+  /(^|\/)data(\/|$)/,
+  /(^|\/)models(\/|$)/,
+  /(^|\/)reports(\/|$)/,
+  /(^|\/)outputs(\/|$)/,
+  /(^|\/)checkpoints(\/|$)/,
+  /(^|\/)wandb(\/|$)/,
+  /(^|\/)mlruns(\/|$)/,
+  /(^|\/)node_modules(\/|$)/,
+  /(^|\/)__pycache__(\/|$)/,
+  /(^|\/)\.pytest_cache(\/|$)/,
+  /(^|\/)\.cache(\/|$)/,
+  /(^|\/)\.venv(\/|$)/,
+  /(^|\/)\.env$/,
+  /(^|\/)\.env\.(?!example$).+$/,
+  /\.log$/,
+  /\.pyc$/,
+];
+
+function normalizePath(value) {
+  return String(value || '').replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+function isForbidden(relPath) {
+  const clean = normalizePath(relPath);
+  return forbiddenPatterns.some((pattern) => pattern.test(clean));
+}
+
+function walkDir(root, base = root, out = []) {
+  for (const name of fs.readdirSync(root)) {
+    const abs = path.join(root, name);
+    const rel = normalizePath(path.relative(base, abs));
+    if (isForbidden(rel)) {
+      out.push(rel);
+      continue;
+    }
+    const stat = fs.lstatSync(abs);
+    if (stat.isDirectory()) walkDir(abs, base, out);
+  }
+  return out;
+}
+
+function listZip(zipPath) {
+  const result = spawnSync('unzip', ['-Z1', zipPath], { encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new Error(`failed to inspect zip: ${zipPath}\n${result.stderr || result.stdout}`);
+  }
+  return result.stdout.split(/\r?\n/g).filter(Boolean);
+}
+
+let failures = [];
+for (const target of targets) {
+  const abs = path.resolve(target);
+  if (!fs.existsSync(abs)) {
+    failures.push(`${target}: does not exist`);
+    continue;
+  }
+  const stat = fs.statSync(abs);
+  const bad = stat.isDirectory()
+    ? walkDir(abs)
+    : (abs.endsWith('.zip') ? listZip(abs).filter(isForbidden) : (isForbidden(path.basename(abs)) ? [path.basename(abs)] : []));
+  if (bad.length) {
+    failures.push(`${target}: forbidden files found\n${bad.slice(0, 200).map((x) => `  - ${x}`).join('\n')}${bad.length > 200 ? `\n  ... ${bad.length - 200} more` : ''}`);
+  }
+}
+
+if (failures.length) {
+  console.error(failures.join('\n'));
+  process.exit(1);
+}
+console.log(JSON.stringify({ ok: true, checked: targets }, null, 2));
