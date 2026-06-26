@@ -85,3 +85,28 @@ test('room_memory_trials event captures room package elicitation metadata withou
   assert.ok(!encoded.includes('raw note should be stripped'));
   assert.deepEqual(validateRoomMemoryEvent(event), { ok: true });
 });
+
+test('room_memory_trials event captures learned concierge metadata without raw prompts', () => {
+  const event = buildRoomMemoryEvent({
+    taskText: 'private raw user question should not leak',
+    chatId: 'chat-concierge',
+    roomConciergeDecision: {
+      kind: 'room_concierge_route_v1',
+      route: 'standard_workbench',
+      learned_model: {
+        applied: true,
+        score: {
+          model: { version: 'local-v1' },
+          ranked: [{ route: 'standard_workbench', probability: 0.88 }],
+        },
+      },
+      prompt: 'raw model prompt should be stripped',
+    },
+  });
+  const encoded = JSON.stringify(event);
+  assert.equal(event.room_concierge.decision.route, 'standard_workbench');
+  assert.equal(event.room_concierge.decision.learned_model.applied, true);
+  assert.ok(!encoded.includes('private raw user question'));
+  assert.ok(!encoded.includes('raw model prompt'));
+  assert.deepEqual(validateRoomMemoryEvent(event), { ok: true });
+});

@@ -71,6 +71,7 @@ export function buildRoomMemoryEvent({
   componentRanking = null,
   roomPackageQuestionPlan = null,
   roomPackageElicitationEvent = null,
+  roomConciergeDecision = null,
   source = 'ddalggak_runtime',
   ts = nowIso(),
 } = {}) {
@@ -127,6 +128,9 @@ export function buildRoomMemoryEvent({
       replay_probe_ids: asArray(asObject(discovery.cross_time_replay_plan).probes || asObject(discovery.cross_time_replay_plan).probe_ids).slice(0, 20),
     }),
     ranking: stripRawTextFields(componentRanking || {}),
+    room_concierge: stripRawTextFields({
+      decision: roomConciergeDecision || {},
+    }),
     room_package_elicitation: stripRawTextFields({
       plan: roomPackageQuestionPlan || {},
       answer_event: roomPackageElicitationEvent || {},

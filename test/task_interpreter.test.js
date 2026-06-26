@@ -60,3 +60,13 @@ test('task interpreter keeps delivery owner coverage for web-service software-de
   assert.ok(interpreted.candidate_capability_slots.some((slot) => slot.role_id === 'synthesizer'));
   assert.equal(interpreted.suppressed_role_ids.includes('synthesizer'), false);
 });
+
+test('task interpreter keeps restaurant menu recommendation/search out of code_change', () => {
+  const interpreted = interpretTask({
+    goal: '실제로 해당 식당에서 파는 메뉴들을 검색해보고 그걸 바탕으로 대답해줘.',
+    seedInstruction: 'quick ask answer, informational only',
+  });
+  assert.notEqual(interpreted.task_type, 'code_change');
+  assert.equal(interpreted.task_type, 'report');
+  assert.equal(interpreted.deliverable_type, 'report');
+});

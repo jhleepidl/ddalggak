@@ -28,6 +28,16 @@ import {
 } from "../../application/team_configuration.js";
 import { buildTeamBlueprint, installTeamBlueprintToSession, normalizeTeamBlueprint } from '../../application/team_blueprint_runtime.js';
 import { buildRoomFirstTeamConfiguration } from '../../application/ai_room_runtime_selection.js';
+import {
+  buildDirectAskPrompt,
+  buildSearchAskFallbackPrompt,
+  classifyRoomConciergeRoute,
+  shouldUseDirectAskFastPath,
+  shouldUseSearchAskPath,
+} from '../../application/room_concierge.js';
+import { loadRoomConciergeModelFromEnv } from '../../application/room_concierge_model.js';
+import { runOpenAICompatiblePrompt } from '../../providers/openai_compatible.js';
+import { runCodexExec } from '../../codex.js';
 import { formatRoomEvolutionSnapshot, proposeRoomEvolution } from '../../application/room_evolution.js';
 import { buildTeamInstallProposal, formatTeamInstallProposalMessage } from '../../application/install_proposal.js';
 import { buildInstallProposalPrompt, createPendingInstallProposalState, getPendingInstallProposal, archivePendingInstallProposal } from '../../application/install_proposal_state.js';
@@ -360,6 +370,9 @@ export function createTelegramCommandHandler(deps = {}) {
   const executeRoutedPlan = runtimeOps.executeRoutedPlan || deps.executeRoutedPlan;
   const suggestNextPrompt = runtimeOps.suggestNextPrompt || deps.suggestNextPrompt;
   const sendChatGPTPrompt = runtimeOps.sendChatGPTPrompt || deps.sendChatGPTPrompt;
+  const directAskExecutor = runtimeOps.directAskExecutor || deps.directAskExecutor || null;
+  const searchAskExecutor = runtimeOps.searchAskExecutor || deps.searchAskExecutor || null;
+  const explicitRoomConciergeModel = runtimeOps.roomConciergeModel || deps.roomConciergeModel || null;
   const memoryModeWithFallback = runtimeOps.memoryModeWithFallback || deps.memoryModeWithFallback;
   const requireGocClient = runtimeOps.requireGocClient || deps.requireGocClient;
 
@@ -1031,6 +1044,241 @@ export function createTelegramCommandHandler(deps = {}) {
     return USER_TEAM_GOAL_RESERVED_SUBCOMMANDS.has(String(sub || '').trim().toLowerCase());
   }
 
+  function getRoomConciergeModel() {
+    if (explicitRoomConciergeModel) return explicitRoomConciergeModel;
+    return loadRoomConciergeModelFromEnv(process.env);
+  }
+
+  function directAskProviderPreference() {
+    return String(process.env.DDALGGAK_DIRECT_ASK_PROVIDER || process.env.ROOM_CONCIERGE_DIRECT_ASK_PROVIDER || '').trim().toLowerCase();
+  }
+
+  function isDirectAskFastPathEnabled() {
+    const raw = String(process.env.DDALGGAK_DIRECT_ASK_FAST_PATH_ENABLED || process.env.ROOM_CONCIERGE_DIRECT_ASK_ENABLED || 'auto').trim().toLowerCase();
+    if (['0', 'false', 'no', 'off'].includes(raw)) return false;
+    if (typeof directAskExecutor === 'function') return true;
+    const providerPreference = directAskProviderPreference();
+    if (['codex', 'openai', 'openai_compatible'].includes(providerPreference)) return true;
+    if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
+    return directAskOpenAIConfigured();
+  }
+
+  function directAskOpenAIConfigured() {
+    return !!String(process.env.DDALGGAK_DIRECT_ASK_BASE_URL || process.env.OPENAI_COMPATIBLE_BASE_URL || process.env.LOCAL_MODEL_BASE_URL || process.env.OLLAMA_BASE_URL || '').trim()
+      && !!String(process.env.DDALGGAK_DIRECT_ASK_MODEL || process.env.OPENAI_COMPATIBLE_MODEL || process.env.LOCAL_MODEL || process.env.OLLAMA_MODEL || '').trim();
+  }
+
+  function searchAskProviderPreference() {
+    return String(process.env.DDALGGAK_SEARCH_ASK_PROVIDER || process.env.ROOM_CONCIERGE_SEARCH_ASK_PROVIDER || directAskProviderPreference() || '').trim().toLowerCase();
+  }
+
+  function searchAskOpenAIConfigured() {
+    return !!String(process.env.DDALGGAK_SEARCH_ASK_BASE_URL || process.env.DDALGGAK_DIRECT_ASK_BASE_URL || process.env.OPENAI_COMPATIBLE_BASE_URL || process.env.LOCAL_MODEL_BASE_URL || process.env.OLLAMA_BASE_URL || '').trim()
+      && !!String(process.env.DDALGGAK_SEARCH_ASK_MODEL || process.env.DDALGGAK_DIRECT_ASK_MODEL || process.env.OPENAI_COMPATIBLE_MODEL || process.env.LOCAL_MODEL || process.env.OLLAMA_MODEL || '').trim();
+  }
+
+  function isSearchAskFastPathEnabled() {
+    const raw = String(process.env.DDALGGAK_SEARCH_ASK_FAST_PATH_ENABLED || process.env.ROOM_CONCIERGE_SEARCH_ASK_ENABLED || 'auto').trim().toLowerCase();
+    if (['0', 'false', 'no', 'off'].includes(raw)) return false;
+    if (typeof searchAskExecutor === 'function') return true;
+    const providerPreference = searchAskProviderPreference();
+    if (['codex', 'openai', 'openai_compatible'].includes(providerPreference)) return true;
+    if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
+    return searchAskOpenAIConfigured();
+  }
+
+  async function executeDirectAskFastPath({ chatId, userId, msg = {}, message = '', decision = null } = {}) {
+    const roomProfile = getAgentRoomProfile(chatSessionStore, chatId) || {};
+    const prompt = buildDirectAskPrompt({
+      question: message,
+      roomName: roomProfile?.name || roomProfile?.room_name || '',
+      locale: 'ko-KR',
+    });
+    const jobId = `direct_ask_${Date.now().toString(36)}`;
+    if (typeof directAskExecutor === 'function') {
+      return await directAskExecutor({ chatId, userId, msg, message, prompt, decision, roomProfile, jobId });
+    }
+
+    const providerPreference = directAskProviderPreference();
+    if ((providerPreference === 'openai_compatible' || providerPreference === 'openai' || (!providerPreference && directAskOpenAIConfigured()))) {
+      const result = await runOpenAICompatiblePrompt({
+        nodeId: process.env.DDALGGAK_DIRECT_ASK_NODE || '',
+        model: process.env.DDALGGAK_DIRECT_ASK_MODEL || process.env.OPENAI_COMPATIBLE_MODEL || process.env.LOCAL_MODEL || process.env.OLLAMA_MODEL || '',
+        baseUrl: process.env.DDALGGAK_DIRECT_ASK_BASE_URL || process.env.OPENAI_COMPATIBLE_BASE_URL || process.env.LOCAL_MODEL_BASE_URL || process.env.OLLAMA_BASE_URL || '',
+        runtime: process.env.DDALGGAK_DIRECT_ASK_RUNTIME || '',
+        apiKey: process.env.DDALGGAK_DIRECT_ASK_API_KEY || process.env.OPENAI_COMPATIBLE_API_KEY || process.env.LOCAL_MODEL_API_KEY || process.env.OLLAMA_API_KEY || '',
+        prompt,
+        system: 'Answer in Korean unless the user asks otherwise. Keep the reply concise and useful.',
+        temperature: Number(process.env.DDALGGAK_DIRECT_ASK_TEMPERATURE || 0.2),
+        maxTokens: Number(process.env.DDALGGAK_DIRECT_ASK_MAX_TOKENS || 512),
+        timeoutMs: Number(process.env.DDALGGAK_DIRECT_ASK_TIMEOUT_MS || 25000),
+        jobId,
+        surface: 'telegram_direct_ask_fast_path',
+        agentId: 'room_concierge',
+        roleId: 'room_concierge',
+        cwd: process.cwd(),
+        traceMetadata: { concierge_decision: decision || null, bypassed_workbench: true },
+      });
+      if (!result.ok) throw new Error(result.stderr || 'direct OpenAI-compatible ask failed');
+      return { text: String(result.stdout || '').trim(), provider: 'openai_compatible', result };
+    }
+
+    const codexResult = await runCodexExec({
+      workspaceRoot: process.cwd(),
+      cwd: process.cwd(),
+      prompt,
+      jobId,
+      surface: 'telegram_direct_ask_fast_path',
+      agentId: 'room_concierge',
+      roleId: 'room_concierge',
+      sandboxMode: process.env.DDALGGAK_DIRECT_ASK_SANDBOX_MODE || 'read-only',
+      approvalPolicy: process.env.DDALGGAK_DIRECT_ASK_APPROVAL_POLICY || 'never',
+      profile: process.env.DDALGGAK_DIRECT_ASK_CODEX_PROFILE || process.env.CODEX_ASSIST_PROFILE || process.env.CODEX_PROFILE || '',
+      timeoutMs: Number(process.env.DDALGGAK_DIRECT_ASK_TIMEOUT_MS || 45000),
+      traceMetadata: { concierge_decision: decision || null, bypassed_workbench: true },
+    });
+    if (!codexResult.ok) throw new Error(codexResult.stderr || 'direct Codex ask failed');
+    return { text: String(codexResult.stdout || '').trim(), provider: 'codex', result: codexResult };
+  }
+
+  async function executeSearchAskFastPath({ chatId, userId, msg = {}, message = '', decision = null } = {}) {
+    const roomProfile = getAgentRoomProfile(chatSessionStore, chatId) || {};
+    const maxSeconds = Math.max(3, Number(process.env.DDALGGAK_SEARCH_ASK_MAX_SECONDS || 20));
+    const prompt = buildSearchAskFallbackPrompt({
+      question: message,
+      locale: 'ko-KR',
+      maxSeconds,
+    });
+    const jobId = `search_ask_${Date.now().toString(36)}`;
+    if (typeof searchAskExecutor === 'function') {
+      return await searchAskExecutor({ chatId, userId, msg, message, prompt, decision, roomProfile, jobId, maxSeconds });
+    }
+
+    const providerPreference = searchAskProviderPreference();
+    if ((providerPreference === 'openai_compatible' || providerPreference === 'openai' || (!providerPreference && searchAskOpenAIConfigured()))) {
+      const result = await runOpenAICompatiblePrompt({
+        nodeId: process.env.DDALGGAK_SEARCH_ASK_NODE || process.env.DDALGGAK_DIRECT_ASK_NODE || '',
+        model: process.env.DDALGGAK_SEARCH_ASK_MODEL || process.env.DDALGGAK_DIRECT_ASK_MODEL || process.env.OPENAI_COMPATIBLE_MODEL || process.env.LOCAL_MODEL || process.env.OLLAMA_MODEL || '',
+        baseUrl: process.env.DDALGGAK_SEARCH_ASK_BASE_URL || process.env.DDALGGAK_DIRECT_ASK_BASE_URL || process.env.OPENAI_COMPATIBLE_BASE_URL || process.env.LOCAL_MODEL_BASE_URL || process.env.OLLAMA_BASE_URL || '',
+        runtime: process.env.DDALGGAK_SEARCH_ASK_RUNTIME || process.env.DDALGGAK_DIRECT_ASK_RUNTIME || '',
+        apiKey: process.env.DDALGGAK_SEARCH_ASK_API_KEY || process.env.DDALGGAK_DIRECT_ASK_API_KEY || process.env.OPENAI_COMPATIBLE_API_KEY || process.env.LOCAL_MODEL_API_KEY || process.env.OLLAMA_API_KEY || '',
+        prompt,
+        system: 'Answer in Korean unless the user asks otherwise. For search-intent requests, do not fabricate unavailable current facts; ask for a link/photo/source when needed.',
+        temperature: Number(process.env.DDALGGAK_SEARCH_ASK_TEMPERATURE || process.env.DDALGGAK_DIRECT_ASK_TEMPERATURE || 0.1),
+        maxTokens: Number(process.env.DDALGGAK_SEARCH_ASK_MAX_TOKENS || process.env.DDALGGAK_DIRECT_ASK_MAX_TOKENS || 512),
+        timeoutMs: Number(process.env.DDALGGAK_SEARCH_ASK_TIMEOUT_MS || Math.max(8000, maxSeconds * 1000)),
+        jobId,
+        surface: 'telegram_search_ask_fast_path',
+        agentId: 'room_concierge_search',
+        roleId: 'room_concierge',
+        cwd: process.cwd(),
+        traceMetadata: { concierge_decision: decision || null, bypassed_workbench: true, bounded_search: true },
+      });
+      if (!result.ok) throw new Error(result.stderr || 'search OpenAI-compatible ask failed');
+      return { text: String(result.stdout || '').trim(), provider: 'openai_compatible', result };
+    }
+
+    const codexResult = await runCodexExec({
+      workspaceRoot: process.cwd(),
+      cwd: process.cwd(),
+      prompt,
+      jobId,
+      surface: 'telegram_search_ask_fast_path',
+      agentId: 'room_concierge_search',
+      roleId: 'room_concierge',
+      sandboxMode: process.env.DDALGGAK_SEARCH_ASK_SANDBOX_MODE || process.env.DDALGGAK_DIRECT_ASK_SANDBOX_MODE || 'read-only',
+      approvalPolicy: process.env.DDALGGAK_SEARCH_ASK_APPROVAL_POLICY || process.env.DDALGGAK_DIRECT_ASK_APPROVAL_POLICY || 'never',
+      profile: process.env.DDALGGAK_SEARCH_ASK_CODEX_PROFILE || process.env.DDALGGAK_DIRECT_ASK_CODEX_PROFILE || process.env.CODEX_ASSIST_PROFILE || process.env.CODEX_PROFILE || '',
+      timeoutMs: Number(process.env.DDALGGAK_SEARCH_ASK_TIMEOUT_MS || Math.max(8000, maxSeconds * 1000)),
+      traceMetadata: { concierge_decision: decision || null, bypassed_workbench: true, bounded_search: true },
+    });
+    if (!codexResult.ok) throw new Error(codexResult.stderr || 'search Codex ask failed');
+    return { text: String(codexResult.stdout || '').trim(), provider: 'codex', result: codexResult };
+  }
+
+  async function runSearchAskOrFallback({ chatId, userId, msg = {}, message = '', decision = null, ackAlreadySent = false } = {}) {
+    if (!isSearchAskFastPathEnabled()) return { status: 'disabled' };
+    try {
+      const started = Date.now();
+      const result = await executeSearchAskFastPath({ chatId, userId, msg, message, decision });
+      const answer = String(result?.text || '').trim();
+      if (!answer) throw new Error('empty search ask answer');
+      await bot.sendMessage(chatId, answer);
+      try {
+        chatSessionStore.upsert(chatId, (session = {}) => ({
+          ...session,
+          last_room_concierge_route: decision || null,
+          last_search_ask: {
+            ts: new Date().toISOString(),
+            provider: result?.provider || 'unknown',
+            duration_ms: Date.now() - started,
+            message_chars: Array.from(String(message || '')).length,
+          },
+        }));
+      } catch {}
+      return { status: 'answered_search_fast_path', duration_ms: Date.now() - started, provider: result?.provider || 'unknown' };
+    } catch (error) {
+      try {
+        chatSessionStore.upsert(chatId, (session = {}) => ({
+          ...session,
+          last_room_concierge_route: decision || null,
+          last_search_ask_error: {
+            ts: new Date().toISOString(),
+            message: String(error?.message || error || 'unknown'),
+          },
+        }));
+      } catch {}
+      if (String(process.env.DDALGGAK_SEARCH_ASK_FALLBACK_NOTICE || '').trim().toLowerCase() === 'true') {
+        await bot.sendMessage(chatId, '검색형 빠른 답변 경로가 실패해서 표준 AI Room 실행으로 전환합니다.');
+      }
+      if (String(process.env.DDALGGAK_SEARCH_ASK_FALLBACK_TO_WORKBENCH || 'true').trim().toLowerCase() === 'false') {
+        throw error;
+      }
+      await enqueueWorkbenchInput({ chatId, userId, msg, text: message, kind: 'ask', teamConfig: buildRoomFirstTeamConfiguration({ taskText: message, workMode: 'ask', roomProfile: getAgentRoomProfile(chatSessionStore, chatId), chatId, source: 'telegram_ask_search_fallback' }), ackAlreadySent });
+      return { status: 'fallback_to_workbench', error: String(error?.message || error || 'unknown') };
+    }
+  }
+
+  async function runDirectAskOrFallback({ chatId, userId, msg = {}, message = '', decision = null, ackAlreadySent = false } = {}) {
+    if (!isDirectAskFastPathEnabled()) return { status: 'disabled' };
+    try {
+      const started = Date.now();
+      const result = await executeDirectAskFastPath({ chatId, userId, msg, message, decision });
+      const answer = String(result?.text || '').trim();
+      if (!answer) throw new Error('empty direct ask answer');
+      await bot.sendMessage(chatId, answer);
+      try {
+        chatSessionStore.upsert(chatId, (session = {}) => ({
+          ...session,
+          last_room_concierge_route: decision || null,
+          last_direct_ask: {
+            ts: new Date().toISOString(),
+            provider: result?.provider || 'unknown',
+            duration_ms: Date.now() - started,
+            message_chars: Array.from(String(message || '')).length,
+          },
+        }));
+      } catch {}
+      return { status: 'answered_directly', duration_ms: Date.now() - started, provider: result?.provider || 'unknown' };
+    } catch (error) {
+      try {
+        chatSessionStore.upsert(chatId, (session = {}) => ({
+          ...session,
+          last_room_concierge_route: decision || null,
+          last_direct_ask_error: {
+            ts: new Date().toISOString(),
+            message: String(error?.message || error || 'unknown'),
+          },
+        }));
+      } catch {}
+      if (String(process.env.DDALGGAK_DIRECT_ASK_FALLBACK_NOTICE || '').trim().toLowerCase() === 'true') {
+        await bot.sendMessage(chatId, '빠른 답변 경로가 실패해서 표준 AI Room 실행으로 전환합니다.');
+      }
+      await enqueueWorkbenchInput({ chatId, userId, msg, text: message, kind: 'ask', teamConfig: buildRoomFirstTeamConfiguration({ taskText: message, workMode: 'ask', roomProfile: getAgentRoomProfile(chatSessionStore, chatId), chatId, source: 'telegram_ask_direct_fallback' }), ackAlreadySent });
+      return { status: 'fallback_to_workbench', error: String(error?.message || error || 'unknown') };
+    }
+  }
+
   async function enqueueWorkbenchInput({ chatId, userId, msg = {}, text = '', kind = 'normal', teamConfig = null, ackAlreadySent = false } = {}) {
     if (!ackAlreadySent) await safeRouterAck(chatId, msg);
     await chatRunManager.handleIncoming({
@@ -1320,15 +1568,59 @@ export function createTelegramCommandHandler(deps = {}) {
         await bot.sendMessage(chatId, 'Usage: /ask <question>');
         return true;
       }
-      recordRoomEvent({ chatId, userId, eventType: 'work_depth_used', command: '/ask', goal: message, profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { depth: 'ask' } });
-      const ack = await bot.sendMessage(chatId, '⚡ /ask accepted: running a quick single-agent answer.');
+      const roomProfile = getAgentRoomProfile(chatSessionStore, chatId);
+      const sessionSnapshot = chatSessionStore.get(chatId) || {};
+      const conciergeDecision = classifyRoomConciergeRoute({
+        text: message,
+        command: '/ask',
+        hasAttachment: !!(msg?.document || msg?.photo || msg?.video || msg?.audio || msg?.voice),
+        pendingApproval: !!sessionSnapshot.pending_approval,
+        busy: chatRunManager?.isRunning ? chatRunManager.isRunning(chatId) : false,
+        policy: {
+          enabled: isDirectAskFastPathEnabled() || isSearchAskFastPathEnabled(),
+          max_chars: Number(process.env.DDALGGAK_DIRECT_ASK_MAX_CHARS || 420),
+          max_tokenish_units: Number(process.env.DDALGGAK_DIRECT_ASK_MAX_TOKENISH_UNITS || 55),
+        },
+        learnedModel: getRoomConciergeModel(),
+        roomFootprint: sessionSnapshot.room_memory_footprint || sessionSnapshot.roomMemoryFootprint || {},
+        recentRouteStats: sessionSnapshot.room_concierge_route_stats || sessionSnapshot.roomConciergeRouteStats || {},
+      });
+      recordRoomEvent({
+        chatId,
+        userId,
+        eventType: 'work_depth_used',
+        command: '/ask',
+        goal: message,
+        profile: roomProfile,
+        extra: { depth: conciergeDecision.depth || 'ask', room_concierge: conciergeDecision },
+      });
+      const ackText = shouldUseDirectAskFastPath(conciergeDecision)
+        ? '⚡ /ask accepted: direct Room Concierge fast path.'
+        : shouldUseSearchAskPath(conciergeDecision)
+          ? '⚡ /ask accepted: bounded Room Concierge search path.'
+          : '⚡ /ask accepted: running a quick single-agent answer.';
+      const ack = await bot.sendMessage(chatId, ackText);
       rememberCommandAck(chatId, ack);
+      try {
+        chatSessionStore.upsert(chatId, (session = {}) => ({
+          ...session,
+          last_room_concierge_route: conciergeDecision,
+        }));
+      } catch {}
+      if (shouldUseDirectAskFastPath(conciergeDecision)) {
+        const directResult = await runDirectAskOrFallback({ chatId, userId, msg, message, decision: conciergeDecision, ackAlreadySent: true });
+        if (directResult?.status !== 'disabled') return true;
+      }
+      if (shouldUseSearchAskPath(conciergeDecision)) {
+        const searchResult = await runSearchAskOrFallback({ chatId, userId, msg, message, decision: conciergeDecision, ackAlreadySent: true });
+        if (searchResult?.status !== 'disabled') return true;
+      }
       const askTeamConfig = buildRoomFirstTeamConfiguration({
         taskText: message,
         workMode: 'ask',
-        roomProfile: getAgentRoomProfile(chatSessionStore, chatId),
+        roomProfile,
         chatId,
-        source: 'telegram_ask_room_first',
+        source: `telegram_ask_${conciergeDecision.route || 'room_first'}`,
       });
       await enqueueWorkbenchInput({ chatId, userId, msg, text: message, kind: 'ask', teamConfig: askTeamConfig, ackAlreadySent: true });
       return true;

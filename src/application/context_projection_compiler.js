@@ -11,9 +11,18 @@ function stableHash(value = '') { return crypto.createHash('sha1').update(String
 function clip(value = '', max = 4000) { const s = String(value || ''); return s.length > max ? `${s.slice(0, max)}\n…[truncated]` : s; }
 function nowMs() { return Date.now(); }
 
+function looksLikeCasualRecommendation(goal = '') {
+  const text = clean(goal).toLowerCase();
+  if (!text) return false;
+  const casual = /메뉴|식당|저녁|점심|아침|회식|맛집|추천|먹을|음식|restaurant|menu|dinner|lunch|recommend/.test(text);
+  const implementation = /code|implement|build|fix|test|refactor|patch|webapp|src\/|코드|구현|패치|리팩터|테스트|레포|workspace|repo/.test(text);
+  return casual && !implementation;
+}
+
 function inferTaskType({ taskType = '', goal = '', role = '' } = {}) {
   const explicit = clean(taskType).toLowerCase();
   if (explicit) return explicit;
+  if (looksLikeCasualRecommendation(goal)) return 'general_task';
   const text = `${goal} ${role}`.toLowerCase();
   if (/code|implement|build|fix|test|refactor|patch|webapp|src\//.test(text)) return 'code_change';
   if (/review|verify|검토|리뷰|검증/.test(text)) return 'review';

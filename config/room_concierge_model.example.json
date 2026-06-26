@@ -1,0 +1,57 @@
+{
+  "kind": "room_concierge_model_v1",
+  "version": "example-local-linear-v0",
+  "model_type": "linear_route_scorer",
+  "routes": [
+    "concierge_direct_answer",
+    "concierge_search_answer",
+    "standard_workbench",
+    "team_orchestration"
+  ],
+  "policy": {
+    "enabled": true,
+    "min_confidence": 0.72,
+    "allow_safe_escalation": true,
+    "allow_direct_override": false,
+    "hard_blockers_prevent_direct": true
+  },
+  "route_weights": {
+    "concierge_direct_answer": {
+      "bias": 0.8,
+      "signal_simple_qa": 1.4,
+      "task_casual": 0.8,
+      "char_norm": -0.6,
+      "tokenish_norm": -0.7,
+      "room_governance_pressure": -0.4,
+      "room_handoff_need": -0.5
+    },
+    "concierge_search_answer": {
+      "bias": -0.2,
+      "signal_search": 2.0,
+      "room_search_need": 0.8,
+      "signal_simple_qa": -0.2
+    },
+    "standard_workbench": {
+      "bias": 0.1,
+      "signal_workbench": 2.0,
+      "signal_high_risk": 1.8,
+      "has_attachment": 1.7,
+      "room_memory_pressure": 0.6,
+      "room_governance_pressure": 0.7,
+      "room_export_boundary_risk": 0.8,
+      "room_handoff_need": 0.8,
+      "task_coding": 0.7,
+      "task_research": 0.3
+    },
+    "team_orchestration": {
+      "bias": -0.6,
+      "signal_team": 2.4,
+      "room_team_need": 1.2,
+      "task_research": 0.5
+    }
+  },
+  "metadata": {
+    "description": "Example local Room Concierge model. Train/replace with room trace labels before enabling in production.",
+    "expected_env": "DDALGGAK_ROOM_CONCIERGE_MODEL_PATH=ddalggak/config/room_concierge_model.example.json"
+  }
+}

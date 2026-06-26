@@ -93,3 +93,19 @@ test('agent output extraction and handoff delta are lightweight runtime side eff
   assert.equal(state.handoffs.length, 1);
   assert.match(JSON.stringify(state.handoffs[0].delta), /financial wording/);
 });
+
+test('context projection keeps casual recommendation goals out of code_change even when role text is implementation-like', () => {
+  const rootDir = tmpRoot();
+  const compiled = compileAgentContextProjection({
+    rootDir,
+    jobId: 'job_menu',
+    agentId: 'research_lead',
+    roleId: 'Research Lead',
+    goal: '오늘 점심에는 오므라이스를 먹었고 저녁에는 식당 회식 메뉴를 추천해줘',
+    baseContextText: 'Legacy context block',
+    modelNode: 'codex:gpt-5.5',
+  });
+  assert.equal(compiled.ok, true);
+  assert.equal(compiled.task_type, 'general_task');
+  assert.doesNotMatch(compiled.prompt_block, /task_type: code_change/);
+});
