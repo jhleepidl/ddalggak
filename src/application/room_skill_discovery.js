@@ -60,7 +60,7 @@ function buildProbeForObject(objectId = 'observed_event', { index = 0, counts = 
       needsConfirmation ? 'asks a confirmation question before persistent write' : 'keeps uncertain writes as proposals',
     ],
     difficulty: index === 0 ? 'representative' : 'coverage',
-    replay_tags: ['paper4_memory_schema_trial', 'room_specific_probe'],
+    replay_tags: ['room_memory_schema_trial', 'room_specific_probe'],
   };
 }
 
@@ -78,7 +78,7 @@ function buildConflictProbe(objectIds = []) {
       'routes risky memory updates to review',
     ],
     difficulty: 'hard_negative',
-    replay_tags: ['paper4_harmful_memory_rejection', 'cross_time_replay'],
+    replay_tags: ['room_memory_harmful_memory_rejection', 'cross_time_replay'],
   };
 }
 
@@ -111,7 +111,7 @@ export function buildRoomProbeSuite({ aggregate = {}, proposals = [], roomPackag
         'reports token/cost versus utility tradeoff',
       ],
       difficulty: 'treatment_selection',
-      replay_tags: ['paper4_memory_treatment_ranking', 'materialization_trial'],
+      replay_tags: ['room_memory_treatment_ranking', 'materialization_trial'],
     });
   }
   return {
@@ -133,7 +133,7 @@ export function buildMemorySchemaTrialPlan({ aggregate = {}, proposals = [], roo
   const objectTypes = topIds(asObject(aggregate).top_objects, 8);
   const schemaProposals = asArray(proposals).filter((proposal) => asObject(proposal).proposal_type === 'memory_schema');
   return {
-    kind: 'paper4_memory_schema_trial_plan_v1',
+    kind: 'room_memory_schema_trial_plan_v1',
     title: 'Room Memory Schema Trials',
     research_question: 'Which room-specific memory schema treatment improves future recurring room tasks, under governance and privacy constraints?',
     unit_of_treatment: 'room_specific_memory_package_or_schema_projection',
@@ -208,7 +208,7 @@ export function buildRoomSkillDiscoveryBundle({
   candidateVersions = [],
 } = {}) {
   const probeSuite = buildRoomProbeSuite({ aggregate, proposals, roomPackage });
-  const paper4TrialPlan = buildMemorySchemaTrialPlan({ aggregate, proposals, roomPackage });
+  const room_memory_trialsTrialPlan = buildMemorySchemaTrialPlan({ aggregate, proposals, roomPackage });
   const replayPlan = buildCrossTimeReplayPlan({ probeSuite, candidateVersions });
   const skillCards = [];
   const objectTypes = topIds(asObject(aggregate).top_objects, 3);
@@ -243,7 +243,7 @@ export function buildRoomSkillDiscoveryBundle({
     scope: 'room_evolution_proposals_only',
     probe_suite: probeSuite,
     skill_proposals: skillCards,
-    paper4_memory_schema_trial_plan: paper4TrialPlan,
+    room_memory_schema_trial_plan: room_memory_trialsTrialPlan,
     cross_time_replay_plan: replayPlan,
     governance: {
       ai_generates_probes_and_proposals: true,

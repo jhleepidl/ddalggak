@@ -40,24 +40,24 @@ function stripRawTextFields(value) {
   const out = {};
   for (const [key, raw] of Object.entries(value)) {
     const lower = key.toLowerCase();
-    if (['text', 'raw_text', 'rawtext', 'body', 'content', 'message', 'prompt', 'answer', 'response'].includes(lower)) continue;
+    if (['text', 'raw_text', 'rawtext', 'body', 'content', 'message', 'prompt', 'answer', 'response', 'question', 'freeform_note', 'note'].includes(lower)) continue;
     if (lower.includes('transcript') || lower.includes('attachment_bytes')) continue;
     out[key] = stripRawTextFields(raw);
   }
   return out;
 }
 
-export function buildPaper4CaptureConfig(env = process.env) {
+export function buildRoomMemoryCaptureConfig(env = process.env) {
   return {
-    kind: 'paper4_capture_config_v1',
-    enabled: boolEnv(env.PAPER4_DATA_COLLECTION_ENABLED),
-    out_dir: env.PAPER4_DATA_DIR || path.join(process.cwd(), 'paper4_data'),
-    event_file: env.PAPER4_EVENT_FILE || 'room_events.jsonl',
+    kind: 'room_memory_capture_config_v1',
+    enabled: boolEnv(env.ROOM_MEMORY_TRIALS_DATA_COLLECTION_ENABLED),
+    out_dir: env.ROOM_MEMORY_TRIALS_DATA_DIR || path.join(process.cwd(), 'room_memory_data'),
+    event_file: env.ROOM_MEMORY_TRIALS_EVENT_FILE || 'room_events.jsonl',
     include_raw_text: false,
   };
 }
 
-export function buildPaper4RoomEvent({
+export function buildRoomMemoryEvent({
   taskText = '',
   chatId = '',
   roomId = '',
@@ -69,18 +69,20 @@ export function buildPaper4RoomEvent({
   skillDiscovery = null,
   outcome = null,
   componentRanking = null,
+  roomPackageQuestionPlan = null,
+  roomPackageElicitationEvent = null,
   source = 'ddalggak_runtime',
   ts = nowIso(),
 } = {}) {
   const route = asObject(roomTurnRoute);
   const evolution = asObject(roomEvolution);
   const discovery = asObject(skillDiscovery || evolution.skill_discovery);
-  const trialPlan = asObject(evolution.paper4_trial_plan || discovery.paper4_memory_schema_trial_plan);
+  const trialPlan = asObject(evolution.room_memory_trial_plan || discovery.room_memory_schema_trial_plan);
   const aggregate = asObject(evolution.aggregate);
   const counts = asObject(aggregate.counts);
   const task = clean(taskText, { maxLen: 2000 });
   return {
-    kind: 'paper4_room_event_v1',
+    kind: 'room_memory_event_v1',
     ts,
     source,
     ids: {
@@ -118,13 +120,17 @@ export function buildPaper4RoomEvent({
       },
       proposal_types: asArray(evolution.proposals).map((p) => asObject(p).proposal_type).filter(Boolean).slice(0, 20),
     }),
-    paper4: stripRawTextFields({
+    room_memory_trials: stripRawTextFields({
       candidate_object_types: asArray(trialPlan.candidate_object_types || trialPlan.candidateObjectTypes).slice(0, 12),
       treatment_ids: asArray(trialPlan.treatments).map((t) => typeof t === 'string' ? t : asObject(t).id).filter(Boolean).slice(0, 12),
       probe_count: asArray(asObject(discovery.probe_suite).probes).length,
       replay_probe_ids: asArray(asObject(discovery.cross_time_replay_plan).probes || asObject(discovery.cross_time_replay_plan).probe_ids).slice(0, 20),
     }),
     ranking: stripRawTextFields(componentRanking || {}),
+    room_package_elicitation: stripRawTextFields({
+      plan: roomPackageQuestionPlan || {},
+      answer_event: roomPackageElicitationEvent || {},
+    }),
     outcome: stripRawTextFields(outcome || {}),
     privacy: {
       includes_raw_text: false,
@@ -135,7 +141,7 @@ export function buildPaper4RoomEvent({
   };
 }
 
-export function validatePaper4Event(event = {}) {
+export function validateRoomMemoryEvent(event = {}) {
   const row = asObject(event);
   const serialized = JSON.stringify(row);
   const forbiddenKeys = ['raw_text', 'rawText', 'transcript', 'attachment_bytes'];
@@ -147,21 +153,21 @@ export function validatePaper4Event(event = {}) {
   return { ok: true };
 }
 
-export function appendPaper4EventJsonl(event = {}, { config = buildPaper4CaptureConfig(), enabled = null } = {}) {
+export function appendRoomMemoryEventJsonl(event = {}, { config = buildRoomMemoryCaptureConfig(), enabled = null } = {}) {
   const cfg = asObject(config);
   const shouldWrite = enabled === null ? cfg.enabled === true : enabled === true;
-  const validation = validatePaper4Event(event);
+  const validation = validateRoomMemoryEvent(event);
   if (!validation.ok) return { ok: false, wrote: false, reason: validation.reason };
   if (!shouldWrite) return { ok: true, wrote: false, reason: 'disabled' };
-  const outDir = path.resolve(cfg.out_dir || path.join(process.cwd(), 'paper4_data'));
+  const outDir = path.resolve(cfg.out_dir || path.join(process.cwd(), 'room_memory_data'));
   const file = path.join(outDir, clean(cfg.event_file || 'room_events.jsonl', { maxLen: 180 }) || 'room_events.jsonl');
   fs.mkdirSync(outDir, { recursive: true });
   fs.appendFileSync(file, `${JSON.stringify(event)}\n`, 'utf8');
   return { ok: true, wrote: true, file };
 }
 
-export function maybeCapturePaper4RoomEvent(args = {}, options = {}) {
-  const event = buildPaper4RoomEvent(args);
-  const result = appendPaper4EventJsonl(event, options);
+export function maybeCaptureRoomMemoryEvent(args = {}, options = {}) {
+  const event = buildRoomMemoryEvent(args);
+  const result = appendRoomMemoryEventJsonl(event, options);
   return { event, result };
 }

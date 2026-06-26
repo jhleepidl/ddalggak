@@ -103,8 +103,8 @@ export function estimateRuntimeCostUsd(tokens = {}, pricing = {}) {
 export function buildRuntimeTelemetryConfig(env = process.env) {
   return {
     kind: 'runtime_telemetry_config_v1',
-    enabled: boolEnv(env.RUNTIME_TELEMETRY_ENABLED || env.PAPER4_DATA_COLLECTION_ENABLED),
-    out_dir: env.RUNTIME_TELEMETRY_DIR || env.PAPER4_DATA_DIR || path.join(process.cwd(), 'paper4_data'),
+    enabled: boolEnv(env.RUNTIME_TELEMETRY_ENABLED || env.ROOM_MEMORY_TRIALS_DATA_COLLECTION_ENABLED),
+    out_dir: env.RUNTIME_TELEMETRY_DIR || env.ROOM_MEMORY_TRIALS_DATA_DIR || path.join(process.cwd(), 'room_memory_data'),
     event_file: env.RUNTIME_TELEMETRY_FILE || 'runtime_telemetry.jsonl',
     include_raw_text: false,
   };
@@ -125,7 +125,7 @@ export function buildRuntimeTelemetryEvent({
   wallDurationMs = 0,
   route = null,
   context = null,
-  paper4 = null,
+  room_memory_trials = null,
   outcome = null,
   pricing = null,
   source = 'ddalggak_runtime',
@@ -159,7 +159,7 @@ export function buildRuntimeTelemetryEvent({
       wall_duration_ms: numeric(wallDurationMs || latencyMs, 0),
     },
     context: stripRuntimeTelemetryRawFields(context || {}),
-    paper4: stripRuntimeTelemetryRawFields(paper4 || {}),
+    room_memory_trials: stripRuntimeTelemetryRawFields(room_memory_trials || {}),
     outcome: stripRuntimeTelemetryRawFields(outcome || {}),
     trace: stripRuntimeTelemetryRawFields(trace || {}),
     cost: costEstimate === null ? null : {
@@ -194,7 +194,7 @@ export function appendRuntimeTelemetryJsonl(event = {}, { config = buildRuntimeT
   const validation = validateRuntimeTelemetryEvent(event);
   if (!validation.ok) return { ok: false, wrote: false, reason: validation.reason };
   if (!shouldWrite) return { ok: true, wrote: false, reason: 'disabled' };
-  const outDir = path.resolve(cfg.out_dir || path.join(process.cwd(), 'paper4_data'));
+  const outDir = path.resolve(cfg.out_dir || path.join(process.cwd(), 'room_memory_data'));
   const file = path.join(outDir, clean(cfg.event_file || 'runtime_telemetry.jsonl', { maxLen: 180 }) || 'runtime_telemetry.jsonl');
   fs.mkdirSync(outDir, { recursive: true });
   fs.appendFileSync(file, `${JSON.stringify(event)}\n`, 'utf8');

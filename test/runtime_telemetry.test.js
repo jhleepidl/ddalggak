@@ -25,7 +25,7 @@ test('runtime telemetry preserves actual OpenAI usage without raw prompts', () =
       output_tokens_details: { reasoning_tokens: 5 },
     },
     route: { depth: 'ask', execution_shape: 'single_agent', raw_text: 'secret' },
-    paper4: { treatment_id: 'T3_schema_plus_confirmation', prompt: 'secret prompt' },
+    room_memory_trials: { treatment_id: 'T3_schema_plus_confirmation', prompt: 'secret prompt' },
     pricing: { input_per_million_usd: 1, cached_input_per_million_usd: 0.1, output_per_million_usd: 2, snapshot: 'test' },
   });
   const encoded = JSON.stringify(event);

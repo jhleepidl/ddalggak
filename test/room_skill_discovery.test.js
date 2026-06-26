@@ -8,7 +8,7 @@ function event(text, command = '/ask') {
   return buildRoomLearningEvent({ chatId: 'room-a', userId: 'u', command, text });
 }
 
-test('room evolution includes Ctx2Skill-inspired probe and Paper 4 trial bundle', () => {
+test('room evolution includes Ctx2Skill-inspired probe and Room Memory Schema Trials trial bundle', () => {
   const events = [
     event('오늘 저녁 뭐 먹을까? 나는 버섯은 싫어해'),
     event('어제는 파스타 먹었어. 기록해줘'),
@@ -19,8 +19,8 @@ test('room evolution includes Ctx2Skill-inspired probe and Paper 4 trial bundle'
 
   assert.equal(snapshot.skill_discovery.kind, 'room_skill_discovery_bundle_v1');
   assert.ok(snapshot.skill_discovery.probe_suite.probes.length >= 2);
-  assert.equal(snapshot.paper4_trial_plan.kind, 'paper4_memory_schema_trial_plan_v1');
-  assert.ok(snapshot.paper4_trial_plan.novelty_claims.some((claim) => claim.includes('room-scoped intervention')));
+  assert.equal(snapshot.room_memory_trial_plan.kind, 'room_memory_schema_trial_plan_v1');
+  assert.ok(snapshot.room_memory_trial_plan.novelty_claims.some((claim) => claim.includes('room-scoped intervention')));
   assert.equal(snapshot.skill_discovery.governance.direct_memory_write, false);
 });
 

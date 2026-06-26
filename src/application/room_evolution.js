@@ -390,7 +390,7 @@ export function proposeRoomEvolution({ events = [], roomPackage = null, policy =
     aggregate,
     proposals: proposals.filter(Boolean),
     skill_discovery: skillDiscovery,
-    paper4_trial_plan: skillDiscovery.paper4_memory_schema_trial_plan,
+    room_memory_trial_plan: skillDiscovery.room_memory_schema_trial_plan,
     governance: {
       ai_role: 'architect_advisor_proposer_not_controller',
       auto_apply: false,

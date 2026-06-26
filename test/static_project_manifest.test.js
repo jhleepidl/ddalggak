@@ -54,7 +54,7 @@ test('manifest import bundle discovers CLAUDE.md from a project directory', () =
   const bundle = buildProjectManifestImportBundle({ rootDir: dir, roomId: 'r1' });
   assert.deepEqual(bundle.discovered_files, ['CLAUDE.md']);
   assert.equal(bundle.room_package_candidates.length, 1);
-  assert.equal(bundle.paper4_static_manifest_treatment[0].treatment_id, 'B1_static_project_manifest');
+  assert.equal(bundle.room_memory_static_manifest_treatment[0].treatment_id, 'B1_static_project_manifest');
   const block = buildStaticManifestContextBlock(bundle.manifests[0]);
   assert.match(block, /static_project_manifest/);
 });

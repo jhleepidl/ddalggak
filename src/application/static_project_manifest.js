@@ -282,7 +282,7 @@ export function buildProjectManifestImportBundle({ rootDir = process.cwd(), file
     discovered_files: manifests.map((m) => m.filename),
     manifests,
     room_package_candidates: roomPackages,
-    paper4_static_manifest_treatment: manifests.map((manifest) => ({
+    room_memory_static_manifest_treatment: manifests.map((manifest) => ({
       treatment_id: 'B1_static_project_manifest',
       manifest_type: manifest.manifest_type,
       filename: manifest.filename,
