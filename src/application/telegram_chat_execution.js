@@ -85,6 +85,7 @@ import {
   summarizeWatchTaskState,
 } from './watch_task_store.js';
 import { formatActiveArtifactContext, recordArtifactObservationFromAgentOutput } from "./artifact_context.js";
+import { recordVisualArtifactCapsuleFromAgentOutput } from "./visual_artifact_memory_capsule.js";
 import { hasProviderFileToolLimitation, materializeArtifactsFromLlmOutput } from "./llm_output_artifact_materializer.js";
 import { formatActiveUserFactContext, recordUserFactEvents } from "./user_fact_context.js";
 import { buildScopedPromptAssembly, hydrateRuntimeScopesViaGoC, resolveScopeExecutionState } from "./goc_scope_runtime.js";
@@ -1210,7 +1211,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     requirements: artifactOutputRequirements,
     decision: artifactOutputRequirements.task_loop_workspace_write_allowed ? 'task_loop_workspace_write_allowed' : (artifactOutputRequirements.artifact_delivery_forbidden ? 'artifact_forbidden' : 'chat_default'),
   });
-  const includeArtifactContext = artifactOutputRequirements.artifact_delivery_requested === true;
+  const includeArtifactContext = artifactOutputRequirements.artifact_delivery_requested === true || /(업로드|올린|이미지|사진|캡처|첨부|메뉴판|upload|image|photo|screenshot|attachment)/i.test(`${cleanUserRequest} ${rawGoal}`);
   const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, {
     limitPerBucket: 3,
     includeWorkspaceArtifacts: includeArtifactContext,
@@ -1326,6 +1327,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
   }
   try {
     recordArtifactObservationFromAgentOutput(runDir(jobId), out, { source: `${effectiveResearchProvider}:${agentKey}` });
+    recordVisualArtifactCapsuleFromAgentOutput(runDir(jobId), out, { source: `${effectiveResearchProvider}:${agentKey}` });
   } catch {}
   const researchPurpose = ['reviewer', 'critic'].includes(roleKey) ? 'review' : 'research';
   appendRoleAwareTracking(jobId, `## ${sectionTitle}\n\n${out}\n`, {
@@ -1521,7 +1523,7 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
     requirements: executionRequirements,
     decision: executionRequirements.task_loop_workspace_write_allowed ? 'task_loop_workspace_write_allowed' : (executionRequirements.artifact_delivery_forbidden ? 'artifact_forbidden' : 'chat_default'),
   });
-  const includeArtifactContext = executionRequirements.artifact_delivery_requested === true;
+  const includeArtifactContext = executionRequirements.artifact_delivery_requested === true || /(업로드|올린|이미지|사진|캡처|첨부|메뉴판|upload|image|photo|screenshot|attachment)/i.test(`${cleanUserRequest} ${instruction}`);
   const activeArtifactContext = includeArtifactContext ? formatActiveArtifactContext(runDir(jobId), { maxChars: 1200, limit: 4 }) : '';
   const activeUserFactContext = formatActiveUserFactContext(runDir(jobId), { maxChars: 1600 });
   const workspaceFilesText = buildWorkspaceFilesPromptSection(jobId, {

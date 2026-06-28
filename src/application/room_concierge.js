@@ -37,6 +37,11 @@ const WORKBENCH_NEEDLES = [
   'pull request', 'commit', 'diff', 'repo', 'repository', 'workspace',
 ];
 
+const ARTIFACT_REFERENCE_NEEDLES = [
+  '업로드', '올렸', '올린', '메뉴 이미지', '메뉴 사진', '이미지', '사진', '캡처', '첨부한', '첨부', '파일', '전에 upload',
+  'uploaded', 'upload', 'image', 'photo', 'screenshot', 'attachment', 'attached',
+];
+
 const SEARCH_NEEDLES = [
   '검색', '찾아봐', '찾아보고', '실제로', '최신', '현재', '공식', '메뉴판', '네이버', '인스타', '링크', '웹', '인터넷',
   'search', 'browse', 'lookup', 'latest', 'current', 'official', 'website',
@@ -73,7 +78,7 @@ export function classifyRoomConciergeRoute({
   const lowerCommand = clean(command).toLowerCase() || '/ask';
 
   if (!message) blockers.push('empty_message');
-  if (lowerCommand !== '/ask') blockers.push('not_ask_command');
+  if (!['/ask', '/chat', '/c'].includes(lowerCommand)) blockers.push('not_conversational_command');
   if (hasAttachment) blockers.push('has_attachment');
   if (pendingApproval) blockers.push('pending_approval');
   if (busy) blockers.push('busy_chat');
@@ -85,10 +90,12 @@ export function classifyRoomConciergeRoute({
   if (includesAny(message, WORKBENCH_NEEDLES)) signals.push('workbench_intent');
   if (includesAny(message, TEAM_OR_LOOP_NEEDLES)) signals.push('team_or_review_intent');
   if (includesAny(message, SEARCH_NEEDLES)) signals.push('search_or_freshness_intent');
+  if (includesAny(message, ARTIFACT_REFERENCE_NEEDLES)) signals.push('artifact_reference_intent');
   if (includesAny(message, SIMPLE_QA_NEEDLES)) signals.push('simple_qa_intent');
 
   if (signals.includes('team_or_review_intent')) blockers.push('needs_team_or_review');
   if (signals.includes('workbench_intent')) blockers.push('needs_workspace_or_artifact');
+  if (signals.includes('artifact_reference_intent')) blockers.push('needs_artifact_context');
   if (signals.includes('high_risk_domain')) blockers.push('needs_standard_safety_context');
 
   let route = 'standard_workbench';
@@ -110,7 +117,7 @@ export function classifyRoomConciergeRoute({
     shouldBypassWorkbench = true;
     shouldShowPlanPreview = false;
     answerMode = 'single_model_minimal_prompt';
-    reasons.push('short_low_risk_ask');
+    reasons.push(lowerCommand === '/ask' ? 'short_low_risk_ask' : 'short_low_risk_chat');
   } else if (signals.includes('team_or_review_intent')) {
     route = 'team_orchestration';
     depth = 'team';
@@ -162,8 +169,9 @@ export function buildDirectAskPrompt({ question = '', locale = 'ko-KR', roomName
   const q = clean(question);
   const roomLine = clean(roomName) ? `Room: ${clean(roomName)}` : '';
   return [
-    'You are DdalGgak Room Concierge direct-answer mode.',
+    'You are DdalGgak Room Concierge direct chat mode.',
     'Answer the user directly and briefly. Do not mention routing, agents, plans, traces, or internal memory.',
+    'LATEST TURN IS AUTHORITATIVE: answer only the user question below. Do not answer previous questions unless the user explicitly asks you to recall them.',
     'For casual recommendations, give practical choices. For uncertainty, say what is uncertain without over-explaining.',
     'Do not claim you searched the web unless the prompt explicitly includes search results.',
     `Locale: ${locale || 'ko-KR'}`,

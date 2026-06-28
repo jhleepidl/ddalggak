@@ -21,7 +21,7 @@ test('/help shows compact command surface and points to /help more', async () =>
   const handled = await handler({ msg: { chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/help', chatId: 'chat-1', userId: 'user-1' })
 
   assert.equal(handled, true)
-  assert.match(sent[0].text, /\/chat <text>/)
+  assert.match(sent[0].text, /\/chat 또는 \/c <message>/)
   assert.match(sent[0].text, /\/task loop <목표>/)
   assert.match(sent[0].text, /\/agents suggest <목표>/)
   assert.match(sent[0].text, /\/review/)

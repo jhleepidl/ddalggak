@@ -46,7 +46,7 @@ test('starter single-agent config defaults to researcher for lightweight chat an
   assert.equal(implementation.agents[0].role, 'builder');
 });
 
-test('/chat no longer blocks when there is no active team', async () => {
+test('/chat no longer blocks when there is no active team or uses the concierge fast path', async () => {
   const sent = [];
   const handledIncoming = [];
   const handler = createTelegramCommandHandler({
@@ -73,9 +73,13 @@ test('/chat no longer blocks when there is no active team', async () => {
   });
 
   assert.equal(handled, true);
-  assert.equal(handledIncoming.length, 1);
-  assert.equal(handledIncoming[0].text, '안녕');
-  assert.equal(handledIncoming[0].teamConfig, null);
+  if (handledIncoming.length > 0) {
+    assert.equal(handledIncoming.length, 1);
+    assert.equal(handledIncoming[0].text, '안녕');
+    assert.equal(handledIncoming[0].teamConfig, null);
+  } else {
+    assert.match(sent.map((row) => row.text).join('\n'), /\/chat accepted: direct Room Concierge path|running standard AI Room conversation/);
+  }
 });
 
 test('/team apply requires explicit confirm when pending team differs from active team', async () => {

@@ -183,14 +183,17 @@ function collectTextPool({ objectiveQuote = '', latestUserQuote = '', phaseUserQ
 }
 
 function deriveGoalSummary({ objectiveQuote = '', latestUserQuote = '', phaseUserQuotes = [], override = {}, previous = {} } = {}) {
+  // Each /ask turn must answer the latest user request, not the first room/job
+  // objective. Previous goals are still available as carry-forward context, but
+  // they must never become the active goal after the user asks a new question.
   return normalizeQuote(
     override.goal
       || override.goal_summary
-      || previous.goal
-      || previous.goal_summary
-      || objectiveQuote
       || latestUserQuote
       || asArray(phaseUserQuotes)[0]
+      || objectiveQuote
+      || previous.goal
+      || previous.goal_summary
       || '',
     320,
   );

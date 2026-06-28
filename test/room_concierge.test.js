@@ -9,12 +9,18 @@ import {
   shouldUseSearchAskPath,
 } from '../src/application/room_concierge.js';
 
-test('short low-risk /ask uses direct fast path', () => {
-  const decision = classifyRoomConciergeRoute({ text: '오늘 저녁 메뉴 추천해줘', command: '/ask' });
+test('short low-risk /chat uses direct fast path', () => {
+  const decision = classifyRoomConciergeRoute({ text: '오늘 저녁 메뉴 추천해줘', command: '/chat' });
   assert.equal(decision.route, 'concierge_direct_answer');
   assert.equal(decision.should_bypass_workbench, true);
   assert.equal(decision.should_show_plan_preview, false);
   assert.equal(shouldUseDirectAskFastPath(decision), true);
+});
+
+test('legacy /ask remains supported as a conversational command', () => {
+  const decision = classifyRoomConciergeRoute({ text: '간단히 설명해줘', command: '/ask' });
+  assert.equal(decision.route, 'concierge_direct_answer');
+  assert.equal(decision.should_bypass_workbench, true);
 });
 
 test('search or freshness request uses bounded search fast path', () => {
@@ -42,7 +48,7 @@ test('team and review requests escalate out of direct fast path', () => {
 
 test('direct prompt keeps routing internals out of user-facing answer request', () => {
   const prompt = buildDirectAskPrompt({ question: '간단히 설명해줘', roomName: '메뉴추천' });
-  assert.match(prompt, /direct-answer mode/);
+  assert.match(prompt, /direct chat mode/);
   assert.match(prompt, /Do not mention routing, agents, plans/);
   assert.match(prompt, /간단히 설명해줘/);
 });
@@ -93,4 +99,18 @@ test('search fallback prompt forbids inventing unavailable fresh facts', () => {
   assert.match(prompt, /search-intent mode/);
   assert.match(prompt, /no reliable source is available/);
   assert.match(prompt, /실제 메뉴를 검색해서 추천해줘/);
+});
+
+test('artifact/image follow-up asks for workbench artifact context instead of stale direct answer', () => {
+  const decision = classifyRoomConciergeRoute({ text: '전에 upload로 메뉴 이미지 올렸잖아. 그 이미지 보고 주류 추천해줘', command: '/ask' });
+  assert.equal(decision.route, 'standard_workbench');
+  assert.ok(decision.signals.includes('artifact_reference_intent'));
+  assert.ok(decision.blockers.includes('needs_artifact_context'));
+  assert.equal(decision.should_show_plan_preview, true);
+});
+
+test('direct prompt pins the latest user request over previous-room state', () => {
+  const prompt = buildDirectAskPrompt({ question: '오늘 저녁 혼자 배달시켜먹을 메뉴 추천해줘' });
+  assert.match(prompt, /LATEST TURN IS AUTHORITATIVE/);
+  assert.match(prompt, /answer only the user question below/);
 });

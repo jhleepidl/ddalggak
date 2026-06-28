@@ -61,13 +61,14 @@ function makeHandler({ sent = [], incoming = [] } = {}) {
   });
 }
 
-test('public help exposes /ask, /team, and /loop as primary commands', () => {
+test('public help exposes /chat primary entry and short aliases', () => {
   const source = readFileSync(new URL('../src/adapters/telegram/commands.js', import.meta.url), 'utf8');
-  assert.match(source, /- \/ask <question>/);
-  assert.match(source, /- \/team <goal>/);
-  assert.match(source, /- \/loop \[--loops n\] <goal>/);
-  assert.match(source, /if \(cmd === "\/ask"\)/);
-  assert.match(source, /if \(cmd === "\/loop"\)/);
+  assert.match(source, /- \/chat 또는 \/c <message>/);
+  assert.match(source, /- \/ask 또는 \/a <question>/);
+  assert.match(source, /- \/team 또는 \/t <goal>/);
+  assert.match(source, /- \/loop 또는 \/l \[--loops n\] <goal>/);
+  assert.match(source, /'\/c': '\/chat'/);
+  assert.match(source, /'\/t': '\/team'/);
 });
 
 test('/ask enqueues a quick answer with an isolated single-agent teamConfig', async () => {
@@ -87,7 +88,7 @@ test('/ask enqueues a quick answer with an isolated single-agent teamConfig', as
   assert.equal(incoming[0].kind, 'ask');
   assert.equal(incoming[0].teamConfig?.agents?.length, 1);
   assert.equal(incoming[0].teamConfig?.agents?.[0]?.role, 'researcher');
-  assert.match(sent.map((row) => row.text).join('\n'), /quick single-agent answer/);
+  assert.match(sent.map((row) => row.text).join('\n'), /standard AI Room conversation/);
 });
 
 test('/loop without a goal returns public usage', async () => {
@@ -126,6 +127,48 @@ test('/team freeform goal starts a team-review attempt while advanced subcommand
   assert.match(sent.map((row) => row.text).join('\n'), /team-review attempt/);
 });
 
+test('/c alias routes through /chat and can use Room Concierge direct executor', async () => {
+  const sent = [];
+  const incoming = [];
+  const handler = createTelegramCommandHandler({
+    bot: makeBot(sent),
+    sendLong: async (_bot, chatId, text) => {
+      sent.push({ chatId, text });
+      return { message_id: sent.length };
+    },
+    sendRouterAckMessage: async (_bot, chatId) => {
+      sent.push({ chatId, text: 'ACK' });
+      return { message_id: sent.length };
+    },
+    chatSessionStore: makeSessionStore(),
+    parseChatMessageWithFlags: (raw) => ({ message: String(raw || '').trim(), debug: false }),
+    directAskExecutor: async ({ prompt, decision }) => {
+      assert.equal(decision.route, 'concierge_direct_answer');
+      assert.match(prompt, /direct chat mode/);
+      return { text: '채팅 답변입니다.', provider: 'test-direct' };
+    },
+    chatRunManager: {
+      isRunning: () => false,
+      async handleIncoming(payload) {
+        incoming.push(payload);
+        return { status: 'started' };
+      },
+    },
+  });
+
+  const handled = await handler({
+    msg: { message_id: 70, chat: { id: 'chat-1', type: 'private' }, from: { id: 'user-1' } },
+    text: '/c 오늘 저녁 메뉴 추천해줘',
+    chatId: 'chat-1',
+    userId: 'user-1',
+  });
+
+  assert.equal(handled, true);
+  assert.equal(incoming.length, 0);
+  assert.match(sent.map((row) => row.text).join('\n'), /\/c accepted: direct Room Concierge path/);
+  assert.match(sent.map((row) => row.text).join('\n'), /채팅 답변입니다/);
+});
+
 test('/ask can bypass workbench through Room Concierge direct executor when configured', async () => {
   const sent = [];
   const incoming = [];
@@ -143,7 +186,7 @@ test('/ask can bypass workbench through Room Concierge direct executor when conf
     parseChatMessageWithFlags: (raw) => ({ message: String(raw || '').trim(), debug: false }),
     directAskExecutor: async ({ prompt, decision }) => {
       assert.equal(decision.route, 'concierge_direct_answer');
-      assert.match(prompt, /direct-answer mode/);
+      assert.match(prompt, /direct chat mode/);
       return { text: '간단 답변입니다.', provider: 'test-direct' };
     },
     chatRunManager: {
@@ -164,7 +207,7 @@ test('/ask can bypass workbench through Room Concierge direct executor when conf
 
   assert.equal(handled, true);
   assert.equal(incoming.length, 0);
-  assert.match(sent.map((row) => row.text).join('\n'), /direct Room Concierge fast path/);
+  assert.match(sent.map((row) => row.text).join('\n'), /direct Room Concierge path/);
   assert.match(sent.map((row) => row.text).join('\n'), /간단 답변입니다/);
 });
 

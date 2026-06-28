@@ -34,6 +34,68 @@ function parseJsonMaybe(text) {
   }
 }
 
+
+const GOC_ROUTE_CIRCUIT = new Map();
+
+function gocCircuitBreakerEnabled() {
+  const raw = String(process.env.GOC_ROUTE_CIRCUIT_BREAKER_DISABLED || '').trim().toLowerCase();
+  return !['1', 'true', 'yes', 'on'].includes(raw);
+}
+
+function gocCircuitThreshold() {
+  const n = Number(process.env.GOC_ROUTE_CIRCUIT_BREAKER_THRESHOLD || 2);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 2;
+}
+
+function gocCircuitCooldownMs() {
+  const n = Number(process.env.GOC_ROUTE_CIRCUIT_BREAKER_COOLDOWN_MS || 300000);
+  return Number.isFinite(n) && n >= 1000 ? Math.floor(n) : 300000;
+}
+
+function circuitKey(method = '', attempt = {}) {
+  const path = String(attempt?.path || '').replace(/[0-9a-f]{8,}-[0-9a-f-]{8,}/gi, ':id');
+  return `${String(method || 'GET').toUpperCase()} ${path}`;
+}
+
+function isCircuitStatus(status) {
+  return [404, 405, 422, 501].includes(Number(status));
+}
+
+function isGocRouteCircuitOpen(method = '', attempt = {}) {
+  if (!gocCircuitBreakerEnabled()) return false;
+  const key = circuitKey(method, attempt);
+  const row = GOC_ROUTE_CIRCUIT.get(key);
+  if (!row) return false;
+  if (Date.now() >= Number(row.openUntil || 0)) {
+    GOC_ROUTE_CIRCUIT.delete(key);
+    return false;
+  }
+  return true;
+}
+
+function recordGocRouteCircuitFailure(method = '', attempt = {}, status = 0, message = '') {
+  if (!gocCircuitBreakerEnabled() || !isCircuitStatus(status)) return;
+  const key = circuitKey(method, attempt);
+  const prev = GOC_ROUTE_CIRCUIT.get(key) || { failures: 0, openUntil: 0, lastStatus: 0, lastMessage: '' };
+  const failures = Number(prev.failures || 0) + 1;
+  const row = {
+    failures,
+    lastStatus: Number(status) || 0,
+    lastMessage: String(message || '').slice(0, 240),
+    openUntil: failures >= gocCircuitThreshold() ? Date.now() + gocCircuitCooldownMs() : 0,
+  };
+  GOC_ROUTE_CIRCUIT.set(key, row);
+}
+
+function clearGocRouteCircuit(method = '', attempt = {}) {
+  if (!gocCircuitBreakerEnabled()) return;
+  GOC_ROUTE_CIRCUIT.delete(circuitKey(method, attempt));
+}
+
+export function getGocRouteCircuitSnapshot() {
+  return [...GOC_ROUTE_CIRCUIT.entries()].map(([key, value]) => ({ key, ...value }));
+}
+
 const RETRYABLE_STATUSES = new Set([400, 404, 405, 415, 422, 501]);
 
 function isRetryableStatus(status) {
@@ -860,17 +922,25 @@ export class GocClient {
     const plannedAttempts = filterLegacyGocAttempts(attempts, { allowLegacy: this.allowLegacyApiPaths });
     const skippedLegacyCount = Math.max(0, (Array.isArray(attempts) ? attempts.length : 0) - plannedAttempts.length);
     const errors = [];
+    const circuitSkipped = [];
     for (const attempt of plannedAttempts) {
+      if (isGocRouteCircuitOpen(method, attempt)) {
+        circuitSkipped.push(attempt);
+        continue;
+      }
       try {
-        return await this._request({
+        const data = await this._request({
           method,
           path: attempt.path,
           query: attempt.query,
           body: attempt.body,
         });
+        clearGocRouteCircuit(method, attempt);
+        return data;
       } catch (e) {
         errors.push({ error: e, attempt });
         const status = Number(e?.status);
+        recordGocRouteCircuitFailure(method, attempt, status, e?.message || e);
         if (!isRetryableStatus(status)) break;
       }
     }
@@ -892,7 +962,10 @@ export class GocClient {
       const omitted = skippedLegacyCount > 0
         ? `; skipped ${skippedLegacyCount} legacy route${skippedLegacyCount === 1 ? '' : 's'} (set GOC_ENABLE_LEGACY_API_PATHS=1 to re-enable)`
         : '';
-      const message = `${String(last?.message || 'GoC API call failed')}; attempted routes: ${attempted}${omitted}`;
+      const circuitOmitted = circuitSkipped.length > 0
+        ? `; skipped ${circuitSkipped.length} route${circuitSkipped.length === 1 ? '' : 's'} due to GoC route circuit breaker`
+        : '';
+      const message = `${String(last?.message || 'GoC API call failed')}; attempted routes: ${attempted}${omitted}${circuitOmitted}`;
       const err = new Error(message);
       err.status = last.status;
       err.data = last.data;
@@ -902,6 +975,13 @@ export class GocClient {
         status: entry?.error?.status,
         message: entry?.error?.message,
       }));
+      throw err;
+    }
+    if (circuitSkipped?.length) {
+      const err = new Error(`GoC API call skipped by route circuit breaker (${circuitSkipped.length} route${circuitSkipped.length === 1 ? '' : 's'})`);
+      err.status = 503;
+      err.attempts = [];
+      err.circuit_skipped = circuitSkipped.map((attempt) => ({ path: attempt?.path }));
       throw err;
     }
     throw new Error("GoC API call failed: no attempts");

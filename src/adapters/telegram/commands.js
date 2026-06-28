@@ -38,7 +38,12 @@ import {
 import { loadRoomConciergeModelFromEnv } from '../../application/room_concierge_model.js';
 import { runOpenAICompatiblePrompt } from '../../providers/openai_compatible.js';
 import { runCodexExec } from '../../codex.js';
+import {
+  resolveRoomConciergeModelPolicy,
+  shouldEnableConciergeFastPathForPolicy,
+} from '../../application/room_concierge_model_policy.js';
 import { formatRoomEvolutionSnapshot, proposeRoomEvolution } from '../../application/room_evolution.js';
+import { appendKnowledgeRouteEvent } from '../../application/knowledge_route_event_log.js';
 import { buildTeamInstallProposal, formatTeamInstallProposalMessage } from '../../application/install_proposal.js';
 import { buildInstallProposalPrompt, createPendingInstallProposalState, getPendingInstallProposal, archivePendingInstallProposal } from '../../application/install_proposal_state.js';
 import { formatManifestRequirementLines, normalizeManifestRequirements } from '../../shared/manifest_requirements.js';
@@ -48,6 +53,7 @@ import { getCredentialBindingState } from '../../application/credential_binding.
 import { buildTeamSchemaOptionsText, buildTeamSchemaOptionsSummaryLines } from '../../shared/team_schema_catalog.js';
 import { buildBenchmarkTeamTemplate, buildBenchmarkTemplateCatalogText } from '../../application/benchmark_team_templates.js';
 import { syncRawHistoryToGoC } from '../../application/goc_raw_history_sync.js';
+import { getGocRouteCircuitSnapshot } from '../../goc_client.js';
 import { normalizeLanguageMetadata, resolveUserSurfaceLocale } from '../../application/language_policy.js';
 import { inspectAndPrepareImprovementJob, loadImprovementExecutionContext, runImprovementAutomation, runImprovementCanary, runImprovementEvalGate, runImprovementReview, runImprovementRollback, runImprovementTests, markImprovementPromotion } from '../../application/improvement_orchestrator.js';
 import { writeIdleCompactionCandidate, formatIdleCompactionCandidateForTelegram } from '../../application/idle_compaction.js';
@@ -120,29 +126,53 @@ import {
 
 const HELP_TEXT = [
   "Commands:",
-  "- /ask <question>: 빠른 단일-agent 답변",
-  "- /team <goal>: 팀 검토/리뷰 깊이로 답변",
-  "- /loop [--loops n] <goal>: bounded loop 작업 시작",
-  "- /room: 이 채팅방의 AI Room / Room Package 설정 보기",
-  "- /chat <text>: legacy 질문/일회성 작업",
+  "- /chat 또는 /c <message>: 일반 대화/질문/사실 정정 기본 진입점",
+  "- /ask 또는 /a <question>: legacy quick-question alias. 일반 사용은 /chat 권장",
+  "- /team 또는 /t <goal>: 팀 검토/리뷰 깊이로 답변",
+  "- /loop 또는 /l [--loops n] <goal>: bounded loop 작업 시작",
+  "- /room 또는 /r: 이 채팅방의 AI Room / Room Package 설정 보기",
   "- /task: 장기 작업/loop 상태 보기",
   "- /task loop <목표>: legacy 반복 점검·개선 작업 시작",
   "- /agents: 이 채팅방의 Agent Room 보기",
   "- /agents suggest <목표>: 목표에 맞는 agent 구성 추천",
-  "- /review: 승인/검토가 필요한 항목 보기",
-  "- /memory: memory topology/pressure/proposal 상태 요약",
+  "- /review 또는 /rev: 승인/검토가 필요한 항목 보기",
+  "- /memory 또는 /m: memory topology/pressure/proposal 상태 요약",
   "- /rule <자연어 지침>: 명시적 runtime rule 추가",
-  "- /skill: skill 상태 보기",
-  "- /board: semantic memory/skill/rule board 요약",
-  "- /context: primitive context substrate/MVCC snapshot 요약",
-  "- /goc: GoC sync/review 링크와 상태 보기",
-  "- /status: 지금 진행 상황 보기",
-  "- /artifacts [limit]: 결과물 보기",
+  "- /skill 또는 /sk: skill 상태 보기",
+  "- /board 또는 /b: semantic memory/skill/rule board 요약",
+  "- /context 또는 /ctx: primitive context substrate/MVCC snapshot 요약",
+  "- /goc 또는 /g: GoC sync/review 링크와 상태 보기",
+  "- /status 또는 /st: 지금 진행 상황 보기",
+  "- /artifacts 또는 /art [limit]: 결과물 보기",
   "- /send <번호|path>: 결과물 전송",
-  "- /files [all|workspace|uploads] [limit]: 파일 보기",
+  "- /files 또는 /f [all|workspace|uploads] [limit]: 파일 보기",
   "- /stop [jobId]: 실행 중지",
   "- /help more: 고급/확장 명령 보기",
 ].join("\n");
+
+
+const COMMAND_ALIASES = new Map(Object.entries({
+  '/c': '/chat',
+  '/a': '/ask',
+  '/t': '/team',
+  '/l': '/loop',
+  '/r': '/room',
+  '/m': '/memory',
+  '/b': '/board',
+  '/ctx': '/context',
+  '/g': '/goc',
+  '/st': '/status',
+  '/art': '/artifacts',
+  '/f': '/files',
+  '/u': '/upload',
+  '/rev': '/review',
+  '/sk': '/skill',
+}));
+
+function normalizeTelegramCommandAlias(cmd = '') {
+  const value = String(cmd || '').trim().toLowerCase();
+  return COMMAND_ALIASES.get(value) || value;
+}
 
 const ADVANCED_HELP_TEXT = [
   "More commands:",
@@ -1049,16 +1079,20 @@ export function createTelegramCommandHandler(deps = {}) {
     return loadRoomConciergeModelFromEnv(process.env);
   }
 
-  function directAskProviderPreference() {
-    return String(process.env.DDALGGAK_DIRECT_ASK_PROVIDER || process.env.ROOM_CONCIERGE_DIRECT_ASK_PROVIDER || '').trim().toLowerCase();
+  function directAskModelPolicy(decision = null) {
+    return resolveRoomConciergeModelPolicy({ decision: decision || { route: 'concierge_direct_answer' }, env: process.env });
+  }
+
+  function directAskProviderPreference(decision = null) {
+    return String(directAskModelPolicy(decision).provider || '').trim().toLowerCase();
   }
 
   function isDirectAskFastPathEnabled() {
     const raw = String(process.env.DDALGGAK_DIRECT_ASK_FAST_PATH_ENABLED || process.env.ROOM_CONCIERGE_DIRECT_ASK_ENABLED || 'auto').trim().toLowerCase();
     if (['0', 'false', 'no', 'off'].includes(raw)) return false;
     if (typeof directAskExecutor === 'function') return true;
-    const providerPreference = directAskProviderPreference();
-    if (['codex', 'openai', 'openai_compatible'].includes(providerPreference)) return true;
+    const providerPreference = directAskProviderPreference({ route: 'concierge_direct_answer' });
+    if (['codex', 'openai', 'openai_compatible', 'antigravity'].includes(providerPreference)) return true;
     if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
     return directAskOpenAIConfigured();
   }
@@ -1068,8 +1102,12 @@ export function createTelegramCommandHandler(deps = {}) {
       && !!String(process.env.DDALGGAK_DIRECT_ASK_MODEL || process.env.OPENAI_COMPATIBLE_MODEL || process.env.LOCAL_MODEL || process.env.OLLAMA_MODEL || '').trim();
   }
 
-  function searchAskProviderPreference() {
-    return String(process.env.DDALGGAK_SEARCH_ASK_PROVIDER || process.env.ROOM_CONCIERGE_SEARCH_ASK_PROVIDER || directAskProviderPreference() || '').trim().toLowerCase();
+  function searchAskModelPolicy(decision = null) {
+    return resolveRoomConciergeModelPolicy({ decision: decision || { route: 'concierge_search_answer' }, env: process.env });
+  }
+
+  function searchAskProviderPreference(decision = null) {
+    return String(searchAskModelPolicy(decision).provider || '').trim().toLowerCase();
   }
 
   function searchAskOpenAIConfigured() {
@@ -1081,8 +1119,8 @@ export function createTelegramCommandHandler(deps = {}) {
     const raw = String(process.env.DDALGGAK_SEARCH_ASK_FAST_PATH_ENABLED || process.env.ROOM_CONCIERGE_SEARCH_ASK_ENABLED || 'auto').trim().toLowerCase();
     if (['0', 'false', 'no', 'off'].includes(raw)) return false;
     if (typeof searchAskExecutor === 'function') return true;
-    const providerPreference = searchAskProviderPreference();
-    if (['codex', 'openai', 'openai_compatible'].includes(providerPreference)) return true;
+    const providerPreference = searchAskProviderPreference({ route: 'concierge_search_answer' });
+    if (['codex', 'openai', 'openai_compatible', 'antigravity'].includes(providerPreference)) return true;
     if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
     return searchAskOpenAIConfigured();
   }
@@ -1099,7 +1137,26 @@ export function createTelegramCommandHandler(deps = {}) {
       return await directAskExecutor({ chatId, userId, msg, message, prompt, decision, roomProfile, jobId });
     }
 
-    const providerPreference = directAskProviderPreference();
+    const modelPolicy = directAskModelPolicy(decision);
+    const providerPreference = String(modelPolicy.provider || '').trim().toLowerCase();
+    if (providerPreference === 'antigravity') {
+      const { runAntigravityPrompt } = await import('../../antigravity.js');
+      const result = await runAntigravityPrompt({
+        workspaceRoot: process.cwd(),
+        cwd: process.cwd(),
+        prompt,
+        jobId,
+        model: modelPolicy.model || process.env.ANTIGRAVITY_MODEL || process.env.GOOGLE_AI_MODEL || '',
+        surface: 'telegram_direct_ask_fast_path',
+        agentId: 'room_concierge',
+        roleId: 'room_concierge',
+        timeoutMs: Number(process.env.DDALGGAK_DIRECT_ASK_TIMEOUT_MS || process.env.ANTIGRAVITY_TIMEOUT_MS || 25000),
+        traceMetadata: { concierge_decision: decision || null, model_policy: modelPolicy, bypassed_workbench: true },
+      });
+      if (!result.ok) throw new Error(result.stderr || 'direct Antigravity ask failed');
+      return { text: String(result.stdout || '').trim(), provider: 'antigravity', result };
+    }
+
     if ((providerPreference === 'openai_compatible' || providerPreference === 'openai' || (!providerPreference && directAskOpenAIConfigured()))) {
       const result = await runOpenAICompatiblePrompt({
         nodeId: process.env.DDALGGAK_DIRECT_ASK_NODE || '',
@@ -1117,7 +1174,7 @@ export function createTelegramCommandHandler(deps = {}) {
         agentId: 'room_concierge',
         roleId: 'room_concierge',
         cwd: process.cwd(),
-        traceMetadata: { concierge_decision: decision || null, bypassed_workbench: true },
+        traceMetadata: { concierge_decision: decision || null, model_policy: modelPolicy, bypassed_workbench: true },
       });
       if (!result.ok) throw new Error(result.stderr || 'direct OpenAI-compatible ask failed');
       return { text: String(result.stdout || '').trim(), provider: 'openai_compatible', result };
@@ -1135,10 +1192,99 @@ export function createTelegramCommandHandler(deps = {}) {
       approvalPolicy: process.env.DDALGGAK_DIRECT_ASK_APPROVAL_POLICY || 'never',
       profile: process.env.DDALGGAK_DIRECT_ASK_CODEX_PROFILE || process.env.CODEX_ASSIST_PROFILE || process.env.CODEX_PROFILE || '',
       timeoutMs: Number(process.env.DDALGGAK_DIRECT_ASK_TIMEOUT_MS || 45000),
-      traceMetadata: { concierge_decision: decision || null, bypassed_workbench: true },
+      traceMetadata: { concierge_decision: decision || null, model_policy: modelPolicy, bypassed_workbench: true },
     });
     if (!codexResult.ok) throw new Error(codexResult.stderr || 'direct Codex ask failed');
     return { text: String(codexResult.stdout || '').trim(), provider: 'codex', result: codexResult };
+  }
+
+
+  function appendAskRouteOutcome({ chatId = '', userId = '', message = '', command = '/chat', decision = null, modelPolicy = null, executor = '', outcome = '', extra = {} } = {}) {
+    try {
+      const jobId = resolveLiveJobIdForChat(chatId);
+      if (!jobId) return null;
+      return appendKnowledgeRouteEvent({
+        jobDir: runDir(jobId),
+        chatId,
+        userId,
+        command,
+        message,
+        decision: decision || {},
+        modelPolicy: modelPolicy || (shouldUseSearchAskPath(decision || {}) ? searchAskModelPolicy(decision || {}) : directAskModelPolicy(decision || {})),
+        executor,
+        outcome: outcome || 'unknown',
+        extra,
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  async function tryRoomConciergeConversationalPath({ chatId, userId, msg = {}, message = '', sourceCommand = '/chat' } = {}) {
+    const roomProfile = getAgentRoomProfile(chatSessionStore, chatId);
+    const sessionSnapshot = chatSessionStore.get(chatId) || {};
+    const conciergeDecision = classifyRoomConciergeRoute({
+      text: message,
+      command: sourceCommand,
+      hasAttachment: !!(msg?.document || msg?.photo || msg?.video || msg?.audio || msg?.voice),
+      pendingApproval: !!sessionSnapshot.pending_approval,
+      busy: chatRunManager?.isRunning ? chatRunManager.isRunning(chatId) : false,
+      policy: {
+        enabled: isDirectAskFastPathEnabled() || isSearchAskFastPathEnabled(),
+        max_chars: Number(process.env.DDALGGAK_DIRECT_ASK_MAX_CHARS || 420),
+        max_tokenish_units: Number(process.env.DDALGGAK_DIRECT_ASK_MAX_TOKENISH_UNITS || 55),
+      },
+      learnedModel: getRoomConciergeModel(),
+      roomFootprint: sessionSnapshot.room_memory_footprint || sessionSnapshot.roomMemoryFootprint || {},
+      recentRouteStats: sessionSnapshot.room_concierge_route_stats || sessionSnapshot.roomConciergeRouteStats || {},
+    });
+    recordRoomEvent({
+      chatId,
+      userId,
+      eventType: 'work_depth_used',
+      command: sourceCommand,
+      goal: message,
+      profile: roomProfile,
+      extra: { depth: conciergeDecision.depth || 'chat', room_concierge: conciergeDecision },
+    });
+    const conciergeModelPolicy = shouldUseSearchAskPath(conciergeDecision) ? searchAskModelPolicy(conciergeDecision) : directAskModelPolicy(conciergeDecision);
+    try {
+      const currentJobIdForRoute = resolveLiveJobIdForChat(chatId);
+      if (currentJobIdForRoute) {
+        appendKnowledgeRouteEvent({
+          jobDir: runDir(currentJobIdForRoute),
+          chatId,
+          userId,
+          command: sourceCommand,
+          message,
+          decision: conciergeDecision,
+          modelPolicy: conciergeModelPolicy,
+          outcome: 'planned',
+        });
+      }
+    } catch {}
+    const ackText = shouldUseDirectAskFastPath(conciergeDecision)
+      ? `⚡ ${sourceCommand} accepted: direct Room Concierge path.`
+      : shouldUseSearchAskPath(conciergeDecision)
+        ? `⚡ ${sourceCommand} accepted: bounded Room Concierge search path.`
+        : `⚡ ${sourceCommand} accepted: running standard AI Room conversation.`;
+    const ack = await bot.sendMessage(chatId, ackText);
+    rememberCommandAck(chatId, ack);
+    try {
+      chatSessionStore.upsert(chatId, (session = {}) => ({
+        ...session,
+        last_room_concierge_route: { ...conciergeDecision, model_policy: conciergeModelPolicy, source_command: sourceCommand },
+      }));
+    } catch {}
+    if (shouldUseDirectAskFastPath(conciergeDecision) && (typeof directAskExecutor === 'function' || shouldEnableConciergeFastPathForPolicy(conciergeModelPolicy))) {
+      const directResult = await runDirectAskOrFallback({ chatId, userId, msg, message, decision: conciergeDecision, ackAlreadySent: true, sourceCommand });
+      if (directResult?.status !== 'disabled') return { handled: true, ackAlreadySent: true, decision: conciergeDecision, modelPolicy: conciergeModelPolicy };
+    }
+    if (shouldUseSearchAskPath(conciergeDecision) && (typeof searchAskExecutor === 'function' || shouldEnableConciergeFastPathForPolicy(conciergeModelPolicy))) {
+      const searchResult = await runSearchAskOrFallback({ chatId, userId, msg, message, decision: conciergeDecision, ackAlreadySent: true, sourceCommand });
+      if (searchResult?.status !== 'disabled') return { handled: true, ackAlreadySent: true, decision: conciergeDecision, modelPolicy: conciergeModelPolicy };
+    }
+    return { handled: false, ackAlreadySent: true, decision: conciergeDecision, modelPolicy: conciergeModelPolicy, roomProfile };
   }
 
   async function executeSearchAskFastPath({ chatId, userId, msg = {}, message = '', decision = null } = {}) {
@@ -1154,7 +1300,26 @@ export function createTelegramCommandHandler(deps = {}) {
       return await searchAskExecutor({ chatId, userId, msg, message, prompt, decision, roomProfile, jobId, maxSeconds });
     }
 
-    const providerPreference = searchAskProviderPreference();
+    const modelPolicy = searchAskModelPolicy(decision);
+    const providerPreference = String(modelPolicy.provider || '').trim().toLowerCase();
+    if (providerPreference === 'antigravity') {
+      const { runAntigravityPrompt } = await import('../../antigravity.js');
+      const result = await runAntigravityPrompt({
+        workspaceRoot: process.cwd(),
+        cwd: process.cwd(),
+        prompt,
+        jobId,
+        model: modelPolicy.model || process.env.ANTIGRAVITY_MODEL || process.env.GOOGLE_AI_MODEL || '',
+        surface: 'telegram_search_ask_fast_path',
+        agentId: 'room_concierge_search',
+        roleId: 'room_concierge',
+        timeoutMs: Number(process.env.DDALGGAK_SEARCH_ASK_TIMEOUT_MS || process.env.ANTIGRAVITY_TIMEOUT_MS || Math.max(8000, maxSeconds * 1000)),
+        traceMetadata: { concierge_decision: decision || null, model_policy: modelPolicy, bypassed_workbench: true, bounded_search: true },
+      });
+      if (!result.ok) throw new Error(result.stderr || 'search Antigravity ask failed');
+      return { text: String(result.stdout || '').trim(), provider: 'antigravity', result };
+    }
+
     if ((providerPreference === 'openai_compatible' || providerPreference === 'openai' || (!providerPreference && searchAskOpenAIConfigured()))) {
       const result = await runOpenAICompatiblePrompt({
         nodeId: process.env.DDALGGAK_SEARCH_ASK_NODE || process.env.DDALGGAK_DIRECT_ASK_NODE || '',
@@ -1172,7 +1337,7 @@ export function createTelegramCommandHandler(deps = {}) {
         agentId: 'room_concierge_search',
         roleId: 'room_concierge',
         cwd: process.cwd(),
-        traceMetadata: { concierge_decision: decision || null, bypassed_workbench: true, bounded_search: true },
+        traceMetadata: { concierge_decision: decision || null, model_policy: modelPolicy, bypassed_workbench: true, bounded_search: true },
       });
       if (!result.ok) throw new Error(result.stderr || 'search OpenAI-compatible ask failed');
       return { text: String(result.stdout || '').trim(), provider: 'openai_compatible', result };
@@ -1190,13 +1355,13 @@ export function createTelegramCommandHandler(deps = {}) {
       approvalPolicy: process.env.DDALGGAK_SEARCH_ASK_APPROVAL_POLICY || process.env.DDALGGAK_DIRECT_ASK_APPROVAL_POLICY || 'never',
       profile: process.env.DDALGGAK_SEARCH_ASK_CODEX_PROFILE || process.env.DDALGGAK_DIRECT_ASK_CODEX_PROFILE || process.env.CODEX_ASSIST_PROFILE || process.env.CODEX_PROFILE || '',
       timeoutMs: Number(process.env.DDALGGAK_SEARCH_ASK_TIMEOUT_MS || Math.max(8000, maxSeconds * 1000)),
-      traceMetadata: { concierge_decision: decision || null, bypassed_workbench: true, bounded_search: true },
+      traceMetadata: { concierge_decision: decision || null, model_policy: modelPolicy, bypassed_workbench: true, bounded_search: true },
     });
     if (!codexResult.ok) throw new Error(codexResult.stderr || 'search Codex ask failed');
     return { text: String(codexResult.stdout || '').trim(), provider: 'codex', result: codexResult };
   }
 
-  async function runSearchAskOrFallback({ chatId, userId, msg = {}, message = '', decision = null, ackAlreadySent = false } = {}) {
+  async function runSearchAskOrFallback({ chatId, userId, msg = {}, message = '', decision = null, ackAlreadySent = false, sourceCommand = '/chat' } = {}) {
     if (!isSearchAskFastPathEnabled()) return { status: 'disabled' };
     try {
       const started = Date.now();
@@ -1204,6 +1369,7 @@ export function createTelegramCommandHandler(deps = {}) {
       const answer = String(result?.text || '').trim();
       if (!answer) throw new Error('empty search ask answer');
       await bot.sendMessage(chatId, answer);
+      appendAskRouteOutcome({ chatId, userId, message, command: sourceCommand, decision, executor: 'search_ask_fast_path', outcome: 'answered_search_fast_path', extra: { latency_ms: Date.now() - started } });
       try {
         chatSessionStore.upsert(chatId, (session = {}) => ({
           ...session,
@@ -1234,12 +1400,13 @@ export function createTelegramCommandHandler(deps = {}) {
       if (String(process.env.DDALGGAK_SEARCH_ASK_FALLBACK_TO_WORKBENCH || 'true').trim().toLowerCase() === 'false') {
         throw error;
       }
+      appendAskRouteOutcome({ chatId, userId, message, command: sourceCommand, decision, executor: 'search_ask_fast_path', outcome: 'fast_path_failed_fallback_to_workbench', extra: { error: String(error?.message || error || 'unknown') } });
       await enqueueWorkbenchInput({ chatId, userId, msg, text: message, kind: 'ask', teamConfig: buildRoomFirstTeamConfiguration({ taskText: message, workMode: 'ask', roomProfile: getAgentRoomProfile(chatSessionStore, chatId), chatId, source: 'telegram_ask_search_fallback' }), ackAlreadySent });
       return { status: 'fallback_to_workbench', error: String(error?.message || error || 'unknown') };
     }
   }
 
-  async function runDirectAskOrFallback({ chatId, userId, msg = {}, message = '', decision = null, ackAlreadySent = false } = {}) {
+  async function runDirectAskOrFallback({ chatId, userId, msg = {}, message = '', decision = null, ackAlreadySent = false, sourceCommand = '/chat' } = {}) {
     if (!isDirectAskFastPathEnabled()) return { status: 'disabled' };
     try {
       const started = Date.now();
@@ -1247,6 +1414,7 @@ export function createTelegramCommandHandler(deps = {}) {
       const answer = String(result?.text || '').trim();
       if (!answer) throw new Error('empty direct ask answer');
       await bot.sendMessage(chatId, answer);
+      appendAskRouteOutcome({ chatId, userId, message, command: sourceCommand, decision, executor: 'direct_ask_fast_path', outcome: 'answered_direct_fast_path', extra: { latency_ms: Date.now() - started } });
       try {
         chatSessionStore.upsert(chatId, (session = {}) => ({
           ...session,
@@ -1274,6 +1442,7 @@ export function createTelegramCommandHandler(deps = {}) {
       if (String(process.env.DDALGGAK_DIRECT_ASK_FALLBACK_NOTICE || '').trim().toLowerCase() === 'true') {
         await bot.sendMessage(chatId, '빠른 답변 경로가 실패해서 표준 AI Room 실행으로 전환합니다.');
       }
+      appendAskRouteOutcome({ chatId, userId, message, command: sourceCommand, decision, executor: 'direct_ask_fast_path', outcome: 'fast_path_failed_fallback_to_workbench', extra: { error: String(error?.message || error || 'unknown') } });
       await enqueueWorkbenchInput({ chatId, userId, msg, text: message, kind: 'ask', teamConfig: buildRoomFirstTeamConfiguration({ taskText: message, workMode: 'ask', roomProfile: getAgentRoomProfile(chatSessionStore, chatId), chatId, source: 'telegram_ask_direct_fallback' }), ackAlreadySent });
       return { status: 'fallback_to_workbench', error: String(error?.message || error || 'unknown') };
     }
@@ -1538,10 +1707,12 @@ export function createTelegramCommandHandler(deps = {}) {
     const rawText = String(text || "");
     const firstSpaceIndex = rawText.indexOf(" ");
     const rawArgs = firstSpaceIndex >= 0 ? rawText.slice(firstSpaceIndex + 1).trim() : "";
-    const [cmd, ...rest] = rawText.split(/\s+/);
+    let [cmd, ...rest] = rawText.split(/\s+/);
+    const originalCmd = String(cmd || '').trim().toLowerCase();
+    cmd = normalizeTelegramCommandAlias(cmd);
     const args = rawArgs || rest.join(" ").trim();
 
-    if (cmd === "/help" || cmd === "/commands") {
+    if (cmd === "/help" || cmd === "/commands" || originalCmd === "/h") {
       const sub = String(args || "").trim().toLowerCase();
       if (sub === "advanced" || sub === "more") {
         await bot.sendMessage(chatId, ADVANCED_HELP_TEXT);
@@ -1568,60 +1739,16 @@ export function createTelegramCommandHandler(deps = {}) {
         await bot.sendMessage(chatId, 'Usage: /ask <question>');
         return true;
       }
-      const roomProfile = getAgentRoomProfile(chatSessionStore, chatId);
-      const sessionSnapshot = chatSessionStore.get(chatId) || {};
-      const conciergeDecision = classifyRoomConciergeRoute({
-        text: message,
-        command: '/ask',
-        hasAttachment: !!(msg?.document || msg?.photo || msg?.video || msg?.audio || msg?.voice),
-        pendingApproval: !!sessionSnapshot.pending_approval,
-        busy: chatRunManager?.isRunning ? chatRunManager.isRunning(chatId) : false,
-        policy: {
-          enabled: isDirectAskFastPathEnabled() || isSearchAskFastPathEnabled(),
-          max_chars: Number(process.env.DDALGGAK_DIRECT_ASK_MAX_CHARS || 420),
-          max_tokenish_units: Number(process.env.DDALGGAK_DIRECT_ASK_MAX_TOKENISH_UNITS || 55),
-        },
-        learnedModel: getRoomConciergeModel(),
-        roomFootprint: sessionSnapshot.room_memory_footprint || sessionSnapshot.roomMemoryFootprint || {},
-        recentRouteStats: sessionSnapshot.room_concierge_route_stats || sessionSnapshot.roomConciergeRouteStats || {},
-      });
-      recordRoomEvent({
-        chatId,
-        userId,
-        eventType: 'work_depth_used',
-        command: '/ask',
-        goal: message,
-        profile: roomProfile,
-        extra: { depth: conciergeDecision.depth || 'ask', room_concierge: conciergeDecision },
-      });
-      const ackText = shouldUseDirectAskFastPath(conciergeDecision)
-        ? '⚡ /ask accepted: direct Room Concierge fast path.'
-        : shouldUseSearchAskPath(conciergeDecision)
-          ? '⚡ /ask accepted: bounded Room Concierge search path.'
-          : '⚡ /ask accepted: running a quick single-agent answer.';
-      const ack = await bot.sendMessage(chatId, ackText);
-      rememberCommandAck(chatId, ack);
-      try {
-        chatSessionStore.upsert(chatId, (session = {}) => ({
-          ...session,
-          last_room_concierge_route: conciergeDecision,
-        }));
-      } catch {}
-      if (shouldUseDirectAskFastPath(conciergeDecision)) {
-        const directResult = await runDirectAskOrFallback({ chatId, userId, msg, message, decision: conciergeDecision, ackAlreadySent: true });
-        if (directResult?.status !== 'disabled') return true;
-      }
-      if (shouldUseSearchAskPath(conciergeDecision)) {
-        const searchResult = await runSearchAskOrFallback({ chatId, userId, msg, message, decision: conciergeDecision, ackAlreadySent: true });
-        if (searchResult?.status !== 'disabled') return true;
-      }
+      const route = await tryRoomConciergeConversationalPath({ chatId, userId, msg, message, sourceCommand: '/ask' });
+      if (route.handled) return true;
       const askTeamConfig = buildRoomFirstTeamConfiguration({
         taskText: message,
         workMode: 'ask',
-        roomProfile,
+        roomProfile: route.roomProfile || getAgentRoomProfile(chatSessionStore, chatId),
         chatId,
-        source: `telegram_ask_${conciergeDecision.route || 'room_first'}`,
+        source: `telegram_ask_${route.decision?.route || 'room_first'}`,
       });
+      appendAskRouteOutcome({ chatId, userId, message, command: '/ask', decision: route.decision, modelPolicy: route.modelPolicy, executor: 'workbench', outcome: 'queued_workbench' });
       await enqueueWorkbenchInput({ chatId, userId, msg, text: message, kind: 'ask', teamConfig: askTeamConfig, ackAlreadySent: true });
       return true;
     }
@@ -3280,6 +3407,23 @@ size=${formatByteSize(sentBundle.size)}`
     if (cmd === "/goc") {
       const sub = String(rest[0] || '').trim().toLowerCase();
       const action = String(rest[1] || '').trim().toLowerCase();
+      if (sub === 'status' || sub === 'circuit' || sub === 'circuits') {
+        const rows = getGocRouteCircuitSnapshot();
+        const now = Date.now();
+        const openRows = rows.filter((row) => Number(row.openUntil || 0) > now);
+        const lines = [
+          'GoC route circuit breaker',
+          `- open routes: ${openRows.length}`,
+          `- tracked routes: ${rows.length}`,
+        ];
+        for (const row of rows.slice(-8)) {
+          const cooldownMs = Math.max(0, Number(row.openUntil || 0) - now);
+          lines.push(`- ${row.key}: failures=${Number(row.failures || 0)} status=${Number(row.lastStatus || 0) || '-'} cooldown_ms=${cooldownMs}`);
+        }
+        if (!rows.length) lines.push('- no recent route failures');
+        await bot.sendMessage(chatId, lines.join('\n'));
+        return true;
+      }
       if (sub === 'history' && (!action || action === 'push' || action === 'sync')) {
         const runtimeForGoc = await requireCurrentRuntime(chatId, userId);
         const threadId = getCurrentThreadId(runtimeForGoc);
@@ -3397,8 +3541,16 @@ size=${formatByteSize(sentBundle.size)}`
             teamState = getSessionTeamState(chatSessionStore, chatId);
           } catch {}
         }
-        await sendRouterAckMessage(bot, chatId, { replyToMessageId: msg.message_id });
         if (!parsed.debug) {
+          const route = await tryRoomConciergeConversationalPath({
+            chatId,
+            userId,
+            msg,
+            message,
+            sourceCommand: originalCmd === '/c' ? '/c' : '/chat',
+          });
+          if (route.handled) return true;
+          appendAskRouteOutcome({ chatId, userId, message, command: originalCmd === '/c' ? '/c' : '/chat', decision: route.decision, modelPolicy: route.modelPolicy, executor: 'workbench', outcome: 'queued_workbench' });
           await chatRunManager.handleIncoming({
             chatId,
             userId,
@@ -3415,6 +3567,7 @@ size=${formatByteSize(sentBundle.size)}`
           });
           return true;
         }
+        await sendRouterAckMessage(bot, chatId, { replyToMessageId: msg.message_id });
         await runSupervisorChat(bot, chatId, userId, message, {
           debug: parsed.debug,
           teamConfig: teamState.active_team || null,

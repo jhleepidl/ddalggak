@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { recordUploadedArtifactContext } from "../../application/artifact_context.js";
+import { recordVisualArtifactCapsuleUpload } from "../../application/visual_artifact_memory_capsule.js";
+import { runBoundedVisualArtifactExtraction } from "../../application/visual_artifact_extraction.js";
 
 const BYTES_PER_MB = 1024 * 1024;
 const DEFAULT_UPLOAD_MAX_BYTES = 20 * BYTES_PER_MB;
@@ -147,6 +149,7 @@ export function createTelegramUploadService(deps = {}) {
     jobs,
     tracking,
     appendWorkspaceUploadArtifactToGoc = async () => null,
+    visualArtifactExtractor = null,
   } = deps;
   const allowedExtSet = new Set(
     (Array.isArray(allowedExts) ? allowedExts : [])
@@ -268,8 +271,18 @@ export function createTelegramUploadService(deps = {}) {
       upload_note: cleanUploadNote || undefined,
     };
     fs.appendFileSync(manifestPath, `${JSON.stringify(record)}\n`, "utf8");
+    let visualExtractionState = null;
     try {
-      recordUploadedArtifactContext(jobs.jobDir(jobId), record);
+      const jobDir = jobs.jobDir(jobId);
+      recordUploadedArtifactContext(jobDir, record);
+      recordVisualArtifactCapsuleUpload(jobDir, record);
+      visualExtractionState = await runBoundedVisualArtifactExtraction({
+        jobDir,
+        uploadRecord: record,
+        extractor: visualArtifactExtractor,
+        timeoutMs: Number(process.env.DDALGGAK_VISUAL_ARTIFACT_EXTRACTION_TIMEOUT_MS || 15000),
+        source: 'telegram_upload',
+      });
     } catch {}
 
     const uploadSummary = cleanUploadNote
@@ -323,6 +336,8 @@ export function createTelegramUploadService(deps = {}) {
         `- 크기: ${formatByteSize(actualSize)}`,
         cleanUploadNote ? `- 메모: ${cleanUploadNote}` : "",
         createdJob ? "- 상태: 새 작업에 저장됨" : "- 상태: 현재 작업에 연결됨",
+        visualExtractionState?.status === 'extracted' ? "- 이미지 추출: 완료" : "",
+        visualExtractionState?.status === 'pending_extractor_unconfigured' ? "- 이미지 추출: 대기 중" : "",
       ].filter(Boolean).join("\n"),
       replyToMessageOptions(msg)
     );

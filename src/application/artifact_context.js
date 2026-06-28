@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { clip } from '../textutil.js';
+import { formatVisualArtifactCapsuleContext } from './visual_artifact_memory_capsule.js';
 
 export const ARTIFACT_OBSERVATIONS_FILE = 'artifact_observations.jsonl';
 const OBSERVATION_CONFIDENCE_DEFAULT = 0.55;
@@ -303,6 +304,7 @@ export function latestObservationByArtifact(jobDir = '') {
 export function formatActiveArtifactContext(jobDir = '', { maxChars = 2200, limit = 5 } = {}) {
   const pairs = latestObservationByArtifact(jobDir).slice(-Math.max(1, Math.floor(Number(limit) || 5))).reverse();
   if (pairs.length === 0) return '';
+  const capsuleContext = formatVisualArtifactCapsuleContext(jobDir, { maxChars: 1200, limit });
   const lines = [
     '[ACTIVE ARTIFACT CONTEXT]',
     '- This block is non-optional runtime context. Prefer it over older working memory when the user says "방금", "해당 이미지", "해당 음식", or "올렸던 이미지".',
@@ -316,5 +318,7 @@ export function formatActiveArtifactContext(jobDir = '', { maxChars = 2200, limi
     if (observation?.rejected_labels?.length) lines.push(`  rejected_previous_labels: ${observation.rejected_labels.join(', ')}`);
     if (observation?.status) lines.push(`  observation_status: ${observation.status}`);
   }
-  return clip(lines.join('\n'), Math.max(600, Math.floor(Number(maxChars) || 2200)), { mode: 'middle' });
+  const base = lines.join('\n');
+  const joined = capsuleContext ? `${base}\n\n${capsuleContext}` : base;
+  return clip(joined, Math.max(600, Math.floor(Number(maxChars) || 2200)), { mode: 'middle' });
 }
