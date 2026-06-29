@@ -109,3 +109,29 @@ test('chat session store compacts heavy team and route state before persisting',
     fs.rmSync(baseDir, { recursive: true, force: true });
   }
 });
+
+test('chat session store preserves Room Concierge cross-path state', () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dd-session-room-'));
+  try {
+    const store = new ChatSessionStore({ baseDir });
+    store.upsert('chat-1', {
+      recent_room_turns: [
+        { role: 'user', text: 'direct path에서 말한 사실', turn_id: 'turn_user_direct', source: 'room_concierge_direct_fast_path' },
+        { role: 'assistant', text: 'direct path 답변', turn_id: 'turn_assistant_direct', source: 'room_concierge_direct_fast_path' },
+      ],
+      last_room_concierge_route: { route: 'concierge_direct_answer', depth: 'direct_answer' },
+      last_room_selection: { room_action: 'use_current_or_inbox_room', execution_room: { room_id: 'inbox', name: 'Inbox' } },
+      last_team_selection: { execution_mode: 'single_model_direct_answer', team_action: 'skip_team_for_direct_answer' },
+      last_direct_ask: { provider: 'antigravity', duration_ms: 123 },
+    });
+    const persisted = JSON.parse(fs.readFileSync(path.join(baseDir, 'chat_sessions.json'), 'utf8'));
+    const session = persisted.sessions['chat-1'];
+    assert.equal(session.recent_room_turns.length, 2);
+    assert.equal(session.last_room_concierge_route.route, 'concierge_direct_answer');
+    assert.equal(session.last_room_selection.room_action, 'use_current_or_inbox_room');
+    assert.equal(session.last_team_selection.execution_mode, 'single_model_direct_answer');
+    assert.equal(session.last_direct_ask.provider, 'antigravity');
+  } finally {
+    fs.rmSync(baseDir, { recursive: true, force: true });
+  }
+});

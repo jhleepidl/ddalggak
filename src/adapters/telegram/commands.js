@@ -44,6 +44,8 @@ import {
 } from '../../application/room_concierge_model_policy.js';
 import { formatRoomEvolutionSnapshot, proposeRoomEvolution } from '../../application/room_evolution.js';
 import { appendKnowledgeRouteEvent } from '../../application/knowledge_route_event_log.js';
+import { appendRoomConversationExchange } from '../../application/room_conversation_ledger.js';
+import { appendRoomSelectionRouteEvent, buildRoomSelectionDecision, buildTeamSelectionDecision } from '../../application/room_selection_routing.js';
 import { buildTeamInstallProposal, formatTeamInstallProposalMessage } from '../../application/install_proposal.js';
 import { buildInstallProposalPrompt, createPendingInstallProposalState, getPendingInstallProposal, archivePendingInstallProposal } from '../../application/install_proposal_state.js';
 import { formatManifestRequirementLines, normalizeManifestRequirements } from '../../shared/manifest_requirements.js';
@@ -1199,12 +1201,27 @@ export function createTelegramCommandHandler(deps = {}) {
   }
 
 
-  function appendAskRouteOutcome({ chatId = '', userId = '', message = '', command = '/chat', decision = null, modelPolicy = null, executor = '', outcome = '', extra = {} } = {}) {
+  function resolveJobDirForRoute(chatId = '') {
     try {
       const jobId = resolveLiveJobIdForChat(chatId);
-      if (!jobId) return null;
+      if (!jobId) return { jobId: '', jobDir: '' };
+      if (jobs && typeof jobs.jobDir === 'function') return { jobId, jobDir: jobs.jobDir(jobId) };
+      if (typeof runWorkspaceDir === 'function') {
+        const workspace = runWorkspaceDir(jobId);
+        if (workspace) return { jobId, jobDir: String(workspace).replace(/\/workspace\/?$/, '') };
+      }
+      return { jobId, jobDir: '' };
+    } catch {
+      return { jobId: '', jobDir: '' };
+    }
+  }
+
+  function appendAskRouteOutcome({ chatId = '', userId = '', message = '', command = '/chat', decision = null, modelPolicy = null, executor = '', outcome = '', extra = {} } = {}) {
+    try {
+      const { jobDir } = resolveJobDirForRoute(chatId);
+      if (!jobDir) return null;
       return appendKnowledgeRouteEvent({
-        jobDir: runDir(jobId),
+        jobDir,
         chatId,
         userId,
         command,
@@ -1238,6 +1255,21 @@ export function createTelegramCommandHandler(deps = {}) {
       roomFootprint: sessionSnapshot.room_memory_footprint || sessionSnapshot.roomMemoryFootprint || {},
       recentRouteStats: sessionSnapshot.room_concierge_route_stats || sessionSnapshot.roomConciergeRouteStats || {},
     });
+    const roomSelection = buildRoomSelectionDecision({
+      text: message,
+      command: sourceCommand,
+      chatId,
+      roomProfile,
+      session: sessionSnapshot,
+      candidateRooms: sessionSnapshot.candidate_rooms || sessionSnapshot.candidateRooms || [],
+    });
+    const teamSelection = buildTeamSelectionDecision({
+      text: message,
+      command: sourceCommand,
+      conciergeDecision,
+      teamState: getSessionTeamState(chatSessionStore, chatId),
+      roomSelection,
+    });
     recordRoomEvent({
       chatId,
       userId,
@@ -1245,14 +1277,14 @@ export function createTelegramCommandHandler(deps = {}) {
       command: sourceCommand,
       goal: message,
       profile: roomProfile,
-      extra: { depth: conciergeDecision.depth || 'chat', room_concierge: conciergeDecision },
+      extra: { depth: conciergeDecision.depth || 'chat', room_concierge: conciergeDecision, room_selection: roomSelection, team_selection: teamSelection },
     });
     const conciergeModelPolicy = shouldUseSearchAskPath(conciergeDecision) ? searchAskModelPolicy(conciergeDecision) : directAskModelPolicy(conciergeDecision);
     try {
-      const currentJobIdForRoute = resolveLiveJobIdForChat(chatId);
-      if (currentJobIdForRoute) {
+      const { jobDir } = resolveJobDirForRoute(chatId);
+      if (jobDir) {
         appendKnowledgeRouteEvent({
-          jobDir: runDir(currentJobIdForRoute),
+          jobDir,
           chatId,
           userId,
           command: sourceCommand,
@@ -1260,7 +1292,9 @@ export function createTelegramCommandHandler(deps = {}) {
           decision: conciergeDecision,
           modelPolicy: conciergeModelPolicy,
           outcome: 'planned',
+          extra: { room_selection: roomSelection, team_selection: teamSelection },
         });
+        appendRoomSelectionRouteEvent({ jobDir, chatId, userId, roomSelection, teamSelection, conciergeDecision, source: sourceCommand });
       }
     } catch {}
     const ackText = shouldUseDirectAskFastPath(conciergeDecision)
@@ -1273,18 +1307,20 @@ export function createTelegramCommandHandler(deps = {}) {
     try {
       chatSessionStore.upsert(chatId, (session = {}) => ({
         ...session,
-        last_room_concierge_route: { ...conciergeDecision, model_policy: conciergeModelPolicy, source_command: sourceCommand },
+        last_room_concierge_route: { ...conciergeDecision, model_policy: conciergeModelPolicy, source_command: sourceCommand, updated_at: new Date().toISOString() },
+        last_room_selection: roomSelection,
+        last_team_selection: teamSelection,
       }));
     } catch {}
     if (shouldUseDirectAskFastPath(conciergeDecision) && (typeof directAskExecutor === 'function' || shouldEnableConciergeFastPathForPolicy(conciergeModelPolicy))) {
       const directResult = await runDirectAskOrFallback({ chatId, userId, msg, message, decision: conciergeDecision, ackAlreadySent: true, sourceCommand });
-      if (directResult?.status !== 'disabled') return { handled: true, ackAlreadySent: true, decision: conciergeDecision, modelPolicy: conciergeModelPolicy };
+      if (directResult?.status !== 'disabled') return { handled: true, ackAlreadySent: true, decision: conciergeDecision, modelPolicy: conciergeModelPolicy, roomSelection, teamSelection };
     }
     if (shouldUseSearchAskPath(conciergeDecision) && (typeof searchAskExecutor === 'function' || shouldEnableConciergeFastPathForPolicy(conciergeModelPolicy))) {
       const searchResult = await runSearchAskOrFallback({ chatId, userId, msg, message, decision: conciergeDecision, ackAlreadySent: true, sourceCommand });
-      if (searchResult?.status !== 'disabled') return { handled: true, ackAlreadySent: true, decision: conciergeDecision, modelPolicy: conciergeModelPolicy };
+      if (searchResult?.status !== 'disabled') return { handled: true, ackAlreadySent: true, decision: conciergeDecision, modelPolicy: conciergeModelPolicy, roomSelection, teamSelection };
     }
-    return { handled: false, ackAlreadySent: true, decision: conciergeDecision, modelPolicy: conciergeModelPolicy, roomProfile };
+    return { handled: false, ackAlreadySent: true, decision: conciergeDecision, modelPolicy: conciergeModelPolicy, roomProfile, roomSelection, teamSelection };
   }
 
   async function executeSearchAskFastPath({ chatId, userId, msg = {}, message = '', decision = null } = {}) {
@@ -1369,6 +1405,23 @@ export function createTelegramCommandHandler(deps = {}) {
       const answer = String(result?.text || '').trim();
       if (!answer) throw new Error('empty search ask answer');
       await bot.sendMessage(chatId, answer);
+      try {
+        const { jobId, jobDir } = resolveJobDirForRoute(chatId);
+        appendRoomConversationExchange({
+          jobDir,
+          chatSessionStore,
+          chatId,
+          userId,
+          userText: message,
+          assistantText: answer,
+          command: sourceCommand,
+          source: 'room_concierge_search_fast_path',
+          provider: result?.provider || 'unknown',
+          model: result?.result?.used_model || result?.result?.model || '',
+          route: decision?.route || 'concierge_search_answer',
+          jobId,
+        });
+      } catch {}
       appendAskRouteOutcome({ chatId, userId, message, command: sourceCommand, decision, executor: 'search_ask_fast_path', outcome: 'answered_search_fast_path', extra: { latency_ms: Date.now() - started } });
       try {
         chatSessionStore.upsert(chatId, (session = {}) => ({
@@ -1414,6 +1467,23 @@ export function createTelegramCommandHandler(deps = {}) {
       const answer = String(result?.text || '').trim();
       if (!answer) throw new Error('empty direct ask answer');
       await bot.sendMessage(chatId, answer);
+      try {
+        const { jobId, jobDir } = resolveJobDirForRoute(chatId);
+        appendRoomConversationExchange({
+          jobDir,
+          chatSessionStore,
+          chatId,
+          userId,
+          userText: message,
+          assistantText: answer,
+          command: sourceCommand,
+          source: 'room_concierge_direct_fast_path',
+          provider: result?.provider || 'unknown',
+          model: result?.result?.used_model || result?.result?.model || '',
+          route: decision?.route || 'concierge_direct_answer',
+          jobId,
+        });
+      } catch {}
       appendAskRouteOutcome({ chatId, userId, message, command: sourceCommand, decision, executor: 'direct_ask_fast_path', outcome: 'answered_direct_fast_path', extra: { latency_ms: Date.now() - started } });
       try {
         chatSessionStore.upsert(chatId, (session = {}) => ({

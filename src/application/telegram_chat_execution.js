@@ -86,6 +86,7 @@ import {
 } from './watch_task_store.js';
 import { formatActiveArtifactContext, recordArtifactObservationFromAgentOutput } from "./artifact_context.js";
 import { recordVisualArtifactCapsuleFromAgentOutput } from "./visual_artifact_memory_capsule.js";
+import { seedRoomConversationLedgerIntoJob } from "./room_conversation_ledger.js";
 import { hasProviderFileToolLimitation, materializeArtifactsFromLlmOutput } from "./llm_output_artifact_materializer.js";
 import { formatActiveUserFactContext, recordUserFactEvents } from "./user_fact_context.js";
 import { buildScopedPromptAssembly, hydrateRuntimeScopesViaGoC, resolveScopeExecutionState } from "./goc_scope_runtime.js";
@@ -3878,6 +3879,17 @@ async function runSupervisorChat(
   let patternRecoveryState = null;
   let pendingTeamApprovalNotice = '';
   const sessionAtStart = chatSessionStore.get(chatId);
+  try {
+    const seedResult = seedRoomConversationLedgerIntoJob({
+      jobDir: runDir(currentJobId),
+      session: sessionAtStart,
+      maxTurns: Number(process.env.DDALGGAK_ROOM_LEDGER_SEED_MAX_TURNS || 12),
+      source: 'session_recent_room_turns',
+    });
+    if (seedResult?.seeded > 0) jobs.log(currentJobId, `seeded room conversation ledger: ${seedResult.seeded}`);
+  } catch (error) {
+    try { jobs.log(currentJobId, `room conversation ledger seed skipped: ${String(error?.message || error || 'unknown')}`); } catch {}
+  }
   const chatRuntimeRulesBlock = formatChatRuntimeRulesBlock(sessionAtStart);
   let currentTurnAckMessageId = Number(sessionAtStart?.current_turn_ack_message_id || 0);
   if (!(Number.isFinite(currentTurnAckMessageId) && currentTurnAckMessageId > 0)) {

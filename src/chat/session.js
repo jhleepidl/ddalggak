@@ -3,6 +3,7 @@ import { normalizeInstallProposalState } from "../application/install_proposal_s
 import { normalizeCredentialBindingState } from "../application/credential_binding.js";
 import { normalizePatternConflictState, normalizeTemporaryExecutionOverride, normalizePatternRecoveryState } from "../application/pattern_conflict_detector.js";
 import { compactInputRequest } from "../shared/input_request_schema.js";
+import { normalizeRecentRoomTurns } from "../application/room_conversation_ledger.js";
 import { normalizeParticipantExecutionSchema } from "../shared/participant_schema.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -96,6 +97,57 @@ function normalizeRuntimeRules(raw) {
     if (out.length >= 20) break;
   }
   return out;
+}
+
+
+function normalizeLastConciergeRoute(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    route: String(raw.route || "").trim() || undefined,
+    depth: String(raw.depth || "").trim() || undefined,
+    reason: String(raw.reason || "").trim() || undefined,
+    source_command: String(raw.source_command || raw.sourceCommand || "").trim() || undefined,
+    model_policy: raw.model_policy && typeof raw.model_policy === "object"
+      ? raw.model_policy
+      : (raw.modelPolicy && typeof raw.modelPolicy === "object" ? raw.modelPolicy : undefined),
+    updated_at: String(raw.updated_at || raw.ts || nowIso()),
+  };
+}
+
+function normalizeLastFastAsk(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    ts: String(raw.ts || nowIso()),
+    provider: String(raw.provider || "").trim().toLowerCase() || undefined,
+    model: String(raw.model || "").trim() || undefined,
+    duration_ms: Number.isFinite(Number(raw.duration_ms || raw.durationMs)) ? Math.max(0, Math.floor(Number(raw.duration_ms || raw.durationMs))) : undefined,
+    message_chars: Number.isFinite(Number(raw.message_chars || raw.messageChars)) ? Math.max(0, Math.floor(Number(raw.message_chars || raw.messageChars))) : undefined,
+  };
+}
+
+function normalizeRoomSelectionSnapshot(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    kind: String(raw.kind || "room_selection_decision").trim(),
+    room_action: String(raw.room_action || raw.roomAction || "").trim() || undefined,
+    persistence_mode: String(raw.persistence_mode || raw.persistenceMode || "").trim() || undefined,
+    ask_user: raw.ask_user === true || raw.askUser === true,
+    execution_room: raw.execution_room && typeof raw.execution_room === "object" ? raw.execution_room : undefined,
+    candidate_rooms: Array.isArray(raw.candidate_rooms || raw.candidateRooms) ? (raw.candidate_rooms || raw.candidateRooms).slice(0, 8) : [],
+    signals: Array.isArray(raw.signals) ? raw.signals.map((v) => String(v || "").trim()).filter(Boolean).slice(0, 12) : [],
+  };
+}
+
+function normalizeTeamSelectionSnapshot(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    kind: String(raw.kind || "team_selection_decision").trim(),
+    execution_mode: String(raw.execution_mode || raw.executionMode || "").trim() || undefined,
+    route: String(raw.route || "").trim() || undefined,
+    team_action: String(raw.team_action || raw.teamAction || "").trim() || undefined,
+    selected_team: raw.selected_team && typeof raw.selected_team === "object" ? raw.selected_team : undefined,
+    show_internal_trace: raw.show_internal_trace === true || raw.showInternalTrace === true,
+  };
 }
 
 function normalizePublicSearchCache(raw) {
@@ -566,7 +618,16 @@ function normalizeSession(chatId, raw = {}) {
     current_turn_plan_message_id: currentTurnPlanMessageId,
     agent_status: normalizeAgentStatusMap(row.agent_status),
     recent_agent_turns: normalizeRecentAgentTurns(row.recent_agent_turns || row.recentAgentTurns),
+    recent_room_turns: normalizeRecentRoomTurns(row.recent_room_turns || row.recentRoomTurns),
+    last_room_turn: normalizeRecentRoomTurns(row.last_room_turn || row.lastRoomTurn ? [row.last_room_turn || row.lastRoomTurn] : [])[0] || null,
     answer_capsules: normalizeAnswerCapsules(row.answer_capsules || row.answerCapsules),
+    last_room_concierge_route: normalizeLastConciergeRoute(row.last_room_concierge_route || row.lastRoomConciergeRoute),
+    last_room_selection: normalizeRoomSelectionSnapshot(row.last_room_selection || row.lastRoomSelection),
+    last_team_selection: normalizeTeamSelectionSnapshot(row.last_team_selection || row.lastTeamSelection),
+    last_direct_ask: normalizeLastFastAsk(row.last_direct_ask || row.lastDirectAsk),
+    last_search_ask: normalizeLastFastAsk(row.last_search_ask || row.lastSearchAsk),
+    last_direct_ask_error: row.last_direct_ask_error && typeof row.last_direct_ask_error === 'object' ? row.last_direct_ask_error : null,
+    last_search_ask_error: row.last_search_ask_error && typeof row.last_search_ask_error === 'object' ? row.last_search_ask_error : null,
     last_route: compactLastRoute(row.last_route),
     recovery_events: (Array.isArray(row.recovery_events) ? row.recovery_events : []).map(normalizeRecoveryEvent).filter(Boolean).slice(-12),
     last_recovery_event: normalizeRecoveryEvent(row.last_recovery_event || row.lastRecoveryEvent),
