@@ -79,3 +79,70 @@ test('runAgentProviderExecution fails over Gemini capacity errors to Codex assis
   assert.equal(logs.some((row) => /provider_failover/.test(row.output)), true);
   assert.equal(messages.some((text) => /Codex|codex|fallback/.test(text)), true);
 });
+
+test('runAgentProviderExecution uses Codex assist for non-coding researcher roles', async () => {
+  const calls = [];
+  const result = await runAgentProviderExecution({
+    provider: 'codex',
+    agentId: 'research_lead',
+    roleId: 'researcher',
+    model: 'gpt-5.5',
+    bot: null,
+    chatId: 1,
+    jobId: 'job-research-codex',
+    prompts: {
+      instruction: 'implementation-looking template should not force code mode',
+      goal: '서울대입구역 주변 기준으로 배달 식당 추천',
+      chatQuestion: '서울대입구역 주변 기준으로 배달 식당 추천',
+      userRequest: '배달해서 먹을만한 곳은 없을까?',
+    },
+    callbacks: {
+      codexAssist: async (_jobId, prompt, _signal, opts) => {
+        calls.push({ mode: 'assist', prompt, opts });
+        return 'assistant-style answer';
+      },
+      codexImplement: async () => {
+        calls.push({ mode: 'implement' });
+        return 'implementation answer';
+      },
+      memoryModeWithFallback: () => 'local',
+      takeGocFallbackReason: () => '',
+    },
+  });
+
+  assert.equal(result.output, 'assistant-style answer');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].mode, 'assist');
+  assert.equal(calls[0].opts.roleId, 'researcher');
+  assert.equal(calls[0].opts.providerOptions.sandboxMode, 'read-only');
+});
+
+test('runAgentProviderExecution keeps Codex implement for coding builder roles', async () => {
+  const calls = [];
+  const result = await runAgentProviderExecution({
+    provider: 'codex',
+    agentId: 'builder',
+    roleId: 'builder',
+    model: 'codex',
+    bot: null,
+    chatId: 1,
+    jobId: 'job-builder-codex',
+    prompts: { instruction: 'patch the source file' },
+    callbacks: {
+      codexAssist: async () => {
+        calls.push({ mode: 'assist' });
+        return 'assist answer';
+      },
+      codexImplement: async (_jobId, instruction) => {
+        calls.push({ mode: 'implement', instruction });
+        return 'implementation answer';
+      },
+      memoryModeWithFallback: () => 'local',
+      takeGocFallbackReason: () => '',
+    },
+  });
+
+  assert.equal(result.output, 'implementation answer');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].mode, 'implement');
+});

@@ -87,6 +87,7 @@ import {
 import { formatActiveArtifactContext, recordArtifactObservationFromAgentOutput } from "./artifact_context.js";
 import { recordVisualArtifactCapsuleFromAgentOutput } from "./visual_artifact_memory_capsule.js";
 import { seedRoomConversationLedgerIntoJob } from "./room_conversation_ledger.js";
+import { createRoomContextSnapshot, formatRoomContextProjectionBlock } from "./room_context_projection.js";
 import { hasProviderFileToolLimitation, materializeArtifactsFromLlmOutput } from "./llm_output_artifact_materializer.js";
 import { formatActiveUserFactContext, recordUserFactEvents } from "./user_fact_context.js";
 import { buildScopedPromptAssembly, hydrateRuntimeScopesViaGoC, resolveScopeExecutionState } from "./goc_scope_runtime.js";
@@ -991,19 +992,11 @@ function compactTaskText(value = '', { maxChars = 2400 } = {}) {
     extractBracketSection(text, 'JOB CONSTRAINTS', { maxChars: Math.max(220, Math.floor(limit * 0.16)) }),
     extractBracketSection(text, 'RECENT TURNS', { maxChars: Math.max(320, Math.floor(limit * 0.24)), tailLines: 6 }),
   ].filter(Boolean);
-  const directiveBullets = extractDirectiveBullets(text, {
-    maxItems: 4,
-    maxChars: Math.max(200, Math.floor(limit * 0.2)),
-  });
-  if (directiveBullets) {
-    const hasTaskPacket = preserved.some((block) => /^\[CURRENT TASK PACKET\]/i.test(String(block || '').trim()));
-    const hasPinnedFacts = preserved.some((block) => /^\[PINNED FACTS\]/i.test(String(block || '').trim()));
-    preserved.push(
-      !hasTaskPacket
-        ? `[LATEST USER QUOTES]\n${directiveBullets}`
-        : (hasPinnedFacts ? `[LATEST USER DIRECTIVES]\n${directiveBullets}` : `[PINNED FACTS]\n${directiveBullets}`)
-    );
-  }
+  // Do not mine arbitrary directive-looking lines from the full provider prompt here.
+  // The compacted text may include system/KB/policy rules, and relabeling those as
+  // latest-user quotes can hide the actual user request from downstream agents.
+  // Explicit [CURRENT TASK PACKET], [ACTIVE DIRECTIVES], [PINNED FACTS], and
+  // [RECENT TURNS] sections are preserved above.
 
   const noteBlock = [
     '[truncated for prompt efficiency]',
@@ -1187,6 +1180,12 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
       runtimePolicy: opts.runtime?.harnessRuntimePolicy || opts.runtime?.openharnessInstallState?.runtime_policy || null,
     })
     : '';
+  const roomContextProjection = formatRoomContextProjectionBlock({
+    snapshot: createRoomContextSnapshot({ jobDir: safeRunDir(jobId), latestUserText: cleanUserRequest || rawGoal, command: '/chat', route: 'standard_workbench' }),
+    tier: 'agent',
+    maxChars: Number(process.env.DDALGGAK_AGENT_CONTEXT_MAX_CHARS || 2600),
+    turnLimit: Number(process.env.DDALGGAK_AGENT_CONTEXT_TURNS || 8),
+  });
   const workspacePath = runWorkspaceDir(jobId);
   const providerOptions = opts.providerOptions && typeof opts.providerOptions === 'object'
     ? opts.providerOptions
@@ -1251,6 +1250,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     kbContract,
     activeArtifactContext ? activeArtifactContext : '',
     activeUserFactContext ? activeUserFactContext : '',
+    roomContextProjection ? roomContextProjection : '',
     ctx ? `[AVAILABLE MEMORY — optional]\n${ctx}` : '',
     workspaceFilesText ? `[WORKSPACE FILES — optional]\n${workspaceFilesText}` : '',
     artifactPolicyBlock,
@@ -1483,7 +1483,7 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
   const resolvedCodexOptions = resolveProviderRuntimeOptions({
     runtimeExecutionPolicy,
     provider: 'codex',
-    workspaceRoot: runWorkspaceDir(jobId),
+    workspaceRoot: safeRunWorkspaceDir(jobId) || process.cwd(),
   });
   const providerOptions = {
     ...resolvedCodexOptions,
@@ -1491,7 +1491,7 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
     sandboxMode: String(explicitProviderOptions.sandboxMode || explicitProviderOptions.sandbox_mode || process.env.CODEX_ASSIST_SANDBOX_MODE || resolvedCodexOptions.sandboxMode || 'read-only').trim() || 'read-only',
     approvalPolicy: String(explicitProviderOptions.approvalPolicy || explicitProviderOptions.approval_policy || process.env.CODEX_ASSIST_APPROVAL_POLICY || resolvedCodexOptions.approvalPolicy || 'never').trim() || 'never',
   };
-  const workspacePath = runWorkspaceDir(jobId);
+  const workspacePath = safeRunWorkspaceDir(jobId) || process.cwd();
   const credentialEnv = resolveCredentialEnvForChat(chatSessionStore, opts.chatId || '');
   const roleKey = String(opts.roleId || 'assistant').trim().toLowerCase() || 'assistant';
   const agentKey = String(opts.agentId || 'codex_assist').trim().toLowerCase() || 'codex_assist';
@@ -1506,6 +1506,12 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
     maxCharsPerDoc: clampInteger(process.env.CHAT_CODEX_ASSIST_CONTEXT_DOC_MAX_CHARS, 1800, { min: 0, max: 4200 }),
     audienceLabel: 'agent failover assist',
     runtimePolicy: opts.runtime?.harnessRuntimePolicy || opts.runtime?.openharnessInstallState?.runtime_policy || null,
+  });
+  const roomContextProjection = formatRoomContextProjectionBlock({
+    snapshot: createRoomContextSnapshot({ jobDir: safeRunDir(jobId), latestUserText: cleanUserRequest || instruction, command: '/chat', route: 'standard_workbench' }),
+    tier: 'agent',
+    maxChars: Number(process.env.DDALGGAK_AGENT_CONTEXT_MAX_CHARS || 2600),
+    turnLimit: Number(process.env.DDALGGAK_AGENT_CONTEXT_TURNS || 8),
   });
   const executionRequirements = resolveExecutionRequirementsForRuntime(
     applyRuntimeRulePolicy(mergeExecutionRequirements(
@@ -1561,6 +1567,7 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
     webSearchEnabled
       ? '- Web search may be available through Codex tooling; use it when needed for current facts.'
       : '- Live web search may be unavailable in this fallback. If current facts are required, ask for permission/tooling or state the limitation briefly.',
+    roomContextProjection ? roomContextProjection : '',
     ctx ? `[AVAILABLE MEMORY — optional]\n${ctx}` : '',
     activeArtifactContext || '',
     activeUserFactContext || '',

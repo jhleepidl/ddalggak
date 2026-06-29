@@ -44,7 +44,8 @@ import {
 } from '../../application/room_concierge_model_policy.js';
 import { formatRoomEvolutionSnapshot, proposeRoomEvolution } from '../../application/room_evolution.js';
 import { appendKnowledgeRouteEvent } from '../../application/knowledge_route_event_log.js';
-import { appendRoomConversationExchange } from '../../application/room_conversation_ledger.js';
+import { appendRoomConversationExchange, appendRoomConversationTurn } from '../../application/room_conversation_ledger.js';
+import { createRoomContextSnapshot, formatRoomContextProjectionBlock } from '../../application/room_context_projection.js';
 import { appendRoomSelectionRouteEvent, buildRoomSelectionDecision, buildTeamSelectionDecision } from '../../application/room_selection_routing.js';
 import { buildTeamInstallProposal, formatTeamInstallProposalMessage } from '../../application/install_proposal.js';
 import { buildInstallProposalPrompt, createPendingInstallProposalState, getPendingInstallProposal, archivePendingInstallProposal } from '../../application/install_proposal_state.js';
@@ -1127,12 +1128,22 @@ export function createTelegramCommandHandler(deps = {}) {
     return searchAskOpenAIConfigured();
   }
 
-  async function executeDirectAskFastPath({ chatId, userId, msg = {}, message = '', decision = null } = {}) {
+  async function executeDirectAskFastPath({ chatId, userId, msg = {}, message = '', decision = null, sourceCommand = '/chat' } = {}) {
     const roomProfile = getAgentRoomProfile(chatSessionStore, chatId) || {};
+    const context = buildRoomContextProjectionForRoute({
+      chatId,
+      message,
+      command: sourceCommand,
+      decision,
+      tier: 'micro',
+      maxChars: Number(process.env.DDALGGAK_DIRECT_CONTEXT_MAX_CHARS || 1200),
+      turnLimit: Number(process.env.DDALGGAK_DIRECT_CONTEXT_TURNS || 4),
+    });
     const prompt = buildDirectAskPrompt({
       question: message,
       roomName: roomProfile?.name || roomProfile?.room_name || '',
       locale: 'ko-KR',
+      context,
     });
     const jobId = `direct_ask_${Date.now().toString(36)}`;
     if (typeof directAskExecutor === 'function') {
@@ -1213,6 +1224,47 @@ export function createTelegramCommandHandler(deps = {}) {
       return { jobId, jobDir: '' };
     } catch {
       return { jobId: '', jobDir: '' };
+    }
+  }
+
+  function buildRoomContextProjectionForRoute({ chatId = '', message = '', command = '/chat', decision = null, tier = 'micro', roomSelection = null, teamSelection = null, maxChars = null, turnLimit = null } = {}) {
+    try {
+      const { jobDir } = resolveJobDirForRoute(chatId);
+      const session = chatSessionStore.get(chatId) || {};
+      const snapshot = createRoomContextSnapshot({
+        jobDir,
+        session,
+        latestUserText: message,
+        command,
+        route: decision?.route || '',
+        roomSelection: roomSelection || session.last_room_selection || session.lastRoomSelection || null,
+        teamSelection: teamSelection || session.last_team_selection || session.lastTeamSelection || null,
+      });
+      return formatRoomContextProjectionBlock({ snapshot, tier, maxChars, turnLimit });
+    } catch {
+      return '';
+    }
+  }
+
+  function recordIncomingRoomTurn({ chatId = '', userId = '', message = '', command = '/chat', decision = null } = {}) {
+    try {
+      const { jobId, jobDir } = resolveJobDirForRoute(chatId);
+      return appendRoomConversationTurn({
+        jobDir,
+        chatSessionStore,
+        chatId,
+        userId,
+        role: 'user',
+        text: message,
+        command,
+        source: 'room_context_substrate_input',
+        route: decision?.route || 'room_concierge_planned',
+        jobId,
+        writeConversation: false,
+        updatePacket: false,
+      });
+    } catch {
+      return null;
     }
   }
 
@@ -1312,6 +1364,7 @@ export function createTelegramCommandHandler(deps = {}) {
         last_team_selection: teamSelection,
       }));
     } catch {}
+    recordIncomingRoomTurn({ chatId, userId, message, command: sourceCommand, decision: conciergeDecision });
     if (shouldUseDirectAskFastPath(conciergeDecision) && (typeof directAskExecutor === 'function' || shouldEnableConciergeFastPathForPolicy(conciergeModelPolicy))) {
       const directResult = await runDirectAskOrFallback({ chatId, userId, msg, message, decision: conciergeDecision, ackAlreadySent: true, sourceCommand });
       if (directResult?.status !== 'disabled') return { handled: true, ackAlreadySent: true, decision: conciergeDecision, modelPolicy: conciergeModelPolicy, roomSelection, teamSelection };
@@ -1323,13 +1376,23 @@ export function createTelegramCommandHandler(deps = {}) {
     return { handled: false, ackAlreadySent: true, decision: conciergeDecision, modelPolicy: conciergeModelPolicy, roomProfile, roomSelection, teamSelection };
   }
 
-  async function executeSearchAskFastPath({ chatId, userId, msg = {}, message = '', decision = null } = {}) {
+  async function executeSearchAskFastPath({ chatId, userId, msg = {}, message = '', decision = null, sourceCommand = '/chat' } = {}) {
     const roomProfile = getAgentRoomProfile(chatSessionStore, chatId) || {};
     const maxSeconds = Math.max(3, Number(process.env.DDALGGAK_SEARCH_ASK_MAX_SECONDS || 20));
+    const context = buildRoomContextProjectionForRoute({
+      chatId,
+      message,
+      command: sourceCommand,
+      decision,
+      tier: 'search',
+      maxChars: Number(process.env.DDALGGAK_SEARCH_CONTEXT_MAX_CHARS || process.env.DDALGGAK_SEARCH_ASK_CONTEXT_MAX_CHARS || 1800),
+      turnLimit: Number(process.env.DDALGGAK_SEARCH_CONTEXT_TURNS || process.env.DDALGGAK_SEARCH_ASK_CONTEXT_TURNS || 6),
+    });
     const prompt = buildSearchAskFallbackPrompt({
       question: message,
       locale: 'ko-KR',
       maxSeconds,
+      context,
     });
     const jobId = `search_ask_${Date.now().toString(36)}`;
     if (typeof searchAskExecutor === 'function') {
@@ -1401,7 +1464,7 @@ export function createTelegramCommandHandler(deps = {}) {
     if (!isSearchAskFastPathEnabled()) return { status: 'disabled' };
     try {
       const started = Date.now();
-      const result = await executeSearchAskFastPath({ chatId, userId, msg, message, decision });
+      const result = await executeSearchAskFastPath({ chatId, userId, msg, message, decision, sourceCommand });
       const answer = String(result?.text || '').trim();
       if (!answer) throw new Error('empty search ask answer');
       await bot.sendMessage(chatId, answer);
@@ -1420,6 +1483,7 @@ export function createTelegramCommandHandler(deps = {}) {
           model: result?.result?.used_model || result?.result?.model || '',
           route: decision?.route || 'concierge_search_answer',
           jobId,
+          skipUserTurn: true,
         });
       } catch {}
       appendAskRouteOutcome({ chatId, userId, message, command: sourceCommand, decision, executor: 'search_ask_fast_path', outcome: 'answered_search_fast_path', extra: { latency_ms: Date.now() - started } });
@@ -1447,14 +1511,19 @@ export function createTelegramCommandHandler(deps = {}) {
           },
         }));
       } catch {}
-      if (String(process.env.DDALGGAK_SEARCH_ASK_FALLBACK_NOTICE || '').trim().toLowerCase() === 'true') {
-        await bot.sendMessage(chatId, '검색형 빠른 답변 경로가 실패해서 표준 AI Room 실행으로 전환합니다.');
+      const shouldNoticeFallback = !['0', 'false', 'no', 'off'].includes(String(process.env.DDALGGAK_SEARCH_ASK_FALLBACK_NOTICE || 'true').trim().toLowerCase());
+      if (shouldNoticeFallback) {
+        await bot.sendMessage(chatId, [
+          '🔎 빠른 검색 경로가 제한 시간 안에 끝나지 않아 표준 AI Room 실행으로 전환합니다.',
+          '지금 하는 일: 최근 대화 맥락을 붙이고, 검색/외부정보 요청으로 처리할 agent를 준비하는 중입니다.',
+          '조금 걸릴 수 있어요. /status 로 현재 단계를 볼 수 있습니다.',
+        ].join('\n'));
       }
       if (String(process.env.DDALGGAK_SEARCH_ASK_FALLBACK_TO_WORKBENCH || 'true').trim().toLowerCase() === 'false') {
         throw error;
       }
       appendAskRouteOutcome({ chatId, userId, message, command: sourceCommand, decision, executor: 'search_ask_fast_path', outcome: 'fast_path_failed_fallback_to_workbench', extra: { error: String(error?.message || error || 'unknown') } });
-      await enqueueWorkbenchInput({ chatId, userId, msg, text: message, kind: 'ask', teamConfig: buildRoomFirstTeamConfiguration({ taskText: message, workMode: 'ask', roomProfile: getAgentRoomProfile(chatSessionStore, chatId), chatId, source: 'telegram_ask_search_fallback' }), ackAlreadySent });
+      await enqueueWorkbenchInput({ chatId, userId, msg, text: message, kind: 'chat_message', teamConfig: buildRoomFirstTeamConfiguration({ taskText: message, workMode: 'ask', roomProfile: getAgentRoomProfile(chatSessionStore, chatId), chatId, source: 'telegram_ask_search_fallback' }), ackAlreadySent });
       return { status: 'fallback_to_workbench', error: String(error?.message || error || 'unknown') };
     }
   }
@@ -1463,7 +1532,7 @@ export function createTelegramCommandHandler(deps = {}) {
     if (!isDirectAskFastPathEnabled()) return { status: 'disabled' };
     try {
       const started = Date.now();
-      const result = await executeDirectAskFastPath({ chatId, userId, msg, message, decision });
+      const result = await executeDirectAskFastPath({ chatId, userId, msg, message, decision, sourceCommand });
       const answer = String(result?.text || '').trim();
       if (!answer) throw new Error('empty direct ask answer');
       await bot.sendMessage(chatId, answer);
@@ -1482,6 +1551,7 @@ export function createTelegramCommandHandler(deps = {}) {
           model: result?.result?.used_model || result?.result?.model || '',
           route: decision?.route || 'concierge_direct_answer',
           jobId,
+          skipUserTurn: true,
         });
       } catch {}
       appendAskRouteOutcome({ chatId, userId, message, command: sourceCommand, decision, executor: 'direct_ask_fast_path', outcome: 'answered_direct_fast_path', extra: { latency_ms: Date.now() - started } });

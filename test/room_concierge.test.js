@@ -114,3 +114,13 @@ test('direct prompt pins the latest user request over previous-room state', () =
   assert.match(prompt, /LATEST TURN IS AUTHORITATIVE/);
   assert.match(prompt, /answer only the user question below/);
 });
+
+test('search prompt includes room continuity context when provided', () => {
+  const prompt = buildSearchAskFallbackPrompt({
+    question: '배달해서 먹을만한 곳은 없을까? 실제 있는 식당으로 검색해서 찾아줘.',
+    context: '[ROOM CONTINUITY — HIGH PRIORITY]\n- user: 서울대입구역 주변에서 먹을만한 식당으로 추천해줘.',
+  });
+  assert.match(prompt, /ROOM CONTINUITY/);
+  assert.match(prompt, /서울대입구역/);
+  assert.match(prompt, /omits a location/);
+});

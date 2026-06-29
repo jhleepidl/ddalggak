@@ -6,6 +6,22 @@ import { formatProviderFailoverNote, resolveProviderFailoverDecision } from './p
 import { isTaskLoopRuntimeExecutionPolicy } from './execution_requirements.js';
 import { migrateProviderAwayFromGemini, sanitizeGeminiModelForProvider } from '../provider_migration.js';
 
+
+function shouldUseCodexAssistForNonCodingRole({ roleId = '', act = null, runtimeExecutionPolicy = {} } = {}) {
+  const role = String(roleId || '').trim().toLowerCase();
+  const codingRoles = new Set(['builder', 'coder', 'developer', 'engineer', 'implementation', 'executor', 'devops']);
+  if (codingRoles.has(role)) return false;
+  if (isTaskLoopRuntimeExecutionPolicy(runtimeExecutionPolicy)) return false;
+  const inputs = act && typeof act === 'object' && act.inputs && typeof act.inputs === 'object' ? act.inputs : {};
+  const wantsWrite = inputs.workspace_write_requested === true
+    || inputs.file_write_requested === true
+    || inputs.requires_implementation === true
+    || inputs.implementation_required === true
+    || inputs.final_synthesis === true;
+  if (wantsWrite) return false;
+  return ['researcher', 'research', 'assistant', 'planner', 'router', 'reviewer', 'critic', 'synthesizer', ''].includes(role);
+}
+
 export async function runAgentProviderExecution({
   provider = '',
   agentId = '',
@@ -85,6 +101,27 @@ export async function runAgentProviderExecution({
         failoverDecision: migrationDecision,
       });
       return finalize(output, { provider: 'codex', model: providerOptions.profile || process.env.CODEX_PROFILE || 'codex', failover: migrationDecision });
+    }
+    if (shouldUseCodexAssistForNonCodingRole({ roleId, act, runtimeExecutionPolicy }) && typeof codexAssist === 'function') {
+      const output = await codexAssist(jobId, String(prompts.chatQuestion || prompts.goal || prompts.instruction || ''), signal, {
+        runtimeExecutionPolicy,
+        providerOptions: {
+          ...providerOptions,
+          sandboxMode: providerOptions.sandboxMode || providerOptions.sandbox_mode || process.env.CODEX_ASSIST_SANDBOX_MODE || 'read-only',
+          approvalPolicy: providerOptions.approvalPolicy || providerOptions.approval_policy || process.env.CODEX_ASSIST_APPROVAL_POLICY || 'never',
+        },
+        chatId,
+        agentId,
+        roleId: roleId || 'assistant',
+        roleMemo: String(prompts.roleMemo || prompts.role_memo || '').trim(),
+        userRequest: String(prompts.userRequest || prompts.user_request || act?.inputs?.user_request || act?.inputs?.userRequest || '').trim(),
+        chatRuntimeRules: String(prompts.chatRuntimeRules || prompts.chat_runtime_rules || act?.inputs?._runtime_rules_text || act?.inputs?.runtime_rules_text || '').trim(),
+        outputGuide: String(prompts.outputGuide || prompts.output_guide || act?.inputs?.output_guide || act?.inputs?.outputGuide || '').trim(),
+        preparedContextInfo: act?.inputs?._prompt_context_info && typeof act.inputs._prompt_context_info === 'object'
+          ? act.inputs._prompt_context_info
+          : {},
+      });
+      return finalize(output, { provider: 'codex', model: providerOptions.profile || process.env.CODEX_PROFILE || 'codex' });
     }
     if (typeof codexImplement !== 'function') throw new Error('codex provider is selected but codexImplement callback is unavailable');
     const output = await codexImplement(jobId, String(prompts.instruction || ''), signal, {

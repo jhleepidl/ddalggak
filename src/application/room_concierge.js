@@ -165,32 +165,38 @@ export function shouldUseSearchAskPath(decision = {}) {
   return decision?.route === 'concierge_search_answer';
 }
 
-export function buildDirectAskPrompt({ question = '', locale = 'ko-KR', roomName = '' } = {}) {
+export function buildDirectAskPrompt({ question = '', locale = 'ko-KR', roomName = '', context = '' } = {}) {
   const q = clean(question);
   const roomLine = clean(roomName) ? `Room: ${clean(roomName)}` : '';
+  const ctx = String(context || '').trim();
   return [
     'You are DdalGgak Room Concierge direct chat mode.',
     'Answer the user directly and briefly. Do not mention routing, agents, plans, traces, or internal memory.',
+    'Use the provided room context snapshot only as lightweight continuity; do not treat it as a separate hidden conversation.',
     'LATEST TURN IS AUTHORITATIVE: answer only the user question below. Do not answer previous questions unless the user explicitly asks you to recall them.',
     'For casual recommendations, give practical choices. For uncertainty, say what is uncertain without over-explaining.',
     'Do not claim you searched the web unless the prompt explicitly includes search results.',
     `Locale: ${locale || 'ko-KR'}`,
     roomLine,
+    ctx ? ctx : '',
     '',
     `User question:\n${q}`,
   ].filter(Boolean).join('\n');
 }
 
-export function buildSearchAskFallbackPrompt({ question = '', locale = 'ko-KR', maxSeconds = 20 } = {}) {
+export function buildSearchAskFallbackPrompt({ question = '', locale = 'ko-KR', maxSeconds = 20, context = '' } = {}) {
   const q = clean(question);
+  const ctx = String(context || '').trim();
   return [
     'You are DdalGgak Room Concierge search-intent mode.',
     'The user requested fresh or external information. If no reliable source is available to you, say so clearly and ask for a link/photo/source rather than inventing details.',
+    'Use recent room continuity to resolve omitted location/object/preference. For example, if the latest message says "near there" or omits a location after a location-bearing turn, carry the latest relevant location forward.',
     `Keep the answer concise. Search budget expectation: ${Math.max(1, Number(maxSeconds || 20))} seconds.`,
     `Locale: ${locale || 'ko-KR'}`,
+    ctx ? ctx : '',
     '',
     `User request:\n${q}`,
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 export function formatRoomConciergeDebugLines(decision = {}) {

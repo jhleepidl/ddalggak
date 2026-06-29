@@ -202,8 +202,9 @@ export function appendRoomConversationExchange({
   model = '',
   route = '',
   jobId = '',
+  skipUserTurn = false,
 } = {}) {
-  const userTurn = appendRoomConversationTurn({
+  const userTurn = skipUserTurn ? null : appendRoomConversationTurn({
     jobDir,
     chatSessionStore,
     chatId,
@@ -237,6 +238,51 @@ export function appendRoomConversationExchange({
     try { updateCurrentTaskPacket({ jobDir, currentUserText: '', runMeta: {}, persist: true }); } catch {}
   }
   return { userTurn, assistantTurn };
+}
+
+
+
+export function readRoomConversationLedger({ jobDir = '', session = null, limit = 8 } = {}) {
+  const cleanJobDir = String(jobDir || '').trim();
+  const maxRows = Math.max(1, Math.floor(Number(limit) || 8));
+  const rows = [];
+  const seen = new Set();
+  const pushRows = (items = []) => {
+    for (const row of normalizeRecentRoomTurns(items)) {
+      const key = row.turn_id || `${row.role}:${clean(row.text).slice(0, 240)}:${row.ts}`;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      rows.push(row);
+    }
+  };
+  if (cleanJobDir) {
+    pushRows(readJsonl(path.join(localMemoryDir(cleanJobDir), 'room_turn_ledger.jsonl')));
+    pushRows(readJsonl(path.join(sharedDir(cleanJobDir), 'room_turn_ledger.jsonl')));
+    pushRows(readJsonl(path.join(localMemoryDir(cleanJobDir), 'turns.jsonl')));
+  }
+  if (session && typeof session === 'object') {
+    pushRows(session.recent_room_turns || session.recentRoomTurns || []);
+  }
+  return rows
+    .sort((a, b) => String(a.ts || '').localeCompare(String(b.ts || '')))
+    .slice(-maxRows);
+}
+
+export function formatRoomContinuityPromptBlock({ jobDir = '', session = null, limit = 8, maxChars = 1600 } = {}) {
+  const turns = readRoomConversationLedger({ jobDir, session, limit });
+  if (!turns.length) return '';
+  const rendered = turns.map((turn) => {
+    const role = turn.role === 'assistant' ? 'assistant' : turn.role === 'system' ? 'system' : 'user';
+    const route = turn.route ? ` · route=${turn.route}` : '';
+    const command = turn.command ? ` · ${turn.command}` : '';
+    return `- ${role}${command}${route}: ${clip(turn.text, role === 'assistant' ? 360 : 280)}`;
+  }).join('\n');
+  return clip([
+    '[ROOM CONTINUITY — HIGH PRIORITY]',
+    'Recent same-chat turns, including direct Room Concierge fast-path turns. Use this before claiming that prior context is missing.',
+    'If the latest user omits a location/object/preference but the immediately preceding turns supply one, carry it forward unless contradicted.',
+    rendered,
+  ].join('\n'), Math.max(400, Math.floor(Number(maxChars) || 1600)));
 }
 
 export function seedRoomConversationLedgerIntoJob({ jobDir = '', session = {}, maxTurns = 12, source = 'session_recent_room_turns' } = {}) {
