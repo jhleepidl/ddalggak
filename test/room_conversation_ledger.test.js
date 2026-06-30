@@ -95,7 +95,7 @@ test('room continuity prompt block preserves direct fast-path context for later 
     assert.match(block, /ROOM CONTINUITY/);
     assert.match(block, /서울대입구역/);
     assert.match(block, /direct/);
-    assert.match(block, /omits a location|위치|location/i);
+    assert.match(block, /omits a referent, constraint, or preference/i);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   executeRunCommand,
   executeContinueCommand,
@@ -46,6 +48,7 @@ import { formatRoomEvolutionSnapshot, proposeRoomEvolution } from '../../applica
 import { appendKnowledgeRouteEvent } from '../../application/knowledge_route_event_log.js';
 import { appendRoomConversationExchange, appendRoomConversationTurn } from '../../application/room_conversation_ledger.js';
 import { createRoomContextSnapshot, formatRoomContextProjectionBlock } from '../../application/room_context_projection.js';
+import { resolveDdalggakRuntimeConfig, resolveDdalggakRouteRuntimeConfig, formatRuntimeConfigForTelegram, auditDdalggakRuntimeEnv, formatRuntimeConfigDoctorForTelegram } from '../../application/runtime_config.js';
 import { appendRoomSelectionRouteEvent, buildRoomSelectionDecision, buildTeamSelectionDecision } from '../../application/room_selection_routing.js';
 import { buildTeamInstallProposal, formatTeamInstallProposalMessage } from '../../application/install_proposal.js';
 import { buildInstallProposalPrompt, createPendingInstallProposalState, getPendingInstallProposal, archivePendingInstallProposal } from '../../application/install_proposal_state.js';
@@ -145,6 +148,7 @@ const HELP_TEXT = [
   "- /board 또는 /b: semantic memory/skill/rule board 요약",
   "- /context 또는 /ctx: primitive context substrate/MVCC snapshot 요약",
   "- /goc 또는 /g: GoC sync/review 링크와 상태 보기",
+  "- /config 또는 /cfg: 현재 runtime/provider 설정 요약, /config doctor: .env 진단",
   "- /status 또는 /st: 지금 진행 상황 보기",
   "- /artifacts 또는 /art [limit]: 결과물 보기",
   "- /send <번호|path>: 결과물 전송",
@@ -164,6 +168,7 @@ const COMMAND_ALIASES = new Map(Object.entries({
   '/b': '/board',
   '/ctx': '/context',
   '/g': '/goc',
+  '/cfg': '/config',
   '/st': '/status',
   '/art': '/artifacts',
   '/f': '/files',
@@ -325,6 +330,56 @@ const ROOM_HELP_TEXT = [
   "",
   "Room packages share how a room works; they never copy private memory, credentials, raw chat logs, or uploaded files.",
 ].join("\n");
+
+
+function parseSimpleDotenv(text = '') {
+  const parsed = {};
+  for (const rawLine of String(text || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim().replace(/^export\s+/, '');
+    let value = line.slice(eq + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (key) parsed[key] = value;
+  }
+  return parsed;
+}
+
+function loadRuntimeDoctorEnv() {
+  const candidates = [];
+  const explicit = String(process.env.DDALGGAK_ENV_FILE || '').trim();
+  if (explicit) candidates.push(explicit);
+  candidates.push(path.join(process.cwd(), '.env'));
+  candidates.push(path.join(process.cwd(), 'ddalggak', '.env'));
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const resolved = path.resolve(candidate);
+    if (!fs.existsSync(resolved)) continue;
+    try {
+      const parsed = parseSimpleDotenv(fs.readFileSync(resolved, 'utf8'));
+      return {
+        env: { ...process.env, ...parsed },
+        configuredKeys: Object.keys(parsed),
+        sourceLabel: resolved,
+      };
+    } catch (error) {
+      return {
+        env: process.env,
+        configuredKeys: Object.keys(process.env),
+        sourceLabel: `${resolved} (read failed: ${error?.message || error})`,
+      };
+    }
+  }
+  return {
+    env: process.env,
+    configuredKeys: Object.keys(process.env),
+    sourceLabel: 'process.env (no .env file found)',
+  };
+}
 
 const REVIEW_HELP_TEXT = [
   "Review commands:",
@@ -1136,8 +1191,8 @@ export function createTelegramCommandHandler(deps = {}) {
       command: sourceCommand,
       decision,
       tier: 'micro',
-      maxChars: Number(process.env.DDALGGAK_DIRECT_CONTEXT_MAX_CHARS || 1200),
-      turnLimit: Number(process.env.DDALGGAK_DIRECT_CONTEXT_TURNS || 4),
+      maxChars: resolveDdalggakRouteRuntimeConfig('direct', { env: process.env }).context_max_chars,
+      turnLimit: resolveDdalggakRouteRuntimeConfig('direct', { env: process.env }).context_turns,
     });
     const prompt = buildDirectAskPrompt({
       question: message,
@@ -1163,7 +1218,7 @@ export function createTelegramCommandHandler(deps = {}) {
         surface: 'telegram_direct_ask_fast_path',
         agentId: 'room_concierge',
         roleId: 'room_concierge',
-        timeoutMs: Number(process.env.DDALGGAK_DIRECT_ASK_TIMEOUT_MS || process.env.ANTIGRAVITY_TIMEOUT_MS || 25000),
+        timeoutMs: resolveDdalggakRouteRuntimeConfig('direct', { env: process.env }).timeout_ms,
         traceMetadata: { concierge_decision: decision || null, model_policy: modelPolicy, bypassed_workbench: true },
       });
       if (!result.ok) throw new Error(result.stderr || 'direct Antigravity ask failed');
@@ -1173,15 +1228,15 @@ export function createTelegramCommandHandler(deps = {}) {
     if ((providerPreference === 'openai_compatible' || providerPreference === 'openai' || (!providerPreference && directAskOpenAIConfigured()))) {
       const result = await runOpenAICompatiblePrompt({
         nodeId: process.env.DDALGGAK_DIRECT_ASK_NODE || '',
-        model: process.env.DDALGGAK_DIRECT_ASK_MODEL || process.env.OPENAI_COMPATIBLE_MODEL || process.env.LOCAL_MODEL || process.env.OLLAMA_MODEL || '',
-        baseUrl: process.env.DDALGGAK_DIRECT_ASK_BASE_URL || process.env.OPENAI_COMPATIBLE_BASE_URL || process.env.LOCAL_MODEL_BASE_URL || process.env.OLLAMA_BASE_URL || '',
-        runtime: process.env.DDALGGAK_DIRECT_ASK_RUNTIME || '',
-        apiKey: process.env.DDALGGAK_DIRECT_ASK_API_KEY || process.env.OPENAI_COMPATIBLE_API_KEY || process.env.LOCAL_MODEL_API_KEY || process.env.OLLAMA_API_KEY || '',
+        model: modelPolicy.model || resolveDdalggakRouteRuntimeConfig('direct', { env: process.env }).model || '',
+        baseUrl: resolveDdalggakRouteRuntimeConfig('direct', { env: process.env }).openai_compatible?.base_url || '',
+        runtime: resolveDdalggakRouteRuntimeConfig('direct', { env: process.env }).openai_compatible?.runtime || '',
+        apiKey: process.env.DDALGGAK_DIRECT_ASK_API_KEY || process.env.DDALGGAK_LOCAL_API_KEY || process.env.OPENAI_COMPATIBLE_API_KEY || process.env.LOCAL_MODEL_API_KEY || process.env.OLLAMA_API_KEY || '',
         prompt,
         system: 'Answer in Korean unless the user asks otherwise. Keep the reply concise and useful.',
         temperature: Number(process.env.DDALGGAK_DIRECT_ASK_TEMPERATURE || 0.2),
         maxTokens: Number(process.env.DDALGGAK_DIRECT_ASK_MAX_TOKENS || 512),
-        timeoutMs: Number(process.env.DDALGGAK_DIRECT_ASK_TIMEOUT_MS || 25000),
+        timeoutMs: resolveDdalggakRouteRuntimeConfig('direct', { env: process.env }).timeout_ms,
         jobId,
         surface: 'telegram_direct_ask_fast_path',
         agentId: 'room_concierge',
@@ -1198,13 +1253,14 @@ export function createTelegramCommandHandler(deps = {}) {
       cwd: process.cwd(),
       prompt,
       jobId,
+      model: modelPolicy.model || process.env.DDALGGAK_DIRECT_ASK_CODEX_MODEL || process.env.CODEX_MODEL || process.env.CODEX_ASSIST_MODEL || '',
       surface: 'telegram_direct_ask_fast_path',
       agentId: 'room_concierge',
       roleId: 'room_concierge',
       sandboxMode: process.env.DDALGGAK_DIRECT_ASK_SANDBOX_MODE || 'read-only',
       approvalPolicy: process.env.DDALGGAK_DIRECT_ASK_APPROVAL_POLICY || 'never',
       profile: process.env.DDALGGAK_DIRECT_ASK_CODEX_PROFILE || process.env.CODEX_ASSIST_PROFILE || process.env.CODEX_PROFILE || '',
-      timeoutMs: Number(process.env.DDALGGAK_DIRECT_ASK_TIMEOUT_MS || 45000),
+      timeoutMs: resolveDdalggakRouteRuntimeConfig('direct', { env: process.env }).timeout_ms,
       traceMetadata: { concierge_decision: decision || null, model_policy: modelPolicy, bypassed_workbench: true },
     });
     if (!codexResult.ok) throw new Error(codexResult.stderr || 'direct Codex ask failed');
@@ -1300,8 +1356,8 @@ export function createTelegramCommandHandler(deps = {}) {
       busy: chatRunManager?.isRunning ? chatRunManager.isRunning(chatId) : false,
       policy: {
         enabled: isDirectAskFastPathEnabled() || isSearchAskFastPathEnabled(),
-        max_chars: Number(process.env.DDALGGAK_DIRECT_ASK_MAX_CHARS || 420),
-        max_tokenish_units: Number(process.env.DDALGGAK_DIRECT_ASK_MAX_TOKENISH_UNITS || 55),
+        max_chars: resolveDdalggakRouteRuntimeConfig('direct', { env: process.env }).max_chars,
+        max_tokenish_units: resolveDdalggakRouteRuntimeConfig('direct', { env: process.env }).max_tokenish_units,
       },
       learnedModel: getRoomConciergeModel(),
       roomFootprint: sessionSnapshot.room_memory_footprint || sessionSnapshot.roomMemoryFootprint || {},
@@ -1378,15 +1434,16 @@ export function createTelegramCommandHandler(deps = {}) {
 
   async function executeSearchAskFastPath({ chatId, userId, msg = {}, message = '', decision = null, sourceCommand = '/chat' } = {}) {
     const roomProfile = getAgentRoomProfile(chatSessionStore, chatId) || {};
-    const maxSeconds = Math.max(3, Number(process.env.DDALGGAK_SEARCH_ASK_MAX_SECONDS || 20));
+    const searchRuntime = resolveDdalggakRouteRuntimeConfig('search', { env: process.env });
+    const maxSeconds = Math.max(3, Number(searchRuntime.max_seconds || 20));
     const context = buildRoomContextProjectionForRoute({
       chatId,
       message,
       command: sourceCommand,
       decision,
       tier: 'search',
-      maxChars: Number(process.env.DDALGGAK_SEARCH_CONTEXT_MAX_CHARS || process.env.DDALGGAK_SEARCH_ASK_CONTEXT_MAX_CHARS || 1800),
-      turnLimit: Number(process.env.DDALGGAK_SEARCH_CONTEXT_TURNS || process.env.DDALGGAK_SEARCH_ASK_CONTEXT_TURNS || 6),
+      maxChars: searchRuntime.context_max_chars,
+      turnLimit: searchRuntime.context_turns,
     });
     const prompt = buildSearchAskFallbackPrompt({
       question: message,
@@ -1412,7 +1469,7 @@ export function createTelegramCommandHandler(deps = {}) {
         surface: 'telegram_search_ask_fast_path',
         agentId: 'room_concierge_search',
         roleId: 'room_concierge',
-        timeoutMs: Number(process.env.DDALGGAK_SEARCH_ASK_TIMEOUT_MS || process.env.ANTIGRAVITY_TIMEOUT_MS || Math.max(8000, maxSeconds * 1000)),
+        timeoutMs: searchRuntime.timeout_ms,
         traceMetadata: { concierge_decision: decision || null, model_policy: modelPolicy, bypassed_workbench: true, bounded_search: true },
       });
       if (!result.ok) throw new Error(result.stderr || 'search Antigravity ask failed');
@@ -1422,15 +1479,15 @@ export function createTelegramCommandHandler(deps = {}) {
     if ((providerPreference === 'openai_compatible' || providerPreference === 'openai' || (!providerPreference && searchAskOpenAIConfigured()))) {
       const result = await runOpenAICompatiblePrompt({
         nodeId: process.env.DDALGGAK_SEARCH_ASK_NODE || process.env.DDALGGAK_DIRECT_ASK_NODE || '',
-        model: process.env.DDALGGAK_SEARCH_ASK_MODEL || process.env.DDALGGAK_DIRECT_ASK_MODEL || process.env.OPENAI_COMPATIBLE_MODEL || process.env.LOCAL_MODEL || process.env.OLLAMA_MODEL || '',
-        baseUrl: process.env.DDALGGAK_SEARCH_ASK_BASE_URL || process.env.DDALGGAK_DIRECT_ASK_BASE_URL || process.env.OPENAI_COMPATIBLE_BASE_URL || process.env.LOCAL_MODEL_BASE_URL || process.env.OLLAMA_BASE_URL || '',
-        runtime: process.env.DDALGGAK_SEARCH_ASK_RUNTIME || process.env.DDALGGAK_DIRECT_ASK_RUNTIME || '',
-        apiKey: process.env.DDALGGAK_SEARCH_ASK_API_KEY || process.env.DDALGGAK_DIRECT_ASK_API_KEY || process.env.OPENAI_COMPATIBLE_API_KEY || process.env.LOCAL_MODEL_API_KEY || process.env.OLLAMA_API_KEY || '',
+        model: modelPolicy.model || searchRuntime.model || '',
+        baseUrl: searchRuntime.openai_compatible?.base_url || '',
+        runtime: searchRuntime.openai_compatible?.runtime || '',
+        apiKey: process.env.DDALGGAK_SEARCH_ASK_API_KEY || process.env.DDALGGAK_DIRECT_ASK_API_KEY || process.env.DDALGGAK_LOCAL_API_KEY || process.env.OPENAI_COMPATIBLE_API_KEY || process.env.LOCAL_MODEL_API_KEY || process.env.OLLAMA_API_KEY || '',
         prompt,
         system: 'Answer in Korean unless the user asks otherwise. For search-intent requests, do not fabricate unavailable current facts; ask for a link/photo/source when needed.',
         temperature: Number(process.env.DDALGGAK_SEARCH_ASK_TEMPERATURE || process.env.DDALGGAK_DIRECT_ASK_TEMPERATURE || 0.1),
         maxTokens: Number(process.env.DDALGGAK_SEARCH_ASK_MAX_TOKENS || process.env.DDALGGAK_DIRECT_ASK_MAX_TOKENS || 512),
-        timeoutMs: Number(process.env.DDALGGAK_SEARCH_ASK_TIMEOUT_MS || Math.max(8000, maxSeconds * 1000)),
+        timeoutMs: searchRuntime.timeout_ms,
         jobId,
         surface: 'telegram_search_ask_fast_path',
         agentId: 'room_concierge_search',
@@ -1447,13 +1504,14 @@ export function createTelegramCommandHandler(deps = {}) {
       cwd: process.cwd(),
       prompt,
       jobId,
+      model: modelPolicy.model || process.env.DDALGGAK_SEARCH_ASK_CODEX_MODEL || process.env.DDALGGAK_DIRECT_ASK_CODEX_MODEL || process.env.CODEX_MODEL || process.env.CODEX_ASSIST_MODEL || '',
       surface: 'telegram_search_ask_fast_path',
       agentId: 'room_concierge_search',
       roleId: 'room_concierge',
       sandboxMode: process.env.DDALGGAK_SEARCH_ASK_SANDBOX_MODE || process.env.DDALGGAK_DIRECT_ASK_SANDBOX_MODE || 'read-only',
       approvalPolicy: process.env.DDALGGAK_SEARCH_ASK_APPROVAL_POLICY || process.env.DDALGGAK_DIRECT_ASK_APPROVAL_POLICY || 'never',
       profile: process.env.DDALGGAK_SEARCH_ASK_CODEX_PROFILE || process.env.DDALGGAK_DIRECT_ASK_CODEX_PROFILE || process.env.CODEX_ASSIST_PROFILE || process.env.CODEX_PROFILE || '',
-      timeoutMs: Number(process.env.DDALGGAK_SEARCH_ASK_TIMEOUT_MS || Math.max(8000, maxSeconds * 1000)),
+      timeoutMs: searchRuntime.timeout_ms,
       traceMetadata: { concierge_decision: decision || null, model_policy: modelPolicy, bypassed_workbench: true, bounded_search: true },
     });
     if (!codexResult.ok) throw new Error(codexResult.stderr || 'search Codex ask failed');
@@ -1511,7 +1569,7 @@ export function createTelegramCommandHandler(deps = {}) {
           },
         }));
       } catch {}
-      const shouldNoticeFallback = !['0', 'false', 'no', 'off'].includes(String(process.env.DDALGGAK_SEARCH_ASK_FALLBACK_NOTICE || 'true').trim().toLowerCase());
+      const shouldNoticeFallback = resolveDdalggakRouteRuntimeConfig('search', { env: process.env }).fallback_notice;
       if (shouldNoticeFallback) {
         await bot.sendMessage(chatId, [
           '🔎 빠른 검색 경로가 제한 시간 안에 끝나지 않아 표준 AI Room 실행으로 전환합니다.',
@@ -1519,7 +1577,7 @@ export function createTelegramCommandHandler(deps = {}) {
           '조금 걸릴 수 있어요. /status 로 현재 단계를 볼 수 있습니다.',
         ].join('\n'));
       }
-      if (String(process.env.DDALGGAK_SEARCH_ASK_FALLBACK_TO_WORKBENCH || 'true').trim().toLowerCase() === 'false') {
+      if (!resolveDdalggakRouteRuntimeConfig('search', { env: process.env }).fallback_to_workbench) {
         throw error;
       }
       appendAskRouteOutcome({ chatId, userId, message, command: sourceCommand, decision, executor: 'search_ask_fast_path', outcome: 'fast_path_failed_fallback_to_workbench', extra: { error: String(error?.message || error || 'unknown') } });
@@ -1859,6 +1917,18 @@ export function createTelegramCommandHandler(deps = {}) {
         return true;
       }
       await bot.sendMessage(chatId, HELP_TEXT);
+      return true;
+    }
+
+    if (cmd === "/config") {
+      const sub = String(args || '').trim().toLowerCase();
+      if (sub === 'doctor' || sub === 'audit') {
+        const source = loadRuntimeDoctorEnv();
+        const report = auditDdalggakRuntimeEnv(source);
+        await sendLong(bot, chatId, formatRuntimeConfigDoctorForTelegram(report));
+        return true;
+      }
+      await bot.sendMessage(chatId, formatRuntimeConfigForTelegram(resolveDdalggakRuntimeConfig({ env: process.env })));
       return true;
     }
 

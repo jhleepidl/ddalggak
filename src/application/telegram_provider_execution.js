@@ -56,6 +56,19 @@ export async function runAgentProviderExecution({
     takeGocFallbackReason,
   } = callbacks;
 
+  const normalizeProviderOutput = (value) => {
+    if (value && typeof value === 'object' && !Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, 'output')) {
+      return {
+        output: String(value.output || ''),
+        provider: String(value.provider || '').trim().toLowerCase(),
+        model: String(value.model || value.used_model || '').trim(),
+        failover: value.failover || undefined,
+        raw: value,
+      };
+    }
+    return { output: value, provider: '', model: '', failover: undefined, raw: value };
+  };
+
   const finalize = async (output, overrides = {}) => {
     await notifyAndConsumeGocFallback(bot, chatId, {
       notify,
@@ -80,7 +93,7 @@ export async function runAgentProviderExecution({
       if (notify && bot && chatId) {
         try { await bot.sendMessage(chatId, `🔁 Gemini CLI가 비활성화되어 Codex로 실행합니다. (${agentId || 'agent'})`); } catch {}
       }
-      const output = await codexAssist(jobId, String(prompts.chatQuestion || prompts.goal || prompts.instruction || ''), signal, {
+      const outputResult = await codexAssist(jobId, String(prompts.chatQuestion || prompts.goal || prompts.instruction || ''), signal, {
         runtimeExecutionPolicy,
         providerOptions: {
           ...providerOptions,
@@ -100,10 +113,15 @@ export async function runAgentProviderExecution({
           : {},
         failoverDecision: migrationDecision,
       });
-      return finalize(output, { provider: 'codex', model: providerOptions.profile || process.env.CODEX_PROFILE || 'codex', failover: migrationDecision });
+      const normalizedOutput = normalizeProviderOutput(outputResult);
+      return finalize(normalizedOutput.output, {
+        provider: normalizedOutput.provider || 'codex',
+        model: normalizedOutput.model || providerOptions.model || providerOptions.profile || process.env.CODEX_ASSIST_MODEL || process.env.CODEX_MODEL || process.env.CODEX_PROFILE || 'codex',
+        failover: normalizedOutput.failover || migrationDecision,
+      });
     }
     if (shouldUseCodexAssistForNonCodingRole({ roleId, act, runtimeExecutionPolicy }) && typeof codexAssist === 'function') {
-      const output = await codexAssist(jobId, String(prompts.chatQuestion || prompts.goal || prompts.instruction || ''), signal, {
+      const outputResult = await codexAssist(jobId, String(prompts.chatQuestion || prompts.goal || prompts.instruction || ''), signal, {
         runtimeExecutionPolicy,
         providerOptions: {
           ...providerOptions,
@@ -121,7 +139,12 @@ export async function runAgentProviderExecution({
           ? act.inputs._prompt_context_info
           : {},
       });
-      return finalize(output, { provider: 'codex', model: providerOptions.profile || process.env.CODEX_PROFILE || 'codex' });
+      const normalizedOutput = normalizeProviderOutput(outputResult);
+      return finalize(normalizedOutput.output, {
+        provider: normalizedOutput.provider || 'codex',
+        model: normalizedOutput.model || providerOptions.model || providerOptions.profile || process.env.CODEX_ASSIST_MODEL || process.env.CODEX_MODEL || process.env.CODEX_PROFILE || 'codex',
+        failover: normalizedOutput.failover,
+      });
     }
     if (typeof codexImplement !== 'function') throw new Error('codex provider is selected but codexImplement callback is unavailable');
     const output = await codexImplement(jobId, String(prompts.instruction || ''), signal, {
@@ -199,7 +222,7 @@ export async function runAgentProviderExecution({
       if (notify && bot && chatId) {
         try { await bot.sendMessage(chatId, `🔁 Gemini 혼잡으로 ${decision.to_provider} fallback을 사용합니다. (${agentId || 'agent'})`); } catch {}
       }
-      const output = await callbacks.codexAssist(jobId, String(prompts.instruction || prompts.goal || prompts.chatQuestion || ''), signal, {
+      const outputResult = await callbacks.codexAssist(jobId, String(prompts.instruction || prompts.goal || prompts.chatQuestion || ''), signal, {
         runtimeExecutionPolicy,
         providerOptions: {
           sandboxMode: process.env.CODEX_ASSIST_SANDBOX_MODE || 'read-only',
@@ -218,10 +241,11 @@ export async function runAgentProviderExecution({
           ? act.inputs._prompt_context_info
           : {},
       });
-      return finalize(output, {
-        provider: 'codex',
-        model: providerOptions?.profile || process.env.CODEX_PROFILE || 'codex',
-        failover: decision,
+      const normalizedOutput = normalizeProviderOutput(outputResult);
+      return finalize(normalizedOutput.output, {
+        provider: normalizedOutput.provider || 'codex',
+        model: normalizedOutput.model || providerOptions?.model || providerOptions?.profile || process.env.CODEX_ASSIST_MODEL || process.env.CODEX_MODEL || process.env.CODEX_PROFILE || 'codex',
+        failover: normalizedOutput.failover || decision,
       });
     }
   }
@@ -275,7 +299,7 @@ export async function runAgentProviderExecution({
         try { await bot.sendMessage(chatId, `🧠 ChatGPT 역할을 Codex CLI bridge로 실행합니다. (${agentId || 'agent'})`); } catch {}
       }
       const bridgeOptions = resolveChatGptCodexProviderOptions(providerOptions);
-      const output = await codexAssist(jobId, promptText, signal, {
+      const outputResult = await codexAssist(jobId, promptText, signal, {
         runtimeExecutionPolicy,
         providerOptions: bridgeOptions,
         chatId,
@@ -289,11 +313,12 @@ export async function runAgentProviderExecution({
           ? act.inputs._prompt_context_info
           : {},
       });
-      if (typeof appendLocalLogs === 'function') appendLocalLogs(output, typeof memoryModeWithFallback === 'function' ? memoryModeWithFallback() : 'default');
-      return finalize(output, {
-        provider: 'codex',
-        model: bridgeOptions.profile || process.env.CODEX_PROFILE || 'codex',
-        failover: { from_provider: 'chatgpt', to_provider: 'codex', reason: bridge.reason },
+      const normalizedOutput = normalizeProviderOutput(outputResult);
+      if (typeof appendLocalLogs === 'function') appendLocalLogs(normalizedOutput.output, typeof memoryModeWithFallback === 'function' ? memoryModeWithFallback() : 'default');
+      return finalize(normalizedOutput.output, {
+        provider: normalizedOutput.provider || 'codex',
+        model: normalizedOutput.model || bridgeOptions.model || bridgeOptions.profile || process.env.CODEX_ASSIST_MODEL || process.env.CODEX_MODEL || process.env.CODEX_PROFILE || 'codex',
+        failover: normalizedOutput.failover || { from_provider: 'chatgpt', to_provider: 'codex', reason: bridge.reason },
       });
     }
     if (bridge.mode === 'manual') {

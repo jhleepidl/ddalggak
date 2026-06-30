@@ -1094,7 +1094,7 @@ function buildDirectAnswerOutputGuide(rawGuide = '', { userLocale = 'ko' } = {})
     '- If the user asks for a recommendation, question answer, or explanation, provide it directly instead of using a fixed implementation-risk template.',
     '- Do not expose internal KB, tracking file, route, provider, run_dir, or runtime metadata unless the user explicitly asks for diagnostics.',
     `- ${userSurfaceLanguageDirective(locale)}`,
-  ].join('\\n');
+  ].join('\n');
 }
 
 function buildArtifactTurnPolicyBlock(requirements = {}, { hasArtifactContract = false, runtimeExecutionPolicy = null, roleId = '' } = {}) {
@@ -1424,7 +1424,7 @@ ${executionRequirementsBlock}` : "",
     row: {
       kind: 'provider_prompt',
       provider: 'codex',
-      model: String(providerOptions.profile || process.env.CODEX_PROFILE || '').trim() || 'codex',
+      model: String(providerOptions.model || providerOptions.profile || process.env.CODEX_ASSIST_MODEL || process.env.CODEX_MODEL || process.env.CODEX_PROFILE || '').trim() || 'codex',
       agent_id: String(opts.agentId || 'codex').trim().toLowerCase(),
       role_id: String(opts.roleId || 'builder').trim().toLowerCase(),
       prompt_text: prompt,
@@ -1450,7 +1450,8 @@ ${executionRequirementsBlock}` : "",
     prompt,
     signal,
     jobId,
-    profile: providerOptions.profile || process.env.CODEX_PROFILE || "",
+    model: providerOptions.model || providerOptions.model_id || process.env.CODEX_MODEL || '',
+    profile: providerOptions.profile || process.env.CODEX_PROFILE || '',
     addDirs: providerOptions.addDirs || [],
     sandboxMode: providerOptions.sandboxMode,
     approvalPolicy: providerOptions.approvalPolicy,
@@ -1488,6 +1489,8 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
   const providerOptions = {
     ...resolvedCodexOptions,
     ...explicitProviderOptions,
+    model: String(explicitProviderOptions.model || explicitProviderOptions.model_id || process.env.CODEX_ASSIST_MODEL || process.env.CODEX_MODEL || resolvedCodexOptions.model || '').trim(),
+    profile: String(explicitProviderOptions.profile || process.env.CODEX_ASSIST_PROFILE || process.env.CODEX_PROFILE || resolvedCodexOptions.profile || '').trim(),
     sandboxMode: String(explicitProviderOptions.sandboxMode || explicitProviderOptions.sandbox_mode || process.env.CODEX_ASSIST_SANDBOX_MODE || resolvedCodexOptions.sandboxMode || 'read-only').trim() || 'read-only',
     approvalPolicy: String(explicitProviderOptions.approvalPolicy || explicitProviderOptions.approval_policy || process.env.CODEX_ASSIST_APPROVAL_POLICY || resolvedCodexOptions.approvalPolicy || 'never').trim() || 'never',
   };
@@ -1586,7 +1589,7 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
     row: {
       kind: 'provider_prompt',
       provider: 'codex',
-      model: String(providerOptions.profile || process.env.CODEX_PROFILE || '').trim() || 'codex',
+      model: String(providerOptions.model || providerOptions.profile || process.env.CODEX_ASSIST_MODEL || process.env.CODEX_MODEL || process.env.CODEX_PROFILE || '').trim() || 'codex',
       agent_id: agentKey,
       role_id: roleKey,
       prompt_text: prompt,
@@ -1626,7 +1629,8 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
     prompt,
     signal,
     jobId,
-    profile: providerOptions.profile || process.env.CODEX_PROFILE || '',
+    model: providerOptions.model || process.env.CODEX_ASSIST_MODEL || process.env.CODEX_MODEL || '',
+    profile: providerOptions.profile || process.env.CODEX_ASSIST_PROFILE || process.env.CODEX_PROFILE || '',
     addDirs: providerOptions.addDirs || [],
     sandboxMode: providerOptions.sandboxMode,
     approvalPolicy: providerOptions.approvalPolicy,
@@ -1660,17 +1664,23 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
     fallbackDoc: 'research',
     requestedDoc: opts.finalSynthesis === true ? 'final_answer' : 'research',
   });
-  jobs.appendConversation(jobId, 'codex', out, { kind: 'assistant_failover', provider: 'codex', model: providerOptions.profile || process.env.CODEX_PROFILE || 'codex' });
+  jobs.appendConversation(jobId, 'codex', out, { kind: 'assistant_failover', provider: 'codex', model: r.used_model || providerOptions.model || providerOptions.profile || process.env.CODEX_ASSIST_MODEL || process.env.CODEX_MODEL || process.env.CODEX_PROFILE || 'codex' });
   ensureCommandOk('Codex fallback assist', r);
-  if (materialization.materialized?.length) {
-    return [
+  const outputText = materialization.materialized?.length
+    ? [
       out,
       '',
       '생성된 파일:',
       ...materialization.materialized.map((entry) => `- ${entry.path}`),
-    ].join('\n');
-  }
-  return out;
+    ].join('\n')
+    : out;
+  return {
+    output: outputText,
+    provider: 'codex',
+    model: String(r.used_model || providerOptions.model || providerOptions.profile || process.env.CODEX_ASSIST_MODEL || process.env.CODEX_MODEL || process.env.CODEX_PROFILE || 'codex').trim(),
+    used_model: String(r.used_model || '').trim(),
+    raw_result: r,
+  };
 }
 
 async function gitSummary(jobId, signal = null) {

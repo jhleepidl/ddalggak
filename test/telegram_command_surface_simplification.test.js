@@ -237,3 +237,49 @@ test('advanced help no longer advertises legacy ChatGPT paste commands', async (
   assert.doesNotMatch(sent[0].text, /gptprompt/)
   assert.match(sent[0].text, /agents export\|publish-candidate\|packages\|clone/)
 })
+
+test('/config and /cfg show effective simplified runtime config', async () => {
+  const sent = []
+  const oldPreset = process.env.DDALGGAK_RUNTIME_PRESET
+  const oldFast = process.env.DDALGGAK_FAST_PROVIDER
+  process.env.DDALGGAK_RUNTIME_PRESET = 'local_fast'
+  process.env.DDALGGAK_FAST_PROVIDER = 'antigravity'
+  try {
+    const handler = createTelegramCommandHandler({ bot: makeBot(sent) })
+    await handler({ msg: { chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/cfg', chatId: 'chat-1', userId: 'user-1' })
+    assert.match(sent[0].text, /runtime config/)
+    assert.match(sent[0].text, /preset: local_fast/)
+    assert.match(sent[0].text, /fast \/c provider: antigravity/)
+  } finally {
+    if (oldPreset === undefined) delete process.env.DDALGGAK_RUNTIME_PRESET
+    else process.env.DDALGGAK_RUNTIME_PRESET = oldPreset
+    if (oldFast === undefined) delete process.env.DDALGGAK_FAST_PROVIDER
+    else process.env.DDALGGAK_FAST_PROVIDER = oldFast
+  }
+})
+
+test('/config doctor returns runtime audit without exposing secret values', async () => {
+  const sent = []
+  const oldFast = process.env.DDALGGAK_FAST_PROVIDER
+  const oldSecret = process.env.DDALGGAK_LOCAL_API_KEY
+  process.env.DDALGGAK_FAST_PROVIDER = 'openai_compatible'
+  process.env.DDALGGAK_LOCAL_API_KEY = 'unit-test-secret'
+  const handler = createTelegramCommandHandler({
+    bot: makeBot(sent),
+    sendLong: async (_bot, chatId, text) => {
+      sent.push({ chatId, text })
+      return { message_id: sent.length }
+    },
+  })
+  try {
+    await handler({ msg: { chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/config doctor', chatId: 'chat-1', userId: 'user-1' })
+    assert.match(sent[0].text, /config doctor/)
+    assert.match(sent[0].text, /Effective runtime/)
+    assert.doesNotMatch(sent[0].text, /unit-test-secret/)
+  } finally {
+    if (oldFast === undefined) delete process.env.DDALGGAK_FAST_PROVIDER
+    else process.env.DDALGGAK_FAST_PROVIDER = oldFast
+    if (oldSecret === undefined) delete process.env.DDALGGAK_LOCAL_API_KEY
+    else process.env.DDALGGAK_LOCAL_API_KEY = oldSecret
+  }
+})

@@ -146,3 +146,30 @@ test('runAgentProviderExecution keeps Codex implement for coding builder roles',
   assert.equal(calls.length, 1);
   assert.equal(calls[0].mode, 'implement');
 });
+
+test('runAgentProviderExecution reports trace-derived Codex assist model when available', async () => {
+  const result = await runAgentProviderExecution({
+    provider: 'codex',
+    agentId: 'research_lead',
+    roleId: 'researcher',
+    model: 'configured-display-model',
+    bot: null,
+    chatId: 1,
+    jobId: 'job-codex-model-reporting',
+    prompts: { chatQuestion: '간단히 답해줘' },
+    callbacks: {
+      codexAssist: async () => ({
+        output: 'model-aware answer',
+        provider: 'codex',
+        model: 'gpt-5.5-thinking',
+        used_model: 'gpt-5.5-thinking',
+      }),
+      memoryModeWithFallback: () => 'local',
+      takeGocFallbackReason: () => '',
+    },
+  });
+
+  assert.equal(result.provider, 'codex');
+  assert.equal(result.output, 'model-aware answer');
+  assert.equal(result.model, 'gpt-5.5-thinking');
+});

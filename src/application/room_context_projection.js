@@ -1,4 +1,6 @@
 import { readRoomConversationLedger } from './room_conversation_ledger.js';
+import { deriveRoomContextState, summarizeRoomContextState } from './room_context_state.js';
+import { readRoomSemanticObservations } from './room_semantic_observation_log.js';
 
 function clean(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
@@ -43,6 +45,7 @@ function normalizeTurn(row = {}) {
     command: clean(row.command || row.source_command || row.sourceCommand) || undefined,
     route: clean(row.route) || undefined,
     source: clean(row.source) || undefined,
+    semantic_observations: Array.isArray(row.semantic_observations || row.semanticObservations) ? (row.semantic_observations || row.semanticObservations).filter(Boolean).slice(-12) : undefined,
   };
 }
 
@@ -82,6 +85,8 @@ export function createRoomContextSnapshot({
     room: roomSelection?.room_id || roomSelection?.execution_room || roomSelection?.roomId || '',
     team: teamSelection?.execution_mode || teamSelection?.mode || '',
   });
+  const semanticObservations = readRoomSemanticObservations({ jobDir, limit: 24 });
+  const contextState = deriveRoomContextState({ turns: sliced, latestUserText: cleanLatest, semanticObservations });
   return {
     kind: 'room_context_snapshot_v1',
     snapshot_id: `roomctx_${tinyHash(seed)}`,
@@ -91,7 +96,9 @@ export function createRoomContextSnapshot({
     room_selection: roomSelection || undefined,
     team_selection: teamSelection || undefined,
     turns: sliced,
-    substrates: ['room_turn_ledger', 'session_recent_room_turns'],
+    context_state: contextState,
+    semantic_observations: semanticObservations,
+    substrates: ['room_turn_ledger', 'session_recent_room_turns', ...(semanticObservations.length ? ['room_semantic_observations'] : [])],
     created_at: new Date().toISOString(),
   };
 }
@@ -100,6 +107,32 @@ function renderTurn(turn = {}, { turnChars = 260 } = {}) {
   const role = turn.role === 'assistant' ? 'assistant' : turn.role === 'system' ? 'system' : 'user';
   const meta = [turn.command, turn.route].filter(Boolean).join(' · ');
   return `- ${role}${meta ? ` (${meta})` : ''}: ${clip(turn.text, turnChars)}`;
+}
+
+function sameTurnIdentity(a = {}, b = {}) {
+  const aId = clean(a.turn_id || a.turnId || a.id);
+  const bId = clean(b.turn_id || b.turnId || b.id);
+  if (aId && bId && aId === bId) return true;
+  return clean(a.text) && clean(a.text) === clean(b.text) && clean(a.role) === clean(b.role);
+}
+
+function focusTurnsForDialogueReferent(turns = [], contextState = {}, tier = 'agent') {
+  const rows = Array.isArray(turns) ? turns : [];
+  const ref = contextState?.latest_dialogue_referent;
+  const shouldFocus = ref
+    && (tier === 'micro' || tier === 'search')
+    && (contextState.latest_user_requires_verification || /followup_to_immediate_previous/.test(String(ref.relation || '')));
+  if (!shouldFocus) return rows;
+  const refTurn = { role: 'assistant', turn_id: ref.turn_id, text: ref.text_excerpt };
+  let refIndex = -1;
+  if (ref.turn_id) refIndex = rows.findIndex((turn) => sameTurnIdentity(turn, refTurn));
+  if (refIndex < 0 && ref.text_excerpt) {
+    const excerpt = clean(ref.text_excerpt).slice(0, 80);
+    refIndex = rows.findIndex((turn) => turn.role === 'assistant' && clean(turn.text).includes(excerpt));
+  }
+  if (refIndex < 0) return rows;
+  const start = Math.max(0, refIndex - 1);
+  return rows.slice(start);
 }
 
 export function buildBudgetedRoomContextProjection({
@@ -114,8 +147,11 @@ export function buildBudgetedRoomContextProjection({
   const charBudget = Math.max(360, Math.floor(Number(maxChars || defaults.maxChars) || defaults.maxChars));
   const maxTurnCount = Math.max(1, Math.floor(Number(turnLimit || defaults.turnLimit) || defaults.turnLimit));
   const snap = snapshot && typeof snapshot === 'object' ? snapshot : createRoomContextSnapshot({});
-  const turns = Array.isArray(snap.turns) ? snap.turns.map(normalizeTurn).filter(Boolean).slice(-maxTurnCount) : [];
+  const allTurns = Array.isArray(snap.turns) ? snap.turns.map(normalizeTurn).filter(Boolean) : [];
+  const focusedTurns = focusTurnsForDialogueReferent(allTurns, snap.context_state || {}, projectionTier);
+  const turns = focusedTurns.slice(-maxTurnCount);
   const latest = clean(snap.latest_user_request) || clean([...turns].reverse().find((turn) => turn.role === 'user')?.text || '');
+  const dialogueRef = snap.context_state?.latest_dialogue_referent;
   const lines = [
     '[ROOM CONTEXT SNAPSHOT]',
     `snapshot_id: ${snap.snapshot_id || 'roomctx_unknown'}`,
@@ -124,8 +160,15 @@ export function buildBudgetedRoomContextProjection({
     latest ? `latest_user_request: ${clip(latest, projectionTier === 'micro' ? 280 : 520)}` : '',
     includePolicy ? 'policy: Use the same room substrate for every route. Older turns are context only; the latest user request is authoritative.' : '',
     includePolicy && (projectionTier === 'micro' || projectionTier === 'search')
-      ? 'carry_forward: If the latest turn omits a nearby location/object/preference, use the most recent same-room turn unless contradicted.'
+      ? 'carry_forward: If the latest turn omits an object, constraint, preference, or other referent, use schema-agnostic room context state first, then recent turns, unless contradicted.'
       : '',
+    includePolicy && dialogueRef
+      ? 'referent_resolution_policy: If the latest user request is a follow-up, bind ambiguous phrases to the DIALOGUE REFERENCE TARGET before older room memories.'
+      : '',
+    (projectionTier === 'search' && snap.context_state?.latest_user_requires_verification)
+      ? 'verification_policy: Do not present prior assistant recommendations as verified external facts unless the context state shows verified evidence or this run produces explicit source evidence. If a DIALOGUE REFERENCE TARGET is present, verify that target rather than older recommendations.'
+      : '',
+    summarizeRoomContextState(snap.context_state || deriveRoomContextState({ turns: allTurns, latestUserText: latest, semanticObservations: snap.semantic_observations || [] }), { maxItems: projectionTier === 'micro' ? 4 : 6 }),
     turns.length ? '[RECENT SAME-ROOM TURNS]' : '',
     ...turns.map((turn) => renderTurn(turn, { turnChars: defaults.turnChars })),
   ].filter(Boolean);

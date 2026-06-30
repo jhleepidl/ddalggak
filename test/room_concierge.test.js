@@ -122,5 +122,14 @@ test('search prompt includes room continuity context when provided', () => {
   });
   assert.match(prompt, /ROOM CONTINUITY/);
   assert.match(prompt, /서울대입구역/);
-  assert.match(prompt, /omits a location/);
+  assert.match(prompt, /omitted referents, constraints, preferences/);
+});
+
+test('search prompt does not treat continuity as external verification evidence', () => {
+  const prompt = buildSearchAskFallbackPrompt({
+    question: '실제로 서울대입구 주변에서 시킬 수 있는 검증된 음식 메뉴들이야?',
+    context: '[ROOM CONTEXT STATE]\nunverified_assistant_recommendations: 포케올데이 / 샐러디\nwarnings: previous_assistant_recommendations_are_unverified',
+  });
+  assert.match(prompt, /previous assistant recommendations.*NOT external evidence/i);
+  assert.match(prompt, /Do not answer.*verified/i);
 });

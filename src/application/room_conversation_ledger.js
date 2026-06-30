@@ -81,6 +81,7 @@ export function normalizeRecentRoomTurns(raw = []) {
       job_id: clean(row.job_id || row.jobId) || undefined,
       chat_id: clean(row.chat_id || row.chatId) || undefined,
       user_id: clean(row.user_id || row.userId) || undefined,
+      semantic_observations: Array.isArray(row.semantic_observations || row.semanticObservations) ? (row.semantic_observations || row.semanticObservations).filter(Boolean).slice(-12) : undefined,
     };
     if (seen.has(normalized.turn_id)) continue;
     seen.add(normalized.turn_id);
@@ -162,6 +163,7 @@ export function appendRoomConversationTurn({
   jobId = '',
   writeConversation = true,
   updatePacket = true,
+  semanticObservations = null,
 } = {}) {
   const normalizedRole = clean(role).toLowerCase();
   const cleanText = clip(text, normalizedRole === 'assistant' ? 4000 : 2400);
@@ -180,6 +182,7 @@ export function appendRoomConversationTurn({
     job_id: clean(jobId) || undefined,
     chat_id: clean(chatId) || undefined,
     user_id: clean(userId) || undefined,
+    semantic_observations: Array.isArray(semanticObservations) ? semanticObservations.filter(Boolean).slice(-12) : undefined,
   };
   appendSessionRoomTurn(chatSessionStore, chatId, row);
   appendJobTurn({ jobDir, turn: row, writeConversation });
@@ -203,6 +206,8 @@ export function appendRoomConversationExchange({
   route = '',
   jobId = '',
   skipUserTurn = false,
+  userSemanticObservations = null,
+  assistantSemanticObservations = null,
 } = {}) {
   const userTurn = skipUserTurn ? null : appendRoomConversationTurn({
     jobDir,
@@ -218,6 +223,7 @@ export function appendRoomConversationExchange({
     route,
     jobId,
     updatePacket: false,
+    semanticObservations: userSemanticObservations,
   });
   const assistantTurn = appendRoomConversationTurn({
     jobDir,
@@ -233,6 +239,7 @@ export function appendRoomConversationExchange({
     route,
     jobId,
     updatePacket: false,
+    semanticObservations: assistantSemanticObservations,
   });
   if (jobDir) {
     try { updateCurrentTaskPacket({ jobDir, currentUserText: '', runMeta: {}, persist: true }); } catch {}
@@ -280,7 +287,7 @@ export function formatRoomContinuityPromptBlock({ jobDir = '', session = null, l
   return clip([
     '[ROOM CONTINUITY — HIGH PRIORITY]',
     'Recent same-chat turns, including direct Room Concierge fast-path turns. Use this before claiming that prior context is missing.',
-    'If the latest user omits a location/object/preference but the immediately preceding turns supply one, carry it forward unless contradicted.',
+    'If the latest user omits a referent, constraint, or preference and recent same-chat turns provide it, carry it forward unless contradicted.',
     rendered,
   ].join('\n'), Math.max(400, Math.floor(Number(maxChars) || 1600)));
 }
