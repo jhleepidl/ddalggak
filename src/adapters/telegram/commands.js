@@ -47,6 +47,7 @@ import {
 import { formatRoomEvolutionSnapshot, proposeRoomEvolution } from '../../application/room_evolution.js';
 import { appendKnowledgeRouteEvent } from '../../application/knowledge_route_event_log.js';
 import { appendRoomConversationExchange, appendRoomConversationTurn } from '../../application/room_conversation_ledger.js';
+import { appendRoomLoopEvent, buildRoomLoopStartEvent, classifyRoomLoopInterruption, createRoomLoopId, deriveActiveRoomLoop, normalizeRoomLoop, readRoomLoopEvents } from '../../application/room_loop_events.js';
 import { createRoomContextSnapshot, formatRoomContextProjectionBlock } from '../../application/room_context_projection.js';
 import { resolveDdalggakRuntimeConfig, resolveDdalggakRouteRuntimeConfig, formatRuntimeConfigForTelegram, auditDdalggakRuntimeEnv, formatRuntimeConfigDoctorForTelegram } from '../../application/runtime_config.js';
 import { appendRoomSelectionRouteEvent, buildRoomSelectionDecision, buildTeamSelectionDecision } from '../../application/room_selection_routing.js';
@@ -1324,6 +1325,97 @@ export function createTelegramCommandHandler(deps = {}) {
     }
   }
 
+  function resolveActiveRoomLoopForChat(chatId = '') {
+    try {
+      const { jobDir } = resolveJobDirForRoute(chatId);
+      const session = chatSessionStore.get(chatId) || {};
+      const events = readRoomLoopEvents({ jobDir, session, limit: 80 });
+      return deriveActiveRoomLoop({ events, session });
+    } catch {
+      return null;
+    }
+  }
+
+  function recordRoomLoopInterruptionForIncoming({ chatId = '', userId = '', message = '', command = '/chat' } = {}) {
+    try {
+      const activeLoop = resolveActiveRoomLoopForChat(chatId);
+      const event = classifyRoomLoopInterruption({ text: message, command, activeLoop });
+      if (!event) return null;
+      const { jobId, jobDir } = resolveJobDirForRoute(chatId);
+      return appendRoomLoopEvent({
+        jobDir,
+        chatSessionStore,
+        chatId,
+        userId,
+        jobId,
+        event: {
+          ...event,
+          chat_id: chatId,
+          user_id: userId,
+          job_id: jobId,
+          command,
+        },
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  function startRoomLoopControlPlane({ chatId = '', userId = '', goal = '', command = '/loop', workflowContract = null, teamConfig = null, source = 'telegram_loop' } = {}) {
+    try {
+      const { jobId, jobDir } = resolveJobDirForRoute(chatId);
+      const loopId = createRoomLoopId({ chatId, objective: goal, source });
+      const loop = normalizeRoomLoop({
+        loop_id: loopId,
+        room_id: chatId,
+        chat_id: chatId,
+        objective: goal,
+        status: 'running',
+        controller: 'user',
+        command,
+        source,
+        model_policy: teamConfig?.room_runtime_selection || teamConfig?.ai_room_selection || {},
+        budget_policy: { max_iterations: workflowContract?.max_iterations || workflowContract?.maxIterations || undefined },
+        current_plan: Array.isArray(workflowContract?.required_passes) ? workflowContract.required_passes : [],
+        active_constraints: Array.isArray(workflowContract?.stop_conditions) ? workflowContract.stop_conditions.map((item) => `stop_condition: ${item}`) : [],
+      });
+      const event = buildRoomLoopStartEvent({ loop, chatId, userId, jobId, command, source });
+      appendRoomLoopEvent({ jobDir, chatSessionStore, chatId, userId, jobId, event });
+      return loop;
+    } catch {
+      return null;
+    }
+  }
+
+  function recordRoomLoopStatusCommand({ chatId = '', userId = '', command = '', status = '', text = '' } = {}) {
+    try {
+      const activeLoop = resolveActiveRoomLoopForChat(chatId);
+      if (!activeLoop?.loop_id) return null;
+      const interruptType = command === '/pause' ? 'pause' : command === '/resume' ? 'resume' : command === '/approve' ? 'approve' : 'status_update';
+      const { jobId, jobDir } = resolveJobDirForRoute(chatId);
+      return appendRoomLoopEvent({
+        jobDir,
+        chatSessionStore,
+        chatId,
+        userId,
+        jobId,
+        event: {
+          event_type: 'user_interrupt',
+          interrupt_type: interruptType,
+          loop_id: activeLoop.loop_id,
+          chat_id: chatId,
+          user_id: userId,
+          job_id: jobId,
+          command,
+          source: 'telegram_loop_status_command',
+          payload: { text: text || command, target_status: status },
+        },
+      });
+    } catch {
+      return null;
+    }
+  }
+
   function appendAskRouteOutcome({ chatId = '', userId = '', message = '', command = '/chat', decision = null, modelPolicy = null, executor = '', outcome = '', extra = {} } = {}) {
     try {
       const { jobDir } = resolveJobDirForRoute(chatId);
@@ -1421,6 +1513,7 @@ export function createTelegramCommandHandler(deps = {}) {
       }));
     } catch {}
     recordIncomingRoomTurn({ chatId, userId, message, command: sourceCommand, decision: conciergeDecision });
+    recordRoomLoopInterruptionForIncoming({ chatId, userId, message, command: sourceCommand });
     if (shouldUseDirectAskFastPath(conciergeDecision) && (typeof directAskExecutor === 'function' || shouldEnableConciergeFastPathForPolicy(conciergeModelPolicy))) {
       const directResult = await runDirectAskOrFallback({ chatId, userId, msg, message, decision: conciergeDecision, ackAlreadySent: true, sourceCommand });
       if (directResult?.status !== 'disabled') return { handled: true, ackAlreadySent: true, decision: conciergeDecision, modelPolicy: conciergeModelPolicy, roomSelection, teamSelection };
@@ -1687,23 +1780,34 @@ export function createTelegramCommandHandler(deps = {}) {
       team_roles: roomProfile.default_agents,
       source: sourceCommand === '/loop' ? 'telegram_loop' : 'telegram_task_loop',
     });
+    const roomLoop = startRoomLoopControlPlane({
+      chatId,
+      userId,
+      goal,
+      command: sourceCommand,
+      workflowContract,
+      teamConfig: taskLoopTeamConfig,
+      source: sourceCommand === '/loop' ? 'telegram_loop' : 'telegram_task_loop',
+    });
     await sendLong(bot, chatId, [
       '🔁 Bounded loop를 시작합니다.',
       '',
       `workflow: ${summarizeTeamWorkflowContract(workflowContract)}`,
       `agents: ${(roomProfile.default_agents || []).join(', ') || '-'}`,
+      roomLoop?.loop_id ? `loop id: ${roomLoop.loop_id}` : '',
       `max loops: ${workflowContract.max_iterations}`,
       'policy: small safe changes auto · risky/large changes approval-required',
     ].join('\n'));
     const taskMessage = [
       'CONTROL PLANE TASK: Start a bounded agent-room loop for the following goal.',
       `Work depth: loop`,
+      roomLoop?.loop_id ? `Loop ID: ${roomLoop.loop_id}` : '',
       `Workflow contract: ${JSON.stringify(workflowContract)}`,
       `Agent room roles: ${(roomProfile.default_agents || []).join(', ')}`,
       '',
       goal,
     ].join('\n');
-    recordRoomEvent({ chatId, userId, eventType: 'work_depth_used', command: sourceCommand || '/loop', goal, profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { depth: 'loop', max_iterations: maxIterations } });
+    recordRoomEvent({ chatId, userId, eventType: 'work_depth_used', command: sourceCommand || '/loop', goal, profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { depth: 'loop', max_iterations: workflowContract.max_iterations } });
     await enqueueWorkbenchInput({ chatId, userId, msg, text: taskMessage, kind: 'team_loop_task', teamConfig: taskLoopTeamConfig || null });
     return true;
   }
@@ -1980,6 +2084,7 @@ export function createTelegramCommandHandler(deps = {}) {
         reason: cmd === '/approve' ? 'telegram_top_level_approve' : `telegram_top_level_${cmd.slice(1)}`,
         actor: String(userId || chatId || 'telegram_user'),
       });
+      recordRoomLoopStatusCommand({ chatId, userId, command: cmd, status: statusMap[cmd], text: args || cmd });
       await bot.sendMessage(chatId, result.ok
         ? `✅ loop 상태를 ${statusMap[cmd]} 로 변경했습니다.`
         : `loop 상태 변경 실패: ${result.reason || 'unknown'}`);

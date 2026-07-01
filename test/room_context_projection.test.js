@@ -207,3 +207,36 @@ test('context state can use agent-provided semantic observations without domain-
   assert.match(block, /user_constraint: The user wants a light meal near Seoul National University Station/);
   assert.doesNotMatch(block, /active_location_candidates/);
 });
+
+
+test('room context projection includes active loop control state from room loop events', async () => {
+  const jobDir = fs.mkdtempSync(path.join(os.tmpdir(), 'room-context-loop-proj-'));
+  try {
+    const { appendRoomLoopEvent, buildRoomLoopStartEvent, normalizeRoomLoop } = await import('../src/application/room_loop_events.js');
+    const loop = normalizeRoomLoop({
+      loop_id: 'room_loop_projection_test',
+      chat_id: 'chat-1',
+      objective: '경쟁 제품 조사 루프',
+      current_plan: ['collect candidates', 'verify claims'],
+      active_constraints: ['latest public evidence only'],
+    });
+    appendRoomLoopEvent({
+      jobDir,
+      chatId: 'chat-1',
+      event: buildRoomLoopStartEvent({ loop, chatId: 'chat-1', jobId: 'job-1' }),
+    });
+    const snapshot = createRoomContextSnapshot({
+      jobDir,
+      latestUserText: '그 계획에서 가격 비교 기준을 최신으로 바꿔줘',
+      command: '/chat',
+      route: 'team_orchestration',
+    });
+    assert.equal(snapshot.active_room_loop.loop_id, 'room_loop_projection_test');
+    const projection = buildBudgetedRoomContextProjection({ snapshot, tier: 'team', maxChars: 2400 });
+    assert.match(projection.text, /ACTIVE ROOM LOOP/);
+    assert.match(projection.text, /경쟁 제품 조사 루프/);
+    assert.match(projection.text, /loop_policy/);
+  } finally {
+    fs.rmSync(jobDir, { recursive: true, force: true });
+  }
+});

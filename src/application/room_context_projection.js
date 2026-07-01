@@ -1,6 +1,7 @@
 import { readRoomConversationLedger } from './room_conversation_ledger.js';
 import { deriveRoomContextState, summarizeRoomContextState } from './room_context_state.js';
 import { readRoomSemanticObservations } from './room_semantic_observation_log.js';
+import { deriveActiveRoomLoop, formatActiveRoomLoopProjectionBlock, readRoomLoopEvents } from './room_loop_events.js';
 
 function clean(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
@@ -87,6 +88,8 @@ export function createRoomContextSnapshot({
   });
   const semanticObservations = readRoomSemanticObservations({ jobDir, limit: 24 });
   const contextState = deriveRoomContextState({ turns: sliced, latestUserText: cleanLatest, semanticObservations });
+  const loopEvents = readRoomLoopEvents({ jobDir, session, limit: 80 });
+  const activeLoop = deriveActiveRoomLoop({ events: loopEvents, session });
   return {
     kind: 'room_context_snapshot_v1',
     snapshot_id: `roomctx_${tinyHash(seed)}`,
@@ -98,7 +101,9 @@ export function createRoomContextSnapshot({
     turns: sliced,
     context_state: contextState,
     semantic_observations: semanticObservations,
-    substrates: ['room_turn_ledger', 'session_recent_room_turns', ...(semanticObservations.length ? ['room_semantic_observations'] : [])],
+    room_loop_events: loopEvents,
+    active_room_loop: activeLoop || undefined,
+    substrates: ['room_turn_ledger', 'session_recent_room_turns', ...(semanticObservations.length ? ['room_semantic_observations'] : []), ...(activeLoop ? ['room_loop_events'] : [])],
     created_at: new Date().toISOString(),
   };
 }
@@ -169,6 +174,7 @@ export function buildBudgetedRoomContextProjection({
       ? 'verification_policy: Do not present prior assistant recommendations as verified external facts unless the context state shows verified evidence or this run produces explicit source evidence. If a DIALOGUE REFERENCE TARGET is present, verify that target rather than older recommendations.'
       : '',
     summarizeRoomContextState(snap.context_state || deriveRoomContextState({ turns: allTurns, latestUserText: latest, semanticObservations: snap.semantic_observations || [] }), { maxItems: projectionTier === 'micro' ? 4 : 6 }),
+    snap.active_room_loop ? formatActiveRoomLoopProjectionBlock({ loop: snap.active_room_loop, maxChars: projectionTier === 'micro' ? 760 : 1200 }) : '',
     turns.length ? '[RECENT SAME-ROOM TURNS]' : '',
     ...turns.map((turn) => renderTurn(turn, { turnChars: defaults.turnChars })),
   ].filter(Boolean);
