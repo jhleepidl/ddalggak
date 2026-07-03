@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -68,13 +69,17 @@ function runCase({ model, mode }) {
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
+    const stdoutDecoder = new StringDecoder('utf8');
+    const stderrDecoder = new StringDecoder('utf8');
     const child = spawn('gemini', args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     const timer = setTimeout(() => {
       stderr += `\n[timeout] killed after ${timeoutMs}ms`;
       try { child.kill('SIGKILL'); } catch {}
     }, timeoutMs);
-    child.stdout.on('data', (d) => { stdout += d.toString('utf8'); });
-    child.stderr.on('data', (d) => { stderr += d.toString('utf8'); });
+    child.stdout.on('data', (d) => { stdout += stdoutDecoder.write(d); });
+    child.stdout.on('end', () => { stdout += stdoutDecoder.end(); });
+    child.stderr.on('data', (d) => { stderr += stderrDecoder.write(d); });
+    child.stderr.on('end', () => { stderr += stderrDecoder.end(); });
     child.on('error', (e) => {
       clearTimeout(timer);
       resolve({ model: cleanModel || 'auto', mode, ok: false, exitCode: -1, durationMs: Date.now() - startedAt, cwd, classification: 'spawn_error', stderrPreview: String(e?.message || e).slice(0, 800) });

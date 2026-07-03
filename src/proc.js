@@ -1,4 +1,20 @@
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
+
+
+export function makeUtf8StreamDecoder() {
+  const decoder = new StringDecoder("utf8");
+  return {
+    write(chunk) {
+      if (Buffer.isBuffer(chunk)) return decoder.write(chunk);
+      if (chunk instanceof Uint8Array) return decoder.write(Buffer.from(chunk));
+      return decoder.write(Buffer.from(String(chunk ?? ""), "utf8"));
+    },
+    end() {
+      return decoder.end();
+    },
+  };
+}
 
 function shouldUseProcessGroup(opts = {}) {
   if (process.platform === "win32") return false;
@@ -101,6 +117,10 @@ export async function runCommand(command, args = [], opts = {}) {
   return await new Promise((resolve) => {
     const stdoutBuffer = makeBoundedTextBuffer({ maxChars: maxStdoutChars });
     const stderrBuffer = makeBoundedTextBuffer({ maxChars: maxStderrChars });
+    const stdoutDecoder = makeUtf8StreamDecoder();
+    const stderrDecoder = makeUtf8StreamDecoder();
+    let stdoutDecoderEnded = false;
+    let stderrDecoderEnded = false;
     let wasAborted = false;
     let didTimeout = false;
     let killed = false;
@@ -113,8 +133,29 @@ export async function runCommand(command, args = [], opts = {}) {
     let earlyKillTimer = null;
     let child = null;
 
+    const flushStdoutDecoder = () => {
+      if (stdoutDecoderEnded) return;
+      const rest = stdoutDecoder.end();
+      if (rest) stdoutBuffer.append(rest);
+      stdoutDecoderEnded = true;
+    };
+    const flushStderrDecoder = () => {
+      if (stderrDecoderEnded) return;
+      const rest = stderrDecoder.end();
+      if (rest) stderrBuffer.append(rest);
+      stderrDecoderEnded = true;
+    };
+
     const currentStdout = () => stdoutBuffer.text();
     const currentStderr = () => stderrBuffer.text();
+    const finalStdout = () => {
+      flushStdoutDecoder();
+      return stdoutBuffer.text();
+    };
+    const finalStderr = () => {
+      flushStderrDecoder();
+      return stderrBuffer.text();
+    };
 
     const cleanup = () => {
       if (abortSignal) abortSignal.removeEventListener("abort", abortHandler);
@@ -150,8 +191,8 @@ export async function runCommand(command, args = [], opts = {}) {
           ok: false,
           exitCode: -1,
           signal: "SIGKILL",
-          stdout: currentStdout(),
-          stderr: `${currentStderr()}\n[hard-resolve] child did not close after ${reason}`,
+          stdout: finalStdout(),
+          stderr: `${finalStderr()}\n[hard-resolve] child did not close after ${reason}`,
           hardResolved: true,
         });
       }, hardKillGraceMs);
@@ -243,23 +284,25 @@ export async function runCommand(command, args = [], opts = {}) {
     }
 
     child.stdout?.on("data", (d) => {
-      const chunk = d.toString("utf8");
+      const chunk = stdoutDecoder.write(d);
       stdoutBuffer.append(chunk);
       maybeEarlyTerminate('stdout', chunk);
     });
+    child.stdout?.on("end", flushStdoutDecoder);
     child.stderr?.on("data", (d) => {
-      const chunk = d.toString("utf8");
+      const chunk = stderrDecoder.write(d);
       stderrBuffer.append(chunk);
       maybeEarlyTerminate('stderr', chunk);
     });
+    child.stderr?.on("end", flushStderrDecoder);
 
     child.on("error", e => {
       finish({
         ok: false,
         exitCode: -1,
         signal: null,
-        stdout: currentStdout(),
-        stderr: `${currentStderr()}\n[spawn error] ${String(e?.message ?? e)}`,
+        stdout: finalStdout(),
+        stderr: `${finalStderr()}\n[spawn error] ${String(e?.message ?? e)}`,
       });
     });
 
@@ -269,8 +312,8 @@ export async function runCommand(command, args = [], opts = {}) {
         ok: !forcedFailure && code === 0,
         exitCode: forcedFailure ? -1 : (code ?? -1),
         signal: signal || null,
-        stdout: currentStdout(),
-        stderr: currentStderr(),
+        stdout: finalStdout(),
+        stderr: finalStderr(),
       });
     });
   });
