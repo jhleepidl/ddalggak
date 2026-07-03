@@ -48,6 +48,7 @@ import { formatRoomEvolutionSnapshot, proposeRoomEvolution } from '../../applica
 import { appendKnowledgeRouteEvent } from '../../application/knowledge_route_event_log.js';
 import { appendRoomConversationExchange, appendRoomConversationTurn } from '../../application/room_conversation_ledger.js';
 import { appendRoomLoopEvent, buildRoomLoopStartEvent, classifyRoomLoopInterruption, createRoomLoopId, deriveActiveRoomLoop, normalizeRoomLoop, readRoomLoopEvents } from '../../application/room_loop_events.js';
+import { appendRoomCompanionEvent, buildCorrectionMergeProposalEvent, buildRoomCompanionMaterializationCandidateEvent, buildRoomCompanionMergeProposalDecisionEvent, classifyRoomCorrectionIntent, deriveRoomCompanionState, formatRoomCompanionListForTelegram, formatRoomCompanionMaterializationCandidatesForTelegram, formatRoomCompanionMergeProposalsForTelegram, formatRoomCompanionProfileForTelegram, getRoomCompanionProfile, normalizeAgentMode, normalizeCompanionId, normalizeContextMode, readRoomCompanionEvents } from '../../application/room_companions.js';
 import { createRoomContextSnapshot, formatRoomContextProjectionBlock } from '../../application/room_context_projection.js';
 import { resolveDdalggakRuntimeConfig, resolveDdalggakRouteRuntimeConfig, formatRuntimeConfigForTelegram, auditDdalggakRuntimeEnv, formatRuntimeConfigDoctorForTelegram } from '../../application/runtime_config.js';
 import { appendRoomSelectionRouteEvent, buildRoomSelectionDecision, buildTeamSelectionDecision } from '../../application/room_selection_routing.js';
@@ -133,16 +134,22 @@ import {
 
 const HELP_TEXT = [
   "Commands:",
+  "- /home 또는 /start: 지금 이 방에서 무엇을 할 수 있는지 한 화면으로 보기",
   "- /chat 또는 /c <message>: 일반 대화/질문/사실 정정 기본 진입점",
   "- /ask 또는 /a <question>: legacy quick-question alias. 일반 사용은 /chat 권장",
   "- /team 또는 /t <goal>: 팀 검토/리뷰 깊이로 답변",
   "- /loop 또는 /l [--loops n] <goal>: bounded loop 작업 시작",
   "- /room 또는 /r: 이 채팅방의 AI Room / Room Package 설정 보기",
+  "- /companions 또는 /companion: AI Companion 선택/프로필 보기",
+  "- /context project-only|clean-slate|exclude <source>|reset: context 사용 범위 조절",
+  "- /agent mode fast|balanced|strict: companion agent 모드 조절",
+  "- /correct <정정>: 반복 오류 방지용 room correction 기록",
   "- /task: 장기 작업/loop 상태 보기",
   "- /task loop <목표>: legacy 반복 점검·개선 작업 시작",
   "- /agents: 이 채팅방의 Agent Room 보기",
   "- /agents suggest <목표>: 목표에 맞는 agent 구성 추천",
   "- /review 또는 /rev: 승인/검토가 필요한 항목 보기",
+  "- /inbox: job review + correction proposal + materialization preview 한 화면",
   "- /memory 또는 /m: memory topology/pressure/proposal 상태 요약",
   "- /rule <자연어 지침>: 명시적 runtime rule 추가",
   "- /skill 또는 /sk: skill 상태 보기",
@@ -150,6 +157,7 @@ const HELP_TEXT = [
   "- /context 또는 /ctx: primitive context substrate/MVCC snapshot 요약",
   "- /goc 또는 /g: GoC sync/review 링크와 상태 보기",
   "- /config 또는 /cfg: 현재 runtime/provider 설정 요약, /config doctor: .env 진단",
+  "- /doctor: .env/provider/runtime 진단 바로 실행",
   "- /status 또는 /st: 지금 진행 상황 보기",
   "- /artifacts 또는 /art [limit]: 결과물 보기",
   "- /send <번호|path>: 결과물 전송",
@@ -185,6 +193,8 @@ function normalizeTelegramCommandAlias(cmd = '') {
 
 const ADVANCED_HELP_TEXT = [
   "More commands:",
+  "- /home 또는 /start: compact onboarding/dashboard 보기",
+  "- /quickstart: /home과 같은 빠른 시작 가이드 보기",
   "- /whoami: 현재 chat_id / user_id 확인",
   "- /running: 실행/대기 job 목록 확인",
   "- /credential ...: credential 바인딩/확인",
@@ -198,13 +208,22 @@ const ADVANCED_HELP_TEXT = [
   "- /team: legacy/advanced alias. 일반 사용은 /agents 권장",
   "- /team more: team topology 고급 명령 보기",
   "- /review approve|reject <reason>: 대기 중인 검토/승인 항목 처리",
+  "- /inbox: active job review, companion merge proposal, materialization candidate 요약",
   "- /memory: topology, pressure, proposal/materialization 상태 요약",
   "- /memory debug <show|md|kb|topology|pressure|evidence|review|materialize-preview|modules>: 개발/진단용 상세 조회",
   "- /settings ...: legacy alias, 가능하면 /memory 또는 GoC 사용",
   "- /skills 또는 /skill: 현재/예정 agent roster와 대표 skill 보기",
   "- /skill list|score|import <path|json>: skill catalog/score/import",
   "- /board: semantic memory/skill/rule board 요약",
-  "- /context: primitive context substrate/MVCC snapshot 요약",
+  "- /context: primitive context substrate/MVCC snapshot 요약 또는 /context project-only|clean-slate|exclude|reset",
+  "- /companions, /companion switch <id>, /companion profile: AI Companion control surface",
+  "- /agent mode fast|balanced|strict: companion agent 모드 조절",
+  "- /correct <정정>: room-local correction을 기록하고 durable correction은 reviewable merge proposal 생성",
+  "- /correct proposals: companion correction merge proposal 확인",
+  "- /correct approve latest|<number>: pending companion merge proposal 명시 승인",
+    "- /correct materialize-preview: accepted proposal의 branchable materialization 후보 보기",
+  "- /correct reject latest|<number> [reason]: pending companion merge proposal 거절",
+  "- /correct promote latest: 최신 correction을 수동으로 merge proposal로 만들기",
   "- /rule import <path|json>: 외부 rule package import",
   "- /models: 연결된 로컬/API/CLI model node 보기",
   "- /tools: 현재 job의 tool 상태 보기",
@@ -876,6 +895,41 @@ export function createTelegramCommandHandler(deps = {}) {
     try { return { jobId, jobDir: jobs.jobDir(jobId) }; } catch { return { jobId, jobDir: null }; }
   }
 
+
+  function appendCompanionControlEvent(chatId, userId, event = {}) {
+    const current = getCurrentJobDirForChat(chatId);
+    return appendRoomCompanionEvent({
+      jobDir: current.jobDir || '',
+      chatSessionStore,
+      chatId,
+      userId,
+      jobId: current.jobId || '',
+      event,
+    });
+  }
+
+  function getCurrentCompanionControlState(chatId) {
+    const current = getCurrentJobDirForChat(chatId);
+    const session = chatSessionStore?.get?.(chatId) || {};
+    const events = readRoomCompanionEvents({ jobDir: current.jobDir || '', session, limit: 80 });
+    return deriveRoomCompanionState({ events, session });
+  }
+
+  function formatCompanionSwitchMessage(state = {}) {
+    const profile = state?.active_companion || getRoomCompanionProfile('research');
+    const connections = (profile.memory_connections || []).map((conn) => `${conn.source}(${conn.mode}/${conn.strictness})`).join(', ') || '-';
+    const excluded = (profile.excluded_by_default || []).join(', ') || '-';
+    return [
+      `✅ ${profile.label} 로 전환했습니다.`,
+      `purpose: ${profile.purpose}`,
+      `memory connections: ${connections}`,
+      `excluded by default: ${excluded}`,
+      `agent_mode: ${state.agent_mode || profile.agent_mode || 'balanced'}`,
+      '',
+      '확인: /companion profile',
+    ].join('\n');
+  }
+
   async function loadRuntimeForCurrentJob(chatId, userId, { includeContext = false } = {}) {
     const currentJobId = resolveLiveJobIdForChat(chatId);
     if (!currentJobId || typeof loadSupervisorRuntime !== 'function') return { currentJobId: currentJobId || null, runtime: null };
@@ -1058,6 +1112,117 @@ export function createTelegramCommandHandler(deps = {}) {
   function getPendingTaskControl(chatId) {
     if (!chatSessionStore || typeof chatSessionStore.get !== 'function') return null;
     return chatSessionStore.get(chatId)?.pending_task_control || null;
+  }
+
+
+  function buildDdalggakHomeText(chatId) {
+    const session = chatSessionStore?.get?.(chatId) || {};
+    const chatKey = String(chatId || '');
+    const current = getCurrentJobDirForChat(chatId);
+    const activeJobFromMap = activeJobByChat && typeof activeJobByChat.get === 'function' ? activeJobByChat.get(chatKey) : '';
+    const currentJobId = String(current.jobId || session.jobId || activeJobFromMap || '').trim();
+    let watchSummary = null;
+    try {
+      watchSummary = current.jobDir ? summarizeWatchTaskState(current.jobDir) : null;
+    } catch {
+      watchSummary = null;
+    }
+    let companionState = null;
+    try {
+      companionState = getCurrentCompanionControlState(chatId);
+    } catch {
+      companionState = null;
+    }
+    const companionProfile = companionState?.active_companion || getRoomCompanionProfile('research');
+    const agentMode = String(companionState?.agent_mode || companionProfile?.agent_mode || 'balanced').trim();
+    let roomProfile = null;
+    try {
+      roomProfile = getAgentRoomProfile(chatSessionStore, chatId);
+    } catch {
+      roomProfile = null;
+    }
+    const roomName = String(roomProfile?.name || roomProfile?.room_name || '').trim();
+    const roomGoal = String(roomProfile?.current_goal || roomProfile?.goal || roomProfile?.task_brief || '').trim();
+    const pendingTask = getPendingTaskControl(chatId);
+    const pendingApproval = session?.pending_approval && typeof session.pending_approval === 'object' ? session.pending_approval : null;
+    const activeLabel = currentJobId ? `job=${currentJobId}` : 'active job 없음';
+    const watchLabel = watchSummary
+      ? `${watchSummary.status} · iteration ${watchSummary.current_iteration}/${watchSummary.max_iterations} · ${watchSummary.workflow_kind}`
+      : '없음';
+    const lines = [
+      '🏠 DdalGgak Home',
+      `- status: ${activeLabel}`,
+      `- loop/watch: ${watchLabel}`,
+      `- companion: ${companionProfile?.label || companionProfile?.id || 'Research Companion'} · mode=${agentMode}`,
+      `- room: ${roomName || roomGoal || '아직 특화되지 않음'}`,
+      pendingTask?.goal ? `- pending goal: ${pendingTask.goal}` : '',
+      pendingApproval ? `- needs review: ${String(pendingApproval.reason || pendingApproval.action || 'pending approval')}` : '',
+      '',
+      '바로 쓰는 5개 명령:',
+      '1. /c <질문 또는 지시> — 가장 가벼운 대화/작업 시작',
+      '2. /loop --loops 2 <목표> — 오래 걸리는 작업을 짧은 반복으로 진행',
+      '3. /room apply <목표> — 이 채팅방을 특정 목적의 AI Room으로 설정',
+      '4. /review — 승인/검토 대기 항목 확인',
+      '5. /status — 지금 진행 상황 확인',
+      '',
+      currentJobId
+        ? '현재 작업이 있으면: /status recent · /review · /artifacts 를 먼저 확인하세요.'
+        : '처음이면: /room apply <하고 싶은 일> 후 /c 또는 /loop 로 시작하는 것을 권장합니다.',
+      '',
+      '진단: /doctor · 전체 명령: /help · 고급 명령: /help more',
+    ].filter(Boolean);
+
+    return lines.join('\n');
+  }
+
+  function buildDdalggakInboxText(chatId) {
+    const current = getCurrentJobDirForChat(chatId);
+    const session = chatSessionStore?.get?.(chatId) || {};
+    let watchSummary = null;
+    try {
+      watchSummary = current.jobDir ? summarizeWatchTaskState(current.jobDir) : null;
+    } catch {
+      watchSummary = null;
+    }
+    let reviewSummary = 'active job 없음';
+    if (current.jobDir) {
+      try {
+        const queueSummary = buildRuntimeReviewQueue({ jobDir: current.jobDir, persist: false });
+        const rows = Array.isArray(queueSummary?.items)
+          ? queueSummary.items
+          : (Array.isArray(queueSummary?.queue) ? queueSummary.queue : []);
+        reviewSummary = rows.length > 0 ? `${rows.length}개 review item` : '대기 item 없음';
+      } catch {
+        reviewSummary = '조회 실패 · /review 로 확인';
+      }
+    }
+    const pendingApproval = session?.pending_approval && typeof session.pending_approval === 'object' ? session.pending_approval : null;
+    let companionState = null;
+    try {
+      companionState = getCurrentCompanionControlState(chatId);
+    } catch {
+      companionState = null;
+    }
+    const proposals = Array.isArray(companionState?.merge_proposals) ? companionState.merge_proposals : [];
+    const pendingProposals = proposals.filter((proposal) => String(proposal?.status || 'pending').trim().toLowerCase() === 'pending').length;
+    const acceptedProposals = proposals.filter((proposal) => String(proposal?.status || '').trim().toLowerCase() === 'accepted').length;
+    const candidates = Array.isArray(companionState?.materialization_candidates) ? companionState.materialization_candidates.length : 0;
+    const lines = [
+      '📥 DdalGgak Inbox',
+      `- job review: ${reviewSummary}`,
+      watchSummary ? `- loop/watch: ${watchSummary.status} · iteration ${watchSummary.current_iteration}/${watchSummary.max_iterations}` : '- loop/watch: 없음',
+      pendingApproval ? `- pending approval: ${String(pendingApproval.reason || pendingApproval.action || 'yes')}` : '- pending approval: 없음',
+      `- correction proposals: pending=${pendingProposals}, accepted=${acceptedProposals}`,
+      `- materialization previews: ${candidates}`,
+      '',
+      '바로 처리:',
+      '- /review — active job review queue 보기',
+      '- /correct proposals — correction merge proposal 보기',
+      '- /correct approve latest 또는 /correct reject latest <reason>',
+      '- /correct materialize-preview — accepted proposal preview 보기',
+      '- /status — 현재 실행 상태 보기',
+    ];
+    return lines.join('\n');
   }
 
   function telegramReplyToMessageId(msg = {}) {
@@ -2014,6 +2179,16 @@ export function createTelegramCommandHandler(deps = {}) {
     cmd = normalizeTelegramCommandAlias(cmd);
     const args = rawArgs || rest.join(" ").trim();
 
+    if (cmd === "/start" || cmd === "/home" || cmd === "/quickstart") {
+      await sendLong(bot, chatId, buildDdalggakHomeText(chatId));
+      return true;
+    }
+
+    if (cmd === "/inbox") {
+      await sendLong(bot, chatId, buildDdalggakInboxText(chatId));
+      return true;
+    }
+
     if (cmd === "/help" || cmd === "/commands" || originalCmd === "/h") {
       const sub = String(args || "").trim().toLowerCase();
       if (sub === "advanced" || sub === "more") {
@@ -2021,6 +2196,13 @@ export function createTelegramCommandHandler(deps = {}) {
         return true;
       }
       await bot.sendMessage(chatId, HELP_TEXT);
+      return true;
+    }
+
+    if (cmd === "/doctor") {
+      const source = loadRuntimeDoctorEnv();
+      const report = auditDdalggakRuntimeEnv(source);
+      await sendLong(bot, chatId, formatRuntimeConfigDoctorForTelegram(report));
       return true;
     }
 
@@ -2039,6 +2221,222 @@ export function createTelegramCommandHandler(deps = {}) {
     if (cmd === "/room") {
       const sub = String(rest[0] || "").trim().toLowerCase();
       return handleRoomCommand({ chatId, userId, msg, sub, rawArgs });
+    }
+
+    if (cmd === "/companions") {
+      await sendLong(bot, chatId, formatRoomCompanionListForTelegram());
+      return true;
+    }
+
+    if (cmd === "/companion") {
+      const raw = String(args || '').trim();
+      const [subRaw, ...subRest] = raw.split(/\s+/);
+      const sub = String(subRaw || '').trim().toLowerCase();
+      if (!raw || sub === 'list' || sub === 'help') {
+        await sendLong(bot, chatId, formatRoomCompanionListForTelegram());
+        return true;
+      }
+      if (sub === 'profile' || sub === 'status') {
+        await sendLong(bot, chatId, formatRoomCompanionProfileForTelegram(getCurrentCompanionControlState(chatId)));
+        return true;
+      }
+      if (sub === 'switch' || sub === 'use' || sub === 'select') {
+        const target = normalizeCompanionId(subRest.join(' ') || subRest[0] || '');
+        if (!target) {
+          await bot.sendMessage(chatId, 'Usage: /companion switch <research|implementation|product|concierge>');
+          return true;
+        }
+        const profile = getRoomCompanionProfile(target);
+        appendCompanionControlEvent(chatId, userId, {
+          event_type: 'companion_selected',
+          companion_id: profile.id,
+          command: '/companion switch',
+          source: 'telegram_companion_command',
+          payload: { requested_companion_id: target },
+        });
+        await sendLong(bot, chatId, formatCompanionSwitchMessage(getCurrentCompanionControlState(chatId)));
+        return true;
+      }
+      await bot.sendMessage(chatId, ['Usage:', '/companion profile', '/companion switch <research|implementation|product|concierge>', '/companions'].join('\n'));
+      return true;
+    }
+
+    if (cmd === "/agent") {
+      const raw = String(args || '').trim();
+      const [subRaw, ...subRest] = raw.split(/\s+/);
+      const sub = String(subRaw || '').trim().toLowerCase();
+      if (sub === 'mode') {
+        const mode = normalizeAgentMode(subRest[0] || '');
+        appendCompanionControlEvent(chatId, userId, {
+          event_type: 'agent_mode_changed',
+          agent_mode: mode,
+          command: '/agent mode',
+          source: 'telegram_companion_command',
+        });
+        await bot.sendMessage(chatId, `✅ agent mode를 ${mode} 로 설정했습니다.
+확인: /companion profile`);
+        return true;
+      }
+      await bot.sendMessage(chatId, 'Usage: /agent mode <fast|balanced|strict>');
+      return true;
+    }
+
+    if (cmd === "/correct") {
+      const correctionText = String(args || '').trim();
+      const [subRaw, ...subRest] = correctionText.split(/\s+/);
+      const sub = String(subRaw || '').trim().toLowerCase();
+      if (!correctionText || sub === 'help') {
+        await bot.sendMessage(chatId, [
+          'Usage:',
+          '/correct <반복 오류 방지용 정정>',
+          '/correct proposals',
+          '/correct approve latest|<number>',
+          '/correct reject latest|<number> [reason]',
+          '/correct materialize-preview',
+          '/correct promote latest',
+          '',
+          '일시적 정정은 room-local로만 기록하고, 앞으로도 적용될 가능성이 큰 정정은 reviewable merge proposal까지 생성합니다. pending proposal은 /correct approve 또는 /correct reject 로 명시 처리하며, accepted proposal은 branchable materialization candidate로만 연결됩니다. 별도 review 없이 canonical project write는 하지 않습니다.',
+        ].join('\n'));
+        return true;
+      }
+      if (['proposals', 'proposal', 'status'].includes(sub)) {
+        await sendLong(bot, chatId, formatRoomCompanionMergeProposalsForTelegram(getCurrentCompanionControlState(chatId)));
+        return true;
+      }
+      if (['materialize-preview', 'materialization-preview', 'materialization', 'materialize', 'candidates'].includes(sub)) {
+        await sendLong(bot, chatId, formatRoomCompanionMaterializationCandidatesForTelegram(getCurrentCompanionControlState(chatId)));
+        return true;
+      }
+      if (['approve', 'approved', 'accept', 'accepted', 'reject', 'rejected', 'deny', 'denied'].includes(sub)) {
+        const state = getCurrentCompanionControlState(chatId);
+        const firstArg = String(subRest[0] || 'latest').trim().toLowerCase();
+        const hasExplicitTarget = firstArg === 'latest' || /^\d+$/.test(firstArg);
+        const target = hasExplicitTarget ? firstArg : 'latest';
+        const reason = subRest.slice(hasExplicitTarget ? 1 : 0).join(' ').trim();
+        const decisionEvent = buildRoomCompanionMergeProposalDecisionEvent({
+          state,
+          target,
+          decision: sub,
+          reason,
+          userId,
+        });
+        if (!decisionEvent) {
+          await bot.sendMessage(chatId, '처리할 pending companion merge proposal이 없습니다. 먼저 /correct proposals 로 상태를 확인해 주세요.');
+          return true;
+        }
+        appendCompanionControlEvent(chatId, userId, {
+          ...decisionEvent,
+          command: `/correct ${decisionEvent.decision}`,
+          source: 'telegram_companion_command',
+        });
+        let materializationEvent = null;
+        if (decisionEvent.status === 'accepted') {
+          const nextState = getCurrentCompanionControlState(chatId);
+          materializationEvent = buildRoomCompanionMaterializationCandidateEvent({
+            state: nextState,
+            proposalEventId: decisionEvent.proposal_event_id,
+            userId,
+          });
+          if (materializationEvent) {
+            appendCompanionControlEvent(chatId, userId, {
+              ...materializationEvent,
+              command: '/correct approve materialization-candidate',
+              source: 'telegram_companion_command',
+            });
+          }
+        }
+        await bot.sendMessage(chatId, [
+          decisionEvent.status === 'accepted'
+            ? '✅ companion merge proposal을 accepted로 표시했습니다.'
+            : '✅ companion merge proposal을 rejected로 표시했습니다.',
+          decisionEvent.summary,
+          '',
+          `status: ${decisionEvent.status}`,
+          `target_scope: ${decisionEvent.target_scope || 'project_candidate'}`,
+          reason ? `reason: ${reason}` : '',
+          materializationEvent ? `materialization_candidate: ${materializationEvent.materialization_id || 'created'} (branch overlay preview only)` : '',
+          '',
+          decisionEvent.status === 'accepted'
+            ? '결정은 companion event log에 남겼고, branchable materialization candidate를 만들었습니다. canonical project write는 아직 비활성입니다.'
+            : '결정은 companion event log에 남겼습니다. rejected proposal은 project memory materialization 후보가 되지 않습니다.',
+          '확인: /correct proposals 또는 /correct materialize-preview',
+        ].filter(Boolean).join('\n'));
+        return true;
+      }
+
+      if (sub === 'promote') {
+        const state = getCurrentCompanionControlState(chatId);
+        const corrections = Array.isArray(state.recent_corrections) ? state.recent_corrections : [];
+        const target = String(subRest[0] || 'latest').trim().toLowerCase();
+        const index = target === 'latest' ? corrections.length - 1 : Math.max(0, Number(target) - 1);
+        const correction = corrections[index];
+        if (!correction) {
+          await bot.sendMessage(chatId, 'promote할 correction이 없습니다. 먼저 /correct <정정> 으로 기록해 주세요.');
+          return true;
+        }
+        const proposalEvent = buildCorrectionMergeProposalEvent({ correction, state, force: true });
+        if (!proposalEvent) {
+          await bot.sendMessage(chatId, 'merge proposal을 만들 수 없습니다.');
+          return true;
+        }
+        appendCompanionControlEvent(chatId, userId, {
+          ...proposalEvent,
+          command: '/correct promote',
+          source: 'telegram_companion_command',
+        });
+        await bot.sendMessage(chatId, [
+          '✅ reviewable merge proposal을 만들었습니다.',
+          proposalEvent.summary,
+          '',
+          '아직 project-shared memory로 승격하지는 않았습니다.',
+          '확인: /correct proposals',
+        ].join('\n'));
+        return true;
+      }
+
+      const intent = classifyRoomCorrectionIntent(correctionText);
+      const correctionEvent = appendCompanionControlEvent(chatId, userId, {
+        event_type: 'user_correction',
+        correction_text: correctionText,
+        scope: intent.correction_scope,
+        promotion_status: intent.promotion_status,
+        command: '/correct',
+        source: 'telegram_companion_command',
+        payload: {
+          durability: intent.durability,
+          risk_level: intent.risk_level,
+          rationale: intent.rationale,
+        },
+      });
+      let proposalEvent = null;
+      if (correctionEvent) {
+        const state = getCurrentCompanionControlState(chatId);
+        proposalEvent = buildCorrectionMergeProposalEvent({
+          correction: { ...correctionEvent, text: correctionText },
+          state,
+        });
+        if (proposalEvent) {
+          appendCompanionControlEvent(chatId, userId, {
+            ...proposalEvent,
+            command: '/correct',
+            source: 'telegram_companion_command',
+          });
+        }
+      }
+      await bot.sendMessage(chatId, [
+        intent.should_create_merge_proposal
+          ? '✅ correction을 기록했고, durable해 보이는 정정이라 reviewable merge proposal도 만들었습니다.'
+          : '✅ room-local correction으로 기록했습니다.',
+        `“${correctionText}”`,
+        '',
+        `scope: ${intent.correction_scope}`,
+        `durability: ${intent.durability}`,
+        proposalEvent ? 'merge proposal: pending review' : 'merge proposal: not created automatically',
+        '',
+        '다음 projection에 correction을 포함합니다. 실제 project-shared memory 승격은 자동으로 하지 않습니다.',
+        proposalEvent ? '확인: /correct proposals' : '필요하면 /correct promote latest 로 proposal을 만들 수 있습니다.',
+      ].join('\n'));
+      return true;
     }
 
     if (cmd === "/ask") {
@@ -3215,6 +3613,40 @@ ${buildTeamListMessage({ active_team: applied }, { runtime: runtimeForTeam })}`)
       const raw = String(args || '').trim();
       const [subRaw, ...subRest] = raw.split(/\s+/);
       const sub = String(subRaw || '').trim().toLowerCase();
+      const companionContextMode = normalizeContextMode(sub);
+      if (companionContextMode) {
+        if (companionContextMode === 'exclude') {
+          const label = subRest.join(' ').trim();
+          if (!label) {
+            await bot.sendMessage(chatId, 'Usage: /context exclude <source-or-assumption>');
+            return true;
+          }
+          appendCompanionControlEvent(chatId, userId, {
+            event_type: 'context_override',
+            context_mode: 'exclude',
+            excluded_sources: [label],
+            command: '/context exclude',
+            source: 'telegram_companion_command',
+          });
+          await bot.sendMessage(chatId, `✅ context에서 제외했습니다: ${label}
+확인: /companion profile`);
+          return true;
+        }
+        appendCompanionControlEvent(chatId, userId, {
+          event_type: 'context_override',
+          context_mode: companionContextMode,
+          command: `/context ${companionContextMode}`,
+          source: 'telegram_companion_command',
+        });
+        const label = companionContextMode === 'project-only'
+          ? 'project-only: project-scoped sources 중심으로 사용하고 unrelated/global memory는 피합니다.'
+          : companionContextMode === 'clean-slate'
+            ? 'clean-slate: 기존 memory/context를 배제하고 이번 요청 중심으로 답합니다.'
+            : 'reset: companion context override를 초기화했습니다.';
+        await bot.sendMessage(chatId, `✅ context mode 설정: ${label}
+확인: /companion profile`);
+        return true;
+      }
       const payload = raw.slice(subRaw ? subRaw.length : 0).trim();
       const currentJobId = resolveLiveJobIdForChat(chatId);
       const contextOptions = { rootDir: process.cwd(), jobId: currentJobId || '' };

@@ -2,6 +2,7 @@ import { readRoomConversationLedger } from './room_conversation_ledger.js';
 import { deriveRoomContextState, summarizeRoomContextState } from './room_context_state.js';
 import { readRoomSemanticObservations } from './room_semantic_observation_log.js';
 import { deriveActiveRoomLoop, formatActiveRoomLoopProjectionBlock, readRoomLoopEvents } from './room_loop_events.js';
+import { deriveRoomCompanionState, formatRoomCompanionProjectionBlock, readRoomCompanionEvents } from './room_companions.js';
 
 function clean(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
@@ -88,6 +89,8 @@ export function createRoomContextSnapshot({
   });
   const semanticObservations = readRoomSemanticObservations({ jobDir, limit: 24 });
   const contextState = deriveRoomContextState({ turns: sliced, latestUserText: cleanLatest, semanticObservations });
+  const companionEvents = readRoomCompanionEvents({ jobDir, session, limit: 80 });
+  const companionState = deriveRoomCompanionState({ events: companionEvents, session });
   const loopEvents = readRoomLoopEvents({ jobDir, session, limit: 80 });
   const activeLoop = deriveActiveRoomLoop({ events: loopEvents, session });
   return {
@@ -100,10 +103,12 @@ export function createRoomContextSnapshot({
     team_selection: teamSelection || undefined,
     turns: sliced,
     context_state: contextState,
+    companion_events: companionEvents,
+    companion_state: companionState,
     semantic_observations: semanticObservations,
     room_loop_events: loopEvents,
     active_room_loop: activeLoop || undefined,
-    substrates: ['room_turn_ledger', 'session_recent_room_turns', ...(semanticObservations.length ? ['room_semantic_observations'] : []), ...(activeLoop ? ['room_loop_events'] : [])],
+    substrates: ['room_turn_ledger', 'session_recent_room_turns', ...(semanticObservations.length ? ['room_semantic_observations'] : []), ...(companionEvents.length || companionState ? ['room_companion_events'] : []), ...(activeLoop ? ['room_loop_events'] : [])],
     created_at: new Date().toISOString(),
   };
 }
@@ -174,6 +179,7 @@ export function buildBudgetedRoomContextProjection({
       ? 'verification_policy: Do not present prior assistant recommendations as verified external facts unless the context state shows verified evidence or this run produces explicit source evidence. If a DIALOGUE REFERENCE TARGET is present, verify that target rather than older recommendations.'
       : '',
     summarizeRoomContextState(snap.context_state || deriveRoomContextState({ turns: allTurns, latestUserText: latest, semanticObservations: snap.semantic_observations || [] }), { maxItems: projectionTier === 'micro' ? 4 : 6 }),
+    formatRoomCompanionProjectionBlock({ state: snap.companion_state || deriveRoomCompanionState({ events: snap.companion_events || [] }), maxChars: projectionTier === 'micro' ? 760 : 1200 }),
     snap.active_room_loop ? formatActiveRoomLoopProjectionBlock({ loop: snap.active_room_loop, maxChars: projectionTier === 'micro' ? 760 : 1200 }) : '',
     turns.length ? '[RECENT SAME-ROOM TURNS]' : '',
     ...turns.map((turn) => renderTurn(turn, { turnChars: defaults.turnChars })),

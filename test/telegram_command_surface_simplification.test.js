@@ -283,3 +283,101 @@ test('/config doctor returns runtime audit without exposing secret values', asyn
     else process.env.DDALGGAK_LOCAL_API_KEY = oldSecret
   }
 })
+
+test('/home and /start show an actionable room dashboard', async () => {
+  const sent = []
+  const backing = new Map()
+  const sessionStore = {
+    get: (key) => backing.get(String(key)) || {},
+    upsert: (key, patcher) => {
+      const current = backing.get(String(key)) || {}
+      const next = typeof patcher === 'function' ? patcher(current) : { ...current, ...patcher }
+      backing.set(String(key), next)
+      return next
+    },
+  }
+  sessionStore.upsert('chat-1', () => ({
+    agent_room_profile: {
+      name: 'Research Room',
+      current_goal: 'usable daily research workflow',
+    },
+  }))
+  const handler = createTelegramCommandHandler({
+    bot: makeBot(sent),
+    sendLong: async (_bot, chatId, text) => {
+      sent.push({ chatId, text })
+      return { message_id: sent.length }
+    },
+    chatSessionStore: sessionStore,
+    resolveLiveJobIdForChat: () => null,
+  })
+
+  await handler({ msg: { chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/home', chatId: 'chat-1', userId: 'user-1' })
+  await handler({ msg: { chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/start', chatId: 'chat-1', userId: 'user-1' })
+
+  assert.match(sent[0].text, /DdalGgak Home/)
+  assert.match(sent[0].text, /바로 쓰는 5개 명령/)
+  assert.match(sent[0].text, /\/room apply <목표>/)
+  assert.match(sent[0].text, /\/doctor/)
+  assert.match(sent[1].text, /DdalGgak Home/)
+})
+
+test('/doctor is a friendly alias for config doctor without exposing secrets', async () => {
+  const sent = []
+  const oldFast = process.env.DDALGGAK_FAST_PROVIDER
+  const oldSecret = process.env.DDALGGAK_LOCAL_API_KEY
+  process.env.DDALGGAK_FAST_PROVIDER = 'openai_compatible'
+  process.env.DDALGGAK_LOCAL_API_KEY = 'home-dashboard-secret'
+  const handler = createTelegramCommandHandler({
+    bot: makeBot(sent),
+    sendLong: async (_bot, chatId, text) => {
+      sent.push({ chatId, text })
+      return { message_id: sent.length }
+    },
+  })
+  try {
+    await handler({ msg: { chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/doctor', chatId: 'chat-1', userId: 'user-1' })
+    assert.match(sent[0].text, /config doctor/)
+    assert.match(sent[0].text, /Effective runtime/)
+    assert.doesNotMatch(sent[0].text, /home-dashboard-secret/)
+  } finally {
+    if (oldFast === undefined) delete process.env.DDALGGAK_FAST_PROVIDER
+    else process.env.DDALGGAK_FAST_PROVIDER = oldFast
+    if (oldSecret === undefined) delete process.env.DDALGGAK_LOCAL_API_KEY
+    else process.env.DDALGGAK_LOCAL_API_KEY = oldSecret
+  }
+})
+
+test('/inbox summarizes review and correction decision surfaces', async () => {
+  const sent = []
+  const backing = new Map()
+  const sessionStore = {
+    get: (key) => backing.get(String(key)) || {},
+    upsert: (key, patcher) => {
+      const current = backing.get(String(key)) || {}
+      const next = typeof patcher === 'function' ? patcher(current) : { ...current, ...patcher }
+      backing.set(String(key), next)
+      return next
+    },
+  }
+  sessionStore.upsert('chat-1', () => ({
+    pending_approval: { reason: 'needs user approval before writing files' },
+  }))
+  const handler = createTelegramCommandHandler({
+    bot: makeBot(sent),
+    sendLong: async (_bot, chatId, text) => {
+      sent.push({ chatId, text })
+      return { message_id: sent.length }
+    },
+    chatSessionStore: sessionStore,
+    resolveLiveJobIdForChat: () => null,
+  })
+
+  await handler({ msg: { chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/inbox', chatId: 'chat-1', userId: 'user-1' })
+
+  assert.match(sent[0].text, /DdalGgak Inbox/)
+  assert.match(sent[0].text, /job review/)
+  assert.match(sent[0].text, /pending approval: needs user approval/)
+  assert.match(sent[0].text, /correction proposals: pending=0, accepted=0/)
+  assert.match(sent[0].text, /\/correct proposals/)
+})
