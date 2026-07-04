@@ -39,6 +39,7 @@ function normalizeTurn(row = {}) {
   const role = clean(row.role || row.author).toLowerCase();
   const text = clean(row.text || row.content || row.message || '');
   if (!['user', 'assistant', 'system'].includes(role) || !text) return null;
+  if (text.includes('�')) return null;
   return {
     turn_id: clean(row.turn_id || row.turnId || row.id) || undefined,
     ts: clean(row.ts || row.created_at || row.createdAt) || '',
@@ -59,6 +60,7 @@ export function createRoomContextSnapshot({
   route = '',
   roomSelection = null,
   teamSelection = null,
+  roomProfile = null,
   maxTurns = 24,
 } = {}) {
   const ledgerTurns = readRoomConversationLedger({ jobDir, session, limit: Math.max(4, Math.floor(Number(maxTurns) || 24)) })
@@ -101,6 +103,7 @@ export function createRoomContextSnapshot({
     route: clean(route) || undefined,
     room_selection: roomSelection || undefined,
     team_selection: teamSelection || undefined,
+    room_profile: roomProfile || undefined,
     turns: sliced,
     context_state: contextState,
     companion_events: companionEvents,
@@ -174,6 +177,24 @@ export function buildBudgetedRoomContextProjection({
       : '',
     includePolicy && dialogueRef
       ? 'referent_resolution_policy: If the latest user request is a follow-up, bind ambiguous phrases to the DIALOGUE REFERENCE TARGET before older room memories.'
+      : '',
+    snap.room_profile
+      ? '[ROOM PROFILE — TELEGRAM DOORWAY]'
+      : '',
+    snap.room_profile
+      ? `room_name: ${clip(snap.room_profile.name || snap.room_profile.room_name || snap.room_profile.current_goal || 'AI Room', 160)}`
+      : '',
+    snap.room_profile?.domain_label
+      ? `domain_label: ${snap.room_profile.domain_label}`
+      : '',
+    Array.isArray(snap.room_profile?.default_agents) && snap.room_profile.default_agents.length
+      ? `room_roles: ${snap.room_profile.default_agents.slice(0, 8).join(', ')}`
+      : '',
+    Array.isArray(snap.room_profile?.memory_schema?.object_types) && snap.room_profile.memory_schema.object_types.length
+      ? `memory_schema: ${snap.room_profile.memory_schema.object_types.slice(0, 10).join(', ')}`
+      : '',
+    snap.room_profile
+      ? 'room_profile_policy: Use this room profile to shape continuity and companion routing. Do not use it as a fixed per-user prompt template; latest user request remains authoritative.'
       : '',
     (projectionTier === 'search' && snap.context_state?.latest_user_requires_verification)
       ? 'verification_policy: Do not present prior assistant recommendations as verified external facts unless the context state shows verified evidence or this run produces explicit source evidence. If a DIALOGUE REFERENCE TARGET is present, verify that target rather than older recommendations.'

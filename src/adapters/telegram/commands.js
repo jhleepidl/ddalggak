@@ -48,7 +48,7 @@ import { formatRoomEvolutionSnapshot, proposeRoomEvolution } from '../../applica
 import { appendKnowledgeRouteEvent } from '../../application/knowledge_route_event_log.js';
 import { appendRoomConversationExchange, appendRoomConversationTurn } from '../../application/room_conversation_ledger.js';
 import { appendRoomLoopEvent, buildRoomLoopStartEvent, classifyRoomLoopInterruption, createRoomLoopId, deriveActiveRoomLoop, normalizeRoomLoop, readRoomLoopEvents } from '../../application/room_loop_events.js';
-import { appendRoomCompanionEvent, buildCorrectionMergeProposalEvent, buildRoomCompanionMaterializationCandidateEvent, buildRoomCompanionMergeProposalDecisionEvent, classifyRoomCorrectionIntent, deriveRoomCompanionState, formatRoomCompanionListForTelegram, formatRoomCompanionMaterializationCandidatesForTelegram, formatRoomCompanionMergeProposalsForTelegram, formatRoomCompanionProfileForTelegram, getRoomCompanionProfile, normalizeAgentMode, normalizeCompanionId, normalizeContextMode, readRoomCompanionEvents } from '../../application/room_companions.js';
+import { appendRoomCompanionEvent, buildCompanionCouncilSession, buildCorrectionMergeProposalEvent, buildRoomCompanionMaterializationCandidateEvent, buildRoomCompanionMemoryExchangeDecisionEvent, buildRoomCompanionMergeProposalDecisionEvent, classifyRoomCorrectionIntent, deriveRoomCompanionState, formatRoomCompanionCouncilLogForTelegram, formatRoomCompanionListForTelegram, formatRoomCompanionMaterializationCandidatesForTelegram, formatRoomCompanionMemoryExchangeProposalsForTelegram, formatRoomCompanionMergeProposalsForTelegram, formatRoomCompanionProfileForTelegram, getRoomCompanionProfile, normalizeAgentMode, normalizeCompanionId, normalizeContextMode, readRoomCompanionEvents, selectRoomCompanionMemoryExchangeProposal } from '../../application/room_companions.js';
 import { createRoomContextSnapshot, formatRoomContextProjectionBlock } from '../../application/room_context_projection.js';
 import { resolveDdalggakRuntimeConfig, resolveDdalggakRouteRuntimeConfig, formatRuntimeConfigForTelegram, auditDdalggakRuntimeEnv, formatRuntimeConfigDoctorForTelegram } from '../../application/runtime_config.js';
 import { appendRoomSelectionRouteEvent, buildRoomSelectionDecision, buildTeamSelectionDecision } from '../../application/room_selection_routing.js';
@@ -62,9 +62,11 @@ import { buildTeamSchemaOptionsText, buildTeamSchemaOptionsSummaryLines } from '
 import { buildBenchmarkTeamTemplate, buildBenchmarkTemplateCatalogText } from '../../application/benchmark_team_templates.js';
 import { syncRawHistoryToGoC } from '../../application/goc_raw_history_sync.js';
 import { getGocRouteCircuitSnapshot } from '../../goc_client.js';
-import { normalizeLanguageMetadata, resolveUserSurfaceLocale } from '../../application/language_policy.js';
+import { normalizeLanguageMetadata, resolveUserSurfaceLocale, userSurfaceLanguageDirective } from '../../application/language_policy.js';
+import { appendRuntimeModelFooter } from '../../application/telegram_status_notifications.js';
 import { inspectAndPrepareImprovementJob, loadImprovementExecutionContext, runImprovementAutomation, runImprovementCanary, runImprovementEvalGate, runImprovementReview, runImprovementRollback, runImprovementTests, markImprovementPromotion } from '../../application/improvement_orchestrator.js';
 import { writeIdleCompactionCandidate, formatIdleCompactionCandidateForTelegram } from '../../application/idle_compaction.js';
+import { runRoomIdleMemoryStructuring, formatRoomIdleMemoryStructuringResultForTelegram } from '../../application/room_idle_memory.js';
 import { formatMemoryTopologyForTelegram, planMemoryTopology } from '../../application/memory_topology.js';
 import { formatMemoryMaterializationPlanForTelegram, loadLatestMemoryMaterializationPlan, planMemoryMaterialization } from '../../application/memory_materialization_planner.js';
 import { createShadowMemoryModule, findMaterializationCandidate, formatShadowMemoryModuleListForTelegram, formatShadowMemoryModuleResultForTelegram, listShadowMemoryModules } from '../../application/memory_materialization_store.js';
@@ -134,13 +136,13 @@ import {
 
 const HELP_TEXT = [
   "Commands:",
-  "- /home 또는 /start: 지금 이 방에서 무엇을 할 수 있는지 한 화면으로 보기",
-  "- /chat 또는 /c <message>: 일반 대화/질문/사실 정정 기본 진입점",
+  "- /home 또는 /start: Telegram chat을 AI companion room doorway로 열기",
+  "- /chat 또는 /c <message>: 이 Telegram room에 요청하기",
   "- /ask 또는 /a <question>: legacy quick-question alias. 일반 사용은 /chat 권장",
   "- /team 또는 /t <goal>: 팀 검토/리뷰 깊이로 답변",
   "- /loop 또는 /l [--loops n] <goal>: bounded loop 작업 시작",
   "- /room 또는 /r: 이 채팅방의 AI Room / Room Package 설정 보기",
-  "- /companions 또는 /companion: AI Companion 선택/프로필 보기",
+  "- /companions 또는 /companion: room companion roster와 memory boundary 보기",
   "- /context project-only|clean-slate|exclude <source>|reset: context 사용 범위 조절",
   "- /agent mode fast|balanced|strict: companion agent 모드 조절",
   "- /correct <정정>: 반복 오류 방지용 room correction 기록",
@@ -149,7 +151,7 @@ const HELP_TEXT = [
   "- /agents: 이 채팅방의 Agent Room 보기",
   "- /agents suggest <목표>: 목표에 맞는 agent 구성 추천",
   "- /review 또는 /rev: 승인/검토가 필요한 항목 보기",
-  "- /inbox: job review + correction proposal + materialization preview 한 화면",
+  "- /inbox: room decision inbox(job review, correction, memory exchange) 보기",
   "- /memory 또는 /m: memory topology/pressure/proposal 상태 요약",
   "- /rule <자연어 지침>: 명시적 runtime rule 추가",
   "- /skill 또는 /sk: skill 상태 보기",
@@ -217,6 +219,7 @@ const ADVANCED_HELP_TEXT = [
   "- /board: semantic memory/skill/rule board 요약",
   "- /context: primitive context substrate/MVCC snapshot 요약 또는 /context project-only|clean-slate|exclude|reset",
   "- /companions, /companion switch <id>, /companion profile: AI Companion control surface",
+  "- /council ask <message>|log|proposals|approve|reject: visible companion backchannel",
   "- /agent mode fast|balanced|strict: companion agent 모드 조절",
   "- /correct <정정>: room-local correction을 기록하고 durable correction은 reviewable merge proposal 생성",
   "- /correct proposals: companion correction merge proposal 확인",
@@ -915,6 +918,32 @@ export function createTelegramCommandHandler(deps = {}) {
     return deriveRoomCompanionState({ events, session });
   }
 
+  function runIdleMemoryStructuringForChat({ chatId = '', userId = '', force = false, source = 'idle_after_room_turn' } = {}) {
+    const roomProfile = getAgentRoomProfile(chatSessionStore, chatId);
+    const companionState = getCurrentCompanionControlState(chatId);
+    return runRoomIdleMemoryStructuring({
+      chatSessionStore,
+      chatId,
+      roomProfile,
+      companionState,
+      force,
+      source,
+      appendEvent: (event) => appendCompanionControlEvent(chatId, userId, event),
+    });
+  }
+
+  function scheduleIdleMemoryStructuringForChat({ chatId = '', userId = '', source = 'idle_after_room_turn' } = {}) {
+    const enabled = String(process.env.DDALGGAK_ROOM_IDLE_MEMORY_ENABLED || '1').trim().toLowerCase();
+    if (['0', 'false', 'no', 'off'].includes(enabled)) return { scheduled: false, reason: 'disabled' };
+    if (chatRunManager?.isRunning && chatRunManager.isRunning(chatId)) return { scheduled: false, reason: 'runtime_busy' };
+    const runner = () => {
+      try { runIdleMemoryStructuringForChat({ chatId, userId, force: false, source }); } catch {}
+    };
+    if (typeof setTimeout === 'function') setTimeout(runner, 0);
+    else runner();
+    return { scheduled: true };
+  }
+
   function formatCompanionSwitchMessage(state = {}) {
     const profile = state?.active_companion || getRoomCompanionProfile('research');
     const connections = (profile.memory_connections || []).map((conn) => `${conn.source}(${conn.mode}/${conn.strictness})`).join(', ') || '-';
@@ -1150,26 +1179,28 @@ export function createTelegramCommandHandler(deps = {}) {
       ? `${watchSummary.status} · iteration ${watchSummary.current_iteration}/${watchSummary.max_iterations} · ${watchSummary.workflow_kind}`
       : '없음';
     const lines = [
-      '🏠 DdalGgak Home',
+      '🏠 DdalGgak Home · Room Doorway',
+      '이 Telegram chat은 단순 bot UI가 아니라 evolving AI companion room으로 들어오는 front door입니다.',
+      '',
+      `- room: ${roomName || roomGoal || '아직 특화되지 않음'}`,
       `- status: ${activeLabel}`,
       `- loop/watch: ${watchLabel}`,
-      `- companion: ${companionProfile?.label || companionProfile?.id || 'Research Companion'} · mode=${agentMode}`,
-      `- room: ${roomName || roomGoal || '아직 특화되지 않음'}`,
+      `- active companion: ${companionProfile?.label || companionProfile?.id || 'Research Companion'} · mode=${agentMode}`,
       pendingTask?.goal ? `- pending goal: ${pendingTask.goal}` : '',
       pendingApproval ? `- needs review: ${String(pendingApproval.reason || pendingApproval.action || 'pending approval')}` : '',
       '',
-      '바로 쓰는 5개 명령:',
-      '1. /c <질문 또는 지시> — 가장 가벼운 대화/작업 시작',
-      '2. /loop --loops 2 <목표> — 오래 걸리는 작업을 짧은 반복으로 진행',
-      '3. /room apply <목표> — 이 채팅방을 특정 목적의 AI Room으로 설정',
-      '4. /review — 승인/검토 대기 항목 확인',
-      '5. /status — 지금 진행 상황 확인',
+      'Room entry actions / 바로 쓰는 5개 명령:',
+      '1. /c <질문 또는 지시> — ask the room through the active companion',
+      '2. /council ask <메시지> — companion들이 먼저 visible backchannel에서 조율',
+      '3. /inbox — pending room decisions 확인',
+      '4. /companions — companion roster와 memory boundary 보기',
+      '5. /room apply <목표> — 이 Telegram chat의 room purpose 설정',
       '',
       currentJobId
-        ? '현재 작업이 있으면: /status recent · /review · /artifacts 를 먼저 확인하세요.'
-        : '처음이면: /room apply <하고 싶은 일> 후 /c 또는 /loop 로 시작하는 것을 권장합니다.',
+        ? '현재 작업이 있으면: /status recent · /inbox · /artifacts 를 먼저 확인하세요.'
+        : '처음이면: /room apply <하고 싶은 일> 후 /c 또는 /council ask 로 시작하는 것을 권장합니다.',
       '',
-      '진단: /doctor · 전체 명령: /help · 고급 명령: /help more',
+      '운영: /doctor · 전체 명령: /help · 고급 명령: /help more',
     ].filter(Boolean);
 
     return lines.join('\n');
@@ -1207,12 +1238,19 @@ export function createTelegramCommandHandler(deps = {}) {
     const pendingProposals = proposals.filter((proposal) => String(proposal?.status || 'pending').trim().toLowerCase() === 'pending').length;
     const acceptedProposals = proposals.filter((proposal) => String(proposal?.status || '').trim().toLowerCase() === 'accepted').length;
     const candidates = Array.isArray(companionState?.materialization_candidates) ? companionState.materialization_candidates.length : 0;
+    const exchanges = Array.isArray(companionState?.memory_exchange_proposals) ? companionState.memory_exchange_proposals : [];
+    const pendingExchanges = exchanges.filter((proposal) => String(proposal?.status || 'pending').trim().toLowerCase() === 'pending').length;
+    const idleCandidates = Array.isArray(companionState?.idle_memory_observations) ? companionState.idle_memory_observations : [];
+    const pendingIdleCandidates = idleCandidates.filter((candidate) => String(candidate?.status || 'pending').trim().toLowerCase() === 'pending').length;
     const lines = [
-      '📥 DdalGgak Inbox',
+      '📥 DdalGgak Inbox · Room Decisions',
+      '사용자가 승인해야 하는 room-level decisions를 모읍니다.',
       `- job review: ${reviewSummary}`,
       watchSummary ? `- loop/watch: ${watchSummary.status} · iteration ${watchSummary.current_iteration}/${watchSummary.max_iterations}` : '- loop/watch: 없음',
       pendingApproval ? `- pending approval: ${String(pendingApproval.reason || pendingApproval.action || 'yes')}` : '- pending approval: 없음',
       `- correction proposals: pending=${pendingProposals}, accepted=${acceptedProposals}`,
+      `- companion memory exchange: pending=${pendingExchanges}`,
+      `- idle memory structuring: pending=${pendingIdleCandidates}`,
       `- materialization previews: ${candidates}`,
       '',
       '바로 처리:',
@@ -1220,6 +1258,9 @@ export function createTelegramCommandHandler(deps = {}) {
       '- /correct proposals — correction merge proposal 보기',
       '- /correct approve latest 또는 /correct reject latest <reason>',
       '- /correct materialize-preview — accepted proposal preview 보기',
+      '- /council proposals — companion memory exchange proposal 보기',
+      '- /council approve latest 또는 /council reject latest <reason>',
+      '- /memory idle — idle-time room memory structuring 후보 생성/점검',
       '- /status — 현재 실행 상태 보기',
     ];
     return lines.join('\n');
@@ -1360,10 +1401,12 @@ export function createTelegramCommandHandler(deps = {}) {
       maxChars: resolveDdalggakRouteRuntimeConfig('direct', { env: process.env }).context_max_chars,
       turnLimit: resolveDdalggakRouteRuntimeConfig('direct', { env: process.env }).context_turns,
     });
+    const session = chatSessionStore.get(chatId) || {};
+    const surfaceLocale = resolveUserSurfaceLocale({ message, session, fallback: 'ko' });
     const prompt = buildDirectAskPrompt({
       question: message,
       roomName: roomProfile?.name || roomProfile?.room_name || '',
-      locale: 'ko-KR',
+      locale: surfaceLocale,
       context,
     });
     const jobId = `direct_ask_${Date.now().toString(36)}`;
@@ -1399,7 +1442,7 @@ export function createTelegramCommandHandler(deps = {}) {
         runtime: resolveDdalggakRouteRuntimeConfig('direct', { env: process.env }).openai_compatible?.runtime || '',
         apiKey: process.env.DDALGGAK_DIRECT_ASK_API_KEY || process.env.DDALGGAK_LOCAL_API_KEY || process.env.OPENAI_COMPATIBLE_API_KEY || process.env.LOCAL_MODEL_API_KEY || process.env.OLLAMA_API_KEY || '',
         prompt,
-        system: 'Answer in Korean unless the user asks otherwise. Keep the reply concise and useful.',
+        system: `${userSurfaceLanguageDirective(surfaceLocale)} Keep the reply concise and useful.`,
         temperature: Number(process.env.DDALGGAK_DIRECT_ASK_TEMPERATURE || 0.2),
         maxTokens: Number(process.env.DDALGGAK_DIRECT_ASK_MAX_TOKENS || 512),
         timeoutMs: resolveDdalggakRouteRuntimeConfig('direct', { env: process.env }).timeout_ms,
@@ -1461,6 +1504,7 @@ export function createTelegramCommandHandler(deps = {}) {
         route: decision?.route || '',
         roomSelection: roomSelection || session.last_room_selection || session.lastRoomSelection || null,
         teamSelection: teamSelection || session.last_team_selection || session.lastTeamSelection || null,
+        roomProfile: getAgentRoomProfile(chatSessionStore, chatId),
       });
       return formatRoomContextProjectionBlock({ snapshot, tier, maxChars, turnLimit });
     } catch {
@@ -1703,9 +1747,11 @@ export function createTelegramCommandHandler(deps = {}) {
       maxChars: searchRuntime.context_max_chars,
       turnLimit: searchRuntime.context_turns,
     });
+    const session = chatSessionStore.get(chatId) || {};
+    const surfaceLocale = resolveUserSurfaceLocale({ message, session, fallback: 'ko' });
     const prompt = buildSearchAskFallbackPrompt({
       question: message,
-      locale: 'ko-KR',
+      locale: surfaceLocale,
       maxSeconds,
       context,
     });
@@ -1742,7 +1788,7 @@ export function createTelegramCommandHandler(deps = {}) {
         runtime: searchRuntime.openai_compatible?.runtime || '',
         apiKey: process.env.DDALGGAK_SEARCH_ASK_API_KEY || process.env.DDALGGAK_DIRECT_ASK_API_KEY || process.env.DDALGGAK_LOCAL_API_KEY || process.env.OPENAI_COMPATIBLE_API_KEY || process.env.LOCAL_MODEL_API_KEY || process.env.OLLAMA_API_KEY || '',
         prompt,
-        system: 'Answer in Korean unless the user asks otherwise. For search-intent requests, do not fabricate unavailable current facts; ask for a link/photo/source when needed.',
+        system: `${userSurfaceLanguageDirective(surfaceLocale)} For search-intent requests, do not fabricate unavailable current facts; ask for a link/photo/source when needed.`,
         temperature: Number(process.env.DDALGGAK_SEARCH_ASK_TEMPERATURE || process.env.DDALGGAK_DIRECT_ASK_TEMPERATURE || 0.1),
         maxTokens: Number(process.env.DDALGGAK_SEARCH_ASK_MAX_TOKENS || process.env.DDALGGAK_DIRECT_ASK_MAX_TOKENS || 512),
         timeoutMs: searchRuntime.timeout_ms,
@@ -1783,7 +1829,12 @@ export function createTelegramCommandHandler(deps = {}) {
       const result = await executeSearchAskFastPath({ chatId, userId, msg, message, decision, sourceCommand });
       const answer = String(result?.text || '').trim();
       if (!answer) throw new Error('empty search ask answer');
-      await bot.sendMessage(chatId, answer);
+      const answerWithModel = appendRuntimeModelFooter(answer, {
+        provider: result?.provider || 'unknown',
+        model: result?.result?.used_model || result?.result?.model || result?.model || '',
+        route: decision?.route || 'concierge_search_answer',
+      });
+      await bot.sendMessage(chatId, answerWithModel);
       try {
         const { jobId, jobDir } = resolveJobDirForRoute(chatId);
         appendRoomConversationExchange({
@@ -1802,6 +1853,7 @@ export function createTelegramCommandHandler(deps = {}) {
           skipUserTurn: true,
         });
       } catch {}
+      scheduleIdleMemoryStructuringForChat({ chatId, userId, source: 'idle_after_search_fast_path' });
       appendAskRouteOutcome({ chatId, userId, message, command: sourceCommand, decision, executor: 'search_ask_fast_path', outcome: 'answered_search_fast_path', extra: { latency_ms: Date.now() - started } });
       try {
         chatSessionStore.upsert(chatId, (session = {}) => ({
@@ -1810,6 +1862,7 @@ export function createTelegramCommandHandler(deps = {}) {
           last_search_ask: {
             ts: new Date().toISOString(),
             provider: result?.provider || 'unknown',
+            model: result?.result?.used_model || result?.result?.model || result?.model || '',
             duration_ms: Date.now() - started,
             message_chars: Array.from(String(message || '')).length,
           },
@@ -1851,7 +1904,12 @@ export function createTelegramCommandHandler(deps = {}) {
       const result = await executeDirectAskFastPath({ chatId, userId, msg, message, decision, sourceCommand });
       const answer = String(result?.text || '').trim();
       if (!answer) throw new Error('empty direct ask answer');
-      await bot.sendMessage(chatId, answer);
+      const answerWithModel = appendRuntimeModelFooter(answer, {
+        provider: result?.provider || 'unknown',
+        model: result?.result?.used_model || result?.result?.model || result?.model || '',
+        route: decision?.route || 'concierge_direct_answer',
+      });
+      await bot.sendMessage(chatId, answerWithModel);
       try {
         const { jobId, jobDir } = resolveJobDirForRoute(chatId);
         appendRoomConversationExchange({
@@ -1870,6 +1928,7 @@ export function createTelegramCommandHandler(deps = {}) {
           skipUserTurn: true,
         });
       } catch {}
+      scheduleIdleMemoryStructuringForChat({ chatId, userId, source: 'idle_after_direct_fast_path' });
       appendAskRouteOutcome({ chatId, userId, message, command: sourceCommand, decision, executor: 'direct_ask_fast_path', outcome: 'answered_direct_fast_path', extra: { latency_ms: Date.now() - started } });
       try {
         chatSessionStore.upsert(chatId, (session = {}) => ({
@@ -1878,6 +1937,7 @@ export function createTelegramCommandHandler(deps = {}) {
           last_direct_ask: {
             ts: new Date().toISOString(),
             provider: result?.provider || 'unknown',
+            model: result?.result?.used_model || result?.result?.model || result?.model || '',
             duration_ms: Date.now() - started,
             message_chars: Array.from(String(message || '')).length,
           },
@@ -2223,6 +2283,71 @@ export function createTelegramCommandHandler(deps = {}) {
       return handleRoomCommand({ chatId, userId, msg, sub, rawArgs });
     }
 
+    if (cmd === "/council") {
+      const raw = String(args || '').trim();
+      const [subRaw, ...subRest] = raw.split(/\s+/);
+      const sub = String(subRaw || '').trim().toLowerCase();
+      const restText = subRest.join(' ').trim();
+      const state = getCurrentCompanionControlState(chatId);
+      if (!raw || sub === 'help') {
+        await sendLong(bot, chatId, [
+          '🧭 Companion Council',
+          '이 Telegram room 안의 companion들이 사용자가 볼 수 있는 backchannel에서 짧게 조율합니다.',
+          '',
+          'Usage:',
+          '- /council ask <message>',
+          '- /council log',
+          '- /council proposals',
+          '- /council approve latest|<number>',
+          '- /council reject latest|<number> [reason]',
+        ].join('\n'));
+        return true;
+      }
+      if (sub === 'ask') {
+        if (!restText) {
+          await bot.sendMessage(chatId, 'Usage: /council ask <message>');
+          return true;
+        }
+        let roomProfile = null;
+        try { roomProfile = getAgentRoomProfile(chatSessionStore, chatId); } catch { roomProfile = null; }
+        const session = buildCompanionCouncilSession({ question: restText, state, roomProfile, chatId, userId });
+        for (const event of session.events) {
+          appendCompanionControlEvent(chatId, userId, event);
+        }
+        await sendLong(bot, chatId, session.text);
+        scheduleIdleMemoryStructuringForChat({ chatId, userId, source: 'idle_after_council' });
+        return true;
+      }
+      if (sub === 'log') {
+        await sendLong(bot, chatId, formatRoomCompanionCouncilLogForTelegram(state));
+        return true;
+      }
+      if (sub === 'proposals' || sub === 'exchange' || sub === 'exchanges') {
+        await sendLong(bot, chatId, formatRoomCompanionMemoryExchangeProposalsForTelegram(state));
+        return true;
+      }
+      if (sub === 'approve' || sub === 'reject') {
+        const target = subRest[0] || 'latest';
+        const reason = subRest.slice(1).join(' ').trim();
+        const selected = selectRoomCompanionMemoryExchangeProposal({ state, target });
+        if (!selected?.proposal) {
+          await bot.sendMessage(chatId, 'pending companion memory exchange proposal이 없습니다. /council proposals 로 확인하세요.');
+          return true;
+        }
+        const event = buildRoomCompanionMemoryExchangeDecisionEvent({ proposal: selected.proposal, decision: sub, reason, userId });
+        appendCompanionControlEvent(chatId, userId, event);
+        const updatedState = getCurrentCompanionControlState(chatId);
+        await sendLong(bot, chatId, [
+          `✅ companion memory exchange ${sub === 'approve' ? 'accepted' : 'rejected'}`,
+          '',
+          formatRoomCompanionMemoryExchangeProposalsForTelegram(updatedState),
+        ].join('\n'));
+        return true;
+      }
+      await bot.sendMessage(chatId, '알 수 없는 /council 명령입니다. /council help 를 확인하세요.');
+      return true;
+    }
+
     if (cmd === "/companions") {
       await sendLong(bot, chatId, formatRoomCompanionListForTelegram());
       return true;
@@ -2243,7 +2368,7 @@ export function createTelegramCommandHandler(deps = {}) {
       if (sub === 'switch' || sub === 'use' || sub === 'select') {
         const target = normalizeCompanionId(subRest.join(' ') || subRest[0] || '');
         if (!target) {
-          await bot.sendMessage(chatId, 'Usage: /companion switch <research|implementation|product|concierge>');
+          await bot.sendMessage(chatId, 'Usage: /companion switch <research|implementation|product|critic|personal|concierge>');
           return true;
         }
         const profile = getRoomCompanionProfile(target);
@@ -2257,7 +2382,7 @@ export function createTelegramCommandHandler(deps = {}) {
         await sendLong(bot, chatId, formatCompanionSwitchMessage(getCurrentCompanionControlState(chatId)));
         return true;
       }
-      await bot.sendMessage(chatId, ['Usage:', '/companion profile', '/companion switch <research|implementation|product|concierge>', '/companions'].join('\n'));
+      await bot.sendMessage(chatId, ['Usage:', '/companion profile', '/companion switch <research|implementation|product|critic|personal|concierge>', '/companions'].join('\n'));
       return true;
     }
 
@@ -2591,7 +2716,7 @@ export function createTelegramCommandHandler(deps = {}) {
       const debugMode = firstMemoryArg === "debug" || firstMemoryArg === "--debug";
       const memoryRest = debugMode ? rest.slice(1) : rest;
       const sub = String(memoryRest[0] || "show").trim().toLowerCase();
-      const publicMemorySubcommands = new Set(["", "show", "status"]);
+      const publicMemorySubcommands = new Set(["", "show", "status", "idle", "structure", "structuring"]);
 
       if (!debugMode && !publicMemorySubcommands.has(sub)) {
         await sendLong(bot, chatId, [
@@ -2600,6 +2725,16 @@ export function createTelegramCommandHandler(deps = {}) {
           '세부 memory 조회/수정은 GoC Review Inbox에서 처리하는 것이 기본입니다.',
           '개발/진단 목적으로만 Telegram에서 보려면 /memory debug <subcommand>를 사용하세요.',
         ].join('\n'));
+        return true;
+      }
+
+      if (sub === "idle" || sub === "structure" || sub === "structuring") {
+        try {
+          const result = runIdleMemoryStructuringForChat({ chatId, userId, force: true, source: 'telegram_memory_idle' });
+          await sendLong(bot, chatId, formatRoomIdleMemoryStructuringResultForTelegram(result));
+        } catch (e) {
+          await bot.sendMessage(chatId, `❌ idle memory structuring 실패: ${String(e?.message ?? e)}`);
+        }
         return true;
       }
 

@@ -28,9 +28,10 @@ test('useCompactProgressUpdates respects env override and verbose flag', () => {
 });
 
 test('buildCompactExecutionUpdateText formats a compact preview summary', () => {
-  const text = buildCompactExecutionUpdateText({ displayName: 'Builder', output: 'hello world', routeSignals: ['a', 'b'], final: true });
+  const text = buildCompactExecutionUpdateText({ displayName: 'Builder', output: 'hello world', routeSignals: ['a', 'b'], final: true, provider: 'codex', model: 'gpt-5-codex' });
   assert.match(text, /최종 합성 완료/);
   assert.match(text, /Builder/);
+  assert.match(text, /model: codex\/gpt-5-codex/);
   assert.match(text, /route_signals: a, b/);
   assert.match(text, /hello world/);
 });
@@ -52,4 +53,13 @@ test('notifyAndConsumeGocFallback sends a sanitized user message and consumes th
   assert.equal(calls[0][0], 123);
   assert.match(calls[0][1], /projection_access_denied/);
   assert.doesNotMatch(calls[0][1], /token mismatch/);
+});
+
+
+test('appendRuntimeModelFooter adds per-response provider and model metadata', async () => {
+  const mod = await import('../src/application/telegram_status_notifications.js');
+  const text = mod.appendRuntimeModelFooter('답변 본문', { provider: 'antigravity', model: 'auto', route: 'concierge_direct_answer' });
+  assert.match(text, /답변 본문/);
+  assert.match(text, /🤖 model: antigravity\/auto/);
+  assert.match(text, /route=concierge_direct_answer/);
 });

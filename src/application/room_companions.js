@@ -103,6 +103,36 @@ export const DEFAULT_ROOM_COMPANIONS = Object.freeze({
     branch_policy: 'branch_for_speculation',
     action_policy: 'draft_and_patch_only',
   }),
+  critic: Object.freeze({
+    id: 'critic',
+    label: 'Critic Companion',
+    purpose: 'Risk, novelty, overclaim, boundary, and failure-mode review before the room acts.',
+    agent_mode: 'strict',
+    memory_connections: Object.freeze([
+      Object.freeze({ source: 'accepted_decisions', mode: 'read', strictness: 'source_required' }),
+      Object.freeze({ source: 'risk_notes', mode: 'read', strictness: 'balanced' }),
+      Object.freeze({ source: 'rejected_directions', mode: 'read', strictness: 'source_required' }),
+    ]),
+    excluded_by_default: Object.freeze(['private_raw_traces', 'unreviewed_memory_exchange']),
+    clarification_policy: 'ask_before_medium_or_high_risk_claims',
+    branch_policy: 'branch_for_speculation',
+    action_policy: 'review_and_veto_only',
+  }),
+  personal: Object.freeze({
+    id: 'personal',
+    label: 'Personal Context Companion',
+    purpose: 'User preferences, working rhythm, durable dislikes, and lightweight personal continuity.',
+    agent_mode: 'balanced',
+    memory_connections: Object.freeze([
+      Object.freeze({ source: 'user_preferences', mode: 'read', strictness: 'source_required' }),
+      Object.freeze({ source: 'accepted_decisions', mode: 'read', strictness: 'balanced' }),
+      Object.freeze({ source: 'room_usage_events', mode: 'read', strictness: 'balanced' }),
+    ]),
+    excluded_by_default: Object.freeze(['private_raw_traces', 'sensitive_memory', 'other_room_personal_memory']),
+    clarification_policy: 'ask_before_sensitive_personal_context',
+    branch_policy: 'suggest_branch_for_private_or_sensitive_context',
+    action_policy: 'preference_support_only',
+  }),
   concierge: Object.freeze({
     id: 'concierge',
     label: 'Best Companion / Concierge',
@@ -125,6 +155,8 @@ export function normalizeCompanionId(value = '') {
   if (key === 'best' || key === 'router' || key === 'friend' || key === 'companion') return 'concierge';
   if (key === 'impl' || key === 'code' || key === 'coding') return 'implementation';
   if (key === 'ux' || key === 'product_design') return 'product';
+  if (key === 'risk' || key === 'reviewer' || key === 'skeptic' || key === 'sceptic') return 'critic';
+  if (key === 'me' || key === 'personal_context' || key === 'preference' || key === 'preferences') return 'personal';
   return key;
 }
 
@@ -178,7 +210,21 @@ export function getRoomCompanionProfile(id = 'research') {
 export function normalizeRoomCompanionEvent(row = {}) {
   if (!row || typeof row !== 'object') return null;
   const eventType = clean(row.event_type || row.eventType || row.type).toLowerCase();
-  if (!['companion_selected', 'context_override', 'agent_mode_changed', 'user_correction', 'merge_proposal_created', 'merge_proposal_decision', 'merge_materialization_candidate_created'].includes(eventType)) return null;
+  if (![
+    'companion_selected',
+    'context_override',
+    'agent_mode_changed',
+    'user_correction',
+    'merge_proposal_created',
+    'merge_proposal_decision',
+    'merge_materialization_candidate_created',
+    'companion_council_started',
+    'companion_council_turn',
+    'companion_council_decision',
+    'companion_memory_exchange_proposed',
+    'companion_memory_exchange_decision',
+    'room_idle_memory_observation_proposed',
+  ].includes(eventType)) return null;
   const ts = clean(row.ts || row.created_at || row.createdAt) || new Date().toISOString();
   const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
   const normalized = {
@@ -191,7 +237,12 @@ export function normalizeRoomCompanionEvent(row = {}) {
     job_id: clean(row.job_id || row.jobId) || undefined,
     command: clean(row.command) || undefined,
     source: clean(row.source) || 'room_companions',
+    council_id: clean(row.council_id || row.councilId || payload.council_id || payload.councilId) || undefined,
+    council_question: clip(row.council_question || row.councilQuestion || payload.council_question || payload.councilQuestion || row.question || payload.question || '', 700) || undefined,
+    turn_index: Number.isFinite(Number(row.turn_index ?? row.turnIndex ?? payload.turn_index ?? payload.turnIndex)) ? Number(row.turn_index ?? row.turnIndex ?? payload.turn_index ?? payload.turnIndex) : undefined,
     companion_id: normalizeCompanionId(row.companion_id || row.companionId || payload.companion_id || payload.companionId) || undefined,
+    from_companion_id: normalizeCompanionId(row.from_companion_id || row.fromCompanionId || payload.from_companion_id || payload.fromCompanionId) || undefined,
+    to_companion_id: normalizeCompanionId(row.to_companion_id || row.toCompanionId || payload.to_companion_id || payload.toCompanionId) || undefined,
     agent_mode: normalizeAgentMode(row.agent_mode || row.agentMode || payload.agent_mode || payload.agentMode || ''),
     context_mode: normalizeContextMode(row.context_mode || row.contextMode || row.mode || payload.context_mode || payload.contextMode || payload.mode || ''),
     excluded_sources: Array.isArray(row.excluded_sources || row.excludedSources || payload.excluded_sources || payload.excludedSources)
@@ -202,7 +253,9 @@ export function normalizeRoomCompanionEvent(row = {}) {
     scope: clean(row.scope || payload.scope) || undefined,
     promotion_status: clean(row.promotion_status || row.promotionStatus || payload.promotion_status || payload.promotionStatus) || undefined,
     summary: clip(row.summary || payload.summary || '', 500) || undefined,
-    status: (eventType.startsWith('merge_proposal') || eventType === 'merge_materialization_candidate_created')
+    memory_summary: clip(row.memory_summary || row.memorySummary || payload.memory_summary || payload.memorySummary || '', 700) || undefined,
+    exchange_reason: clip(row.exchange_reason || row.exchangeReason || payload.exchange_reason || payload.exchangeReason || row.reason || payload.reason || '', 500) || undefined,
+    status: (eventType.startsWith('merge_proposal') || eventType === 'merge_materialization_candidate_created' || eventType.startsWith('companion_memory_exchange') || eventType === 'room_idle_memory_observation_proposed')
       ? normalizeMergeProposalStatus(row.status || payload.status || row.decision || payload.decision || (eventType === 'merge_materialization_candidate_created' ? 'candidate' : ''))
       : clean(row.status || payload.status) || undefined,
     proposal_kind: clean(row.proposal_kind || row.proposalKind || payload.proposal_kind || payload.proposalKind) || undefined,
@@ -306,6 +359,9 @@ export function deriveRoomCompanionState({ events = [], session = null } = {}) {
   let recentCorrections = [];
   let mergeProposals = [];
   let materializationCandidates = [];
+  let recentCouncils = [];
+  let memoryExchangeProposals = [];
+  let idleMemoryObservations = [];
 
   for (const event of rows) {
     if (event.event_type === 'companion_selected' && event.companion_id) {
@@ -420,6 +476,95 @@ export function deriveRoomCompanionState({ events = [], session = null } = {}) {
           ts: event.ts,
         },
       ].slice(-8);
+    } else if (event.event_type === 'companion_council_decision') {
+      recentCouncils = [
+        ...recentCouncils,
+        {
+          council_id: event.council_id || event.payload?.council_id || event.event_id,
+          question: event.council_question || event.payload?.question || '',
+          summary: event.summary || event.payload?.decision || 'Room decision recorded',
+          companions: Array.isArray(event.payload?.companions) ? event.payload.companions : [],
+          turns: Array.isArray(event.payload?.turns) ? event.payload.turns : [],
+          event_id: event.event_id,
+          ts: event.ts,
+        },
+      ].slice(-8);
+    } else if (event.event_type === 'companion_memory_exchange_proposed') {
+      memoryExchangeProposals = [
+        ...memoryExchangeProposals,
+        {
+          summary: event.summary || event.memory_summary || 'Companion memory exchange proposal',
+          memory_summary: event.memory_summary || event.payload?.memory_summary || event.summary || '',
+          status: normalizeMergeProposalStatus(event.status || 'pending'),
+          from_companion_id: event.from_companion_id || event.payload?.from_companion_id,
+          to_companion_id: event.to_companion_id || event.payload?.to_companion_id,
+          exchange_reason: event.exchange_reason || event.payload?.exchange_reason || event.rationale,
+          council_id: event.council_id || event.payload?.council_id,
+          payload: event.payload || {},
+          event_id: event.event_id,
+          ts: event.ts,
+        },
+      ].slice(-8);
+    } else if (event.event_type === 'room_idle_memory_observation_proposed') {
+      const candidateId = clean(event.payload?.candidate_id || event.payload?.candidateId || event.event_id);
+      if (!idleMemoryObservations.some((row) => clean(row.candidate_id || row.event_id) === candidateId)) {
+        idleMemoryObservations = [
+          ...idleMemoryObservations,
+          {
+            candidate_id: candidateId,
+            summary: event.summary || event.memory_summary || event.payload?.memory_summary || 'Idle memory observation candidate',
+            memory_summary: event.memory_summary || event.payload?.memory_summary || event.summary || '',
+            observation_type: event.payload?.observation_type || event.payload?.observationType || 'room_memory_observation',
+            status: normalizeMergeProposalStatus(event.status || 'pending'),
+            target_companion_ids: Array.isArray(event.payload?.target_companion_ids) ? event.payload.target_companion_ids : [],
+            source_turn_id: event.payload?.source_turn_id || event.payload?.sourceTurnId,
+            source_quote: event.payload?.source_quote || event.payload?.sourceQuote,
+            generated_during_idle: event.payload?.generated_during_idle !== false,
+            canonical_write_enabled: Boolean(event.payload?.canonical_write_enabled),
+            rationale: event.rationale || event.payload?.rationale,
+            payload: event.payload || {},
+            event_id: event.event_id,
+            ts: event.ts,
+          },
+        ].slice(-12);
+      }
+    } else if (event.event_type === 'companion_memory_exchange_decision') {
+      const decision = normalizeMergeProposalDecision(event.decision || event.status || '');
+      const status = decision === 'reject' ? 'rejected' : decision === 'approve' ? 'accepted' : normalizeMergeProposalStatus(event.status || 'pending');
+      const targetEventId = clean(event.proposal_event_id || event.source_event_id || event.payload?.proposal_event_id || event.payload?.source_event_id);
+      const patch = {
+        status,
+        decision: decision || undefined,
+        decided_at: event.decided_at || event.ts,
+        decided_by: event.decided_by || event.user_id,
+        decision_reason: event.decision_reason || event.rationale,
+        decision_event_id: event.event_id,
+      };
+      let matchIndex = -1;
+      for (let i = memoryExchangeProposals.length - 1; i >= 0; i -= 1) {
+        if (targetEventId && clean(memoryExchangeProposals[i].event_id) === targetEventId) {
+          matchIndex = i;
+          break;
+        }
+      }
+      if (matchIndex >= 0) {
+        memoryExchangeProposals = memoryExchangeProposals.map((proposal, index) => (index === matchIndex ? { ...proposal, ...patch } : proposal)).slice(-8);
+      } else {
+        memoryExchangeProposals = [
+          ...memoryExchangeProposals,
+          {
+            summary: event.summary || `Memory exchange ${status}`,
+            memory_summary: event.memory_summary || event.payload?.memory_summary || '',
+            from_companion_id: event.from_companion_id || event.payload?.from_companion_id,
+            to_companion_id: event.to_companion_id || event.payload?.to_companion_id,
+            exchange_reason: event.exchange_reason || event.payload?.exchange_reason || event.rationale,
+            event_id: targetEventId || event.event_id,
+            ts: event.ts,
+            payload: event.payload || {},
+            ...patch,
+          },
+        ].slice(-8);
+      }
     }
   }
 
@@ -436,6 +581,9 @@ export function deriveRoomCompanionState({ events = [], session = null } = {}) {
     recent_corrections: recentCorrections,
     merge_proposals: mergeProposals,
     materialization_candidates: materializationCandidates,
+    recent_councils: recentCouncils,
+    memory_exchange_proposals: memoryExchangeProposals,
+    idle_memory_observations: idleMemoryObservations,
     request_repair_policy: agentMode === 'strict'
       ? 'Ask before acting on medium/high-risk ambiguity; never use excluded sources.'
       : 'Low-risk ambiguity: proceed with explicit assumptions. High-risk ambiguity: ask before acting. Never use excluded sources.',
@@ -719,11 +867,30 @@ export function formatRoomCompanionMergeProposalsForTelegram(state = null) {
 }
 
 export function formatRoomCompanionListForTelegram() {
-  const lines = ['AI Companions'];
+  const lines = [
+    '🏠 DdalGgak Companion Room',
+    'Telegram은 단순 transport가 아니라 이 evolving companion room의 front door입니다.',
+    '각 companion은 role-specific memory boundary를 갖고, 필요할 때 visible backchannel에서 조율합니다.',
+    '',
+    'Companion roster:',
+  ];
   for (const profile of listRoomCompanions()) {
-    lines.push('', `${profile.id} — ${profile.label}`, `  ${profile.purpose}`);
+    lines.push('', `${profile.id} — ${profile.label}`, `  role: ${profile.purpose}`);
+    lines.push(`  memory boundary: ${(profile.memory_connections || []).map((conn) => `${conn.source}:${conn.mode}/${conn.strictness}`).join(', ') || '-'}`);
+    lines.push(`  excluded by default: ${(profile.excluded_by_default || []).join(', ') || '-'}`);
   }
-  lines.push('', '사용법:', '- /companion switch <id>', '- /companion profile', '- /context project-only|clean-slate|exclude <source>|reset', '- /agent mode fast|balanced|strict', '- /correct <correction>', '- /correct proposals', '- /correct approve latest|<number>', '- /correct reject latest|<number> [reason]', '- /correct materialize-preview');
+  lines.push(
+    '',
+    'Room-governed commands:',
+    '- /c <message> — ask the room through the active companion/concierge',
+    '- /council ask <message> — companion들이 먼저 visible backchannel에서 짧게 조율',
+    '- /council log — 최근 council transcript 보기',
+    '- /council proposals — companion 간 memory exchange proposal 보기',
+    '- /council approve latest|<number> 또는 /council reject latest|<number> [reason]',
+    '- /companion switch <id> · /companion profile',
+    '- /context project-only|clean-slate|exclude <source>|reset',
+    '- /correct <correction> · /correct proposals',
+  );
   return lines.join('\n');
 }
 
@@ -759,6 +926,232 @@ export function formatRoomCompanionProfileForTelegram(state = null) {
     proposals.forEach((proposal, index) => lines.push(`${index + 1}. ${proposal.summary || 'merge proposal'} (${proposal.status || 'pending'}; ${proposal.target_scope || 'project_candidate'})`));
   }
   return lines.join('\n');
+}
+
+
+function normalizeCouncilRole(value = '') {
+  return clean(value).toLowerCase().replace(/^@+/, '').replace(/[^a-z0-9가-힣_-]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+function companionIdForRoomRole(role = '') {
+  const key = normalizeCouncilRole(role);
+  if (!key) return '';
+  const tokens = new Set(key.split(/[_-]+/).filter(Boolean));
+  if (tokens.has('risk') || tokens.has('critic') || tokens.has('reviewer') || tokens.has('verifier') || tokens.has('검토') || tokens.has('리뷰어')) return 'critic';
+  if (tokens.has('builder') || tokens.has('implementation') || tokens.has('implementer') || tokens.has('code') || tokens.has('developer')) return 'implementation';
+  if (tokens.has('product') || tokens.has('ux') || tokens.has('planner') || tokens.has('synthesizer') || tokens.has('manager')) return 'product';
+  if (tokens.has('personal') || tokens.has('preference') || tokens.has('context') || tokens.has('history') || tokens.has('tracker')) return 'personal';
+  if (tokens.has('research') || tokens.has('researcher') || tokens.has('scout') || tokens.has('analyst') || tokens.has('paper') || tokens.has('market')) return 'research';
+  return '';
+}
+
+export function selectRoomCouncilCompanions({ question = '', state = null, roomProfile = null, maxCompanions = 4 } = {}) {
+  const ordered = [];
+  const add = (id) => {
+    const cleanId = normalizeCompanionId(id);
+    if (cleanId && DEFAULT_ROOM_COMPANIONS[cleanId] && !ordered.includes(cleanId)) ordered.push(cleanId);
+  };
+  const activeId = normalizeCompanionId(state?.active_companion?.id || '') || '';
+  if (activeId && activeId !== 'concierge') add(activeId);
+  const roomRoles = Array.isArray(roomProfile?.default_agents || roomProfile?.defaultAgents || roomProfile?.agent_roles)
+    ? (roomProfile.default_agents || roomProfile.defaultAgents || roomProfile.agent_roles)
+    : [];
+  for (const role of roomRoles) add(companionIdForRoomRole(role));
+  add('critic');
+  add('concierge');
+  if (ordered.length < 2) add('product');
+  return ordered
+    .slice(0, Math.max(2, Math.min(5, Number(maxCompanions) || 4)))
+    .map(getRoomCompanionProfile);
+}
+
+function buildCouncilTurnSummary({ companion = null, question = '', roomLabel = '', roomProfile = null } = {}) {
+  const profile = companion || getRoomCompanionProfile('concierge');
+  const room = roomLabel || 'this Telegram doorway room';
+  const memoryBoundary = (profile.memory_connections || []).map((conn) => `${conn.source}:${conn.mode}/${conn.strictness}`).join(', ') || 'room-scoped memory only';
+  const roles = Array.isArray(roomProfile?.default_agents) && roomProfile.default_agents.length ? roomProfile.default_agents.join(', ') : 'adaptive room roster';
+  return `${profile.label}: ${room}의 현재 room roles(${roles})와 ${memoryBoundary} boundary 안에서만 근거·선호·위험을 점검합니다. 이 turn은 고정 prompt 분류가 아니라 visible coordination note이며, 실제 memory 변경은 /inbox approval이 필요합니다.`;
+}
+
+function buildCouncilDecision({ question = '', turns = [], roomProfile = null } = {}) {
+  const roomName = clean(roomProfile?.name || roomProfile?.room_name || roomProfile?.current_goal || roomProfile?.goal || '') || 'this room';
+  const companionLabels = (Array.isArray(turns) ? turns : []).map((turn) => turn.label).filter(Boolean).join(', ') || 'selected companions';
+  return `${roomName}: ${companionLabels}가 room boundary 안에서 조율했습니다. 다음 응답은 최신 사용자 요청을 기준으로 하되, room profile·승인된 memory·pending /inbox decisions를 분리해서 다루세요.`;
+}
+
+export function buildCompanionCouncilSession({ question = '', state = null, roomProfile = null, chatId = '', userId = '' } = {}) {
+  const q = clip(question, 900);
+  const s = state && typeof state === 'object' ? state : deriveRoomCompanionState({});
+  const roomLabel = clean(roomProfile?.name || roomProfile?.room_name || roomProfile?.current_goal || roomProfile?.goal || '') || 'this Telegram doorway room';
+  const councilId = `council_${tinyHash(`${chatId}\n${userId}\n${q}\n${new Date().toISOString().slice(0, 16)}`)}`;
+  const companions = selectRoomCouncilCompanions({ question: q, state: s, roomProfile });
+  const turns = companions.map((companion, index) => ({
+    companion_id: companion.id,
+    label: companion.label,
+    summary: buildCouncilTurnSummary({ companion, question: q, roomLabel, roomProfile }),
+    turn_index: index + 1,
+  }));
+  const decision = buildCouncilDecision({ question: q, turns, roomProfile });
+  const latestIdleCandidate = (Array.isArray(s.idle_memory_observations) ? s.idle_memory_observations : [])
+    .slice().reverse().find((row) => normalizeMergeProposalStatus(row.status || 'pending') === 'pending');
+  const exchangeProposal = latestIdleCandidate ? {
+    from_companion_id: Array.isArray(latestIdleCandidate.target_companion_ids) && latestIdleCandidate.target_companion_ids.includes('personal') ? 'personal' : 'concierge',
+    to_companion_id: Array.isArray(latestIdleCandidate.target_companion_ids) && latestIdleCandidate.target_companion_ids.includes('critic') ? 'critic' : 'concierge',
+    summary: clip(`Review cross-companion sharing for idle memory candidate: ${latestIdleCandidate.memory_summary || latestIdleCandidate.summary}`, 500),
+    memory_summary: clip(latestIdleCandidate.memory_summary || latestIdleCandidate.summary || '', 700),
+    exchange_reason: 'A pending idle-structured memory observation may be useful to another companion. User approval is required before cross-companion sharing.',
+  } : null;
+  const now = new Date().toISOString();
+  const events = [
+    {
+      event_type: 'companion_council_started',
+      council_id: councilId,
+      council_question: q,
+      status: 'started',
+      summary: `Council opened for: ${clip(q, 160)}`,
+      source: 'telegram_council_command',
+      payload: { council_id: councilId, question: q, companions: companions.map((c) => c.id), room_label: roomLabel },
+    },
+    ...turns.map((turn) => ({
+      event_type: 'companion_council_turn',
+      council_id: councilId,
+      council_question: q,
+      companion_id: turn.companion_id,
+      turn_index: turn.turn_index,
+      summary: turn.summary,
+      source: 'telegram_council_command',
+      payload: { council_id: councilId, question: q, ...turn },
+    })),
+    {
+      event_type: 'companion_council_decision',
+      council_id: councilId,
+      council_question: q,
+      status: 'accepted',
+      summary: decision,
+      source: 'telegram_council_command',
+      payload: { council_id: councilId, question: q, decision, companions: companions.map((c) => c.id), turns, created_at: now },
+    },
+  ];
+  if (exchangeProposal) {
+    events.push({
+      event_type: 'companion_memory_exchange_proposed',
+      council_id: councilId,
+      council_question: q,
+      from_companion_id: exchangeProposal.from_companion_id,
+      to_companion_id: exchangeProposal.to_companion_id,
+      status: 'pending',
+      summary: exchangeProposal.summary,
+      memory_summary: exchangeProposal.memory_summary,
+      exchange_reason: exchangeProposal.exchange_reason,
+      source: 'telegram_council_command',
+      payload: { council_id: councilId, question: q, ...exchangeProposal, approval_required: true },
+    });
+  }
+  const lines = [
+    '🧭 Companion Council',
+    'visible backchannel · 사용자가 볼 수 있는 room-level coordination입니다.',
+    '',
+    `Question: ${q || '(empty)'}`,
+  ];
+  for (const turn of turns) {
+    lines.push('', `${turn.label}:`, turn.summary);
+  }
+  lines.push('', 'Room decision:', decision);
+  if (exchangeProposal) {
+    lines.push(
+      '',
+      '📥 Memory exchange proposal created',
+      `${getRoomCompanionProfile(exchangeProposal.from_companion_id).label} → ${getRoomCompanionProfile(exchangeProposal.to_companion_id).label}`,
+      exchangeProposal.summary,
+      'Approve/reject: /council approve latest · /council reject latest <reason>',
+    );
+  }
+  lines.push('', '다음: /council log · /inbox · /c <next action>');
+  return { council_id: councilId, companions, turns, decision, exchange_proposal: exchangeProposal, events, text: lines.join('\n') };
+}
+
+export function formatRoomCompanionCouncilLogForTelegram(state = null) {
+  const s = state && typeof state === 'object' ? state : deriveRoomCompanionState({});
+  const councils = Array.isArray(s.recent_councils) ? s.recent_councils.slice(-5) : [];
+  if (!councils.length) return 'No companion council transcript yet. Try: /council ask <message>';
+  const lines = ['🧭 Recent Companion Councils'];
+  councils.forEach((council, index) => {
+    lines.push('', `${index + 1}. ${council.question || '(no question)'}`);
+    lines.push(`   decision: ${council.summary || '-'}`);
+    const labels = (Array.isArray(council.companions) ? council.companions : []).map((id) => getRoomCompanionProfile(id).label).join(', ');
+    if (labels) lines.push(`   companions: ${labels}`);
+  });
+  return lines.join('\n');
+}
+
+export function formatRoomCompanionMemoryExchangeProposalsForTelegram(state = null) {
+  const s = state && typeof state === 'object' ? state : deriveRoomCompanionState({});
+  const proposals = Array.isArray(s.memory_exchange_proposals) ? s.memory_exchange_proposals.slice(-8) : [];
+  if (!proposals.length) return 'No companion memory exchange proposals yet.';
+  const pending = proposals.filter((p) => normalizeMergeProposalStatus(p.status || 'pending') === 'pending').length;
+  const lines = ['Companion memory exchange proposals', `pending: ${pending}; total shown: ${proposals.length}`];
+  proposals.forEach((proposal, index) => {
+    const from = getRoomCompanionProfile(proposal.from_companion_id || 'personal');
+    const to = getRoomCompanionProfile(proposal.to_companion_id || 'critic');
+    lines.push('', `${index + 1}. ${proposal.summary || proposal.memory_summary || 'memory exchange proposal'}`);
+    lines.push(`   status: ${normalizeMergeProposalStatus(proposal.status || 'pending')}`);
+    lines.push(`   route: ${from.label} → ${to.label}`);
+    if (proposal.exchange_reason) lines.push(`   reason: ${proposal.exchange_reason}`);
+    if (proposal.decided_at) lines.push(`   decided_at: ${proposal.decided_at}`);
+    if (proposal.decision_reason) lines.push(`   decision_reason: ${proposal.decision_reason}`);
+  });
+  lines.push('', '처리:', '- /council approve latest 또는 /council approve <number>', '- /council reject latest [reason] 또는 /council reject <number> [reason]');
+  return lines.join('\n');
+}
+
+export function selectRoomCompanionMemoryExchangeProposal({ state = null, target = 'latest', includeDecided = false } = {}) {
+  const proposals = Array.isArray(state?.memory_exchange_proposals) ? state.memory_exchange_proposals : [];
+  if (!proposals.length) return null;
+  const displayed = proposals.slice(-8);
+  const rawTarget = clean(target || 'latest').toLowerCase();
+  if (rawTarget === 'latest' || rawTarget === 'last' || !rawTarget) {
+    for (let i = proposals.length - 1; i >= 0; i -= 1) {
+      const proposal = proposals[i];
+      if (includeDecided || normalizeMergeProposalStatus(proposal.status || 'pending') === 'pending') return { proposal, index: i, display_index: displayed.indexOf(proposal) };
+    }
+    return null;
+  }
+  const n = Number.parseInt(rawTarget, 10);
+  if (!Number.isFinite(n) || n < 1 || n > displayed.length) return null;
+  const proposal = displayed[n - 1];
+  if (!proposal) return null;
+  if (!includeDecided && normalizeMergeProposalStatus(proposal.status || 'pending') !== 'pending') return null;
+  return { proposal, index: proposals.indexOf(proposal), display_index: n - 1 };
+}
+
+export function buildRoomCompanionMemoryExchangeDecisionEvent({ proposal = null, decision = '', reason = '', userId = '' } = {}) {
+  const normalizedDecision = normalizeMergeProposalDecision(decision);
+  if (!proposal || !normalizedDecision) return null;
+  const status = normalizedDecision === 'approve' ? 'accepted' : 'rejected';
+  return {
+    event_type: 'companion_memory_exchange_decision',
+    proposal_event_id: proposal.event_id,
+    council_id: proposal.council_id,
+    from_companion_id: proposal.from_companion_id,
+    to_companion_id: proposal.to_companion_id,
+    status,
+    decision: normalizedDecision,
+    decided_by: userId || 'telegram_user',
+    decided_at: new Date().toISOString(),
+    decision_reason: clip(reason, 500) || undefined,
+    summary: `${status}: ${proposal.summary || proposal.memory_summary || 'memory exchange proposal'}`,
+    memory_summary: proposal.memory_summary,
+    exchange_reason: proposal.exchange_reason,
+    source: 'telegram_council_command',
+    payload: {
+      proposal_event_id: proposal.event_id,
+      decision: normalizedDecision,
+      status,
+      reason: clip(reason, 500) || undefined,
+      approval_boundary: 'cross_companion_memory_exchange',
+      canonical_write_enabled: false,
+    },
+  };
 }
 
 export function formatRoomCompanionProjectionBlock({ state = null, maxChars = 1200 } = {}) {
@@ -807,6 +1200,16 @@ export function formatRoomCompanionProjectionBlock({ state = null, maxChars = 12
     }
     lines.push('materialization_policy: These are branchable RoomChange previews only. Do not mutate canonical project memory, cross-room memory, or loop state without an explicit materialization review.');
   }
+  const idleCandidates = Array.isArray(s.idle_memory_observations) ? s.idle_memory_observations.slice(-5) : [];
+  const pendingIdleCandidates = idleCandidates.filter((candidate) => normalizeMergeProposalStatus(candidate.status || 'pending') === 'pending');
+  if (pendingIdleCandidates.length) {
+    lines.push('[IDLE STRUCTURED MEMORY CANDIDATES]');
+    for (const candidate of pendingIdleCandidates) {
+      lines.push(`- ${clip(candidate.memory_summary || candidate.summary || 'idle memory observation', 220)} (status=pending; type=${candidate.observation_type || 'observation'}; canonical_write_enabled=false)`);
+    }
+    lines.push('idle_memory_policy: These were generated while the room was idle. Treat them as reviewable observations only; do not use them as accepted durable memory until approved/materialized.');
+  }
+
   const decidedProposals = proposals.filter((proposal) => normalizeMergeProposalStatus(proposal.status || 'pending') !== 'pending');
   if (decidedProposals.length) {
     lines.push('[REVIEWED MEMORY MERGE DECISIONS]');

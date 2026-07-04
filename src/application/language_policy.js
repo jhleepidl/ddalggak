@@ -3,6 +3,25 @@ function clean(value = '', { maxLen = 4000 } = {}) {
   return text.length > maxLen ? text.slice(0, maxLen) : text;
 }
 function countMatches(text = '', re) { const m = String(text || '').match(re); return m ? m.length : 0; }
+
+export function isLikelyInternalRuntimeText(text = '') {
+  const src = clean(text, { maxLen: 6000 });
+  if (!src) return false;
+  const strongMarkers = [
+    /\[LANGUAGE POLICY\]/i,
+    /\[KNOWLEDGE BASE CONTRACT\]/i,
+    /\[ADAPTIVE MEMORY TOPOLOGY\]/i,
+    /\[ASSIGNED TASK\]/i,
+    /\[AVAILABLE MEMORY/i,
+    /\[ROOM CONTEXT SNAPSHOT\]/i,
+    /OUTPUT CONTRACT/i,
+    /CONTROL PLANE TASK:/i,
+    /profile=.+\bKB\)/i,
+  ];
+  const markerCount = strongMarkers.reduce((n, re) => n + (re.test(src) ? 1 : 0), 0);
+  if (markerCount >= 1 && src.length > 220) return true;
+  return markerCount >= 2;
+}
 export const SUPPORTED_SURFACE_LOCALES = ['en', 'ko'];
 export const DEFAULT_INTERNAL_LANGUAGE = 'en';
 export function normalizeLocale(value = '', fallback = 'ko') {
@@ -33,19 +52,31 @@ export function detectTextLanguage(text = '', fallback = 'ko') {
 }
 export function resolveUserSurfaceLocale({ message = '', request = '', session = null, runtime = null, fallback = '' } = {}) {
   const envFallback = normalizeLocale(process.env.DEFAULT_USER_LOCALE || process.env.USER_SURFACE_LOCALE || fallback || 'ko', 'ko');
-  const explicit = detectExplicitLocaleRequest([message, request].filter(Boolean).join('\n'), '');
-  if (explicit) return explicit;
+  const surfaceText = [message, request].filter(Boolean).join('\n');
   const runtimeLocale = runtime?.user_surface_locale || runtime?.userSurfaceLocale || runtime?.locale || runtime?.runtimeSessionState?.user_surface_locale || runtime?.runtime_session_state?.user_surface_locale;
   const sessionLocale = session?.user_surface_locale || session?.userSurfaceLocale || session?.locale;
+
+  // Telegram/user surface language should be inferred from raw user text, not from
+  // generated runtime prompts. Workbench prompts often contain English control
+  // contracts such as [LANGUAGE POLICY] or [KNOWLEDGE BASE CONTRACT]; treating
+  // those as the user request was the main cause of occasional English replies
+  // in Korean chats. When the candidate text looks runtime-authored, trust the
+  // persisted room/session locale or the Korean default instead.
+  const internalRuntimeText = isLikelyInternalRuntimeText(surfaceText);
+  if (!internalRuntimeText) {
+    const explicit = detectExplicitLocaleRequest(surfaceText, '');
+    if (explicit) return explicit;
+  }
   if (runtimeLocale) return normalizeLocale(runtimeLocale, envFallback);
   if (sessionLocale) return normalizeLocale(sessionLocale, envFallback);
-  return detectTextLanguage([message, request].filter(Boolean).join('\n'), envFallback);
+  if (internalRuntimeText) return envFallback;
+  return detectTextLanguage(surfaceText, envFallback);
 }
 export function localeDisplayName(locale = 'ko') { return normalizeLocale(locale) === 'en' ? 'English' : 'Korean'; }
 export function userSurfaceLanguageDirective(locale = 'ko', { terse = false } = {}) {
   const l = normalizeLocale(locale);
-  if (l === 'en') return terse ? 'Respond in natural English.' : 'Write the user-facing response in natural English, matching the user’s tone. Do not switch to Korean unless the user asks.';
-  return terse ? 'Respond in natural Korean.' : 'Write the user-facing response in natural Korean, matching the user’s tone. Do not switch to English unless the user asks.';
+  if (l === 'en') return terse ? 'Respond in natural English.' : 'Write the user-facing response in natural English, matching the user’s tone. This is a hard requirement for the final user-visible answer. Do not switch to Korean unless the user asks.';
+  return terse ? 'Respond in natural Korean.' : 'Write the user-facing response in natural Korean, matching the user’s tone. This is a hard requirement for the final user-visible answer. Do not switch to English unless the user asks.';
 }
 export function internalLanguagePolicyBlock({ surfaceLocale = 'ko', preserveOriginal = true } = {}) {
   return [

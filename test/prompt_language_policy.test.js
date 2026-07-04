@@ -18,6 +18,18 @@ test('detects Korean and English surface locale from user text', () => {
   assert.match(userSurfaceLanguageDirective('ko'), /Korean/);
 });
 
+
+
+test('runtime-authored control prompts do not force English surface locale', () => {
+  const synthetic = [
+    '[LANGUAGE POLICY]',
+    '- User-facing surface language for this turn: English (en).',
+    '[KNOWLEDGE BASE CONTRACT] profile=experiment_lab agent=reviewer role=reviewer provider=codex',
+    'CONTROL PLANE TASK: Run a team-review attempt for the following goal.',
+    '여러 뉴스들도 종합하고 분석해서 투자 종목을 추천해봐.',
+  ].join('\\n');
+  assert.equal(resolveUserSurfaceLocale({ message: synthetic, fallback: 'ko' }), 'ko');
+});
 test('internal language policy is English while preserving user-facing locale', () => {
   const block = internalLanguagePolicyBlock({ surfaceLocale: 'ko' });
   assert.match(block, /Internal operating language: English/);

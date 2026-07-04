@@ -6,6 +6,15 @@
 - 복잡한 판단은 **중앙 통제 AI(=ChatGPT)**에게 물어보고, 답을 붙여넣으면 자동 실행(액션 플랜 JSON)
 - ddalggak은 **standalone-first 실행 런타임**이며, GoC는 선택적 업그레이드 모드
 
+
+## Current product direction: Evolving Companion Room
+
+DdalGgak should be developed as an **evolving AI room**, not a single self-improving agent. The user-facing room contains multiple role-specific companions, memory boundaries, visible coordination rituals, review queues, and repeatable room protocols.
+
+Current implemented surfaces such as `/home`, `/companions`, `/companion switch`, `/context`, `/agent mode`, `/correct`, and `/inbox` are stepping stones. The next clarity target is a Companion Council MVP: `/council ask`, `/council log`, and reviewable companion-to-companion memory exchange proposals in `/inbox`.
+
+See `../docs/DDALGGAK_EVOLVING_COMPANION_ROOM.md`.
+
 ## Architecture (v2 Runtime Refactor)
 
 외부 Telegram UX/명령은 유지하면서 내부 런타임을 모듈화했습니다.
@@ -517,3 +526,47 @@ sudo systemctl status telegram-orchestrator
 - `goc.json` (`MEMORY_MODE=goc`에서 thread/ctx 매핑)
 
 Slack/Telegram 히스토리 제한에 의존하지 않습니다.
+
+
+## Telegram as room doorway
+
+DdalGgak treats a Telegram chat as the front door to an evolving AI companion room. Use:
+
+```text
+/home
+  Enter the room doorway.
+
+/companions
+  Inspect companion roster and role-specific memory boundaries.
+
+/council ask <message>
+  Let companions coordinate through a visible backchannel before a room decision.
+
+/inbox
+  Review pending room decisions, including correction proposals and companion memory-exchange proposals.
+```
+
+The current Companion Council is an MVP: council turns are deterministic and visible; accepted memory exchanges are recorded as user-governed decisions rather than silent memory copies.
+
+
+### Room doorway + idle memory structuring
+
+DdalGgak treats a Telegram chat as the front door of an evolving companion room. Use `/home` to enter, `/companions` to inspect the roster, `/council ask <message>` for visible companion coordination, and `/memory idle` to create reviewable idle-memory candidates from recent same-chat turns.
+
+Idle candidates are review-required and canonical-write-disabled. They appear in `/inbox`; accepting cross-companion sharing remains a separate user-governed step.
+
+### Telegram language and model visibility
+
+DdalGgak defaults Telegram user-facing replies to Korean unless the raw user message explicitly asks for another language. Internal runtime prompts such as `[LANGUAGE POLICY]`, `[KNOWLEDGE BASE CONTRACT]`, or `CONTROL PLANE TASK` are not used to infer the user-facing language, because those prompts are often English even inside Korean Telegram rooms.
+
+Generated Telegram answers now include a small model footer by default:
+
+```text
+🤖 model: antigravity/auto · route=concierge_direct_answer
+```
+
+Disable it with:
+
+```bash
+DDALGGAK_SHOW_MODEL_FOOTER=false
+```

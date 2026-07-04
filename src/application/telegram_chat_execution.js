@@ -457,6 +457,7 @@ function buildAgentOutputContractBlock({ roleId = '', runtimeExecutionPolicy = n
     `- continuous_improvement: ${policy.continuous_improvement?.enabled ? `enabled(mode=${policy.continuous_improvement.mode || 'bounded'}, min_turns=${policy.continuous_improvement.min_turns || 1}, max_turns=${policy.continuous_improvement.max_turns || 1})` : 'disabled'}`,
     policy.workflow_contract?.workflow_kind ? `- workflow_contract: ${policy.workflow_contract.workflow_kind}; required_passes=${(policy.workflow_contract.required_passes || []).join('→') || '(unspecified)'}` : '',
     '- respond with concrete artifacts, verification notes, and next-step risks when relevant',
+    '- for any user-facing Telegram answer, obey the [LANGUAGE POLICY] surface language exactly; if absent, use Korean unless the latest user explicitly asks for another language',
   ];
   return lines.join('\n');
 }
@@ -6158,9 +6159,9 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
       const routeSignals = resolveActionRouteSignals({ action: act, result });
       for (const signal of routeSignals) activeRouteSignals.add(signal);
       if (runtimeUiHelpers.useCompactProgressUpdates(false)) {
-        await bot.sendMessage(chatId, runtimeUiHelpers.buildCompactExecutionUpdateText({ displayName, output: result.output, routeSignals }));
+        await bot.sendMessage(chatId, runtimeUiHelpers.buildCompactExecutionUpdateText({ displayName, output: result.output, routeSignals, provider: result.provider, model: result.model, mode: result.mode }));
       } else {
-        await sendLong(bot, chatId, `🤖 ${displayName} 완료 (${result.mode})${routeSignals.length > 0 ? `\nroute_signals=${routeSignals.join(', ')}` : ''}\n${clip(result.output, 3500)}`);
+        await sendLong(bot, chatId, runtimeUiHelpers.appendRuntimeModelFooter(`🤖 ${displayName} 완료 (${result.mode})${routeSignals.length > 0 ? `\nroute_signals=${routeSignals.join(', ')}` : ''}\n${clip(result.output, 3500)}`, { provider: result.provider, model: result.model, mode: result.mode }));
       }
       if (result.provider === "chatgpt") askedChatGPT = true;
       continue;
@@ -6197,9 +6198,9 @@ async function executeRoutedPlan(bot, chatId, jobId, route, signal = null, opts 
       const routeSignals = resolveActionRouteSignals({ action: act, result });
       for (const signal of routeSignals) activeRouteSignals.add(signal);
       if (runtimeUiHelpers.useCompactProgressUpdates(false)) {
-        await bot.sendMessage(chatId, runtimeUiHelpers.buildCompactExecutionUpdateText({ displayName, output: result.output, routeSignals, final: true }));
+        await bot.sendMessage(chatId, runtimeUiHelpers.buildCompactExecutionUpdateText({ displayName, output: result.output, routeSignals, final: true, provider: result.provider, model: result.model, mode: result.mode }));
       } else {
-        await sendLong(bot, chatId, `🧩 ${displayName} 최종 합성 완료 (${result.mode})${routeSignals.length > 0 ? `\nroute_signals=${routeSignals.join(', ')}` : ''}\n${clip(result.output, 3500)}`);
+        await sendLong(bot, chatId, runtimeUiHelpers.appendRuntimeModelFooter(`🧩 ${displayName} 최종 합성 완료 (${result.mode})${routeSignals.length > 0 ? `\nroute_signals=${routeSignals.join(', ')}` : ''}\n${clip(result.output, 3500)}`, { provider: result.provider, model: result.model, mode: result.mode }));
       }
       if (result.provider === "chatgpt") askedChatGPT = true;
       continue;
@@ -6479,9 +6480,9 @@ reason=${String(note?.reason || 'parallel spawn unavailable').trim()}`
       const routeSignals = resolveActionRouteSignals({ action: act, result: r });
       for (const nextSignal of routeSignals) activeRouteSignals.add(nextSignal);
       if (runtimeUiHelpers.useCompactProgressUpdates(false)) {
-        await bot.sendMessage(chatId, runtimeUiHelpers.buildCompactExecutionUpdateText({ displayName, output: r.output, routeSignals }));
+        await bot.sendMessage(chatId, runtimeUiHelpers.buildCompactExecutionUpdateText({ displayName, output: r.output, routeSignals, provider: r.provider, model: r.model, mode: r.mode }));
       } else {
-        await sendLong(bot, chatId, `🤖 ${displayName} 결과 (${r.mode})${routeSignals.length > 0 ? `\nroute_signals=${routeSignals.join(', ')}` : ''}\n${clip(r.output, 3500)}`);
+        await sendLong(bot, chatId, runtimeUiHelpers.appendRuntimeModelFooter(`🤖 ${displayName} 결과 (${r.mode})${routeSignals.length > 0 ? `\nroute_signals=${routeSignals.join(', ')}` : ''}\n${clip(r.output, 3500)}`, { provider: r.provider, model: r.model, mode: r.mode }));
       }
       continue;
     }
@@ -6512,9 +6513,9 @@ reason=${String(note?.reason || 'parallel spawn unavailable').trim()}`
       const routeSignals = resolveActionRouteSignals({ action: act, result: r });
       for (const nextSignal of routeSignals) activeRouteSignals.add(nextSignal);
       if (runtimeUiHelpers.useCompactProgressUpdates(false)) {
-        await bot.sendMessage(chatId, runtimeUiHelpers.buildCompactExecutionUpdateText({ displayName, output: r.output, routeSignals, final: true }));
+        await bot.sendMessage(chatId, runtimeUiHelpers.buildCompactExecutionUpdateText({ displayName, output: r.output, routeSignals, final: true, provider: r.provider, model: r.model, mode: r.mode }));
       } else {
-        await sendLong(bot, chatId, `🧩 ${displayName} 최종 합성 완료 (${r.mode})${routeSignals.length > 0 ? `\nroute_signals=${routeSignals.join(', ')}` : ''}\n${clip(r.output, 3500)}`);
+        await sendLong(bot, chatId, runtimeUiHelpers.appendRuntimeModelFooter(`🧩 ${displayName} 최종 합성 완료 (${r.mode})${routeSignals.length > 0 ? `\nroute_signals=${routeSignals.join(', ')}` : ''}\n${clip(r.output, 3500)}`, { provider: r.provider, model: r.model, mode: r.mode }));
       }
       continue;
     }

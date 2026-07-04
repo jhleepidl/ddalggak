@@ -51,6 +51,8 @@ test('direct prompt keeps routing internals out of user-facing answer request', 
   assert.match(prompt, /direct chat mode/);
   assert.match(prompt, /Do not mention routing, agents, plans/);
   assert.match(prompt, /간단히 설명해줘/);
+  assert.match(prompt, /USER-FACING LANGUAGE/);
+  assert.match(prompt, /natural Korean/);
 });
 
 test('learned concierge model can safely escalate a direct-looking ask to workbench', () => {

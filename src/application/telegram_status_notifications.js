@@ -12,15 +12,45 @@ export function sendLong(bot, chatId, text, options = undefined) {
   return sendLongAdapter(bot, chatId, text, options);
 }
 
+function cleanRuntimePart(value = '', { maxLen = 80 } = {}) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return text.length > maxLen ? text.slice(0, maxLen) : text;
+}
+
+export function runtimeModelLabel({ provider = '', model = '', nodeId = '', route = '', mode = '' } = {}) {
+  const p = cleanRuntimePart(provider || 'unknown');
+  const m = cleanRuntimePart(model || nodeId || 'unknown');
+  const parts = [`${p}/${m}`];
+  if (route) parts.push(`route=${cleanRuntimePart(route, { maxLen: 60 })}`);
+  if (mode) parts.push(`mode=${cleanRuntimePart(mode, { maxLen: 60 })}`);
+  return parts.join(' · ');
+}
+
+export function appendRuntimeModelFooter(text = '', { provider = '', model = '', nodeId = '', route = '', mode = '' } = {}) {
+  const raw = String(text || '').trim();
+  if (['0', 'false', 'no', 'off'].includes(String(process.env.DDALGGAK_SHOW_MODEL_FOOTER || 'true').trim().toLowerCase())) return raw;
+  const label = runtimeModelLabel({ provider, model, nodeId, route, mode });
+  if (!label || /unknown\/unknown/.test(label)) return raw;
+  const footer = `
+
+—
+🤖 model: ${label}`;
+  if (!raw) return footer.trim();
+  if (raw.includes('🤖 model:')) return raw;
+  return `${raw}${footer}`;
+}
+
 export function useCompactProgressUpdates(verbose = false) {
   if (verbose) return false;
   return String(process.env.TELEGRAM_PROGRESS_DETAIL_MODE || '').trim().toLowerCase() !== 'full';
 }
 
-export function buildCompactExecutionUpdateText({ displayName = '', output = '', routeSignals = [], final = false } = {}) {
+export function buildCompactExecutionUpdateText({ displayName = '', output = '', routeSignals = [], final = false, provider = '', model = '', route = '', mode = '' } = {}) {
   const lines = [
     final ? '🧩 최종 합성 완료' : '🤖 실행 완료',
     displayName ? `- agent: ${displayName}` : '',
+    (provider || model) ? `- model: ${runtimeModelLabel({ provider, model, route, mode })}` : '',
     Array.isArray(routeSignals) && routeSignals.length > 0 ? `- route_signals: ${routeSignals.join(', ')}` : '',
     output ? `- preview: ${clip(String(output || '').trim(), 500)}` : '',
   ].filter(Boolean);

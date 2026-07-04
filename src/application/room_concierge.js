@@ -1,3 +1,5 @@
+import { userSurfaceLanguageDirective } from './language_policy.js';
+
 import {
   applyLearnedRoomConciergeModel,
   extractRoomConciergeFeatureVector,
@@ -165,7 +167,7 @@ export function shouldUseSearchAskPath(decision = {}) {
   return decision?.route === 'concierge_search_answer';
 }
 
-export function buildDirectAskPrompt({ question = '', locale = 'ko-KR', roomName = '', context = '' } = {}) {
+export function buildDirectAskPrompt({ question = '', locale = 'ko', roomName = '', context = '' } = {}) {
   const q = clean(question);
   const roomLine = clean(roomName) ? `Room: ${clean(roomName)}` : '';
   const ctx = String(context || '').trim();
@@ -176,7 +178,9 @@ export function buildDirectAskPrompt({ question = '', locale = 'ko-KR', roomName
     'LATEST TURN IS AUTHORITATIVE: answer only the user question below. Do not answer previous questions unless the user explicitly asks you to recall them.',
     'For casual recommendations, give practical choices. For uncertainty, say what is uncertain without over-explaining.',
     'Do not claim you searched the web unless the prompt explicitly includes search results.',
-    `Locale: ${locale || 'ko-KR'}`,
+    '[USER-FACING LANGUAGE]',
+    `- ${userSurfaceLanguageDirective(locale || 'ko')}`,
+    `- surface_locale: ${locale || 'ko'}`,
     roomLine,
     ctx ? ctx : '',
     '',
@@ -184,7 +188,7 @@ export function buildDirectAskPrompt({ question = '', locale = 'ko-KR', roomName
   ].filter(Boolean).join('\n');
 }
 
-export function buildSearchAskFallbackPrompt({ question = '', locale = 'ko-KR', maxSeconds = 20, context = '' } = {}) {
+export function buildSearchAskFallbackPrompt({ question = '', locale = 'ko', maxSeconds = 20, context = '' } = {}) {
   const q = clean(question);
   const ctx = String(context || '').trim();
   return [
@@ -195,7 +199,9 @@ export function buildSearchAskFallbackPrompt({ question = '', locale = 'ko-KR', 
     'If the user asks whether prior suggestions are actually available/verified and you lack source evidence, answer that the referenced suggestions were prior recommendations, not verified results, then ask to run/search with a source-capable provider or request app screenshots/links.',
     'Use recent room continuity and room context state to resolve omitted referents, constraints, preferences, and user-provided facts. Do not rely on domain-specific slot guessing; use the schema-agnostic context observations and recent user context quotes.',
     `Keep the answer concise. Search budget expectation: ${Math.max(1, Number(maxSeconds || 20))} seconds.`,
-    `Locale: ${locale || 'ko-KR'}`,
+    '[USER-FACING LANGUAGE]',
+    `- ${userSurfaceLanguageDirective(locale || 'ko')}`,
+    `- surface_locale: ${locale || 'ko'}`,
     ctx ? ctx : '',
     '',
     `User request:\n${q}`,
