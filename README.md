@@ -570,3 +570,20 @@ Disable it with:
 ```bash
 DDALGGAK_SHOW_MODEL_FOOTER=false
 ```
+
+### Default room presets
+
+Use `/room presets` to see bundled room settings and `/room preset <id>` to apply one. Presets include companion rosters, skills, memory hierarchy, and loop policy. They are starting structures, not hard-coded prompt routes. `/loop 5 <goal>` and `/l —loops 5 <goal>` are supported for easier mobile usage.
+
+### Room memory commands
+
+- `/memory` or `/memory list`: compact room-local memory view.
+- `/memory proposals`: pending idle-memory candidates.
+- `/memory approve latest|<n>` and `/memory reject latest|<n>`: decide memory candidates.
+- `/memory explain <id>`: source/provenance for a memory item or candidate.
+
+GoC is the preferred surface for richer memory browsing and lifecycle review.
+
+### Room package retrieval/evolution
+
+DdalGgak starts a Telegram room from reusable room packages, then composes missing skills/memory/protocols and evolves through idle-time candidates and user/GoC approval. See `../docs/DDALGGAK_ROOM_PACKAGE_EVOLUTION.md`.

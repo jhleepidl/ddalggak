@@ -67,6 +67,7 @@ import { appendRuntimeModelFooter } from '../../application/telegram_status_noti
 import { inspectAndPrepareImprovementJob, loadImprovementExecutionContext, runImprovementAutomation, runImprovementCanary, runImprovementEvalGate, runImprovementReview, runImprovementRollback, runImprovementTests, markImprovementPromotion } from '../../application/improvement_orchestrator.js';
 import { writeIdleCompactionCandidate, formatIdleCompactionCandidateForTelegram } from '../../application/idle_compaction.js';
 import { runRoomIdleMemoryStructuring, formatRoomIdleMemoryStructuringResultForTelegram } from '../../application/room_idle_memory.js';
+import { deriveRoomMemoryView, formatRoomMemoryDecisionForTelegram, formatRoomMemoryExplainForTelegram, formatRoomMemoryListForTelegram, formatRoomMemoryProposalsForTelegram, updateRoomMemoryCandidateDecision } from '../../application/room_memory_view.js';
 import { formatMemoryTopologyForTelegram, planMemoryTopology } from '../../application/memory_topology.js';
 import { formatMemoryMaterializationPlanForTelegram, loadLatestMemoryMaterializationPlan, planMemoryMaterialization } from '../../application/memory_materialization_planner.js';
 import { createShadowMemoryModule, findMaterializationCandidate, formatShadowMemoryModuleListForTelegram, formatShadowMemoryModuleResultForTelegram, listShadowMemoryModules } from '../../application/memory_materialization_store.js';
@@ -111,10 +112,17 @@ import { buildWorkflowRuntimeExecutionPatch } from '../../application/workflow_e
 import {
   buildRoomPackage,
   buildRoomProfileFromGoal,
+  formatDefaultRoomPackageComposition,
+  formatDefaultRoomPackageDetail,
+  formatDefaultRoomPackageList,
   formatRoomPackageSummary,
   formatRoomComponentLibrary,
+  getDefaultRoomPackage,
+  listDefaultRoomPackages,
   parseRoomPackageInput,
+  recommendDefaultRoomPackages,
   renderRoomMarkdown,
+  buildDefaultRoomPackageComposition,
   roomPackageToProfilePatch,
 } from '../../application/room_package.js';
 import {
@@ -140,7 +148,7 @@ const HELP_TEXT = [
   "- /chat 또는 /c <message>: 이 Telegram room에 요청하기",
   "- /ask 또는 /a <question>: legacy quick-question alias. 일반 사용은 /chat 권장",
   "- /team 또는 /t <goal>: 팀 검토/리뷰 깊이로 답변",
-  "- /loop 또는 /l [--loops n] <goal>: bounded loop 작업 시작",
+  "- /loop 또는 /l [--loops n|n] <goal>: bounded loop 작업 시작",
   "- /room 또는 /r: 이 채팅방의 AI Room / Room Package 설정 보기",
   "- /companions 또는 /companion: room companion roster와 memory boundary 보기",
   "- /context project-only|clean-slate|exclude <source>|reset: context 사용 범위 조절",
@@ -152,7 +160,8 @@ const HELP_TEXT = [
   "- /agents suggest <목표>: 목표에 맞는 agent 구성 추천",
   "- /review 또는 /rev: 승인/검토가 필요한 항목 보기",
   "- /inbox: room decision inbox(job review, correction, memory exchange) 보기",
-  "- /memory 또는 /m: memory topology/pressure/proposal 상태 요약",
+  "- /memory 또는 /m: 이 room에 저장된 memory 보기",
+  "- /memory proposals|approve|reject|explain: memory 후보 검토/승인/설명",
   "- /rule <자연어 지침>: 명시적 runtime rule 추가",
   "- /skill 또는 /sk: skill 상태 보기",
   "- /board 또는 /b: semantic memory/skill/rule board 요약",
@@ -211,7 +220,8 @@ const ADVANCED_HELP_TEXT = [
   "- /team more: team topology 고급 명령 보기",
   "- /review approve|reject <reason>: 대기 중인 검토/승인 항목 처리",
   "- /inbox: active job review, companion merge proposal, materialization candidate 요약",
-  "- /memory: topology, pressure, proposal/materialization 상태 요약",
+  "- /memory: room memory 요약 및 저장된 memory 보기",
+  "- /memory proposals|approve|reject|explain: memory 후보 검토/승인/설명",
   "- /memory debug <show|md|kb|topology|pressure|evidence|review|materialize-preview|modules>: 개발/진단용 상세 조회",
   "- /settings ...: legacy alias, 가능하면 /memory 또는 GoC 사용",
   "- /skills 또는 /skill: 현재/예정 agent roster와 대표 skill 보기",
@@ -344,6 +354,9 @@ const ROOM_HELP_TEXT = [
   "- /room: 현재 방의 specialization 보기",
   "- /room suggest <goal>: 반복 작업용 room profile / Room Package 제안",
   "- /room apply <goal>: 이 방을 해당 목적에 맞게 전문화",
+  "- /room presets [query]: 내장 room/skill/memory preset 목록 보기",
+  "- /room preset <id> 또는 /room use <id>: 내장 preset을 이 방에 적용",
+  "- /room alternatives [goal]: base package + borrowed skill/protocol/memory 후보 보기",
   "- /room advisor [goal]: broad/specialized/hybrid tradeoff 추천",
   "- /room evolution: 반복 상호작용에서 emergent schema/agent/gateway 제안 보기",
   "- /room manual: 현재 ROOM.md 보기",
@@ -1298,20 +1311,35 @@ export function createTelegramCommandHandler(deps = {}) {
   function parseLoopDepthArgs(raw = '') {
     let text = String(raw || '').trim();
     let maxLoops = null;
+    let explicitMaxLoops = false;
     let staged = false;
-    text = text.replace(/(?:^|\s)--loops(?:=|\s+)(\d{1,2})(?=\s|$)/i, (_m, n) => {
+    // Telegram/mobile keyboards often turn --loops into —loops or –loops.
+    // Normalize option dashes without touching the user's natural-language goal.
+    text = text.replace(/[—–−]/g, '-');
+    const takeLoops = (_m, _prefix, n) => {
       maxLoops = Math.max(1, Math.min(24, Number(n) || 1));
+      explicitMaxLoops = true;
+      return ' ';
+    };
+    text = text.replace(/(^|\s)(?:--?loops|loops)(?:=|\s+)(\d{1,2})(?=\s|$)/i, takeLoops);
+    text = text.replace(/(^|\s)(\d{1,2})(?:\s*(?:회|번|loops?))?(?=\s+\S)/i, (_m, _prefix, n) => {
+      if (maxLoops !== null) return _m;
+      maxLoops = Math.max(1, Math.min(24, Number(n) || 1));
+      explicitMaxLoops = true;
       return ' ';
     });
-    text = text.replace(/(?:^|\s)--staged(?=\s|$)/i, () => { staged = true; return ' '; });
-    return { goal: text.replace(/\s+/g, ' ').trim(), maxLoops, staged };
+    text = text.replace(/(?:^|\s)--?staged(?=\s|$)/i, () => { staged = true; return ' '; });
+    return { goal: text.replace(/\s+/g, ' ').trim(), maxLoops, explicitMaxLoops, staged };
   }
 
-  function forceBoundedLoopContract(contract = {}, { goal = '', maxLoops = null, staged = false } = {}) {
+  function forceBoundedLoopContract(contract = {}, { goal = '', maxLoops = null, explicitMaxLoops = false, staged = false, defaultMaxLoops = null } = {}) {
     const fallbackPasses = staged
       ? ['plan', 'research_or_build', 'review', 'revise', 'stop_condition_evaluation']
       : ['plan', 'implement_or_diagnose', 'verify', 'review', 'stop_condition_evaluation'];
-    const maxIterations = Math.max(1, Math.min(24, Number(maxLoops || contract.max_iterations || contract.maxIterations || (staged ? 5 : 3)) || (staged ? 5 : 3)));
+    const defaultIterations = Math.max(1, Math.min(24, Number(defaultMaxLoops || (staged ? 5 : 3)) || (staged ? 5 : 3)));
+    const contractIterations = Math.max(0, Math.min(24, Number(contract.max_iterations || contract.maxIterations || 0) || 0));
+    const rawIterations = explicitMaxLoops ? maxLoops : Math.max(defaultIterations, contractIterations);
+    const maxIterations = Math.max(1, Math.min(24, Number(rawIterations) || defaultIterations));
     const minIterations = Math.min(maxIterations, Math.max(1, Math.min(2, Number(contract.min_iterations || contract.minIterations || 2) || 2)));
     return {
       ...contract,
@@ -1986,8 +2014,10 @@ export function createTelegramCommandHandler(deps = {}) {
       return true;
     }
     const { runtime: runtimeForTeam } = await loadRuntimeForCurrentJob(chatId, userId, { includeContext: false });
+    const existingRoomProfile = getAgentRoomProfile(chatSessionStore, chatId);
+    const defaultMaxLoops = Number(existingRoomProfile?.loop_policy?.default_iterations || existingRoomProfile?.loopPolicy?.default_iterations || 0) || null;
     const signals = extractTeamCreationSignals({ request: goal, goal, runtime: runtimeForTeam });
-    const workflowContract = forceBoundedLoopContract(buildTeamWorkflowContract({ signals, goal }), { goal, ...parsedLoop });
+    const workflowContract = forceBoundedLoopContract(buildTeamWorkflowContract({ signals, goal }), { goal, ...parsedLoop, defaultMaxLoops });
     const { activeTeam, roomProfile } = await suggestAndApplyAgentRoomTeam({ chatId, userId, goal, runtimeForTeam, autoApply: true, workMode: 'team_loop_task' });
     const taskLoopRuntimeExecution = buildWorkflowRuntimeExecutionPatch(workflowContract, activeTeam?.runtime_execution || activeTeam?.runtimeExecution || runtimeForTeam?.runtime_execution || runtimeForTeam?.runtimeExecution || {});
     const taskLoopTeamConfig = activeTeam && typeof activeTeam === 'object'
@@ -2079,6 +2109,80 @@ export function createTelegramCommandHandler(deps = {}) {
       await sendLong(bot, chatId, ROOM_HELP_TEXT);
       return true;
     }
+    if (['presets', 'preset-list', 'library', 'catalog'].includes(command)) {
+      const query = argsAfterSub;
+      const rows = query ? recommendDefaultRoomPackages(query, { limit: 12, minScore: 1 }) : listDefaultRoomPackages({ limit: 40 });
+      recordRoomEvent({ chatId, userId, eventType: 'default_room_presets_view', command: '/room presets', goal: query, profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { count: rows.length } });
+      await sendLong(bot, chatId, [
+        formatDefaultRoomPackageList(rows, { includeScores: Boolean(query) }),
+        '',
+        '적용:',
+        '/room preset <id>',
+        '',
+        '원칙: 이 preset들은 fixed prompt가 아니라 agent roster, skill cards, memory hierarchy, loop policy의 starting point입니다. 실제 방은 사용 기록과 승인된 memory proposal로 점점 조정됩니다.',
+      ].join('\n'));
+      return true;
+    }
+    if (['alternatives', 'alt', 'compose', 'composition'].includes(command)) {
+      const profile = getAgentRoomProfile(chatSessionStore, chatId);
+      const goal = argsAfterSub || profile?.current_goal || '';
+      if (!goal) {
+        await sendLong(bot, chatId, [
+          '아직 비교할 room goal이 없습니다.',
+          '',
+          '먼저 /room apply <goal> 또는 /room suggest <goal>를 사용하세요.',
+        ].join('\n'));
+        return true;
+      }
+      const composition = buildDefaultRoomPackageComposition(goal, { limit: 8, currentProfile: profile });
+      recordRoomEvent({ chatId, userId, eventType: 'room_package_composition_view', command: '/room alternatives', goal, profile, extra: { mode: composition.mode, base_package: composition.base_package?.package_id || '', borrowed_count: (composition.borrowed_packages || []).length } });
+      await sendLong(bot, chatId, [
+        formatDefaultRoomPackageComposition(composition),
+        '',
+        '적용:',
+        `/room apply ${goal}`,
+        composition.base_package?.package_id ? `/room preset ${composition.base_package.package_id}` : '',
+        '',
+        '원칙: 이것은 분류기가 아니라 retrieval + composition 후보입니다. durable room 변경은 사용자/GoC 승인 경로를 거칩니다.',
+      ].filter(Boolean).join('\n'));
+      return true;
+    }
+    if (['preset', 'use', 'template'].includes(command)) {
+      const presetId = String(argsAfterSub || '').trim();
+      if (!presetId) {
+        await sendLong(bot, chatId, [
+          'Usage: /room preset <id>',
+          '',
+          formatDefaultRoomPackageList(listDefaultRoomPackages({ limit: 20 })),
+        ].join('\n'));
+        return true;
+      }
+      const preset = getDefaultRoomPackage(presetId);
+      if (!preset) {
+        await sendLong(bot, chatId, [
+          `Default room preset을 찾지 못했습니다: ${presetId}`,
+          '',
+          formatDefaultRoomPackageList(recommendDefaultRoomPackages(presetId, { limit: 8, minScore: 1 }), { includeScores: true }),
+        ].join('\n'));
+        return true;
+      }
+      const profile = buildRoomProfileFromGoal({ chatId, goal: preset.description || preset.title, roomName: preset.title, source: 'telegram_room_preset', presetId: preset.package_id });
+      upsertAgentRoomProfile(chatSessionStore, chatId, profile);
+      recordRoomEvent({ chatId, userId, eventType: 'default_room_preset_applied', command: '/room preset', goal: preset.package_id, profile, extra: { package_id: preset.package_id } });
+      await sendLong(bot, chatId, [
+        '✅ Default room preset을 이 Telegram room에 적용했습니다.',
+        '',
+        formatDefaultRoomPackageDetail(preset),
+        '',
+        formatAgentRoomProfile(profile, { includeHelp: false }),
+        '',
+        '다음:',
+        '- /c <요청>: preset 기반으로 바로 요청',
+        '- /loop 3 <목표>: preset loop policy를 사용해 bounded loop 시작',
+        '- /memory idle: idle 시간에 memory candidate 정리',
+      ].join('\n'));
+      return true;
+    }
     if (command === 'suggest') {
       const goal = argsAfterSub;
       if (!goal) {
@@ -2088,6 +2192,7 @@ export function createTelegramCommandHandler(deps = {}) {
       const profile = buildRoomProfileFromGoal({ chatId, goal, source: 'telegram_room_suggest' });
       const pkg = buildRoomPackage({ profile, chatId, goal, title: profile.name, source: 'telegram_room_suggest' });
       recordRoomEvent({ chatId, userId, eventType: 'room_suggested', command: '/room suggest', goal, profile });
+      const presets = recommendDefaultRoomPackages(goal, { limit: 5, minScore: 1 });
       await sendLong(bot, chatId, [
         '추천 AI Room specialization입니다. 아직 적용하지 않았습니다.',
         '',
@@ -2095,9 +2200,14 @@ export function createTelegramCommandHandler(deps = {}) {
         '',
         formatRoomPackageSummary(pkg),
         '',
+        formatDefaultRoomPackageComposition(buildDefaultRoomPackageComposition(goal, { limit: 6, currentProfile: getAgentRoomProfile(chatSessionStore, chatId) })),
+        '',
+        presets.length ? formatDefaultRoomPackageList(presets, { includeScores: true }) : '',
+        '',
         '적용하려면:',
         `/room apply ${goal}`,
-      ].join('\n'));
+        presets[0]?.package_id ? `또는: /room preset ${presets[0].package_id}` : '',
+      ].filter(Boolean).join('\n'));
       return true;
     }
     if (command === 'apply' || command === 'specialize' || command === 'set') {
@@ -2109,13 +2219,20 @@ export function createTelegramCommandHandler(deps = {}) {
       const profile = buildRoomProfileFromGoal({ chatId, goal, source: 'telegram_room_apply' });
       upsertAgentRoomProfile(chatSessionStore, chatId, profile);
       recordRoomEvent({ chatId, userId, eventType: 'room_applied', command: '/room apply', goal, profile });
+      const preset = profile?.preset_id ? getDefaultRoomPackage(profile.preset_id) : null;
       await sendLong(bot, chatId, [
         '✅ 이 채팅방을 specialized AI Room으로 설정했습니다.',
+        profile?.preset_id ? `- default preset: ${profile.preset_id}` : '',
         '',
         formatAgentRoomProfile(profile, { includeHelp: false }),
         '',
+        formatDefaultRoomPackageComposition(profile.room_package_composition),
+        preset ? '' : '',
+        preset ? formatDefaultRoomPackageDetail(preset) : '',
+        '',
         '공유/포크 가능한 설명서를 보려면 /room manual 또는 /room export 를 사용하세요.',
-      ].join('\n'));
+        '대안/구성 근거를 다시 보려면 /room alternatives 를 사용하세요.',
+      ].filter((line) => line !== '').join('\n'));
       return true;
     }
     if (['advisor', 'advise', 'tradeoff', 'granularity', 'recommend'].includes(command)) {
@@ -2716,15 +2833,45 @@ export function createTelegramCommandHandler(deps = {}) {
       const debugMode = firstMemoryArg === "debug" || firstMemoryArg === "--debug";
       const memoryRest = debugMode ? rest.slice(1) : rest;
       const sub = String(memoryRest[0] || "show").trim().toLowerCase();
-      const publicMemorySubcommands = new Set(["", "show", "status", "idle", "structure", "structuring"]);
+      const publicMemorySubcommands = new Set(["", "show", "status", "list", "ls", "proposals", "proposal", "candidates", "approve", "accept", "reject", "explain", "detail", "idle", "structure", "structuring"]);
 
       if (!debugMode && !publicMemorySubcommands.has(sub)) {
+        const session = chatSessionStore?.get?.(chatId) || {};
+        const companionState = getCurrentCompanionControlState(chatId);
         await sendLong(bot, chatId, [
-          formatMemorySummary(),
+          formatRoomMemoryListForTelegram(deriveRoomMemoryView({ session, companionState })),
           '',
-          '세부 memory 조회/수정은 GoC Review Inbox에서 처리하는 것이 기본입니다.',
-          '개발/진단 목적으로만 Telegram에서 보려면 /memory debug <subcommand>를 사용하세요.',
+          '개발/진단용 topology/pressure/materialization은 /memory debug <subcommand>를 사용하세요.',
         ].join('\n'));
+        return true;
+      }
+
+      if (!debugMode && (sub === "show" || sub === "status" || sub === "list" || sub === "ls" || sub === "")) {
+        const session = chatSessionStore?.get?.(chatId) || {};
+        const companionState = getCurrentCompanionControlState(chatId);
+        await sendLong(bot, chatId, formatRoomMemoryListForTelegram(deriveRoomMemoryView({ session, companionState })));
+        return true;
+      }
+
+      if (!debugMode && (sub === "proposals" || sub === "proposal" || sub === "candidates")) {
+        const session = chatSessionStore?.get?.(chatId) || {};
+        const companionState = getCurrentCompanionControlState(chatId);
+        await sendLong(bot, chatId, formatRoomMemoryProposalsForTelegram(deriveRoomMemoryView({ session, companionState, includeRejected: true })));
+        return true;
+      }
+
+      if (!debugMode && (sub === "approve" || sub === "accept" || sub === "reject")) {
+        const target = String(memoryRest[1] || 'latest').trim() || 'latest';
+        const reason = memoryRest.slice(2).join(' ').trim();
+        const result = updateRoomMemoryCandidateDecision({ chatSessionStore, chatId, target, decision: sub === 'reject' ? 'reject' : 'approve', userId, reason });
+        await sendLong(bot, chatId, formatRoomMemoryDecisionForTelegram(result));
+        return true;
+      }
+
+      if (!debugMode && (sub === "explain" || sub === "detail")) {
+        const session = chatSessionStore?.get?.(chatId) || {};
+        const id = memoryRest.slice(1).join(' ').trim();
+        await sendLong(bot, chatId, formatRoomMemoryExplainForTelegram({ session, id }));
         return true;
       }
 
@@ -2738,7 +2885,7 @@ export function createTelegramCommandHandler(deps = {}) {
         return true;
       }
 
-      if (sub === "show" || sub === "status") {
+      if (debugMode && (sub === "show" || sub === "status")) {
         await sendLong(bot, chatId, formatMemorySummary());
         return true;
       }

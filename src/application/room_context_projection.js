@@ -187,11 +187,23 @@ export function buildBudgetedRoomContextProjection({
     snap.room_profile?.domain_label
       ? `domain_label: ${snap.room_profile.domain_label}`
       : '',
+    snap.room_profile?.preset_id
+      ? `default_room_preset: ${snap.room_profile.preset_id}`
+      : '',
     Array.isArray(snap.room_profile?.default_agents) && snap.room_profile.default_agents.length
       ? `room_roles: ${snap.room_profile.default_agents.slice(0, 8).join(', ')}`
       : '',
+    Array.isArray(snap.room_profile?.installed_skills) && snap.room_profile.installed_skills.length
+      ? `room_skills: ${snap.room_profile.installed_skills.slice(0, 12).join(', ')}`
+      : '',
+    Array.isArray(snap.room_profile?.memory_hierarchy) && snap.room_profile.memory_hierarchy.length
+      ? `memory_hierarchy: ${snap.room_profile.memory_hierarchy.slice(0, 12).join(' -> ')}`
+      : '',
     Array.isArray(snap.room_profile?.memory_schema?.object_types) && snap.room_profile.memory_schema.object_types.length
       ? `memory_schema: ${snap.room_profile.memory_schema.object_types.slice(0, 10).join(', ')}`
+      : '',
+    snap.room_profile?.loop_policy?.default_iterations
+      ? `loop_policy: default_iterations=${snap.room_profile.loop_policy.default_iterations}; verify_each_iteration=${snap.room_profile.loop_policy.verify_each_iteration !== false}`
       : '',
     snap.room_profile
       ? 'room_profile_policy: Use this room profile to shape continuity and companion routing. Do not use it as a fixed per-user prompt template; latest user request remains authoritative.'

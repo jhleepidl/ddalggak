@@ -3,6 +3,16 @@ import {
   buildRoomComponentsFromPackage,
   formatRoomComponentLibrary,
 } from './ai_room_components.js';
+import {
+  buildDefaultRoomPackageComposition,
+  formatDefaultRoomPackageComposition,
+  formatDefaultRoomPackageDetail,
+  formatDefaultRoomPackageList,
+  getDefaultRoomPackage,
+  listDefaultRoomPackages,
+  recommendDefaultRoomPackages,
+  roomTemplateFromDefaultPackage,
+} from './default_room_library.js';
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -289,35 +299,80 @@ export function getRoomDomainTemplate(domainLabel = '') {
   return DOMAIN_TEMPLATES[domainLabel] || DOMAIN_TEMPLATES.general_workbench;
 }
 
-export function buildRoomProfileFromGoal({ chatId = '', goal = '', roomName = '', source = 'room_specialization', attachmentKinds = [] } = {}) {
+export function selectDefaultRoomPackageForGoal(goal = '', { minScore = 4 } = {}) {
+  const recommendations = recommendDefaultRoomPackages(goal, { limit: 5, minScore: 1 });
+  const top = recommendations[0] || null;
+  if (!top || Number(top.score || 0) < minScore) return { preset: null, recommendations };
+  return { preset: top, recommendations };
+}
+
+export function buildRoomProfileFromGoal({ chatId = '', goal = '', roomName = '', source = 'room_specialization', attachmentKinds = [], presetId = '' } = {}) {
+  const explicitPreset = presetId ? getDefaultRoomPackage(presetId) : null;
+  const selected = explicitPreset ? { preset: explicitPreset, recommendations: [explicitPreset] } : selectDefaultRoomPackageForGoal(goal);
+  const composition = explicitPreset
+    ? buildDefaultRoomPackageComposition(explicitPreset.description || explicitPreset.title || goal, { limit: 6 })
+    : buildDefaultRoomPackageComposition(goal, { limit: 6 });
+  const compositionBaseId = composition?.base_package?.package_id || '';
+  const compositionBase = compositionBaseId ? getDefaultRoomPackage(compositionBaseId) : null;
   const inferred = inferRoomDomain(goal, { attachmentKinds });
-  const template = inferred.template;
+  const basePreset = explicitPreset || compositionBase || selected.preset;
+  const presetTemplate = basePreset ? roomTemplateFromDefaultPackage(basePreset) : null;
+  const template = presetTemplate || inferred.template;
   const now = new Date().toISOString();
+  const domainLabel = basePreset?.domain_label || inferred.domain_label;
+  const defaultDepth = template.default_depth || 'team';
+  const borrowed = asArray(composition?.borrowed_packages);
+  const borrowedSkills = borrowed.flatMap((item) => asArray(asObject(item.borrowed_components).skills));
+  const borrowedMemory = borrowed.flatMap((item) => asArray(asObject(item.borrowed_components).memory_schema));
+  const borrowedHierarchy = borrowed.flatMap((item) => asArray(asObject(item.borrowed_components).memory_hierarchy));
+  const borrowedAgents = borrowed.flatMap((item) => asArray(asObject(item.borrowed_components).agents));
+  const skills = uniqueStrings([...(template.skills || basePreset?.skills || []), ...borrowedSkills], { max: 48, lower: true });
+  const memoryHierarchy = uniqueStrings([...(template.memory_hierarchy || basePreset?.memory_hierarchy || []), ...borrowedHierarchy], { max: 48, lower: true });
+  const memoryObjects = uniqueStrings([...(template.memory_schema || []), ...borrowedMemory], { max: 48, lower: true });
+  const agentRoles = uniqueStrings([...(template.agent_roles || []), ...borrowedAgents], { max: 12, lower: true });
   return {
     kind: 'agent_room_profile_v1',
     room_id: String(chatId || 'telegram_room'),
     name: cleanText(roomName || template.room_name || 'AI Work Room', { maxLen: 120 }),
     status: 'active',
     source,
-    domain_label: inferred.domain_label,
-    domain_confidence: inferred.confidence,
+    package_id: basePreset?.package_id || '',
+    preset_id: basePreset?.package_id || '',
+    preset_title: basePreset?.title || '',
+    domain_label: domainLabel,
+    domain_confidence: basePreset ? Math.max(0.75, inferred.confidence || 0.75) : inferred.confidence,
     setup_only: inferred.setup_only,
     room_purpose: template.purpose,
-    default_agents: uniqueStrings(template.agent_roles, { max: 16, lower: true }),
-    default_workflow: template.default_depth === 'loop' ? 'bounded_review_improve_loop' : (template.default_depth === 'team' ? 'review_gated_pipeline' : 'quick_answer'),
-    default_depth: template.default_depth,
+    default_agents: agentRoles,
+    default_workflow: defaultDepth === 'loop' ? 'bounded_review_improve_loop' : (defaultDepth === 'team' ? 'review_gated_pipeline' : 'quick_answer'),
+    default_depth: defaultDepth,
+    installed_skills: skills,
     memory_scope: 'room',
+    memory_hierarchy: memoryHierarchy,
+    loop_policy: asObject(template.loop_policy || basePreset?.loop_policy),
     memory_schema: {
-      object_types: uniqueStrings(template.memory_schema, { max: 32, lower: true }),
+      object_types: memoryObjects,
+      hierarchy: memoryHierarchy,
       retention_policy: 'room_local_by_default',
       private_memory_export: 'never_by_default',
     },
-    prompt_policy: asObject(template.prompt_policy),
+    prompt_policy: {
+      ...asObject(template.prompt_policy),
+      selected_default_room_preset: basePreset?.package_id || '',
+      room_package_composition_mode: composition?.mode || '',
+    },
     context_policy: asObject(template.context_policy),
     autonomy_policy: asObject(template.approval_policy),
     interaction_examples: asArray(template.examples),
     current_goal: cleanText(goal, { maxLen: 800 }),
-    reasons: [`domain:${inferred.domain_label}`, inferred.setup_only ? 'setup_only_room_preparation' : 'recurring_room_specialization'].filter(Boolean),
+    room_package_recommendations: (composition?.candidates || selected.recommendations || []).slice(0, 8).map((row) => ({ package_id: row.package_id, title: row.title, score: row.composition_score ?? row.score })),
+    room_package_composition: composition,
+    reasons: [
+      `domain:${domainLabel}`,
+      basePreset ? `default_room_preset:${basePreset.package_id}` : '',
+      borrowed.length ? `borrowed_room_components:${borrowed.map((row) => row.package_id).join(',')}` : '',
+      inferred.setup_only ? 'setup_only_room_preparation' : 'recurring_room_specialization',
+    ].filter(Boolean),
     tags: uniqueStrings(template.tags, { max: 16, lower: true }),
     created_at: now,
     updated_at: now,
@@ -356,8 +411,12 @@ export function sanitizeRoomPackage(raw = {}) {
     room_manual: cleanText(source.room_manual || source.roomManual || '', { maxLen: 8000 }),
     agents: uniqueStrings(source.agents || source.agent_roles || source.agentRoles || template.agent_roles, { max: 24, lower: true }),
     default_depth: slugify(source.default_depth || source.defaultDepth || template.default_depth || 'ask', 'ask'),
+    skills: uniqueStrings(source.skills || source.installed_skills || template.skills, { max: 64, lower: true }),
+    memory_hierarchy: uniqueStrings(source.memory_hierarchy || source.memoryHierarchy || memory.hierarchy || template.memory_hierarchy, { max: 64, lower: true }),
+    loop_policy: asObject(source.loop_policy || source.loopPolicy || template.loop_policy),
     memory_schema: {
       object_types: uniqueStrings(memory.object_types || memory.objectTypes || source.memory_object_types || template.memory_schema, { max: 64, lower: true }),
+      hierarchy: uniqueStrings(memory.hierarchy || source.memory_hierarchy || source.memoryHierarchy || template.memory_hierarchy, { max: 64, lower: true }),
       retention_policy: cleanText(memory.retention_policy || memory.retentionPolicy || 'room_local_by_default', { maxLen: 200 }),
       private_memory_export: 'never_by_default',
       copies_private_memory: false,
@@ -402,6 +461,9 @@ export function buildRoomPackage({ profile = null, goal = '', title = '', chatId
     domain_label: base.domain_label || inferRoomDomain(goal).domain_label,
     agents: base.default_agents,
     default_depth: base.default_depth || (base.default_workflow === 'quick_answer' ? 'ask' : 'team'),
+    skills: base.installed_skills || base.skills || [],
+    memory_hierarchy: base.memory_hierarchy || base.memory_schema?.hierarchy || [],
+    loop_policy: base.loop_policy || {},
     memory_schema: base.memory_schema,
     prompt_policy: base.prompt_policy,
     context_policy: base.context_policy,
@@ -427,7 +489,10 @@ export function roomPackageToProfilePatch(roomPackage = {}, { chatId = '', sourc
     default_agents: pkg.agents,
     default_depth: pkg.default_depth,
     default_workflow: pkg.default_depth === 'loop' ? 'bounded_review_improve_loop' : (pkg.default_depth === 'team' ? 'review_gated_pipeline' : 'quick_answer'),
+    installed_skills: pkg.skills || [],
     memory_scope: 'room',
+    memory_hierarchy: pkg.memory_hierarchy || pkg.memory_schema?.hierarchy || [],
+    loop_policy: pkg.loop_policy || {},
     memory_schema: pkg.memory_schema,
     prompt_policy: pkg.prompt_policy,
     context_policy: pkg.context_policy,
@@ -463,8 +528,22 @@ export function renderRoomMarkdown(roomPackage = {}) {
   const componentLibrary = buildRoomComponentsFromPackage(pkg);
   for (const agent of componentLibrary.agents) lines.push(`- agent_card: ${agent.local_id || agent.role} · borrow=${agent.install_policy?.can_borrow !== false}`);
   lines.push('');
+  lines.push('## Skills');
+  for (const skill of asArray(pkg.skills)) lines.push(`- ${skill}`);
+  if (!asArray(pkg.skills).length) lines.push('- (none declared)');
+  lines.push('');
+  lines.push('## Memory hierarchy');
+  for (const layer of asArray(pkg.memory_hierarchy || pkg.memory_schema.hierarchy)) lines.push(`- ${layer}`);
+  if (!asArray(pkg.memory_hierarchy || pkg.memory_schema.hierarchy).length) lines.push('- room_profile');
+  lines.push('');
   lines.push('## Memory schema');
   for (const objectType of asArray(pkg.memory_schema.object_types)) lines.push(`- ${objectType}`);
+  lines.push('');
+  lines.push('## Loop policy');
+  for (const [key, value] of Object.entries(asObject(pkg.loop_policy))) {
+    lines.push(`- ${key}: ${Array.isArray(value) ? value.join(', ') : String(value)}`);
+  }
+  if (!Object.keys(asObject(pkg.loop_policy)).length) lines.push('- default_iterations: adaptive');
   lines.push('');
   lines.push('## Prompt policy');
   for (const [key, value] of Object.entries(asObject(pkg.prompt_policy))) {
@@ -506,6 +585,9 @@ export function formatRoomPackageSummary(roomPackage = {}, { includeExamples = t
     `- components: ${asObject(pkg.components?.summary).total_components || buildRoomComponentsFromPackage(pkg).summary.total_components}`,
     `- reusable agents: ${asObject(pkg.components?.summary).reusable_agent_count || buildRoomComponentsFromPackage(pkg).summary.reusable_agent_count}`,
     `- memory objects: ${asArray(pkg.memory_schema.object_types).join(', ') || '-'}`,
+    `- skills: ${asArray(pkg.skills).slice(0, 8).join(', ') || '-'}`,
+    `- memory hierarchy: ${asArray(pkg.memory_hierarchy || pkg.memory_schema.hierarchy).slice(0, 8).join(' → ') || '-'}`,
+    `- loop default: ${asObject(pkg.loop_policy).default_iterations || 'adaptive'}`,
     `- private memory copied: no`,
   ];
   if (includeExamples && asArray(pkg.examples).length) {
@@ -528,4 +610,14 @@ export function parseRoomPackageInput(raw = '') {
   }
 }
 
-export { buildRoomComponentsFromPackage, formatRoomComponentLibrary };
+export {
+  buildRoomComponentsFromPackage,
+  formatRoomComponentLibrary,
+  buildDefaultRoomPackageComposition,
+  formatDefaultRoomPackageComposition,
+  formatDefaultRoomPackageDetail,
+  formatDefaultRoomPackageList,
+  getDefaultRoomPackage,
+  listDefaultRoomPackages,
+  recommendDefaultRoomPackages,
+};

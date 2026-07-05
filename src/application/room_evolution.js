@@ -357,6 +357,56 @@ function buildGatewayProposal({ counts = {}, topObjects = [] } = {}) {
   };
 }
 
+
+
+function buildRoomEvolutionDecisionPolicy({ counts = {}, proposalCount = 0 } = {}) {
+  return {
+    kind: 'room_evolution_decision_policy_v1',
+    goal: 'avoid uncontrolled self-improvement and room drift',
+    auto_apply_allowed: [
+      'deduplicate_candidates',
+      'refresh_indexes',
+      'quarantine_corrupted_context',
+      'recompute_package_scores',
+    ],
+    trial_mode_allowed: [
+      'temporary_protocol_addition',
+      'temporary_companion_priority_shift',
+      'temporary_loop_policy_patch',
+      'temporary_projection_budget_change',
+    ],
+    approval_required: [
+      'active_room_package_change',
+      'resident_companion_change',
+      'durable_memory_schema_change',
+      'cross_companion_memory_exchange',
+      'new_room_protocol_or_skill_install',
+      'risk_policy_relaxation',
+    ],
+    improvement_signals: [
+      'task_completion',
+      'artifact_created_or_validated',
+      'user_approval_or_low_correction_rate',
+      'lower_manual_configuration_burden',
+      'fewer_unsafe_or_ungrounded_claims',
+      'successful_counterfactual_replay',
+    ],
+    deterioration_signals: [
+      'user_stop_or_repeated_retry',
+      'correction_after_memory_use',
+      'artifact_missing_or_tests_not_run',
+      'room_drift_from_declared_goal',
+      'unsafe_or_unverified_claim',
+      'higher_latency_without_better_outcome',
+    ],
+    current_observation: {
+      events: counts.total_events || 0,
+      proposals: proposalCount,
+      enough_for_durable_change: (counts.total_events || 0) >= 6 && proposalCount > 0,
+    },
+  };
+}
+
 export function proposeRoomEvolution({ events = [], roomPackage = null, policy = {} } = {}) {
   const aggregate = aggregateSignals(events);
   const counts = aggregate.counts;
@@ -391,6 +441,7 @@ export function proposeRoomEvolution({ events = [], roomPackage = null, policy =
     proposals: proposals.filter(Boolean),
     skill_discovery: skillDiscovery,
     room_memory_trial_plan: skillDiscovery.room_memory_schema_trial_plan,
+    decision_policy: buildRoomEvolutionDecisionPolicy({ counts, proposalCount: proposals.filter(Boolean).length }),
     governance: {
       ai_role: 'architect_advisor_proposer_not_controller',
       auto_apply: false,
@@ -462,6 +513,10 @@ export function formatRoomEvolutionSnapshot(snapshot = {}) {
   if (proposals.length) {
     lines.push('- pending proposals:');
     for (const proposal of proposals) lines.push(`  - ${proposal.proposal_type}: ${proposal.title || proposal.proposal_id} · ${proposal.status || 'pending_review'}`);
+  }
+  const policy = asObject(row.decision_policy);
+  if (policy.kind) {
+    lines.push(`- improvement guard: approval_required=${asArray(policy.approval_required).slice(0, 3).join(', ')}; trial_allowed=${asArray(policy.trial_mode_allowed).slice(0, 2).join(', ')}`);
   }
   lines.push('- policy: AI proposes; runtime validates; GoC/user approves; private content is not exported.');
   return lines.join('\n');

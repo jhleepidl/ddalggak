@@ -167,11 +167,22 @@ export function formatAgentRoomProfile(profile = null, { includeHelp = true } = 
     `- domain: ${row.domain_label || 'general_workbench'}`,
     `- default depth: ${row.default_depth || 'adaptive'}`,
     `- default workflow: ${row.default_workflow || 'task_adaptive'}`,
+    row.preset_id ? `- default preset: ${row.preset_id}` : '',
     `- agents: ${asArray(row.default_agents).join(', ') || '-'}`,
+    `- skills: ${asArray(row.installed_skills || row.skills).join(', ') || '-'}`,
     `- memory scope: ${row.memory_scope || 'room'}`,
+    `- memory hierarchy: ${asArray(row.memory_hierarchy || asObject(row.memory_schema).hierarchy).join(' → ') || '-'}`,
     `- memory schema: ${asArray(asObject(row.memory_schema).object_types).join(', ') || '-'}`,
     `- package: ${row.package_id || '(not exported)'}`,
-  ];
+  ].filter(Boolean);
+  const loop = asObject(row.loop_policy);
+  if (Object.keys(loop).length) {
+    lines.push('- loop policy:');
+    if (loop.default_iterations) lines.push(`  - default iterations: ${loop.default_iterations}`);
+    if (loop.staged_iterations) lines.push(`  - staged iterations: ${loop.staged_iterations}`);
+    if (typeof loop.verify_each_iteration !== 'undefined') lines.push(`  - verify each iteration: ${loop.verify_each_iteration !== false}`);
+    if (asArray(loop.stop_when).length) lines.push(`  - stop when: ${asArray(loop.stop_when).join(', ')}`);
+  }
   const policy = asObject(row.autonomy_policy);
   if (Object.keys(policy).length) {
     lines.push('- autonomy:');
