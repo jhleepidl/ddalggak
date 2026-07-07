@@ -23,6 +23,8 @@ test('goal specialization starts from reusable preset rather than no-base routin
   assert.ok(profile.installed_skills.includes('related_work_mapping'));
   assert.ok(profile.memory_hierarchy.includes('claim_ledger'));
   assert.equal(profile.loop_policy.default_iterations, 3);
+  assert.equal(profile.agent_activation_policy.strategy, 'cost_aware_outcome_aware_agent_roster');
+  assert.ok(profile.agent_activation_policy.roster.some((row) => row.state === 'required' || row.state === 'active'));
   assert.match(profile.reasons.join('\n'), /default_room_preset:research_paper_factory/);
 });
 
@@ -35,6 +37,7 @@ test('room package export preserves skill cards, memory hierarchy, and loop poli
   assert.equal(pkg.memory_schema.private_memory_export, 'never_by_default');
   assert.match(markdown, /## Skills/);
   assert.match(markdown, /## Memory hierarchy/);
+  assert.match(markdown, /## Agent activation policy/);
   assert.match(markdown, /## Loop policy/);
 });
 
@@ -61,4 +64,13 @@ test('room setting composes base package with borrowed skills and memory instead
   assert.ok(profile.installed_skills.includes('synthetic_task_generation'));
   assert.ok(profile.memory_schema.object_types.includes('benchmark_specs'));
   assert.match(profile.reasons.join('\n'), /borrowed_room_components:/);
+});
+
+test('default room packages expose multi-model role policy', () => {
+  const profile = buildRoomProfileFromGoal({ chatId: 'c-model', goal: 'repo 코드를 패치하고 테스트까지 검증하는 loop 방' });
+  assert.equal(profile.model_policy.strategy, 'room_scoped_model_portfolio');
+  const roles = profile.model_policy.default_assignment.map((row) => row.role);
+  assert.ok(roles.includes('code_executor'));
+  assert.ok(roles.includes('verifier_critic'));
+  assert.ok(profile.agent_activation_policy.roster.some((row) => row.model_role_hint === 'code_executor' || row.model_role_hint === 'verifier_critic'));
 });

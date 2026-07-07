@@ -110,3 +110,59 @@ test('/room apply reports package composition and /room alternatives shows the s
   assert.match(sent.at(-1).text, /Room package selection/);
   assert.match(sent.at(-1).text, /not a fixed prompt route/);
 });
+
+test('/room docs and /room topology expose MOC and topology-learning surfaces', async () => {
+  const sent = [];
+  const sessionStore = makeSessionStore();
+  const handler = makeHandler({ sent, sessionStore });
+  await handler({ msg: { message_id: 1, chat: { id: 'chat-docs' }, from: { id: 'u' } }, text: '/room preset research_paper_factory', chatId: 'chat-docs', userId: 'u' });
+  await handler({ msg: { message_id: 2, chat: { id: 'chat-docs' }, from: { id: 'u' } }, text: '/room docs', chatId: 'chat-docs', userId: 'u' });
+  assert.match(sent.at(-1).text, /Room Markdown MOC/);
+  assert.match(sent.at(-1).text, /action\//);
+  assert.match(sent.at(-1).text, /docs\//);
+
+  await handler({ msg: { message_id: 3, chat: { id: 'chat-docs' }, from: { id: 'u' } }, text: '/room docs status', chatId: 'chat-docs', userId: 'u' });
+  assert.match(sent.at(-1).text, /materialized-view status/);
+
+  await handler({ msg: { message_id: 4, chat: { id: 'chat-docs' }, from: { id: 'u' } }, text: '/room docs sync', chatId: 'chat-docs', userId: 'u' });
+  assert.match(sent.at(-1).text, /Room docs synced/);
+
+  await handler({ msg: { message_id: 5, chat: { id: 'chat-docs' }, from: { id: 'u' } }, text: '/room topology', chatId: 'chat-docs', userId: 'u' });
+  assert.match(sent.at(-1).text, /Room topology learning/);
+  assert.match(sent.at(-1).text, /special tokens/);
+
+  await handler({ msg: { message_id: 6, chat: { id: 'chat-docs' }, from: { id: 'u' } }, text: '/room topology export', chatId: 'chat-docs', userId: 'u' });
+  assert.match(sent.at(-1).text, /topology training dataset exported/);
+});
+
+test('/room agents exposes activation policy and specialization guardrails', async () => {
+  const sent = [];
+  const sessionStore = makeSessionStore();
+  const handler = makeHandler({ sent, sessionStore });
+  await handler({ msg: { message_id: 1, chat: { id: 'chat-agents' }, from: { id: 'u' } }, text: '/room preset research_paper_factory', chatId: 'chat-agents', userId: 'u' });
+  await handler({ msg: { message_id: 2, chat: { id: 'chat-agents' }, from: { id: 'u' } }, text: '/room agents', chatId: 'chat-agents', userId: 'u' });
+  assert.match(sent.at(-1).text, /Room agent activation policy/);
+  assert.match(sent.at(-1).text, /required:/);
+  assert.match(sent.at(-1).text, /active:/);
+  assert.match(sent.at(-1).text, /token cost is an optimization signal/);
+
+  await handler({ msg: { message_id: 3, chat: { id: 'chat-agents' }, from: { id: 'u' } }, text: '/room agents specialize', chatId: 'chat-agents', userId: 'u' });
+  assert.match(sent.at(-1).text, /Room agent specialization proposal/);
+  assert.match(sent.at(-1).text, /token_cost_only/);
+});
+
+test('/room learning summarizes and exports room preference data', async () => {
+  const sent = [];
+  const sessionStore = makeSessionStore();
+  const handler = makeHandler({ sent, sessionStore });
+  await handler({ msg: { message_id: 1, chat: { id: 'chat-learning' }, from: { id: 'u' } }, text: '/room preset research_paper_factory', chatId: 'chat-learning', userId: 'u' });
+  await handler({ msg: { message_id: 2, chat: { id: 'chat-learning' }, from: { id: 'u' } }, text: '/room agents specialize', chatId: 'chat-learning', userId: 'u' });
+  await handler({ msg: { message_id: 3, chat: { id: 'chat-learning' }, from: { id: 'u' } }, text: '/room learning', chatId: 'chat-learning', userId: 'u' });
+  assert.match(sent.at(-1).text, /Room preference learning/);
+  assert.match(sent.at(-1).text, /Learning targets/);
+  assert.match(sent.at(-1).text, /Export: \/room learning export/);
+
+  await handler({ msg: { message_id: 4, chat: { id: 'chat-learning' }, from: { id: 'u' } }, text: '/room learning export', chatId: 'chat-learning', userId: 'u' });
+  assert.match(sent.at(-1).text, /preference dataset exported/);
+  assert.match(sent.at(-1).text, /durable evolution/);
+});

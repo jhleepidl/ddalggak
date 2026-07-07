@@ -45,6 +45,12 @@ import {
   shouldEnableConciergeFastPathForPolicy,
 } from '../../application/room_concierge_model_policy.js';
 import { formatRoomEvolutionSnapshot, proposeRoomEvolution } from '../../application/room_evolution.js';
+import { buildRoomDocumentMocPack, formatRoomDocumentInvalidationForTelegram, formatRoomDocumentMocPackForTelegram } from '../../application/room_markdown_moc.js';
+import { appendRoomActionNoteFromEvent, buildMaterializedRoomDocsInvalidation, formatRoomDocsSyncResultForTelegram, materializeRoomDocumentMocPack } from '../../application/room_markdown_store.js';
+import { buildRoomTopologyLearningCard, formatRoomTopologyLearningCardForTelegram } from '../../application/room_topology_learning.js';
+import { exportRoomTopologyTrainingDataset, formatRoomTopologyDatasetExportForTelegram } from '../../application/room_topology_trace_export.js';
+import { buildDefaultAgentActivationPolicy, deriveAgentTelemetry, formatAgentActivationPolicyForTelegram, formatAgentSpecializationProposalForTelegram, proposeAgentRosterSpecialization } from '../../application/room_agent_policy.js';
+import { buildRoomPreferenceDataset, exportRoomPreferenceDataset, formatRoomPreferenceDatasetExportForTelegram, formatRoomPreferenceLearningSummaryForTelegram } from '../../application/room_preference_learning.js';
 import { appendKnowledgeRouteEvent } from '../../application/knowledge_route_event_log.js';
 import { appendRoomConversationExchange, appendRoomConversationTurn } from '../../application/room_conversation_ledger.js';
 import { appendRoomLoopEvent, buildRoomLoopStartEvent, classifyRoomLoopInterruption, createRoomLoopId, deriveActiveRoomLoop, normalizeRoomLoop, readRoomLoopEvents } from '../../application/room_loop_events.js';
@@ -357,6 +363,11 @@ const ROOM_HELP_TEXT = [
   "- /room presets [query]: 내장 room/skill/memory preset 목록 보기",
   "- /room preset <id> 또는 /room use <id>: 내장 preset을 이 방에 적용",
   "- /room alternatives [goal]: base package + borrowed skill/protocol/memory 후보 보기",
+  "- /room docs [full]: action/docs + MOC 문서 구조 보기",
+  "- /room topology: agent communication topology와 learning dataset 계획 보기",
+  "- /room agents: cost/outcome-aware agent activation policy 보기",
+  "- /room agents specialize: 최근 trace 기반 agent pruning/downgrade proposal 생성",
+  "- /room learning [export]: 사용자 approve/reject/correct/stop 선택을 room preference dataset으로 요약/내보내기",
   "- /room advisor [goal]: broad/specialized/hybrid tradeoff 추천",
   "- /room evolution: 반복 상호작용에서 emergent schema/agent/gateway 제안 보기",
   "- /room manual: 현재 ROOM.md 보기",
@@ -2077,6 +2088,11 @@ export function createTelegramCommandHandler(deps = {}) {
     try {
       const event = buildRoomUsageEvent({ chatId, userId, eventType, command, goal, profile, recommendation, extra });
       appendRoomUsageEvent(event);
+      try {
+        appendRoomActionNoteFromEvent({ chatId, event });
+      } catch (docErr) {
+        console.warn('[room-docs] failed to append action note:', docErr?.message || docErr);
+      }
     } catch (err) {
       console.warn('[room-events] failed to record event:', err?.message || err);
     }
@@ -2121,6 +2137,100 @@ export function createTelegramCommandHandler(deps = {}) {
         '',
         '원칙: 이 preset들은 fixed prompt가 아니라 agent roster, skill cards, memory hierarchy, loop policy의 starting point입니다. 실제 방은 사용 기록과 승인된 memory proposal로 점점 조정됩니다.',
       ].join('\n'));
+      return true;
+    }
+    if (['docs', 'doc', 'moc', 'index'].includes(command)) {
+      const profile = getAgentRoomProfile(chatSessionStore, chatId);
+      const events = readRoomUsageEvents(chatId, { limit: 240 });
+      const pkg = getCurrentRoomPackage(chatId);
+      const pack = buildRoomDocumentMocPack({ roomPackage: pkg, profile, events });
+      const docMode = String(argsAfterSub || '').trim().toLowerCase();
+      const invalidation = buildMaterializedRoomDocsInvalidation({ chatId, pack, events });
+      if (/\b(sync|materialize|write)\b/i.test(docMode)) {
+        const result = materializeRoomDocumentMocPack({ chatId, pack, events });
+        recordRoomEvent({ chatId, userId, eventType: 'room_document_moc_synced', command: '/room docs sync', profile, extra: { file_count: result.files_written, root: result.root } });
+        await sendLong(bot, chatId, formatRoomDocsSyncResultForTelegram(result));
+        return true;
+      }
+      if (/\b(status|stale|invalidat|freshness)\b/i.test(docMode)) {
+        recordRoomEvent({ chatId, userId, eventType: 'room_document_moc_status_view', command: '/room docs status', profile, extra: { status: invalidation.status, changed_event_count: invalidation.changed_event_count } });
+        await sendLong(bot, chatId, formatRoomDocumentInvalidationForTelegram(invalidation));
+        return true;
+      }
+      const includeFull = /\b(full|export|files|all)\b/i.test(docMode);
+      recordRoomEvent({ chatId, userId, eventType: 'room_document_moc_view', command: '/room docs', profile, extra: { action_count: (pack.actions || []).length, doc_count: (pack.docs || []).length, include_full: includeFull, materialized_status: invalidation.status } });
+      await sendLong(bot, chatId, formatRoomDocumentMocPackForTelegram(pack, { includeFull, invalidation }));
+      return true;
+    }
+    if (['agents', 'agent-roster', 'roster', 'activation'].includes(command)) {
+      const profile = getAgentRoomProfile(chatSessionStore, chatId);
+      const events = readRoomUsageEvents(chatId, { limit: 240 });
+      const pkg = getCurrentRoomPackage(chatId);
+      const subMode = String(argsAfterSub || '').trim().toLowerCase();
+      const currentPolicy = buildDefaultAgentActivationPolicy(pkg, { profile });
+      const telemetry = deriveAgentTelemetry({ events, policy: currentPolicy, roomPackage: pkg, profile });
+      if (/\b(specialize|optimise|optimize|prune|proposal|trial)\b/i.test(subMode)) {
+        const proposal = proposeAgentRosterSpecialization({ events, policy: currentPolicy, roomPackage: pkg, profile });
+        try {
+          chatSessionStore.upsert(chatId, (session = {}) => ({
+            ...session,
+            pending_agent_specialization: proposal,
+            updated_at: new Date().toISOString(),
+          }));
+        } catch {}
+        recordRoomEvent({ chatId, userId, eventType: 'room_agent_specialization_proposed', command: '/room agents specialize', profile, extra: { status: proposal.status, action_count: (proposal.actions || []).length } });
+        await sendLong(bot, chatId, formatAgentSpecializationProposalForTelegram(proposal));
+        return true;
+      }
+      if (/\b(approve|accept)\b/i.test(subMode)) {
+        const session = chatSessionStore.get(chatId) || {};
+        const proposal = session.pending_agent_specialization || null;
+        if (!proposal || proposal.status !== 'proposal_ready') {
+          await sendLong(bot, chatId, '승인할 pending agent specialization proposal이 없습니다. 먼저 /room agents specialize 를 실행하세요.');
+          return true;
+        }
+        const updatedProfile = upsertAgentRoomProfile(chatSessionStore, chatId, {
+          ...(profile || {}),
+          agent_activation_policy: proposal.proposed_policy,
+          updated_at: new Date().toISOString(),
+          reasons: [...new Set([...(profile?.reasons || []), 'approved_agent_activation_specialization'])],
+        });
+        try {
+          chatSessionStore.upsert(chatId, (session = {}) => ({ ...session, pending_agent_specialization: null, updated_at: new Date().toISOString() }));
+        } catch {}
+        recordRoomEvent({ chatId, userId, eventType: 'room_agent_specialization_approved', command: '/room agents approve', profile: updatedProfile, extra: { action_count: (proposal.actions || []).length } });
+        await sendLong(bot, chatId, [
+          '✅ Agent activation policy를 이 room에 적용했습니다.',
+          '',
+          formatAgentActivationPolicyForTelegram(proposal.proposed_policy),
+          '',
+          '주의: required agent는 자동으로 비활성화하지 않으며, rollback/재특화가 필요하면 /room agents specialize 로 다시 proposal을 만드세요.',
+        ].join('\n'));
+        return true;
+      }
+      if (/\b(reject|deny)\b/i.test(subMode)) {
+        try { chatSessionStore.upsert(chatId, (session = {}) => ({ ...session, pending_agent_specialization: null, updated_at: new Date().toISOString() })); } catch {}
+        recordRoomEvent({ chatId, userId, eventType: 'room_agent_specialization_rejected', command: '/room agents reject', profile, extra: {} });
+        await sendLong(bot, chatId, '✅ pending agent specialization proposal을 거절했습니다. 현재 agent activation policy는 유지됩니다.');
+        return true;
+      }
+      recordRoomEvent({ chatId, userId, eventType: 'room_agent_activation_policy_view', command: '/room agents', profile, extra: { agent_count: (currentPolicy.roster || []).length } });
+      await sendLong(bot, chatId, formatAgentActivationPolicyForTelegram(currentPolicy, { telemetry }));
+      return true;
+    }
+    if (['topology', 'communication', 'comm', 'graph'].includes(command)) {
+      const profile = getAgentRoomProfile(chatSessionStore, chatId);
+      const events = readRoomUsageEvents(chatId, { limit: 240 });
+      const pkg = getCurrentRoomPackage(chatId);
+      if (/\b(export|dataset|jsonl|train|training)\b/i.test(argsAfterSub || '')) {
+        const result = exportRoomTopologyTrainingDataset({ chatId, events, profile, roomPackage: pkg, format: /\bjson\b/i.test(argsAfterSub || '') && !/jsonl/i.test(argsAfterSub || '') ? 'json' : 'jsonl' });
+        recordRoomEvent({ chatId, userId, eventType: 'room_topology_dataset_exported', command: '/room topology export', profile, extra: { row_count: result.dataset?.row_count || 0, root: result.root } });
+        await sendLong(bot, chatId, formatRoomTopologyDatasetExportForTelegram(result));
+        return true;
+      }
+      const card = buildRoomTopologyLearningCard({ roomPackage: pkg, profile, events });
+      recordRoomEvent({ chatId, userId, eventType: 'room_topology_learning_view', command: '/room topology', profile, extra: { primary_topology: card.primary_topology, candidate_count: (card.candidates || []).length } });
+      await sendLong(bot, chatId, formatRoomTopologyLearningCardForTelegram(card));
       return true;
     }
     if (['alternatives', 'alt', 'compose', 'composition'].includes(command)) {
@@ -2263,7 +2373,23 @@ export function createTelegramCommandHandler(deps = {}) {
       ].join('\n'));
       return true;
     }
-    if (['evolution', 'learn', 'learning', 'grow', 'growth'].includes(command)) {
+    if (['learning', 'learn', 'preference', 'preferences', 'feedback', 'rlhf'].includes(command)) {
+      const profile = getAgentRoomProfile(chatSessionStore, chatId);
+      const events = readRoomUsageEvents(chatId, { limit: 500 });
+      const pkg = getCurrentRoomPackage(chatId);
+      const mode = String(argsAfterSub || '').trim().toLowerCase();
+      if (/\b(export|dataset|jsonl|train|training)\b/i.test(mode)) {
+        const result = exportRoomPreferenceDataset({ chatId, events, profile, roomPackage: pkg, format: /\bjson\b/i.test(mode) && !/jsonl/i.test(mode) ? 'json' : 'jsonl' });
+        recordRoomEvent({ chatId, userId, eventType: 'room_preference_dataset_exported', command: '/room learning export', profile, extra: { row_count: result.dataset?.row_count || 0, dpo_ready_rows: result.dataset?.summary?.dpo_ready_rows || 0, root: result.root } });
+        await sendLong(bot, chatId, formatRoomPreferenceDatasetExportForTelegram(result));
+        return true;
+      }
+      const dataset = buildRoomPreferenceDataset({ events, profile, roomPackage: pkg, limit: 500 });
+      recordRoomEvent({ chatId, userId, eventType: 'room_preference_learning_view', command: '/room learning', profile, extra: { row_count: dataset.row_count || 0, dpo_ready_rows: dataset.summary?.dpo_ready_rows || 0 } });
+      await sendLong(bot, chatId, formatRoomPreferenceLearningSummaryForTelegram(dataset));
+      return true;
+    }
+    if (['evolution', 'grow', 'growth'].includes(command)) {
       const profile = getAgentRoomProfile(chatSessionStore, chatId);
       const events = readRoomUsageEvents(chatId, { limit: 200 });
       const snapshot = proposeRoomEvolution({ events, roomPackage: getCurrentRoomPackage(chatId) });

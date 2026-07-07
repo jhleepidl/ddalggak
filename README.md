@@ -587,3 +587,27 @@ GoC is the preferred surface for richer memory browsing and lifecycle review.
 ### Room package retrieval/evolution
 
 DdalGgak starts a Telegram room from reusable room packages, then composes missing skills/memory/protocols and evolves through idle-time candidates and user/GoC approval. See `../docs/DDALGGAK_ROOM_PACKAGE_EVOLUTION.md`.
+
+
+### Room docs and topology commands
+
+- `/room docs`: show the current room's compact action/docs + MOC documentation pack.
+- `/room docs full`: render the virtual Markdown files (`AGENTS.md`, `moc-structure.md`, `moc-by-date.md`, `moc-by-category.md`, `docs/*`, recent `action/*`).
+- `/room topology`: show candidate communication topologies and a trace/dataset plan for learning better topology/skill/memory routing over time.
+
+### Room docs and topology export
+
+`/room docs` shows the room Markdown MOC. `/room docs status` checks stale materialized views. `/room docs sync` writes `AGENTS.md`, MOCs, living docs, and action notes under `runs/room_docs/<chat_id>/`. `/room topology export` writes guarded topology-router training data under `runs/room_topology_dataset/<chat_id>/`.
+
+## Multi-model room orchestration
+
+DdalGgak is not intended to behave like a single-model chatbot. A room may route different phases to specialized model roles: fast concierge routing, source grounding, code execution, verification/critique, idle memory/docs structuring, and user-facing synthesis. Each response should remain inspectable through model/provider metadata, while shared room packages never export credentials or provider state.
+
+
+### Room agent specialization
+
+Use `/room agents` to view the room-specific activation policy. Use `/room agents specialize` to generate a cost/outcome-aware proposal that can move agents between required, active, on-demand, shadow, and disabled states. Durable changes require approval.
+
+### Room preference learning
+
+`/room learning` summarizes user-governed choice signals for the current room. `/room learning export` writes a JSON/JSONL dataset for room package scorers, recipe routers, memory/skill selectors, and agent/model-policy scorers. Learned components are advisory only; durable room changes still require user or GoC approval.

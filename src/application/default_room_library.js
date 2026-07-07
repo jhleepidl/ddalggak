@@ -1,3 +1,5 @@
+import { buildDefaultAgentActivationPolicy } from './room_agent_policy.js';
+
 function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -34,7 +36,95 @@ const COMMON_AUTONOMY = {
   cross_room_memory: 'ask_before_import',
 };
 
-export const DEFAULT_ROOM_PACKAGE_LIBRARY_VERSION = '2026-07-03.default-room-library.v1';
+
+
+export const MULTI_MODEL_ROLE_LIBRARY = [
+  {
+    role: 'concierge_router',
+    purpose: 'Classify work depth, surface language, and room route quickly without doing heavy generation.',
+    preferred_tier: 'fast_low_latency',
+    fallback_tier: 'general_reasoning',
+  },
+  {
+    role: 'source_grounder',
+    purpose: 'Handle fresh, local, finance, health, or research claims that need evidence and citation discipline.',
+    preferred_tier: 'search_or_retrieval_capable',
+    fallback_tier: 'strong_reasoning_with_grounding_guard',
+  },
+  {
+    role: 'code_executor',
+    purpose: 'Plan and perform workspace changes through controlled tool/runtime execution.',
+    preferred_tier: 'tool_capable_coding_model',
+    fallback_tier: 'strong_reasoning_with_no_write_mode',
+  },
+  {
+    role: 'verifier_critic',
+    purpose: 'Review artifacts, tests, claims, safety boundaries, and continuation correctness.',
+    preferred_tier: 'strong_reasoning',
+    fallback_tier: 'general_reasoning',
+  },
+  {
+    role: 'idle_structurer',
+    purpose: 'Run slower background memory, docs, skill, protocol, and room-evolution structuring work.',
+    preferred_tier: 'cheap_batch_or_local',
+    fallback_tier: 'fast_low_latency',
+  },
+  {
+    role: 'delivery_synthesizer',
+    purpose: 'Produce concise user-facing summaries in the room language after specialist work is done.',
+    preferred_tier: 'general_reasoning',
+    fallback_tier: 'fast_low_latency',
+  },
+];
+
+function inferModelStrategy(goal = '', { evidence = 'normal', autonomy = 'ask_or_plan', artifacts = [] } = {}) {
+  const text = cleanText(goal, { lower: true, maxLen: 6000 });
+  const needsCode = asArray(artifacts).includes('code_or_patch') || /(code|repo|patch|test|build|코드|레포|패치|테스트|구현)/i.test(text);
+  const needsLoop = autonomy === 'bounded_loop' || /(loop|반복|루프|autonomous|iterate)/i.test(text);
+  const needsGrounding = evidence === 'high' || evidence === 'medium_high';
+  const roles = ['concierge_router', 'delivery_synthesizer', 'idle_structurer'];
+  if (needsGrounding) roles.push('source_grounder');
+  if (needsCode) roles.push('code_executor');
+  if (needsLoop || needsGrounding || needsCode) roles.push('verifier_critic');
+  return {
+    strategy: 'room_scoped_model_portfolio',
+    role_assignments: uniqueStrings(roles, { max: 12, lower: true }),
+    selection_basis: ['task_phase', 'room_package', 'risk', 'evidence_requirement', 'tool_permission', 'cost_latency_budget'],
+    note: 'DdalGgak is not a single-model assistant; the room can route different phases to specialized model/provider roles.',
+  };
+}
+
+export function buildRoomModelPolicy(pkg = {}, { intent = null } = {}) {
+  const row = asObject(pkg);
+  const tags = new Set([...asArray(row.tags), row.domain_label, row.default_depth].map((v) => cleanText(v, { lower: true })));
+  const text = packageSearchText(row);
+  const roles = ['concierge_router', 'delivery_synthesizer', 'idle_structurer'];
+  const evidenceNeeded = /(research|paper|finance|health|local|source|evidence|claim|citation|nutrition|portfolio)/i.test(text);
+  const codeNeeded = /(code|repo|patch|test|build|implementation|autonomous_code_loop)/i.test(text);
+  const loopNeeded = row.default_depth === 'loop' || tags.has('loop');
+  if (evidenceNeeded) roles.push('source_grounder');
+  if (codeNeeded) roles.push('code_executor');
+  if (loopNeeded || evidenceNeeded || codeNeeded) roles.push('verifier_critic');
+  for (const extra of asArray(asObject(intent).model_strategy?.role_assignments)) roles.push(extra);
+  const unique = uniqueStrings(roles, { max: 12, lower: true });
+  return {
+    strategy: 'room_scoped_model_portfolio',
+    default_assignment: unique.map((role) => {
+      const found = MULTI_MODEL_ROLE_LIBRARY.find((item) => item.role === role) || { role, purpose: 'Room-specific model role.', preferred_tier: 'general_reasoning', fallback_tier: 'fast_low_latency' };
+      return { ...found };
+    }),
+    routing_signals: ['room_intent_card', 'active_loop_phase', 'artifact_type', 'evidence_requirement', 'risk_profile', 'tool_permission', 'latency_budget', 'cost_budget'],
+    governance: {
+      footer_required: true,
+      log_provider_and_model_per_response: true,
+      single_model_fallback_allowed: true,
+      provider_secret_export: 'never',
+      durable_model_policy_change: 'trial_then_user_or_goc_approval',
+    },
+  };
+}
+
+export const DEFAULT_ROOM_PACKAGE_LIBRARY_VERSION = '2026-07-05.default-room-library.v2.multi-model';
 
 export const DEFAULT_ROOM_PACKAGE_LIBRARY = [
   {
@@ -563,6 +653,7 @@ export function buildRoomIntentCard(goal = '', { currentProfile = null } = {}) {
     evidence_requirement: evidence,
     desired_autonomy: inferAutonomy(goal),
     risk_profile: inferRiskProfile(goal),
+    model_strategy: inferModelStrategy(goal, { evidence, autonomy: inferAutonomy(goal), artifacts }),
     needed_skills: uniqueStrings(neededSkills, { max: 24, lower: true }),
     needed_memory: uniqueStrings(neededMemory, { max: 24, lower: true }),
     current_room: {
@@ -616,6 +707,7 @@ function borrowedComponentsFromPackage(pkg = {}, base = {}, intent = {}) {
     memory_schema: uniqueStrings(memory.length ? memory : asArray(pkg.memory_schema).slice(0, 3), { max: 8, lower: true }),
     memory_hierarchy: uniqueStrings(hierarchy.length ? hierarchy : asArray(pkg.memory_hierarchy).slice(0, 3), { max: 8, lower: true }),
     agents: uniqueStrings(agents, { max: 3, lower: true }),
+    model_roles: buildRoomModelPolicy(pkg, { intent }).default_assignment.map((item) => item.role).slice(0, 4),
   };
 }
 
@@ -701,6 +793,8 @@ export function buildDefaultRoomPackageComposition(goal = '', { limit = 6, curre
       score: base.score,
       composition_score: base.composition_score,
       default_depth: base.default_depth,
+      model_roles: buildRoomModelPolicy(base, { intent }).default_assignment.map((item) => item.role),
+      agent_activation: buildDefaultAgentActivationPolicy(base).roster.map((item) => ({ agent: item.agent, state: item.state })),
     },
     borrowed_packages: borrowed,
     candidates: ranked.slice(0, Math.max(1, Math.min(10, Number(limit) || 6))).map((pkg) => ({
@@ -734,8 +828,10 @@ export function formatDefaultRoomPackageComposition(composition = {}) {
   lines.push(`- task horizon: ${intent.task_horizon || '-'}`);
   lines.push(`- artifacts: ${asArray(intent.artifact_expectation).join(', ') || '-'}`);
   lines.push(`- evidence: ${intent.evidence_requirement || 'normal'} · autonomy=${intent.desired_autonomy || 'ask_or_plan'}`);
+  if (intent.model_strategy?.strategy) lines.push(`- model strategy: ${intent.model_strategy.strategy} · roles=${asArray(intent.model_strategy.role_assignments).join(', ') || '-'}`);
   if (asArray(intent.risk_profile).length) lines.push(`- risk: ${asArray(intent.risk_profile).join(', ')}`);
   if (base.package_id) lines.push(`- base package: ${base.package_id} · ${base.title} · score=${base.composition_score ?? base.score ?? '-'}`);
+  if (asArray(base.agent_activation).length) lines.push(`- base agent states: ${asArray(base.agent_activation).slice(0, 8).map((item) => `${item.agent}:${item.state}`).join(', ')}`);
   const borrowed = asArray(row.borrowed_packages);
   if (borrowed.length) {
     lines.push('- borrowed components:');
@@ -744,6 +840,7 @@ export function formatDefaultRoomPackageComposition(composition = {}) {
       lines.push(`  - ${item.package_id} · ${asArray(item.reason_codes).join(', ') || 'component_gap_fill'}`);
       if (asArray(components.skills).length) lines.push(`    skills: ${asArray(components.skills).slice(0, 4).join(', ')}`);
       if (asArray(components.memory_schema).length) lines.push(`    memory: ${asArray(components.memory_schema).slice(0, 4).join(', ')}`);
+      if (asArray(components.model_roles).length) lines.push(`    model roles: ${asArray(components.model_roles).slice(0, 4).join(', ')}`);
     }
   }
   const candidates = asArray(row.candidates).slice(0, 5);
@@ -830,6 +927,8 @@ export function roomTemplateFromDefaultPackage(pkg = {}) {
       ...COMMON_AUTONOMY,
       default: 'candidate_then_review_for_long_term_changes',
     },
+    model_policy: buildRoomModelPolicy(row),
+    agent_activation_policy: buildDefaultAgentActivationPolicy(row),
     examples: asArray(row.examples),
     tags: uniqueStrings(row.tags || [], { max: 24, lower: true }),
     loop_policy: asObject(row.loop_policy),
@@ -846,6 +945,7 @@ export function formatDefaultRoomPackageList(packages = [], { includeScores = fa
   for (const pkg of rows) {
     lines.push(`- ${pkg.package_id}: ${pkg.title}${includeScores && Number.isFinite(pkg.score) ? ` · score=${pkg.score}` : ''}`);
     lines.push(`  depth=${pkg.default_depth || 'team'} · agents=${asArray(pkg.agents).slice(0, 5).join(', ')}`);
+    lines.push(`  activation=${buildDefaultAgentActivationPolicy(pkg).roster.slice(0, 5).map((item) => `${item.agent}:${item.state}`).join(', ')}`);
     lines.push(`  memory=${asArray(pkg.memory_schema).slice(0, 5).join(', ')}`);
   }
   return lines.join('\n');
@@ -864,6 +964,8 @@ export function formatDefaultRoomPackageDetail(pkg = null) {
     `- skills: ${asArray(row.skills).join(', ') || '-'}`,
     `- memory hierarchy: ${asArray(row.memory_hierarchy).join(' → ') || '-'}`,
     `- memory objects: ${asArray(row.memory_schema).join(', ') || '-'}`,
+    `- model roles: ${buildRoomModelPolicy(row).default_assignment.map((item) => item.role).join(', ') || '-'}`,
+    `- agent activation: ${buildDefaultAgentActivationPolicy(row).roster.map((item) => `${item.agent}:${item.state}`).join(', ') || '-'}`,
   ];
   const loop = asObject(row.loop_policy);
   if (Object.keys(loop).length) {

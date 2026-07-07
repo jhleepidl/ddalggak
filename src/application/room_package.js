@@ -1,3 +1,4 @@
+import { buildDefaultAgentActivationPolicy, normalizeAgentActivationPolicy } from './room_agent_policy.js';
 import {
   augmentRoomPackageWithComponents,
   buildRoomComponentsFromPackage,
@@ -350,6 +351,8 @@ export function buildRoomProfileFromGoal({ chatId = '', goal = '', roomName = ''
     memory_scope: 'room',
     memory_hierarchy: memoryHierarchy,
     loop_policy: asObject(template.loop_policy || basePreset?.loop_policy),
+    model_policy: asObject(template.model_policy || basePreset?.model_policy),
+    agent_activation_policy: normalizeAgentActivationPolicy(template.agent_activation_policy || basePreset?.agent_activation_policy || {}, { agents: agentRoles, roomPackage: basePreset || {}, profile: { default_depth: defaultDepth, domain_label: domainLabel, current_goal: goal } }),
     memory_schema: {
       object_types: memoryObjects,
       hierarchy: memoryHierarchy,
@@ -432,6 +435,8 @@ export function sanitizeRoomPackage(raw = {}) {
       cross_room_memory: cleanText(context.cross_room_memory || context.crossRoomMemory || template.context_policy?.cross_room_memory || 'ask_before_use', { maxLen: 160 }),
     },
     approval_policy: approval && Object.keys(approval).length ? approval : template.approval_policy,
+    model_policy: asObject(source.model_policy || source.modelPolicy || template.model_policy),
+    agent_activation_policy: normalizeAgentActivationPolicy(source.agent_activation_policy || source.agentActivationPolicy || template.agent_activation_policy || {}, { agents: uniqueStrings(source.agents || source.agent_roles || source.agentRoles || template.agent_roles, { max: 24, lower: true }), roomPackage: source, profile: {} }),
     examples: examples.length ? examples : asArray(template.examples),
     tags: uniqueStrings(source.tags || template.tags, { max: 24, lower: true }),
     safety_report: {
@@ -468,6 +473,8 @@ export function buildRoomPackage({ profile = null, goal = '', title = '', chatId
     prompt_policy: base.prompt_policy,
     context_policy: base.context_policy,
     approval_policy: base.autonomy_policy,
+    model_policy: base.model_policy || {},
+    agent_activation_policy: base.agent_activation_policy || buildDefaultAgentActivationPolicy({ agents: base.default_agents || [], default_depth: base.default_depth, domain_label: base.domain_label }, { profile: base }),
     examples: base.interaction_examples,
     tags: base.tags,
     source: { chat_id: String(chatId || base.room_id || ''), source },
@@ -487,6 +494,7 @@ export function roomPackageToProfilePatch(roomPackage = {}, { chatId = '', sourc
     domain_confidence: 0.9,
     room_purpose: pkg.description,
     default_agents: pkg.agents,
+    agent_activation_policy: pkg.agent_activation_policy || buildDefaultAgentActivationPolicy(pkg),
     default_depth: pkg.default_depth,
     default_workflow: pkg.default_depth === 'loop' ? 'bounded_review_improve_loop' : (pkg.default_depth === 'team' ? 'review_gated_pipeline' : 'quick_answer'),
     installed_skills: pkg.skills || [],
@@ -498,6 +506,7 @@ export function roomPackageToProfilePatch(roomPackage = {}, { chatId = '', sourc
     context_policy: pkg.context_policy,
     autonomy_policy: pkg.approval_policy,
     interaction_examples: pkg.examples,
+    model_policy: pkg.model_policy || {},
     tags: pkg.tags,
     reasons: ['installed_shared_room_package', `domain:${pkg.domain_label}`],
   };
@@ -519,6 +528,12 @@ export function renderRoomMarkdown(roomPackage = {}) {
   lines.push('');
   lines.push('## Agent team');
   for (const agent of pkg.agents) lines.push(`- ${agent}`);
+  lines.push('');
+  lines.push('## Agent activation policy');
+  lines.push('- The room can specialize by moving agents between required, active, on_demand, shadow, and disabled states.');
+  lines.push('- Token cost alone must not disable safety-critical agents; durable roster changes require trial + user/GoC approval.');
+  const activationPolicy = normalizeAgentActivationPolicy(pkg.agent_activation_policy || {}, { agents: pkg.agents, roomPackage: pkg });
+  for (const row of activationPolicy.roster) lines.push(`- ${row.agent}: ${row.state} · model=${row.model_role_hint}`);
   lines.push('');
   lines.push('## Composable components');
   lines.push('- Room packages are module bundles, not monoliths.');
@@ -582,6 +597,7 @@ export function formatRoomPackageSummary(roomPackage = {}, { includeExamples = t
     `- domain: ${pkg.domain_label}`,
     `- default depth: ${pkg.default_depth}`,
     `- agents: ${pkg.agents.join(', ') || '-'}`,
+    `- agent states: ${normalizeAgentActivationPolicy(pkg.agent_activation_policy || {}, { agents: pkg.agents, roomPackage: pkg }).roster.slice(0, 8).map((item) => `${item.agent}:${item.state}`).join(', ') || '-'}`,
     `- components: ${asObject(pkg.components?.summary).total_components || buildRoomComponentsFromPackage(pkg).summary.total_components}`,
     `- reusable agents: ${asObject(pkg.components?.summary).reusable_agent_count || buildRoomComponentsFromPackage(pkg).summary.reusable_agent_count}`,
     `- memory objects: ${asArray(pkg.memory_schema.object_types).join(', ') || '-'}`,
