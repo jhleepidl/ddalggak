@@ -76,6 +76,7 @@ import { writeIdleCompactionCandidate, formatIdleCompactionCandidateForTelegram 
 import { runRoomIdleMemoryStructuring, formatRoomIdleMemoryStructuringResultForTelegram } from '../../application/room_idle_memory.js';
 import { deriveRoomMemoryView, formatRoomMemoryDecisionForTelegram, formatRoomMemoryExplainForTelegram, formatRoomMemoryListForTelegram, formatRoomMemoryProposalsForTelegram, updateRoomMemoryCandidateDecision } from '../../application/room_memory_view.js';
 import { syncTelegramApprovedRoomMemoryToGoc } from '../../application/goc_memory_sync.js';
+import { buildRoomGovernanceMetrics, formatRoomGovernanceDigestForTelegram, shouldSendRoomGovernanceDigest } from '../../application/room_governance_metrics.js';
 import { formatMemoryTopologyForTelegram, planMemoryTopology } from '../../application/memory_topology.js';
 import { formatMemoryMaterializationPlanForTelegram, loadLatestMemoryMaterializationPlan, planMemoryMaterialization } from '../../application/memory_materialization_planner.js';
 import { createShadowMemoryModule, findMaterializationCandidate, formatShadowMemoryModuleListForTelegram, formatShadowMemoryModuleResultForTelegram, listShadowMemoryModules } from '../../application/memory_materialization_store.js';
@@ -983,6 +984,7 @@ export function createTelegramCommandHandler(deps = {}) {
     if (chatRunManager?.isRunning && chatRunManager.isRunning(chatId)) return { scheduled: false, reason: 'runtime_busy' };
     const runner = () => {
       try { runIdleMemoryStructuringForChat({ chatId, userId, force: false, source }); } catch {}
+      try { maybeSendRoomGovernanceDigest({ chatId, userId }).catch(() => {}); } catch {}
     };
     if (typeof setTimeout === 'function') setTimeout(runner, 0);
     else runner();
@@ -1287,6 +1289,11 @@ export function createTelegramCommandHandler(deps = {}) {
     const pendingExchanges = exchanges.filter((proposal) => String(proposal?.status || 'pending').trim().toLowerCase() === 'pending').length;
     const idleCandidates = Array.isArray(companionState?.idle_memory_observations) ? companionState.idle_memory_observations : [];
     const pendingIdleCandidates = idleCandidates.filter((candidate) => String(candidate?.status || 'pending').trim().toLowerCase() === 'pending').length;
+    let governance = null;
+    try { governance = buildRoomGovernanceMetricsForChat(chatId); } catch { governance = null; }
+    const governanceLine = governance && governance.status !== 'no_governance_items'
+      ? `- governance: ${governance.status} · pending=${governance.totals.pending} · 7d 결정 ${governance.throughput_7d.decided}건 (/inbox digest)`
+      : '- governance: 측정할 proposal 없음';
     const lines = [
       '📥 DdalGgak Inbox · Room Decisions',
       '사용자가 승인해야 하는 room-level decisions를 모읍니다.',
@@ -1297,6 +1304,7 @@ export function createTelegramCommandHandler(deps = {}) {
       `- companion memory exchange: pending=${pendingExchanges}`,
       `- idle memory structuring: pending=${pendingIdleCandidates}`,
       `- materialization previews: ${candidates}`,
+      governanceLine,
       '',
       '바로 처리:',
       '- /review — active job review queue 보기',
@@ -1306,9 +1314,50 @@ export function createTelegramCommandHandler(deps = {}) {
       '- /council proposals — companion memory exchange proposal 보기',
       '- /council approve latest 또는 /council reject latest <reason>',
       '- /memory idle — idle-time room memory structuring 후보 생성/점검',
+      '- /inbox digest — proposal 백로그/리뷰율/결정 지연 다이제스트',
       '- /status — 현재 실행 상태 보기',
     ];
     return lines.join('\n');
+  }
+
+  function buildRoomGovernanceMetricsForChat(chatId) {
+    const session = chatSessionStore?.get?.(chatId) || {};
+    const current = getCurrentJobDirForChat(chatId);
+    const companionEvents = readRoomCompanionEvents({ jobDir: current.jobDir || '', session, limit: 400 });
+    const companionState = deriveRoomCompanionState({ events: companionEvents, session });
+    const memoryView = deriveRoomMemoryView({ session, companionState, includeRejected: true });
+    const usageEvents = readRoomUsageEvents(chatId, { limit: 500 });
+    return buildRoomGovernanceMetrics({
+      companionEvents,
+      memoryView,
+      usageEvents,
+      pendingAgentSpecialization: session.pending_agent_specialization || null,
+    });
+  }
+
+  async function maybeSendRoomGovernanceDigest({ chatId = '', userId = '' } = {}) {
+    const session = chatSessionStore?.get?.(chatId) || {};
+    const metrics = buildRoomGovernanceMetricsForChat(chatId);
+    const gate = shouldSendRoomGovernanceDigest({ session, metrics });
+    if (!gate.send) return { sent: false, reason: gate.reason };
+    try {
+      chatSessionStore.upsert(chatId, (current = {}) => ({
+        ...current,
+        last_governance_digest_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }));
+    } catch {}
+    await sendLong(bot, chatId, formatRoomGovernanceDigestForTelegram(metrics));
+    try {
+      appendRoomUsageEvent(buildRoomUsageEvent({
+        chatId,
+        userId,
+        eventType: 'room_governance_digest_sent',
+        command: '/inbox digest',
+        extra: { status: metrics.status, pending: metrics.totals.pending, review_rate: metrics.totals.review_rate },
+      }));
+    } catch {}
+    return { sent: true, status: metrics.status };
   }
 
   function telegramReplyToMessageId(msg = {}) {
@@ -2575,6 +2624,20 @@ export function createTelegramCommandHandler(deps = {}) {
     }
 
     if (cmd === "/inbox") {
+      const sub = String(args || '').trim().toLowerCase();
+      if (['digest', 'metrics', 'governance'].includes(sub)) {
+        const metrics = buildRoomGovernanceMetricsForChat(chatId);
+        recordRoomEvent({
+          chatId,
+          userId,
+          eventType: 'room_governance_digest_view',
+          command: '/inbox digest',
+          profile: getAgentRoomProfile(chatSessionStore, chatId),
+          extra: { status: metrics.status, pending: metrics.totals.pending, review_rate: metrics.totals.review_rate },
+        });
+        await sendLong(bot, chatId, formatRoomGovernanceDigestForTelegram(metrics));
+        return true;
+      }
       await sendLong(bot, chatId, buildDdalggakInboxText(chatId));
       return true;
     }
