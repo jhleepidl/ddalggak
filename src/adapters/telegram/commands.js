@@ -47,10 +47,11 @@ import {
 import { formatRoomEvolutionSnapshot, proposeRoomEvolution } from '../../application/room_evolution.js';
 import { buildRoomDocumentMocPack, formatRoomDocumentInvalidationForTelegram, formatRoomDocumentMocPackForTelegram } from '../../application/room_markdown_moc.js';
 import { appendRoomActionNoteFromEvent, buildMaterializedRoomDocsInvalidation, formatRoomDocsSyncResultForTelegram, materializeRoomDocumentMocPack } from '../../application/room_markdown_store.js';
-import { buildRoomTopologyLearningCard, formatRoomTopologyLearningCardForTelegram } from '../../application/room_topology_learning.js';
+import { buildRoomTopologyLearningCard, evaluateTopologyReplay, formatRoomTopologyLearningCardForTelegram, formatTopologyReplayEvaluationForTelegram } from '../../application/room_topology_learning.js';
 import { exportRoomTopologyTrainingDataset, formatRoomTopologyDatasetExportForTelegram } from '../../application/room_topology_trace_export.js';
 import { buildDefaultAgentActivationPolicy, deriveAgentTelemetry, formatAgentActivationPolicyForTelegram, formatAgentSpecializationProposalForTelegram, proposeAgentRosterSpecialization } from '../../application/room_agent_policy.js';
-import { buildRoomPreferenceDataset, exportRoomPreferenceDataset, formatRoomPreferenceDatasetExportForTelegram, formatRoomPreferenceLearningSummaryForTelegram } from '../../application/room_preference_learning.js';
+import { buildRoomPreferenceDataset, exportRoomPreferenceDataset, formatRoomPreferenceDatasetExportForTelegram, formatRoomPreferenceLearningSummaryForTelegram, formatRoomPreferenceScorerReportForTelegram, scoreRoomPreferenceCandidates } from '../../application/room_preference_learning.js';
+import { resolveRoomModelRolePlan, formatRoomModelRolePlanForTelegram } from '../../application/room_model_role_router.js';
 import { appendKnowledgeRouteEvent } from '../../application/knowledge_route_event_log.js';
 import { appendRoomConversationExchange, appendRoomConversationTurn } from '../../application/room_conversation_ledger.js';
 import { appendRoomLoopEvent, buildRoomLoopStartEvent, classifyRoomLoopInterruption, createRoomLoopId, deriveActiveRoomLoop, normalizeRoomLoop, readRoomLoopEvents } from '../../application/room_loop_events.js';
@@ -74,6 +75,7 @@ import { inspectAndPrepareImprovementJob, loadImprovementExecutionContext, runIm
 import { writeIdleCompactionCandidate, formatIdleCompactionCandidateForTelegram } from '../../application/idle_compaction.js';
 import { runRoomIdleMemoryStructuring, formatRoomIdleMemoryStructuringResultForTelegram } from '../../application/room_idle_memory.js';
 import { deriveRoomMemoryView, formatRoomMemoryDecisionForTelegram, formatRoomMemoryExplainForTelegram, formatRoomMemoryListForTelegram, formatRoomMemoryProposalsForTelegram, updateRoomMemoryCandidateDecision } from '../../application/room_memory_view.js';
+import { syncTelegramApprovedRoomMemoryToGoc } from '../../application/goc_memory_sync.js';
 import { formatMemoryTopologyForTelegram, planMemoryTopology } from '../../application/memory_topology.js';
 import { formatMemoryMaterializationPlanForTelegram, loadLatestMemoryMaterializationPlan, planMemoryMaterialization } from '../../application/memory_materialization_planner.js';
 import { createShadowMemoryModule, findMaterializationCandidate, formatShadowMemoryModuleListForTelegram, formatShadowMemoryModuleResultForTelegram, listShadowMemoryModules } from '../../application/memory_materialization_store.js';
@@ -735,6 +737,25 @@ export function createTelegramCommandHandler(deps = {}) {
       threadId,
       client: requireGocClient(),
     };
+  }
+
+
+  async function trySyncApprovedRoomMemoryToGoc({ chatId = '', userId = '', memoryItem = null } = {}) {
+    if (!memoryItem) return { ok: false, synced: false, reason: 'no_memory_item' };
+    if (typeof requireGocClient !== 'function' || typeof memoryModeWithFallback !== 'function' || memoryModeWithFallback() !== 'goc') {
+      return { ok: false, synced: false, reason: 'goc_memory_mode_not_active' };
+    }
+    const runtimeForGoc = await requireCurrentRuntime(chatId, userId);
+    const threadId = getCurrentThreadId(runtimeForGoc);
+    if (!threadId) return { ok: false, synced: false, reason: 'missing_goc_thread_id' };
+    return await syncTelegramApprovedRoomMemoryToGoc({
+      client: requireGocClient(),
+      threadId,
+      memoryItem,
+      chatId,
+      userId,
+      runId: resolveLiveJobIdForChat(chatId) || '',
+    });
   }
 
   function normalizeRuleSource(row = {}) {
@@ -2084,6 +2105,51 @@ export function createTelegramCommandHandler(deps = {}) {
     return buildRoomPackage({ profile, chatId, title: title || profile?.name || '', source: 'telegram_room_command' });
   }
 
+
+
+  function buildRoomPreferenceScorerCandidates({ profile = null, roomPackage = null, goal = '' } = {}) {
+    const pkg = roomPackage || {};
+    const packageCandidates = listDefaultRoomPackages({ limit: 24 }).map((row) => ({
+      candidate_id: row.package_id,
+      title: row.title || row.package_id,
+      learning_target: 'room_package',
+      proposal_kind: 'room_package_trial',
+      summary: row.description || row.domain_label || '',
+      tags: [...(Array.isArray(row.tags) ? row.tags : []), row.domain_label, row.default_depth, ...(Array.isArray(row.skills) ? row.skills.slice(0, 8) : []), ...(Array.isArray(row.agents) ? row.agents.slice(0, 8) : [])],
+      risk: row.default_depth === 'loop' ? 'medium' : 'low',
+    }));
+    const recipeCandidates = ['ask', 'team', 'loop'].map((depth) => ({
+      candidate_id: `recipe_${depth}`,
+      title: `Recipe: ${depth}`,
+      learning_target: 'room_recipe',
+      proposal_kind: 'room_recipe_trial',
+      summary: `Route recurring ${depth} work through a ${depth} room recipe; durable change remains approval-gated.`,
+      tags: [depth, profile?.domain_label, pkg.domain_label, goal],
+      risk: depth === 'loop' ? 'medium' : 'low',
+    }));
+    const agentPolicy = buildDefaultAgentActivationPolicy(pkg, { profile });
+    const agentCandidates = (agentPolicy.roster || []).slice(0, 12).map((row) => ({
+      candidate_id: `agent_${row.agent}_${row.state}`,
+      title: `Agent policy: ${row.agent} stays ${row.state}`,
+      learning_target: 'agent_policy',
+      proposal_kind: 'agent_policy_trial',
+      summary: `${row.agent} uses activation=${row.state}; token cost alone cannot disable required/safety/verifier agents.`,
+      tags: [row.agent, row.state, row.model_role_hint, row.rationale],
+      risk: row.state === 'required' ? 'medium' : 'low',
+    }));
+    const modelAssignments = Array.isArray(pkg.model_policy?.default_assignment) ? pkg.model_policy.default_assignment : [];
+    const modelCandidates = modelAssignments.slice(0, 12).map((row) => ({
+      candidate_id: `model_role_${row.role}`,
+      title: `Model role: ${row.role}`,
+      learning_target: 'model_policy',
+      proposal_kind: 'model_policy_trial',
+      summary: `${row.role}: ${row.purpose || 'room-scoped model role'}; provider secrets are never exported.`,
+      tags: [row.role, row.preferred_tier, row.fallback_tier, row.purpose],
+      risk: /verifier|source|code/.test(String(row.role || '')) ? 'medium' : 'low',
+    }));
+    return [...packageCandidates, ...recipeCandidates, ...agentCandidates, ...modelCandidates];
+  }
+
   function recordRoomEvent({ chatId, userId, eventType, command, goal = '', profile = null, recommendation = null, extra = {} }) {
     try {
       const event = buildRoomUsageEvent({ chatId, userId, eventType, command, goal, profile, recommendation, extra });
@@ -2218,6 +2284,14 @@ export function createTelegramCommandHandler(deps = {}) {
       await sendLong(bot, chatId, formatAgentActivationPolicyForTelegram(currentPolicy, { telemetry }));
       return true;
     }
+    if (['model', 'models', 'model-policy', 'model-router', 'router'].includes(command)) {
+      const profile = getAgentRoomProfile(chatSessionStore, chatId);
+      const pkg = getCurrentRoomPackage(chatId);
+      const plan = resolveRoomModelRolePlan({ roomPackage: pkg, profile });
+      recordRoomEvent({ chatId, userId, eventType: 'room_model_role_router_view', command: '/room model-router', profile, extra: { role_count: plan.role_count || 0, roles: (plan.rows || []).map((row) => row.role).slice(0, 12) } });
+      await sendLong(bot, chatId, formatRoomModelRolePlanForTelegram(plan));
+      return true;
+    }
     if (['topology', 'communication', 'comm', 'graph'].includes(command)) {
       const profile = getAgentRoomProfile(chatSessionStore, chatId);
       const events = readRoomUsageEvents(chatId, { limit: 240 });
@@ -2226,6 +2300,12 @@ export function createTelegramCommandHandler(deps = {}) {
         const result = exportRoomTopologyTrainingDataset({ chatId, events, profile, roomPackage: pkg, format: /\bjson\b/i.test(argsAfterSub || '') && !/jsonl/i.test(argsAfterSub || '') ? 'json' : 'jsonl' });
         recordRoomEvent({ chatId, userId, eventType: 'room_topology_dataset_exported', command: '/room topology export', profile, extra: { row_count: result.dataset?.row_count || 0, root: result.root } });
         await sendLong(bot, chatId, formatRoomTopologyDatasetExportForTelegram(result));
+        return true;
+      }
+      if (/\b(replay|evaluate|eval|rank|score)\b/i.test(argsAfterSub || '')) {
+        const report = evaluateTopologyReplay({ events, profile, roomPackage: pkg });
+        recordRoomEvent({ chatId, userId, eventType: 'room_topology_replay_evaluated', command: '/room topology replay', profile, extra: { status: report.status, trace_count: report.trace_count || 0, top_candidate: report.top_candidate?.topology_id || '' } });
+        await sendLong(bot, chatId, formatTopologyReplayEvaluationForTelegram(report));
         return true;
       }
       const card = buildRoomTopologyLearningCard({ roomPackage: pkg, profile, events });
@@ -2382,6 +2462,13 @@ export function createTelegramCommandHandler(deps = {}) {
         const result = exportRoomPreferenceDataset({ chatId, events, profile, roomPackage: pkg, format: /\bjson\b/i.test(mode) && !/jsonl/i.test(mode) ? 'json' : 'jsonl' });
         recordRoomEvent({ chatId, userId, eventType: 'room_preference_dataset_exported', command: '/room learning export', profile, extra: { row_count: result.dataset?.row_count || 0, dpo_ready_rows: result.dataset?.summary?.dpo_ready_rows || 0, root: result.root } });
         await sendLong(bot, chatId, formatRoomPreferenceDatasetExportForTelegram(result));
+        return true;
+      }
+      if (/\b(score|rank|scorer|recommend|router)\b/i.test(mode)) {
+        const dataset = buildRoomPreferenceDataset({ events, profile, roomPackage: pkg, limit: 500 });
+        const report = scoreRoomPreferenceCandidates({ dataset, profile, roomPackage: pkg, candidates: buildRoomPreferenceScorerCandidates({ profile, roomPackage: pkg, goal: mode }) });
+        recordRoomEvent({ chatId, userId, eventType: 'room_preference_scorer_view', command: '/room learning score', profile, extra: { candidate_count: report.candidate_count || 0, top_candidate: report.top_recommendation?.candidate_id || '', top_target: report.top_recommendation?.learning_target || '' } });
+        await sendLong(bot, chatId, formatRoomPreferenceScorerReportForTelegram(report));
         return true;
       }
       const dataset = buildRoomPreferenceDataset({ events, profile, roomPackage: pkg, limit: 500 });
@@ -2990,6 +3077,17 @@ export function createTelegramCommandHandler(deps = {}) {
         const target = String(memoryRest[1] || 'latest').trim() || 'latest';
         const reason = memoryRest.slice(2).join(' ').trim();
         const result = updateRoomMemoryCandidateDecision({ chatSessionStore, chatId, target, decision: sub === 'reject' ? 'reject' : 'approve', userId, reason });
+        if (result?.ok && result.memory_item && sub !== 'reject') {
+          result.goc_sync = await trySyncApprovedRoomMemoryToGoc({ chatId, userId, memoryItem: result.memory_item });
+          try {
+            chatSessionStore.upsert(chatId, (session = {}) => ({
+              ...session,
+              room_memory_goc_sync_events: [...(Array.isArray(session.room_memory_goc_sync_events) ? session.room_memory_goc_sync_events : []), { ts: new Date().toISOString(), memory_id: result.memory_item.memory_id, ...result.goc_sync }].slice(-80),
+              updated_at: new Date().toISOString(),
+            }));
+          } catch {}
+        }
+        recordRoomEvent({ chatId, userId, eventType: sub === 'reject' ? 'room_memory_candidate_rejected' : 'room_memory_candidate_approved', command: `/memory ${sub}`, profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { candidate_id: result?.candidate?.candidate_id || '', memory_id: result?.memory_item?.memory_id || '', goc_synced: result?.goc_sync?.synced === true, goc_sync_reason: result?.goc_sync?.reason || '' } });
         await sendLong(bot, chatId, formatRoomMemoryDecisionForTelegram(result));
         return true;
       }

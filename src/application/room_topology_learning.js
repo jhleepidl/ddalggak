@@ -105,6 +105,216 @@ export function buildRoomTopologyLearningCard({ roomPackage = null, profile = nu
   };
 }
 
+
+function numberOrZero(value) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function hasAny(text = '', patterns = []) {
+  const hay = cleanText(text, { lower: true, maxLen: 6000 });
+  return patterns.some((pattern) => pattern.test(hay));
+}
+
+function flattenEventText(event = {}) {
+  const row = asObject(event);
+  const extra = asObject(row.extra);
+  return cleanText([
+    row.event_type,
+    row.type,
+    row.command,
+    row.goal,
+    row.recommendation,
+    extra.intent,
+    extra.reason,
+    extra.outcome,
+    extra.status,
+    extra.primary_topology,
+    extra.phase,
+    ...(asArray(extra.roles)),
+    ...(asArray(extra.agents)),
+    ...(asArray(extra.tags)),
+  ].join(' '), { lower: true, maxLen: 6000 });
+}
+
+function collectAgentTelemetryRows(events = []) {
+  const rows = [];
+  for (const event of asArray(events)) {
+    const row = asObject(event);
+    const extra = asObject(row.extra);
+    const candidates = [row.agent_telemetry, row.agentTelemetry, extra.agent_telemetry, extra.agentTelemetry, extra.agent_calls, extra.agentCalls];
+    for (const value of candidates) {
+      if (Array.isArray(value)) rows.push(...value.map(asObject));
+      else if (value && typeof value === 'object') rows.push(asObject(value));
+    }
+  }
+  return rows;
+}
+
+export function deriveTopologyReplaySignals(events = [], { roomPackage = null, profile = null } = {}) {
+  const pkg = asObject(roomPackage);
+  const prof = asObject(profile);
+  const rows = asArray(events).map(asObject);
+  const texts = rows.map(flattenEventText);
+  const allText = texts.join(' ');
+  const telemetry = collectAgentTelemetryRows(rows);
+  const totalTokens = telemetry.reduce((sum, row) => sum + numberOrZero(row.total_tokens ?? row.tokens ?? row.token_count), 0);
+  const latencies = telemetry.map((row) => numberOrZero(row.latency_ms ?? row.duration_ms ?? row.elapsed_ms)).filter(Boolean);
+  const contributionRows = telemetry.map((row) => numberOrZero(row.contribution_score ?? row.quality_score ?? row.acceptance_score)).filter(Boolean);
+  const eventCount = rows.length;
+  const approvals = texts.filter((t) => /approve|approved|accept|accepted|commit|committed|승인|적용/.test(t)).length;
+  const rejections = texts.filter((t) => /reject|rejected|deny|rollback|stale|거절|취소|롤백/.test(t)).length;
+  const corrections = texts.filter((t) => /correct|correction|revise|fix|rerun|오류|수정|재작성|다시/.test(t)).length;
+  const stops = texts.filter((t) => /stop|blocked|abort|unsafe|위험|중단|차단/.test(t)).length;
+  const reviewEvents = texts.filter((t) => /review|verify|verifier|critic|evidence|claim|검토|검증|근거/.test(t)).length;
+  const buildEvents = texts.filter((t) => /code|patch|test|artifact|build|implementation|코드|패치|테스트|구현/.test(t)).length;
+  const sourceEvents = texts.filter((t) => /source|ground|browse|search|citation|evidence|출처|검색|브라우징|근거/.test(t)).length;
+  const memoryEvents = texts.filter((t) => /memory|preference|profile|room_memory|goc|graph|메모리|선호/.test(t)).length;
+  const parallelHints = texts.filter((t) => /parallel|bounded|wccu|council|multi|roster|agent|동시|여러|협업/.test(t)).length;
+  const lowRiskHints = texts.filter((t) => /ask|direct|quick|small|simple|간단|짧게/.test(t)).length;
+  const avgLatencyMs = latencies.length ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) : 0;
+  const avgContribution = contributionRows.length ? Number((contributionRows.reduce((a, b) => a + b, 0) / contributionRows.length).toFixed(3)) : 0;
+  return {
+    trace_count: eventCount,
+    approvals,
+    rejections,
+    corrections,
+    stops,
+    review_events: reviewEvents,
+    build_events: buildEvents,
+    source_events: sourceEvents,
+    memory_events: memoryEvents,
+    parallel_hints: parallelHints,
+    low_risk_hints: lowRiskHints,
+    observed_agent_call_count: telemetry.length,
+    observed_total_tokens: totalTokens,
+    observed_avg_latency_ms: avgLatencyMs,
+    observed_avg_contribution_score: avgContribution,
+    room_goal_text: cleanText([prof.current_goal, prof.room_purpose, pkg.description, ...(pkg.skills || [])].join(' '), { lower: true, maxLen: 3000 }),
+    needs_review: reviewEvents + stops + corrections > 0 || hasAny(allText, [/claim/, /safety/, /verifier/, /검증/, /근거/]),
+    needs_build: buildEvents > 0 || hasAny(allText, [/code/, /patch/, /artifact/, /구현/, /테스트/]),
+    needs_sources: sourceEvents > 0 || hasAny(allText, [/source/, /browse/, /citation/, /출처/, /검색/]),
+    needs_memory_care: memoryEvents > 0 || hasAny(allText, [/memory/, /preference/, /goc/, /메모리/, /선호/]),
+    needs_parallelism: parallelHints > 0 || hasAny(allText, [/parallel/, /multi-agent/, /wccu/, /동시/]),
+    likely_simple: lowRiskHints > Math.max(1, reviewEvents + buildEvents + parallelHints),
+  };
+}
+
+function replayScoreTopology(topology, signals = {}, baseScore = 0) {
+  const id = topology.id;
+  let quality = Number(baseScore || 0);
+  let safety = 0;
+  let latencyCost = 1;
+  let tokenCost = 1;
+  const reasons = [];
+  if (signals.trace_count <= 0) reasons.push('no replay trace yet; ranking uses room/package priors only');
+
+  if (id === 'reviewer_gated_pipeline') {
+    if (signals.needs_review) { quality += 3; safety += 3; reasons.push('recent trace contains review/correction/evidence pressure'); }
+    if (signals.needs_build) { quality += 2; reasons.push('builder→reviewer pipeline fits code/artifact work'); }
+    latencyCost += 2; tokenCost += 2;
+  } else if (id === 'bounded_parallel_wccu_group') {
+    if (signals.needs_parallelism) { quality += 4; reasons.push('parallel/multi-agent hints favor bounded witness-checked group work'); }
+    if (signals.needs_memory_care) { quality += 2; safety += 2; reasons.push('memory/preference updates benefit from explicit witnesses'); }
+    latencyCost += 2; tokenCost += 3;
+  } else if (id === 'visible_companion_council') {
+    if (signals.needs_memory_care) { quality += 2; reasons.push('preference-heavy room decisions benefit from visible tradeoff council'); }
+    if (signals.corrections > 0) { quality += 1; reasons.push('corrections suggest surfacing alternatives before committing'); }
+    latencyCost += 1; tokenCost += 2;
+  } else if (id === 'orchestrator_star') {
+    if (signals.needs_sources || signals.needs_build) { quality += 2; reasons.push('heterogeneous source/build/tool phases fit specialist routing'); }
+    if (signals.observed_agent_call_count >= 3) { quality += 1; reasons.push('existing traces already contain multiple agent/model calls'); }
+    latencyCost += 1; tokenCost += 2;
+  } else if (id === 'sequential_handoff') {
+    if (signals.likely_simple) { quality += 3; reasons.push('simple/low-risk traces favor sequential handoff'); }
+    if (signals.needs_review || signals.needs_parallelism) { quality -= 2; reasons.push('review or parallel pressure can make pure sequence brittle'); }
+  }
+
+  const correctionPenalty = Math.min(3, signals.corrections * 0.35 + signals.rejections * 0.3 + signals.stops * 0.5);
+  const acceptanceBoost = Math.min(2, signals.approvals * 0.2 + signals.observed_avg_contribution_score);
+  const costPenalty = (latencyCost * 0.25) + (tokenCost * 0.2);
+  const rankingScore = Number((quality + safety + acceptanceBoost - correctionPenalty - costPenalty).toFixed(3));
+  return {
+    topology_id: id,
+    title: topology.title,
+    base_score: Number(baseScore || 0),
+    replay_score: rankingScore,
+    expected_quality_gain: Number(quality.toFixed(3)),
+    expected_safety_gain: Number(safety.toFixed(3)),
+    estimated_latency_weight: latencyCost,
+    estimated_token_weight: tokenCost,
+    correction_pressure: Number(correctionPenalty.toFixed(3)),
+    acceptance_signal: Number(acceptanceBoost.toFixed(3)),
+    proposal_kind: 'room_topology_trial',
+    recommended_action: rankingScore > 3 ? 'propose_trial_in_goc' : 'collect_more_trace',
+    graph: topology.graph,
+    risk: topology.risk,
+    reasons: reasons.slice(0, 4),
+  };
+}
+
+export function evaluateTopologyReplay({ events = [], roomPackage = null, profile = null, candidates = null } = {}) {
+  const card = buildRoomTopologyLearningCard({ roomPackage, profile, events });
+  const catalog = asArray(candidates).length ? asArray(candidates) : card.candidates;
+  const signals = deriveTopologyReplaySignals(events, { roomPackage, profile });
+  const ranked = catalog.map((topology) => replayScoreTopology(topology, signals, topology.score || 0))
+    .sort((a, b) => b.replay_score - a.replay_score || a.topology_id.localeCompare(b.topology_id));
+  const top = ranked[0] || null;
+  return {
+    kind: 'room_topology_replay_evaluator_v1',
+    status: signals.trace_count > 0 ? 'shadow_replay_ranked' : 'insufficient_trace_shadow',
+    trace_count: signals.trace_count,
+    signals,
+    ranked_candidates: ranked,
+    top_candidate: top,
+    proposal_path: {
+      may_create_proposal: Boolean(top && top.recommended_action === 'propose_trial_in_goc'),
+      proposal_kind: 'room_topology_trial',
+      durable_change_requires: 'proposal -> reversible trial -> user_or_goc_approval',
+      direct_room_state_mutation: false,
+    },
+    guardrails: [
+      'Replay evaluator is a room-level scorer, not base-model RLHF.',
+      'A topology score may open a proposal/trial; it must not directly mutate durable room state.',
+      'Verifier, safety, and required agents stay protected from token-cost-only pruning.',
+      'Use fixed traces plus outcome labels; do not treat self-judgment as ground truth.',
+    ],
+  };
+}
+
+export function formatTopologyReplayEvaluationForTelegram(report = {}) {
+  const row = asObject(report);
+  const ranked = asArray(row.ranked_candidates);
+  const signals = asObject(row.signals);
+  const path = asObject(row.proposal_path);
+  return [
+    '🧪 Room topology replay evaluator',
+    '',
+    `status: ${row.status || 'unknown'}`,
+    `trace count: ${row.trace_count || 0}`,
+    `top candidate: ${asObject(row.top_candidate).topology_id || '(none)'}`,
+    '',
+    'Replay signals:',
+    `- review/build/source/memory/parallel: ${signals.review_events || 0}/${signals.build_events || 0}/${signals.source_events || 0}/${signals.memory_events || 0}/${signals.parallel_hints || 0}`,
+    `- approvals/rejections/corrections/stops: ${signals.approvals || 0}/${signals.rejections || 0}/${signals.corrections || 0}/${signals.stops || 0}`,
+    `- agent calls/tokens/avg latency: ${signals.observed_agent_call_count || 0}/${signals.observed_total_tokens || 0}/${signals.observed_avg_latency_ms || 0}ms`,
+    '',
+    'Ranked topology trials:',
+    ...ranked.slice(0, 5).map((item, idx) => `${idx + 1}. ${item.topology_id} · replay=${item.replay_score} · ${item.recommended_action}`),
+    '',
+    'Why top candidates ranked this way:',
+    ...ranked.slice(0, 3).flatMap((item) => [`- ${item.topology_id}:`, ...asArray(item.reasons).slice(0, 3).map((reason) => `  · ${reason}`)]),
+    '',
+    'Proposal path:',
+    `- may create proposal: ${path.may_create_proposal ? 'yes' : 'not yet'}`,
+    `- durable change: ${path.durable_change_requires || 'proposal/trial/user-or-GoC approval'}`,
+    `- direct mutation: ${path.direct_room_state_mutation ? 'yes' : 'no'}`,
+    '',
+    'Guardrails:',
+    ...asArray(row.guardrails).map((item) => `- ${item}`),
+  ].join('\n');
+}
+
 export function formatRoomTopologyLearningCardForTelegram(card = {}) {
   const row = asObject(card);
   const candidates = asArray(row.candidates);

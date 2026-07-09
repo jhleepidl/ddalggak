@@ -257,6 +257,163 @@ export function exportRoomPreferenceDataset({ chatId = 'unknown', events = [], p
   };
 }
 
+
+function tokenSet(value = '') {
+  return new Set(cleanText(value, { lower: true, maxLen: 4000 }).split(/[^a-z0-9가-힣_:-]+/g).filter((x) => x && x.length >= 2));
+}
+
+function overlapCount(a = new Set(), b = new Set()) {
+  let n = 0;
+  for (const item of a) if (b.has(item)) n += 1;
+  return n;
+}
+
+function normalizeScorerCandidate(candidate = {}, index = 0) {
+  const row = asObject(candidate);
+  const target = cleanText(row.learning_target || row.target || row.type || inferLearningTarget({ event_type: row.event_type || row.kind || '' }), { lower: true, maxLen: 80 }) || 'room_setting';
+  const id = cleanText(row.candidate_id || row.id || row.package_id || row.recipe_id || row.agent_id || row.model_role || `${target}_${index + 1}`, { maxLen: 160 }) || `${target}_${index + 1}`;
+  const title = cleanText(row.title || row.name || row.package_id || row.recipe_id || id, { maxLen: 180 }) || id;
+  return {
+    ...row,
+    candidate_id: id,
+    title,
+    learning_target: target,
+    proposal_kind: cleanText(row.proposal_kind || `${target}_scorer_shadow_recommendation`, { lower: true, maxLen: 120 }),
+    summary: cleanText(row.summary || row.description || title, { maxLen: 1000 }) || title,
+    tags: asArray(row.tags || row.skills || row.agents || row.model_roles).map((v) => cleanText(v, { lower: true, maxLen: 120 })).filter(Boolean).slice(0, 32),
+    risk: cleanText(row.risk || 'low', { lower: true, maxLen: 40 }) || 'low',
+  };
+}
+
+function datasetFromInput({ dataset = null, events = [], profile = null, roomPackage = null } = {}) {
+  return dataset && dataset.schema_version ? dataset : buildRoomPreferenceDataset({ events, profile, roomPackage, limit: 1000 });
+}
+
+function targetStats(ds = {}) {
+  const rows = asArray(ds.rows);
+  const out = new Map();
+  for (const row of rows) {
+    const target = cleanText(row.learning_target || 'room_setting', { lower: true, maxLen: 80 });
+    const prev = out.get(target) || { count: 0, positive: 0, negative: 0, confidence: 0, weighted: 0, tags: new Set() };
+    const polarity = Number(row.label?.polarity || 0);
+    const confidence = Number(row.label?.confidence || 0);
+    prev.count += 1;
+    if (polarity > 0) prev.positive += 1;
+    if (polarity < 0) prev.negative += 1;
+    prev.confidence += confidence;
+    prev.weighted += polarity * confidence;
+    const hay = [row.input?.room_intent, row.input?.command, row.input?.event_type, JSON.stringify(row.input?.current_package || {}), JSON.stringify(row.input?.candidate_change || {})].join(' ');
+    for (const token of tokenSet(hay)) prev.tags.add(token);
+    out.set(target, prev);
+  }
+  return out;
+}
+
+function scoreCandidateAgainstDataset(candidate = {}, ds = {}) {
+  const row = normalizeScorerCandidate(candidate);
+  const stats = targetStats(ds);
+  const target = stats.get(row.learning_target) || { count: 0, positive: 0, negative: 0, confidence: 0, weighted: 0, tags: new Set() };
+  const reward = asObject(ds.summary?.reward_features);
+  const candidateTokens = tokenSet([row.candidate_id, row.title, row.summary, ...(row.tags || [])].join(' '));
+  const targetOverlap = overlapCount(candidateTokens, target.tags || new Set());
+  const explicitScore = Number(target.weighted || 0);
+  const support = Math.min(1, Number(target.count || 0) / 8);
+  const approvalBias = Number(reward.approval_rate || 0) - Number(reward.correction_rate || 0) - Number(reward.stop_rate || 0);
+  const riskPenalty = ['high', 'critical'].includes(cleanText(row.risk, { lower: true })) ? 0.35 : cleanText(row.risk, { lower: true }) === 'medium' ? 0.12 : 0;
+  const safetyBonus = row.learning_target === 'model_policy' || row.learning_target === 'agent_policy'
+    ? (Number(reward.safety_or_grounding_events || 0) > 0 ? 0.12 : 0)
+    : 0;
+  const base = 0.35;
+  const score = base + support * 0.18 + Math.max(-0.25, Math.min(0.35, explicitScore / 8)) + Math.min(0.18, targetOverlap * 0.035) + Math.max(-0.18, Math.min(0.18, approvalBias * 0.35)) + safetyBonus - riskPenalty;
+  const confidence = Math.max(0.15, Math.min(0.92, 0.28 + support * 0.35 + Math.min(0.18, targetOverlap * 0.03) + Math.min(0.11, Math.abs(explicitScore) / 10)));
+  return {
+    ...row,
+    score: Number(Math.max(0, Math.min(1, score)).toFixed(3)),
+    confidence: Number(confidence.toFixed(3)),
+    feature_contributions: [
+      { feature: 'target_support', value: support, weight: 0.18, rationale: `${target.count || 0} prior row(s) for ${row.learning_target}` },
+      { feature: 'weighted_preference', value: Number(explicitScore.toFixed(3)), weight: 0.125, rationale: 'positive approvals minus rejects/corrections for this target' },
+      { feature: 'intent_overlap', value: targetOverlap, weight: 0.035, rationale: 'candidate tags overlap with room preference traces' },
+      { feature: 'room_approval_bias', value: Number(approvalBias.toFixed(3)), weight: 0.35, rationale: 'approval rate minus correction/stop rate' },
+      ...(safetyBonus ? [{ feature: 'safety_grounding_bonus', value: safetyBonus, weight: 1, rationale: 'safety/grounding signals favor explicit model/agent policy' }] : []),
+      ...(riskPenalty ? [{ feature: 'risk_penalty', value: -riskPenalty, weight: 1, rationale: 'higher-risk recommendations require stronger evidence and approval' }] : []),
+    ],
+    governance: {
+      mode: 'shadow_recommendation_only',
+      may_mutate_room_state: false,
+      durable_change_requires: 'proposal_or_trial_then_user_or_goc_approval',
+    },
+  };
+}
+
+export function scoreRoomPreferenceCandidates({ dataset = null, events = [], profile = null, roomPackage = null, candidates = [], limit = 12 } = {}) {
+  const ds = datasetFromInput({ dataset, events, profile, roomPackage });
+  const normalizedCandidates = asArray(candidates).map(normalizeScorerCandidate).filter((row) => row.candidate_id);
+  const scored = normalizedCandidates.map((candidate) => scoreCandidateAgainstDataset(candidate, ds))
+    .sort((a, b) => b.score - a.score || b.confidence - a.confidence || a.candidate_id.localeCompare(b.candidate_id));
+  const top = scored[0] || null;
+  return {
+    schema_version: 'ddalggak.room_preference_scorer_report/v1',
+    generated_at: new Date().toISOString(),
+    status: scored.length ? 'shadow_ranked' : 'no_candidates',
+    dataset_summary: ds.summary || {},
+    row_count: Number(ds.row_count || 0),
+    candidate_count: scored.length,
+    top_recommendation: top ? {
+      candidate_id: top.candidate_id,
+      title: top.title,
+      learning_target: top.learning_target,
+      score: top.score,
+      confidence: top.confidence,
+      proposal_kind: top.proposal_kind,
+    } : null,
+    ranked_candidates: scored.slice(0, Math.max(1, Math.min(Number(limit) || 12, 50))),
+    proposal_path: top ? {
+      proposal_kind: top.proposal_kind,
+      recommended_action: 'create_trial_or_goc_proposal',
+      source: 'room_preference_scorer_shadow',
+      candidate_id: top.candidate_id,
+      risk: top.risk || 'low',
+    } : null,
+    guardrail: {
+      model_may_score: true,
+      model_may_propose: true,
+      model_may_mutate_room_state: false,
+      durable_change_requires: 'trial_then_user_or_goc_approval',
+      private_memory_export: 'never_by_default',
+      not_base_model_rlhf: true,
+    },
+  };
+}
+
+export function formatRoomPreferenceScorerReportForTelegram(report = {}) {
+  const row = asObject(report);
+  const ranked = asArray(row.ranked_candidates);
+  const lines = [
+    '🎚️ Room preference scorer (shadow)',
+    '',
+    `status: ${row.status || 'unknown'}`,
+    `dataset rows: ${Number(row.row_count || 0)}`,
+    `candidates: ${Number(row.candidate_count || 0)}`,
+  ];
+  if (row.top_recommendation) {
+    lines.push('', 'Top recommendation:', `- ${row.top_recommendation.title} (${row.top_recommendation.learning_target})`, `- score=${row.top_recommendation.score} confidence=${row.top_recommendation.confidence}`);
+  }
+  if (ranked.length) {
+    lines.push('', 'Ranked candidates:');
+    for (const candidate of ranked.slice(0, 8)) {
+      const features = asArray(candidate.feature_contributions).slice(0, 3).map((f) => `${f.feature}=${f.value}`).join(', ');
+      lines.push(`- ${candidate.title}: score=${candidate.score}, conf=${candidate.confidence}, target=${candidate.learning_target}`);
+      if (features) lines.push(`  features: ${features}`);
+    }
+  } else {
+    lines.push('', 'No scorer candidates were supplied.');
+  }
+  lines.push('', 'Governance:', '- scorer/router is decision support only', '- durable package/recipe/agent/model-policy changes must go through proposal/trial + user/GoC approval', '- this is room-level scorer data, not base-model RLHF');
+  return lines.join('\n');
+}
+
+
 export function formatRoomPreferenceLearningSummaryForTelegram(dataset = {}) {
   const ds = asObject(dataset);
   const summary = asObject(ds.summary);

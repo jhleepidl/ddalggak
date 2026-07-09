@@ -147,6 +147,138 @@ export function buildGocMemoryNodePayload({
   };
 }
 
+
+function tinyHash(value = '') {
+  const key = String(value || '');
+  let hash = 0;
+  for (let i = 0; i < key.length; i += 1) hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
+  return Math.abs(hash).toString(36);
+}
+
+function clipText(value = '', maxLen = 700) {
+  const text = cleanText(value).replace(/\s+/g, ' ');
+  const n = Math.max(40, Math.floor(Number(maxLen) || 700));
+  return text.length <= n ? text : `${text.slice(0, n - 1).trim()}…`;
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function safeMemoryId(value = '') {
+  return cleanLower(value).replace(/[^a-z0-9._:-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 120);
+}
+
+function compactOwnerList(value = []) {
+  return asArray(value).map((entry) => cleanLower(entry).replace(/^@+/, '').replace(/[^a-z0-9가-힣_-]+/g, '_')).filter(Boolean).slice(0, 12);
+}
+
+export function deriveTelegramRoomMemorySurfaceSpec({ memoryItem = null, chatId = '' } = {}) {
+  const item = memoryItem && typeof memoryItem === 'object' ? memoryItem : {};
+  const scope = cleanLower(item.scope || 'room') || 'room';
+  return {
+    surface_id: 'telegram_approved_room_memory',
+    title: 'Telegram-approved room memory',
+    semantic_kind: 'room_memory',
+    visibility_scope: scope === 'companion' ? 'team' : 'shared',
+    write_mode: 'user_approved_append_or_upsert',
+    policy: {
+      origin: 'telegram_memory_approval',
+      source_runtime: 'ddalggak',
+      room_local: true,
+      private_memory_export: 'summary_only_by_default',
+      raw_transcript_exported: false,
+      telegram_chat_fingerprint: chatId ? tinyHash(chatId) : undefined,
+      target_roles: compactOwnerList(item.owner_companion_ids || item.target_companion_ids),
+      lifecycle: ['candidate', 'telegram_approved', 'goc_upserted', 'goc_review_or_edit'],
+    },
+  };
+}
+
+export function buildTelegramApprovedRoomMemoryNodePayload({ memoryItem = null, chatId = '', userId = '', runId = '' } = {}) {
+  const item = memoryItem && typeof memoryItem === 'object' ? memoryItem : {};
+  const memoryId = safeMemoryId(item.memory_id || item.memoryId || item.id || '');
+  const summary = clipText(item.summary || item.content || item.text || '', 900);
+  if (!memoryId || !summary) return null;
+  const owners = compactOwnerList(item.owner_companion_ids || item.ownerCompanionIds || item.target_companion_ids);
+  const approvedAt = cleanText(item.review?.approved_at || item.updated_at || item.updatedAt || new Date().toISOString());
+  const type = cleanLower(item.type || 'memory') || 'memory';
+  return {
+    surface_id: 'telegram_approved_room_memory',
+    node_type: type === 'preference' ? 'preference' : 'room_memory',
+    owner_agent_id: owners[0] ? `room:${owners[0]}` : 'room:shared',
+    owner_role_id: owners[0] || 'room',
+    content: {
+      memory_id: memoryId,
+      title: clipText(item.title || type.replace(/_/g, ' '), 120),
+      summary,
+      text: summary,
+      memory_type: type,
+      scope: cleanLower(item.scope || (owners.length ? 'companion' : 'room')) || 'room',
+      owner_companion_ids: owners,
+      sensitivity: cleanLower(item.sensitivity || 'medium') || 'medium',
+      confidence: Number.isFinite(Number(item.confidence)) ? Number(item.confidence) : null,
+      source_candidate_id: cleanText(item.source_candidate_id || item.sourceCandidateId) || undefined,
+      approved_at: approvedAt,
+      raw_transcript_exported: false,
+    },
+    provenance: {
+      source: 'telegram_approved_room_memory',
+      source_id: `ddalggak:telegram_memory:${memoryId}`,
+      source_memory_id: memoryId,
+      source_candidate_id: cleanText(item.source_candidate_id || item.sourceCandidateId) || undefined,
+      source_turn_id: cleanText(item.source_turn_id || item.sourceTurnId || item.provenance?.source_turn_id) || undefined,
+      approved_by: cleanText(userId || item.provenance?.approved_by || 'telegram_user') || 'telegram_user',
+      approved_at: approvedAt,
+      telegram_chat_fingerprint: chatId ? tinyHash(chatId) : undefined,
+      raw_transcript_exported: false,
+      private_memory_payload: 'summary_only',
+      lifecycle: 'telegram_approved_then_goc_upserted',
+      confidence: Number.isFinite(Number(item.confidence)) ? Number(item.confidence) : 0.8,
+    },
+    trust_tier: 'reported',
+    status: 'published',
+    created_run_id: cleanText(runId) || undefined,
+  };
+}
+
+export async function syncTelegramApprovedRoomMemoryToGoc({ client = null, threadId = '', memoryItem = null, chatId = '', userId = '', runId = '', logger = null } = {}) {
+  const cleanThreadId = cleanText(threadId);
+  const surface = deriveTelegramRoomMemorySurfaceSpec({ memoryItem, chatId });
+  const node = buildTelegramApprovedRoomMemoryNodePayload({ memoryItem, chatId, userId, runId });
+  if (!client || !cleanThreadId || !node) {
+    return {
+      ok: false,
+      synced: false,
+      reason: !client ? 'missing_goc_client' : (!cleanThreadId ? 'missing_thread_id' : 'invalid_memory_item'),
+      surface,
+      node,
+    };
+  }
+  try {
+    const surfaceResult = await client.createMemorySurface(cleanThreadId, surface);
+    const nodeResult = await client.createMemoryNode(cleanThreadId, node);
+    return {
+      ok: true,
+      synced: true,
+      surface_id: surface.surface_id,
+      memory_id: node.content.memory_id,
+      node_id: nodeResult?.node?.id || nodeResult?.id || '',
+      upserted: Boolean(nodeResult?.upserted || nodeResult?.node?.upserted),
+      surface_result: surfaceResult,
+      node_result: nodeResult,
+      privacy: {
+        raw_transcript_exported: false,
+        private_memory_payload: 'summary_only',
+      },
+    };
+  } catch (error) {
+    try { logger?.warn?.({ error, threadId: cleanThreadId, memory_id: node.content.memory_id }, 'GoC room memory sync failed'); } catch {}
+    return { ok: false, synced: false, reason: String(error?.message || error || 'goc_sync_failed'), surface_id: surface.surface_id, memory_id: node.content.memory_id };
+  }
+}
+
+
 function rememberSurfaceSignature(cacheKey, signature) {
   if (gocMemorySurfaceSyncByJob.has(cacheKey)) {
     gocMemorySurfaceSyncByJob.delete(cacheKey);

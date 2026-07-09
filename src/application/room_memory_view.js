@@ -287,6 +287,11 @@ export function formatRoomMemoryDecisionForTelegram(result = {}) {
   if (item) {
     lines.push(`memory_id: ${item.memory_id}`);
     lines.push(`summary: ${item.summary}`);
+    const sync = result.goc_sync && typeof result.goc_sync === 'object' ? result.goc_sync : null;
+    if (sync) {
+      lines.push(`GoC sync: ${sync.synced ? 'synced' : 'not synced'}${sync.reason ? ` · ${sync.reason}` : ''}${sync.node_id ? ` · node=${sync.node_id}` : ''}`);
+      lines.push('privacy: raw transcript was not exported; only the approved structured summary was synced.');
+    }
     lines.push('note: Telegram은 구조화 텍스트 요약만 보여주고, GoC에서 편집/브라우징하는 것이 기본입니다.');
   }
   return lines.join('\n');

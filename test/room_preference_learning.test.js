@@ -11,6 +11,8 @@ import {
   formatRoomPreferenceDatasetExportForTelegram,
   formatRoomPreferenceLearningSummaryForTelegram,
   inferLearningTarget,
+  scoreRoomPreferenceCandidates,
+  formatRoomPreferenceScorerReportForTelegram,
 } from '../src/application/room_preference_learning.js';
 
 test('preference signal classifier extracts explicit approve/reject/correct choices', () => {
@@ -73,4 +75,30 @@ test('learning target inference covers package, recipe, memory, skill, agent and
   assert.equal(inferLearningTarget({ event_type: 'room_skill_imported' }), 'skill_policy');
   assert.equal(inferLearningTarget({ event_type: 'room_agent_specialization_approved' }), 'agent_policy');
   assert.equal(inferLearningTarget({ event_type: 'model_policy_changed' }), 'model_policy');
+});
+
+
+test('preference scorer ranks candidates as shadow recommendations without mutating room state', () => {
+  const events = [
+    { chat_id: 'c', event_type: 'default_room_preset_applied', command: '/room preset', goal: 'code patch test', extra: { package_id: 'autonomous_code_loop' } },
+    { chat_id: 'c', event_type: 'room_agent_specialization_approved', command: '/room agents approve', goal: 'builder verifier', extra: { status: 'approved' } },
+    { chat_id: 'c', event_type: 'model_policy_viewed', command: '/models', goal: 'verifier source grounding', extra: { reason: 'safety approval' } },
+  ];
+  const dataset = buildRoomPreferenceDataset({ events, roomPackage: { package_id: 'autonomous_code_loop', domain_label: 'code_review' } });
+  const report = scoreRoomPreferenceCandidates({
+    dataset,
+    candidates: [
+      { candidate_id: 'recipe_loop', learning_target: 'room_recipe', title: 'Loop recipe', tags: ['loop', 'code', 'test'] },
+      { candidate_id: 'model_verifier', learning_target: 'model_policy', title: 'Verifier model role', tags: ['verifier', 'safety', 'source'] },
+      { candidate_id: 'generic_package', learning_target: 'room_package', title: 'Generic package', tags: ['chat'] },
+    ],
+  });
+  assert.equal(report.status, 'shadow_ranked');
+  assert.equal(report.guardrail.model_may_mutate_room_state, false);
+  assert.equal(report.guardrail.not_base_model_rlhf, true);
+  assert.ok(report.ranked_candidates[0].score >= report.ranked_candidates.at(-1).score);
+  assert.ok(report.ranked_candidates.every((row) => row.governance.may_mutate_room_state === false));
+  const msg = formatRoomPreferenceScorerReportForTelegram(report);
+  assert.match(msg, /Room preference scorer/);
+  assert.match(msg, /proposal\/trial/);
 });

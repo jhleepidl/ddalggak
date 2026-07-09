@@ -140,6 +140,104 @@ export function buildDefaultAgentActivationPolicy(roomPackage = {}, { profile = 
   return normalizeAgentActivationPolicy(pkg.agent_activation_policy || prof.agent_activation_policy || {}, { agents, roomPackage: pkg, profile: prof });
 }
 
+
+
+function num(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function normalizeTokenUsage(value = {}) {
+  const row = asObject(value);
+  const input = num(row.input_tokens ?? row.prompt_tokens ?? row.inputTokens ?? row.promptTokens, 0);
+  const output = num(row.output_tokens ?? row.completion_tokens ?? row.outputTokens ?? row.completionTokens, 0);
+  const total = num(row.total_tokens ?? row.totalTokens, input + output);
+  return { input_tokens: input, output_tokens: output, total_tokens: total };
+}
+
+export function normalizeAgentExecutionTelemetry(row = {}) {
+  const item = asObject(row);
+  const usage = normalizeTokenUsage(item.tokens || item.token_usage || item.tokenUsage || item.usage || item);
+  const agent = cleanText(item.agent || item.agent_id || item.agentId || item.role || item.role_id || item.roleId || '', { lower: true, maxLen: 160 });
+  if (!agent) return null;
+  return {
+    kind: 'ddalggak.agent_execution_telemetry/v1',
+    ts: cleanText(item.ts || item.created_at || item.createdAt || new Date().toISOString(), { maxLen: 80 }),
+    agent,
+    model_role: cleanText(item.model_role || item.modelRole || item.model_role_hint || item.modelRoleHint || inferModelRoleHint(agent), { lower: true, maxLen: 120 }),
+    provider: cleanText(item.provider || '', { lower: true, maxLen: 80 }),
+    model: cleanText(item.model || item.model_id || item.modelId || '', { maxLen: 160 }),
+    phase: cleanText(item.phase || item.task_phase || item.taskPhase || item.route || '', { lower: true, maxLen: 120 }),
+    input_tokens: usage.input_tokens,
+    output_tokens: usage.output_tokens,
+    total_tokens: usage.total_tokens,
+    latency_ms: num(item.latency_ms ?? item.latencyMs ?? item.duration_ms ?? item.durationMs, 0),
+    contribution_score: Math.max(0, Math.min(1, num(item.contribution_score ?? item.contributionScore ?? item.contribution ?? 0, 0))),
+    contribution_hint: cleanText(item.contribution_hint || item.contributionHint || item.hint || item.outcome || '', { maxLen: 240 }),
+    source_event_id: cleanText(item.source_event_id || item.sourceEventId || item.event_id || item.eventId || '', { maxLen: 160 }),
+  };
+}
+
+function telemetryRowsFromEvent(event = {}) {
+  const row = asObject(event);
+  const extra = asObject(row.extra);
+  const containers = [row.agent_telemetry, row.agentTelemetry, extra.agent_telemetry, extra.agentTelemetry, extra.agent_calls, extra.agentCalls];
+  const out = [];
+  for (const value of containers) {
+    if (Array.isArray(value)) out.push(...value);
+    else if (value && typeof value === 'object') out.push(value);
+  }
+  if (extra.agent || extra.agent_id || extra.agentId) out.push({ ...extra, ts: row.ts || row.created_at, phase: extra.phase || row.event_type });
+  return out.map(normalizeAgentExecutionTelemetry).filter(Boolean);
+}
+
+export function extractAgentExecutionTelemetry(events = []) {
+  return asArray(events).flatMap(telemetryRowsFromEvent);
+}
+
+export function summarizeAgentExecutionTelemetry(events = []) {
+  const rows = extractAgentExecutionTelemetry(events);
+  const byAgent = new Map();
+  for (const row of rows) {
+    const prev = byAgent.get(row.agent) || {
+      agent: row.agent,
+      call_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      total_latency_ms: 0,
+      avg_latency_ms: 0,
+      contribution_score_sum: 0,
+      avg_contribution_score: 0,
+      model_roles: {},
+      providers: {},
+      models: {},
+      phases: {},
+      latest: null,
+    };
+    prev.call_count += 1;
+    prev.input_tokens += row.input_tokens;
+    prev.output_tokens += row.output_tokens;
+    prev.total_tokens += row.total_tokens;
+    prev.total_latency_ms += row.latency_ms;
+    prev.contribution_score_sum += row.contribution_score;
+    if (row.model_role) prev.model_roles[row.model_role] = (prev.model_roles[row.model_role] || 0) + 1;
+    if (row.provider) prev.providers[row.provider] = (prev.providers[row.provider] || 0) + 1;
+    if (row.model) prev.models[row.model] = (prev.models[row.model] || 0) + 1;
+    if (row.phase) prev.phases[row.phase] = (prev.phases[row.phase] || 0) + 1;
+    prev.latest = row;
+    prev.avg_latency_ms = Math.round(prev.total_latency_ms / Math.max(1, prev.call_count));
+    prev.avg_contribution_score = Number((prev.contribution_score_sum / Math.max(1, prev.call_count)).toFixed(3));
+    byAgent.set(row.agent, prev);
+  }
+  return [...byAgent.values()].map((row) => ({
+    ...row,
+    total_latency_ms: Math.round(row.total_latency_ms),
+    contribution_score_sum: Number(row.contribution_score_sum.toFixed(3)),
+  })).sort((a, b) => b.call_count - a.call_count || b.total_tokens - a.total_tokens || a.agent.localeCompare(b.agent));
+}
+
+
 function stringifyEvent(event = {}) {
   return cleanText([event.event_type, event.command, event.goal, JSON.stringify(event.extra || {}), JSON.stringify(event.profile || event.room || {})].join(' '), { lower: true, maxLen: 5000 });
 }
@@ -149,6 +247,7 @@ export function deriveAgentTelemetry({ events = [], policy = {}, roomPackage = {
   const rows = asArray(events).slice(-200);
   const eventText = rows.map(stringifyEvent);
   const totalEvents = rows.length;
+  const executionSummary = new Map(summarizeAgentExecutionTelemetry(rows).map((row) => [row.agent, row]));
   return normalized.roster.map((agentRow) => {
     const agent = agentRow.agent;
     const simpleAgent = agent.replace(/_/g, ' ');
@@ -157,8 +256,10 @@ export function deriveAgentTelemetry({ events = [], policy = {}, roomPackage = {
     const artifactSignals = eventText.filter((text) => /(artifact|patch|test|build|file|bundle|code|실험|테스트|코드|파일|번들)/i.test(text)).length;
     const interventionSignals = eventText.filter((text) => /(reject|correction|stop|retry|rollback|아냐|아니|다시|중단|거절|정정)/i.test(text)).length;
     const isRequired = agentRow.state === 'required';
+    const usage = executionSummary.get(agent) || null;
     const estimatedCostWeight = agentRow.state === 'active' ? 1 : agentRow.state === 'required' ? 0.9 : agentRow.state === 'on_demand' ? 0.35 : agentRow.state === 'shadow' ? 0.1 : 0;
-    const contributionSignal = mentions + (/(verifier|reviewer|critic|risk|claim|safety|guard)/i.test(agent) ? Math.min(verifySignals, 3) : 0) + (/(builder|runner|experiment|implementation|synthesizer|writer)/i.test(agent) ? Math.min(artifactSignals, 3) : 0);
+    const executionContribution = usage ? Math.round(Number(usage.avg_contribution_score || 0) * 4) : 0;
+    const contributionSignal = mentions + executionContribution + (/(verifier|reviewer|critic|risk|claim|safety|guard)/i.test(agent) ? Math.min(verifySignals, 3) : 0) + (/(builder|runner|experiment|implementation|synthesizer|writer)/i.test(agent) ? Math.min(artifactSignals, 3) : 0);
     return {
       agent,
       state: agentRow.state,
@@ -169,9 +270,18 @@ export function deriveAgentTelemetry({ events = [], policy = {}, roomPackage = {
       verify_signals: verifySignals,
       artifact_signals: artifactSignals,
       intervention_signals: interventionSignals,
+      call_count: usage?.call_count || 0,
+      input_tokens: usage?.input_tokens || 0,
+      output_tokens: usage?.output_tokens || 0,
+      total_tokens: usage?.total_tokens || 0,
+      avg_latency_ms: usage?.avg_latency_ms || 0,
+      avg_contribution_score: usage?.avg_contribution_score || 0,
+      observed_model_roles: usage?.model_roles || {},
+      observed_providers: usage?.providers || {},
+      observed_models: usage?.models || {},
       estimated_cost_weight: Number(estimatedCostWeight.toFixed(2)),
       required: isRequired,
-      telemetry_quality: totalEvents >= 8 ? 'usable_shadow_signal' : 'insufficient_trace',
+      telemetry_quality: usage?.call_count ? 'per_agent_execution_telemetry' : (totalEvents >= 8 ? 'usable_shadow_signal' : 'insufficient_trace'),
     };
   });
 }
@@ -280,7 +390,7 @@ export function formatAgentActivationPolicyForTelegram(policy = {}, { telemetry 
   if (asArray(telemetry).length) {
     lines.push('', 'Recent telemetry:');
     for (const row of asArray(telemetry).slice(0, 12)) {
-      lines.push(`- ${row.agent}: state=${row.state}, contribution=${row.contribution_signal}, mentions=${row.explicit_mentions}, quality=${row.telemetry_quality}`);
+      lines.push(`- ${row.agent}: state=${row.state}, calls=${row.call_count || 0}, tokens=${row.total_tokens || 0}, avg_latency=${row.avg_latency_ms || 0}ms, contribution=${row.contribution_signal}, quality=${row.telemetry_quality}`);
     }
   }
   lines.push('', 'Policy:', '- token cost is an optimization signal, not the sole pruning objective', '- durable roster changes require trial + user/GoC approval');
