@@ -9,6 +9,7 @@ import { runCommand } from "../proc.js";
 import { runCodexExec } from "../codex.js";
 import { runGeminiPrompt } from "../gemini.js";
 import { migrateProviderAwayFromGemini, sanitizeGeminiModelForProvider } from "../provider_migration.js";
+import { appendRoomUsageEvent, buildRoomUsageEvent } from "./room_usage_events.js";
 import { OrchestratorMemory } from "../settings.js";
 import { orchestratorNotes, buildChatGPTNextStepPrompt } from "../prompts.js";
 import { clip, extractCodexInstruction, extractJsonPlan } from "../textutil.js";
@@ -5922,6 +5923,16 @@ ${output}
       summary: String(providerResult?.output || '').slice(0, 500),
       payload: { provider: providerResult?.provider || provider, model: providerResult?.model || model },
     });
+    if (providerResult?.agent_telemetry) {
+      try {
+        appendRoomUsageEvent(buildRoomUsageEvent({
+          chatId,
+          eventType: 'agent_provider_call',
+          command: 'agent_execution',
+          extra: { agent_telemetry: providerResult.agent_telemetry },
+        }));
+      } catch {}
+    }
     return providerResult;
   } finally {
     restoreActor();

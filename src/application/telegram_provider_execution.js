@@ -82,6 +82,10 @@ export async function runAgentProviderExecution({
       provider: String(overrides.provider || cleanProvider || '').trim().toLowerCase(),
       model: String(overrides.model || cleanModel || '').trim(),
       failover: overrides.failover || undefined,
+      usage: overrides.usage || undefined,
+      cost_usd: Number.isFinite(Number(overrides.cost_usd)) && Number(overrides.cost_usd) > 0 ? Number(overrides.cost_usd) : undefined,
+      duration_ms: Number.isFinite(Number(overrides.duration_ms)) && Number(overrides.duration_ms) > 0 ? Number(overrides.duration_ms) : undefined,
+      agent_telemetry: overrides.agent_telemetry || undefined,
     };
   };
 
@@ -159,6 +163,41 @@ export async function runAgentProviderExecution({
       finalSynthesis: act?.inputs?.final_synthesis === true,
     });
     return finalize(output);
+  }
+
+  if (cleanProvider === 'claude') {
+    const { runClaudeCliPrompt, buildClaudeAgentTelemetryRow } = await import('../claude_cli.js');
+    const promptText = String(prompts.instruction || prompts.goal || prompts.chatQuestion || '');
+    const result = await runClaudeCliPrompt({
+      workspaceRoot: providerOptions.workspaceRoot || providerOptions.workspace_root || process.cwd(),
+      cwd: providerOptions.cwd || process.cwd(),
+      prompt: promptText,
+      signal,
+      jobId,
+      model: cleanModel || '',
+      surface: 'agent_provider_execution',
+      agentId,
+      roleId,
+      timeoutMs: Number(providerOptions.timeoutMs || providerOptions.timeout_ms || process.env.CLAUDE_CLI_TIMEOUT_MS || 0),
+      traceMetadata: { provider: cleanProvider },
+    });
+    if (!result.ok) throw new Error(result.stderr || `Claude CLI provider failed for agent ${agentId}`);
+    const output = result.stdout || '';
+    if (typeof appendLocalLogs === 'function') appendLocalLogs(output, typeof memoryModeWithFallback === 'function' ? memoryModeWithFallback() : 'default');
+    return finalize(output, {
+      provider: 'claude',
+      model: result.used_model || cleanModel || 'claude',
+      usage: result.usage,
+      cost_usd: result.cost_usd,
+      duration_ms: result.duration_ms,
+      agent_telemetry: buildClaudeAgentTelemetryRow({
+        result,
+        agentId,
+        roleId,
+        modelRole: providerOptions.modelRole || providerOptions.model_role || '',
+        phase: providerOptions.phase || providerOptions.task_phase || '',
+      }),
+    });
   }
 
   if (cleanProvider === 'antigravity') {

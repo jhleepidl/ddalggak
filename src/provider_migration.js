@@ -22,6 +22,15 @@ const ANTIGRAVITY_KEYS = new Set([
   'google_ai_antigravity',
 ]);
 
+const CLAUDE_KEYS = new Set([
+  'claude',
+  'claude_cli',
+  'claude-cli',
+  'claude_code',
+  'claude-code',
+  'anthropic',
+]);
+
 const DISABLED_KEYS = new Set(['off', 'false', '0', 'disabled', 'none', 'no']);
 
 export function geminiCliDisabledByDefault() {
@@ -38,12 +47,17 @@ export function isAntigravityProvider(value = '') {
   return ANTIGRAVITY_KEYS.has(clean(value));
 }
 
+export function isClaudeProvider(value = '') {
+  return CLAUDE_KEYS.has(clean(value));
+}
+
 export function normalizeRuntimeProvider(raw = '', fallback = 'codex') {
   const key = clean(raw || fallback || 'codex');
   if (!key) return clean(fallback || 'codex');
   if (['chatgpt', 'gpt', 'openai'].includes(key)) return 'chatgpt';
   if (['codex', 'codex_cli', 'codex-cli'].includes(key)) return 'codex';
   if (['openai_compatible', 'openai-compatible', 'ollama', 'local', 'local_model', 'llamacpp', 'llama.cpp'].includes(key)) return 'openai_compatible';
+  if (isClaudeProvider(key)) return 'claude';
   if (isAntigravityProvider(key)) return 'antigravity';
   if (isGeminiProvider(key)) {
     if (!geminiCliDisabledByDefault()) return 'gemini';
