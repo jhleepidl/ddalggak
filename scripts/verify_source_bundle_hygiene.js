@@ -7,6 +7,7 @@ const targets = process.argv.slice(2);
 if (!targets.length) targets.push(process.cwd());
 
 const forbiddenPatterns = [
+  /(^|\/)\.git(\/|$)/,
   /(^|\/)runs(\/|$)/,
   /(^|\/)ddalggak-main\/docs(\/|$)/,
   /(^|\/)ddalggak\/docs(\/|$)/,
@@ -43,6 +44,7 @@ const forbiddenPatterns = [
   /(^|\/)\.env\.(?!example$).+$/,
   /\.log$/,
   /\.pyc$/,
+  /\.(pem|key|p12|pfx)$/i,
 ];
 
 function normalizePath(value) {
@@ -76,6 +78,11 @@ function listZip(zipPath) {
   return result.stdout.split(/\r?\n/g).filter(Boolean);
 }
 
+const requiredBundleFiles = [
+  'ddalggak/src/shared/openharness_contracts.js',
+  'ddalggak/src/shared/team_structure_v2.js',
+];
+
 let failures = [];
 for (const target of targets) {
   const abs = path.resolve(target);
@@ -89,6 +96,18 @@ for (const target of targets) {
     : (abs.endsWith('.zip') ? listZip(abs).filter(isForbidden) : (isForbidden(path.basename(abs)) ? [path.basename(abs)] : []));
   if (bad.length) {
     failures.push(`${target}: forbidden files found\n${bad.slice(0, 200).map((x) => `  - ${x}`).join('\n')}${bad.length > 200 ? `\n  ... ${bad.length - 200} more` : ''}`);
+  }
+  if (stat.isDirectory() && fs.existsSync(path.join(abs, 'ddalggak'))) {
+    const missing = requiredBundleFiles.filter((rel) => !fs.existsSync(path.join(abs, rel)));
+    if (missing.length) failures.push(`${target}: required source files missing\n${missing.map((x) => `  - ${x}`).join('\n')}`);
+  }
+  if (!stat.isDirectory() && abs.endsWith('.zip')) {
+    const entries = new Set(listZip(abs).map(normalizePath));
+    const prefixes = ['', ...[...entries].filter((entry) => entry.endsWith('/ddalggak/')).map((entry) => entry.slice(0, -'ddalggak/'.length))];
+    const missing = requiredBundleFiles.filter((rel) => !prefixes.some((prefix) => entries.has(`${prefix}${rel}`)));
+    if (entries.size && [...entries].some((entry) => /(^|\/)ddalggak\//.test(entry)) && missing.length) {
+      failures.push(`${target}: required source files missing\n${missing.map((x) => `  - ${x}`).join('\n')}`);
+    }
   }
 }
 

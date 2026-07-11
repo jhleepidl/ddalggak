@@ -9,7 +9,10 @@
     "trace:doctor": "node scripts/trace_doctor.js",
     "trace:bundle": "node scripts/trace_handoff_bundle.js",
     "agency:doctor": "node scripts/agency_focus_doctor.js",
-    "maintenance:doctor": "node scripts/maintenance_doctor.js"
+    "maintenance:doctor": "node scripts/maintenance_doctor.js",
+    "eval:live": "node scripts/run_live_scenarios.js",
+    "eval:probe": "node scripts/probe_provider_capabilities.js",
+    "eval:replay": "node scripts/replay_live_scenario.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

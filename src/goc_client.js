@@ -2946,6 +2946,52 @@ export class GocClient {
     };
   }
 
+  async ingestOpenHarnessRuntimeEvents(events = []) {
+    const rows = Array.isArray(events) ? events.filter((item) => item && typeof item === 'object') : [];
+    if (!rows.length) return { accepted: 0, duplicates: 0, projections: [] };
+    return await this._requestAny({
+      method: 'POST',
+      attempts: [
+        { path: '/api/runtime/events/ingest', body: { events: rows } },
+        { path: '/runtime/events/ingest', body: { events: rows } },
+        { path: '/v1/runtime/events/ingest', body: { events: rows } },
+      ],
+    });
+  }
+
+  async ingestHarnessEvaluationRun(summary = {}) {
+    const payload = summary && typeof summary === 'object' ? summary : {};
+    return await this._requestAny({
+      method: 'POST',
+      attempts: [
+        { path: '/api/evaluations/harness/runs/ingest', body: payload },
+        { path: '/evaluations/harness/runs/ingest', body: payload },
+      ],
+    });
+  }
+
+  async listPendingRuntimeCommands({ limit = 50, workerId = '' } = {}) {
+    return await this._requestAny({
+      method: 'GET',
+      attempts: [
+        { path: '/api/runtime/commands/pending', query: { limit, worker_id: workerId } },
+        { path: '/runtime/commands/pending', query: { limit, worker_id: workerId } },
+      ],
+    });
+  }
+
+  async acknowledgeRuntimeCommand(commandId, body = {}) {
+    const id = String(commandId || '').trim();
+    if (!id) throw new Error('acknowledgeRuntimeCommand requires commandId');
+    return await this._requestAny({
+      method: 'POST',
+      attempts: [
+        { path: `/api/runtime/commands/${encodeURIComponent(id)}/ack`, body },
+        { path: `/runtime/commands/${encodeURIComponent(id)}/ack`, body },
+      ],
+    });
+  }
+
   async mintUiToken(ttlSec) {
     const n = Number(ttlSec);
     const ttl = Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;

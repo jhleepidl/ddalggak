@@ -69,3 +69,21 @@ test('ensureGeminiWorkspaceConfig writes policy patch including mcp settings', (
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('resolveProviderRuntimeOptions exposes reasoning effort and harness variant for all CLI providers', () => {
+  const policy = {
+    providers: {
+      codex: { reasoning_effort: 'high', harness_variant_id: 'code_executor.codex.default.high.v1' },
+      claude: { effort: 'medium', harness_variant_id: 'code_executor.claude.default.medium.v1' },
+      antigravity: { reasoning_effort: 'provider_default', harness_variant_id: 'code_executor.antigravity.default.v1' },
+    },
+  };
+  const codex = resolveProviderRuntimeOptions({ runtimeExecutionPolicy: policy, provider: 'codex' });
+  const claude = resolveProviderRuntimeOptions({ runtimeExecutionPolicy: policy, provider: 'claude' });
+  const antigravity = resolveProviderRuntimeOptions({ runtimeExecutionPolicy: policy, provider: 'antigravity' });
+  assert.equal(codex.reasoningEffort, 'high');
+  assert.equal(codex.harnessVariantId, 'code_executor.codex.default.high.v1');
+  assert.equal(claude.reasoningEffort, 'medium');
+  assert.equal(claude.harnessVariantId, 'code_executor.claude.default.medium.v1');
+  assert.equal(antigravity.harnessVariantId, 'code_executor.antigravity.default.v1');
+});

@@ -103,6 +103,7 @@ export async function runClaudeCliPrompt({
   cwd,
   jobId = '',
   model = '',
+  effort = '',
   surface = 'claude_cli_prompt',
   agentId = '',
   roleId = '',
@@ -114,12 +115,14 @@ export async function runClaudeCliPrompt({
   const baseArgs = splitArgs(process.env.CLAUDE_CLI_ARGS || '');
   const requestedModel = String(model || process.env.CLAUDE_CLI_MODEL || process.env.CLAUDE_MODEL || '').trim();
   const modelArgs = requestedModel ? ['--model', requestedModel] : [];
+  const requestedEffort = String(effort || process.env.CLAUDE_CLI_EFFORT || process.env.CLAUDE_CODE_EFFORT_LEVEL || '').trim().toLowerCase();
+  const effortArgs = requestedEffort && requestedEffort !== 'provider_default' ? ['--effort', requestedEffort] : [];
   const workspacePath = path.resolve(String(workspaceRoot || cwd || process.cwd()).trim() || process.cwd());
   const commandCwd = path.resolve(String(cwd || workspacePath).trim() || workspacePath);
   const effectiveTimeoutMs = Number(timeoutMs || process.env.CLAUDE_CLI_TIMEOUT_MS || 0) > 0
     ? Number(timeoutMs || process.env.CLAUDE_CLI_TIMEOUT_MS)
     : 300000;
-  const result = await runCommand(command, [...baseArgs, ...modelArgs, '-p', '--output-format', 'json'], {
+  const result = await runCommand(command, [...baseArgs, ...modelArgs, ...effortArgs, '-p', '--output-format', 'json'], {
     cwd: commandCwd,
     timeoutMs: effectiveTimeoutMs,
     input: String(prompt || ''),
@@ -169,6 +172,7 @@ export async function runClaudeCliPrompt({
       num_turns: enriched.num_turns,
       session_id: enriched.session_id,
       parsed_json_output: enriched.parsed_json_output,
+      reasoning_effort: requestedEffort || null,
     },
   });
   return trace ? { ...enriched, llm_trace_id: trace.trace_id, llm_trace_dir: trace.trace_dir } : enriched;

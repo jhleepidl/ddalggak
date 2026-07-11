@@ -84,3 +84,18 @@ test('runtime execution policy preserves provider policies and approval matrix',
   assert.equal(policy.providers.gemini.approval_mode, 'plan');
   assert.equal(policy.providers.gemini.workspace_settings.mcpServers.docs.command, 'node');
 });
+
+test('runtime execution policy preserves provider-specific harness and reasoning controls', () => {
+  const policy = normalizeRuntimeExecutionPolicy({
+    providers: {
+      codex: { reasoning_effort: 'high', harness_variant_id: 'codex.high.v1' },
+      claude: { effort: 'medium', harness_variant_id: 'claude.medium.v1' },
+      antigravity: { reasoning_effort: 'provider_default', harness_variant_id: 'agy.default.v1' },
+    },
+  });
+  assert.equal(policy.providers.codex.reasoning_effort, 'high');
+  assert.equal(policy.providers.codex.harness_variant_id, 'codex.high.v1');
+  assert.equal(policy.providers.claude.effort, 'medium');
+  assert.equal(policy.providers.claude.harness_variant_id, 'claude.medium.v1');
+  assert.equal(policy.providers.antigravity.harness_variant_id, 'agy.default.v1');
+});

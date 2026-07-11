@@ -144,8 +144,34 @@ function normalizeCodexProviderPolicy(raw = {}) {
     sandbox_mode: cleanId(row.sandbox_mode || row.sandboxMode || 'workspace-write') || 'workspace-write',
     approval_policy: cleanId(row.approval_policy || row.approvalPolicy || 'never') || 'never',
     profile: clean(row.profile || ''),
+    reasoning_effort: cleanId(row.reasoning_effort || row.reasoningEffort || configOverrides.model_reasoning_effort || 'provider_default') || 'provider_default',
+    harness_variant_id: clean(row.harness_variant_id || row.harnessVariantId || ''),
     add_dirs: uniqStrings(row.add_dirs || row.addDirs || [], { limit: 16 }),
     config_overrides: configOverrides,
+    mcp_servers: mcpServers,
+  };
+}
+
+
+function normalizeClaudeProviderPolicy(raw = {}) {
+  const row = asObject(raw);
+  return {
+    effort: cleanId(row.effort || row.reasoning_effort || row.reasoningEffort || 'provider_default') || 'provider_default',
+    harness_variant_id: clean(row.harness_variant_id || row.harnessVariantId || ''),
+    extra_env: normalizeStringMap(row.extra_env || row.extraEnv || {}, { limit: 24 }),
+  };
+}
+
+function normalizeAntigravityProviderPolicy(raw = {}) {
+  const row = asObject(raw);
+  const workspaceSettings = asObject(row.workspace_settings || row.workspaceSettings);
+  const mcpServers = asObject(row.mcp_servers || row.mcpServers);
+  if (Object.keys(mcpServers).length > 0 && !workspaceSettings.mcpServers && !workspaceSettings.mcp_servers) workspaceSettings.mcpServers = mcpServers;
+  return {
+    reasoning_effort: cleanId(row.reasoning_effort || row.reasoningEffort || 'provider_default') || 'provider_default',
+    harness_variant_id: clean(row.harness_variant_id || row.harnessVariantId || ''),
+    workspace_settings: workspaceSettings,
+    extra_env: normalizeStringMap(row.extra_env || row.extraEnv || {}, { limit: 24 }),
     mcp_servers: mcpServers,
   };
 }
@@ -170,6 +196,8 @@ export function normalizeProviderRuntimePolicies(raw = {}) {
   const row = asObject(raw);
   return {
     codex: normalizeCodexProviderPolicy(row.codex || row.codex_cli || row.codexCli || {}),
+    claude: normalizeClaudeProviderPolicy(row.claude || row.claude_cli || row.claudeCli || {}),
+    antigravity: normalizeAntigravityProviderPolicy(row.antigravity || row.google_ai || row.googleAi || {}),
     gemini: normalizeGeminiProviderPolicy(row.gemini || row.gemini_cli || row.geminiCli || {}),
   };
 }
@@ -195,6 +223,8 @@ export function normalizeRuntimeExecutionPolicy(raw = {}) {
     approval_matrix: normalizeApprovalMatrix(row.approval_matrix || row.approvalMatrix || {}),
     providers: providerPolicies,
     codex: providerPolicies.codex,
+    claude: providerPolicies.claude,
+    antigravity: providerPolicies.antigravity,
     gemini: providerPolicies.gemini,
     execution_mode: taskLoopBase.execution_mode,
     workspace_write: taskLoopBase.workspace_write,
@@ -216,6 +246,8 @@ export function resolveProviderRuntimePolicy(runtimeExecution = {}, provider = '
   const policy = normalizeRuntimeExecutionPolicy(runtimeExecution);
   const key = cleanId(provider);
   if (key === 'codex') return policy.providers.codex;
+  if (key === 'claude' || key === 'anthropic') return policy.providers.claude;
+  if (key === 'antigravity' || key === 'google_ai') return policy.providers.antigravity;
   if (key === 'gemini') return policy.providers.gemini;
   return {};
 }
@@ -238,6 +270,17 @@ export function summarizeProviderRuntimePolicy(runtimeExecution = {}) {
         profile: policy.providers.codex.profile,
         add_dirs: policy.providers.codex.add_dirs,
         mcp_server_names: Object.keys(asObject(policy.providers.codex.mcp_servers)),
+      },
+      claude: {
+        effort: policy.providers.claude.effort,
+        harness_variant_id: policy.providers.claude.harness_variant_id || undefined,
+        env_keys: Object.keys(asObject(policy.providers.claude.extra_env)),
+      },
+      antigravity: {
+        reasoning_effort: policy.providers.antigravity.reasoning_effort,
+        harness_variant_id: policy.providers.antigravity.harness_variant_id || undefined,
+        env_keys: Object.keys(asObject(policy.providers.antigravity.extra_env)),
+        mcp_server_names: Object.keys(asObject(policy.providers.antigravity.mcp_servers)),
       },
       gemini: {
         approval_mode: policy.providers.gemini.approval_mode,

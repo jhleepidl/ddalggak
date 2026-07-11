@@ -189,6 +189,7 @@ import {
 } from "./execution_requirements.js";
 import { normalizeRuntimeExecutionPolicy } from "./runtime_execution_policy.js";
 import { resolveProviderRuntimeOptions } from "./provider_runtime_policy.js";
+import { applyHarnessVariantToPrompt } from "../evaluation/harness_variant_registry.js";
 import { summarizeProviderInteractionCapabilities } from "./provider_interaction_capabilities.js";
 import { summarizeRuntimeCheckpointRef, writeRuntimeCheckpointBundle } from "./runtime_checkpointing.js";
 import { appendPromptTelemetry, estimateTextTokens as estimatePromptTelemetryTokens } from "./prompt_telemetry.js";
@@ -1397,7 +1398,7 @@ async function codexImplement(jobId, instruction, signal = null, opts = {}) {
   const cliSupport = ensureCliWorkspaceSupportFiles(jobId, { provider: "codex", roleMemo, kbContract, instruction, goal: instruction, runtimeExecutionPolicy, providerOptions, allowDirectExecution });
   const compactInstruction = compactTaskText(instruction, { maxChars: 2800 });
   const executionRequirementsBlock = formatExecutionRequirementsBlock(executionRequirements);
-  const prompt = [
+  const basePrompt = [
     ctx,
     "",
     "Codex workspace context is preloaded via .codex/instructions.md.",
@@ -1420,6 +1421,15 @@ ${executionRequirementsBlock}` : "",
     compactInstruction,
     "",
   ].join("\n");
+  const harnessAdaptation = applyHarnessVariantToPrompt({
+    basePrompt,
+    provider: 'codex',
+    role: String(opts.roleId || 'builder').trim().toLowerCase() || 'builder',
+    model: providerOptions.model || providerOptions.profile || '',
+    reasoningEffort: providerOptions.reasoningEffort || '',
+    variantId: providerOptions.harnessVariantId || providerOptions.harness_variant_id || '',
+  });
+  const prompt = harnessAdaptation.prompt;
   appendPromptTelemetry({
     jobDir: runDir(jobId),
     sharedDir: runSharedDir(jobId),
@@ -1443,6 +1453,8 @@ ${executionRequirementsBlock}` : "",
       metadata: {
         sandbox_mode: providerOptions.sandboxMode || undefined,
         approval_policy: providerOptions.approvalPolicy || undefined,
+        reasoning_effort: providerOptions.reasoningEffort || harnessAdaptation.variant?.reasoning_effort || undefined,
+        harness_variant_id: harnessAdaptation.variant?.id || undefined,
       },
     },
   });
@@ -1453,6 +1465,7 @@ ${executionRequirementsBlock}` : "",
     signal,
     jobId,
     model: providerOptions.model || providerOptions.model_id || process.env.CODEX_MODEL || '',
+    reasoningEffort: providerOptions.reasoningEffort || harnessAdaptation.variant?.reasoning_effort || '',
     profile: providerOptions.profile || process.env.CODEX_PROFILE || '',
     addDirs: providerOptions.addDirs || [],
     sandboxMode: providerOptions.sandboxMode,
@@ -1560,7 +1573,7 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
   const failoverNote = opts.failoverDecision
     ? `Provider failover: Gemini could not serve the request because of ${String(opts.failoverDecision?.failure?.category || opts.failoverDecision?.reason || 'transient capacity').trim()}. Continue with the best available answer; mention missing live-web capability only if it materially affects the answer.`
     : '';
-  const prompt = [
+  const basePrompt = [
     internalLanguagePolicyBlock({ surfaceLocale }),
     'You are a general-purpose assistant agent invoked by Telegram /chat.',
     'This execution is not code-editing only. Answer the latest user request directly.',
@@ -1585,6 +1598,15 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
     outputGuide,
     buildLocalizedSurfaceLabels(surfaceLocale).finalAnswer,
   ].filter(Boolean).join('\n\n');
+  const harnessAdaptation = applyHarnessVariantToPrompt({
+    basePrompt,
+    provider: 'codex',
+    role: roleKey,
+    model: providerOptions.model || providerOptions.profile || '',
+    reasoningEffort: providerOptions.reasoningEffort || '',
+    variantId: providerOptions.harnessVariantId || providerOptions.harness_variant_id || '',
+  });
+  const prompt = harnessAdaptation.prompt;
   appendPromptTelemetry({
     jobDir: runDir(jobId),
     sharedDir: runSharedDir(jobId),
@@ -1612,6 +1634,8 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
         failover_from: opts.failoverDecision?.from_provider || undefined,
         failover_reason: opts.failoverDecision?.reason || undefined,
         prompt_mode: 'direct_answer_failover',
+        reasoning_effort: providerOptions.reasoningEffort || harnessAdaptation.variant?.reasoning_effort || undefined,
+        harness_variant_id: harnessAdaptation.variant?.id || undefined,
       },
     },
   });
@@ -1632,6 +1656,7 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
     signal,
     jobId,
     model: providerOptions.model || process.env.CODEX_ASSIST_MODEL || process.env.CODEX_MODEL || '',
+    reasoningEffort: providerOptions.reasoningEffort || harnessAdaptation.variant?.reasoning_effort || '',
     profile: providerOptions.profile || process.env.CODEX_ASSIST_PROFILE || process.env.CODEX_PROFILE || '',
     addDirs: providerOptions.addDirs || [],
     sandboxMode: providerOptions.sandboxMode,

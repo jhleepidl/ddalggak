@@ -1,0 +1,6 @@
+{
+  "name": "ai-rooms-live-scenario-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test checks/clamp_check.js" }
+}

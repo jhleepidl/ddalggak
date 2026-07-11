@@ -125,14 +125,16 @@ function attachCodexTrace({ result, jobId, surface, agentId, roleId, model, prom
   return trace ? { ...withModel, llm_trace_id: trace.trace_id, llm_trace_dir: trace.trace_dir } : withModel;
 }
 
-export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId = "", model = "", profile = "", addDirs = [], configOverrides = {}, sandboxMode = "", approvalPolicy = "", env = {}, surface = "codex_exec", agentId = "", roleId = "", traceMetadata = {}, timeoutMs = 0 }) {
+export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId = "", model = "", reasoningEffort = "", profile = "", addDirs = [], configOverrides = {}, sandboxMode = "", approvalPolicy = "", env = {}, surface = "codex_exec", agentId = "", roleId = "", traceMetadata = {}, timeoutMs = 0 }) {
   // Requires Codex CLI logged in on the server
+  const command = String(process.env.CODEX_CLI_COMMAND || "codex").trim() || "codex";
   const requestedSandboxMode = String(sandboxMode || process.env.CODEX_SANDBOX_MODE || "workspace-write").trim() || "workspace-write";
   const requestedApprovalPolicy = String(approvalPolicy || process.env.CODEX_APPROVAL_POLICY || "never").trim() || "never";
   const effectiveTimeoutMs = Number(timeoutMs || process.env.CODEX_EXEC_TIMEOUT_MS || 0) > 0 ? Number(timeoutMs || process.env.CODEX_EXEC_TIMEOUT_MS) : 45 * 60 * 1000;
   const workspacePath = path.resolve(String(workspaceRoot || cwd || process.cwd()).trim() || process.cwd());
   const commandCwd = path.resolve(String(cwd || workspacePath).trim() || workspacePath);
   const requestedModel = String(model || "").trim();
+  const requestedReasoningEffort = String(reasoningEffort || process.env.CODEX_REASONING_EFFORT || "").trim().toLowerCase();
   const requestedProfile = String(profile || process.env.CODEX_PROFILE || "").trim();
   const extraDirs = Array.isArray(addDirs) ? addDirs.map((entry) => String(entry || "").trim()).filter(Boolean) : [];
   const approvalResolution = resolveCodexWorkspaceApprovalPolicy({
@@ -150,6 +152,7 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
   if (["1", "true", "yes", "on"].includes(String(process.env.CODEX_ENABLE_WEB_SEARCH || "").trim().toLowerCase())) envConfigOverrides["tools.web_search"] = true;
   const mergedConfigOverrides = {
     ...envConfigOverrides,
+    ...(requestedReasoningEffort && requestedReasoningEffort !== 'provider_default' ? { model_reasoning_effort: requestedReasoningEffort } : {}),
     ...(configOverrides && typeof configOverrides === "object" ? configOverrides : {}),
   };
   appendCodexDebugLog(`[codex] job=${String(jobId || "").trim() || "-"} cwd=${commandCwd} workspace=${workspacePath} model=${requestedModel || "(default)"} approval=${effectiveApprovalPolicy}${approvalResolution.workspaceAutoApprove ? '/workspace-auto' : ''}`);
@@ -190,11 +193,12 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
     timeout_ms: effectiveTimeoutMs,
     add_dirs: extraDirs,
     profile: requestedProfile || null,
+    reasoning_effort: requestedReasoningEffort || null,
     ...asObject(traceMetadata),
   };
   const traceModel = requestedModel || requestedProfile || "default";
   const modernArgs = [...modelArgs, ...profileArgs, "exec", "-C", workspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "-c", `approval_policy=${cliApprovalPolicy}`, ...configArgs, "-"];
-  const modern = await runCommand("codex", modernArgs, { cwd: commandCwd, timeoutMs: effectiveTimeoutMs, input: prompt, abortSignal: signal, env });
+  const modern = await runCommand(command, modernArgs, { cwd: commandCwd, timeoutMs: effectiveTimeoutMs, input: prompt, abortSignal: signal, env });
   if (modern.ok) return attachCodexTrace({ result: modern, jobId, surface, agentId, roleId, model: traceModel, prompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: modernArgs, compatibility_retry: false } });
 
   // Fallback for older codex-cli variants that still support this flag in `exec`.
@@ -207,7 +211,7 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
   if (!optionCompatibilityError) return attachCodexTrace({ result: modern, jobId, surface, agentId, roleId, model: traceModel, prompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: modernArgs, compatibility_retry: false } });
 
   const legacyArgs = [...modelArgs, ...profileArgs, "exec", "-C", workspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "--ask-for-approval", cliApprovalPolicy, "-"];
-  const legacy = await runCommand("codex", legacyArgs, { cwd: commandCwd, timeoutMs: effectiveTimeoutMs, input: prompt, abortSignal: signal, env });
+  const legacy = await runCommand(command, legacyArgs, { cwd: commandCwd, timeoutMs: effectiveTimeoutMs, input: prompt, abortSignal: signal, env });
   if (legacy.ok) return attachCodexTrace({ result: legacy, jobId, surface, agentId, roleId, model: traceModel, prompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: legacyArgs, compatibility_retry: true, primary_error: modern.stderr || null } });
 
   // If legacy flag is unsupported too, keep modern error as the primary one.

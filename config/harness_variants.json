@@ -1,0 +1,51 @@
+{
+  "schema_version": "ddalggak.harness_variant_registry/v1",
+  "variants": [
+    {
+      "id": "code_executor.codex.default.medium.v1",
+      "role": "code_executor",
+      "provider": "codex",
+      "reasoning_effort": "medium",
+      "status": "challenger",
+      "provider_runtime": {
+        "config_overrides": {
+          "model_reasoning_effort": "medium"
+        }
+      },
+      "native_delegation": {
+        "mode": "allowed",
+        "max_depth": 2,
+        "max_parallel_agents": 3,
+        "prefer_native_for": [
+          "repository exploration"
+        ],
+        "prefer_room_external_for": [
+          "cross-provider review",
+          "durable state changes"
+        ]
+      }
+    },
+    {
+      "id": "code_executor.claude.default.medium.v1",
+      "role": "code_executor",
+      "provider": "claude",
+      "reasoning_effort": "medium",
+      "status": "challenger",
+      "provider_runtime": {
+        "effort": "medium"
+      },
+      "native_delegation": {
+        "mode": "allowed",
+        "max_depth": 2,
+        "max_parallel_agents": 3,
+        "prefer_native_for": [
+          "repository exploration"
+        ],
+        "prefer_room_external_for": [
+          "cross-provider review",
+          "durable state changes"
+        ]
+      }
+    }
+  ]
+}

@@ -123,12 +123,14 @@ export function composeRuntimeCapabilities({
           jobs,
           logger: runtimeLogger,
           runtimePolicy,
+          gocClient: hasGoc ? gocClient : null,
         });
         if (hasGoc) {
           return new GocRunEventSink({
             executionGraph,
             fallbackSink: localSink,
             runtimePolicy,
+            logger: runtimeLogger,
           });
         }
         return localSink;
@@ -165,3 +167,7 @@ export {
   LocalRunEventSink,
   GocRunEventSink,
 } from "./run_event_sink.js";
+
+export { OpenHarnessRunEventOutbox } from './run_event_outbox.js';
+export { RuntimeCommandProcessor } from './runtime_command_processor.js';
+export { createDefaultRuntimeCommandHandlers, startRuntimeCommandWorker } from './runtime_command_worker.js';

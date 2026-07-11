@@ -1,0 +1,54 @@
+{
+  "schema_version": "ddalggak.live_scenario/v1",
+  "id": "coding_smoke_add_clamp",
+  "suite": "coding_live_v1",
+  "title": "Implement a bounded utility fix and run the real test command",
+  "goal": "Implement clamp(value, min, max) in src/math.js so the included tests pass. Keep the change minimal.",
+  "acceptance_criteria": [
+    "npm test exits successfully",
+    "Only src/** and checks/** may change",
+    "Do not modify package metadata"
+  ],
+  "fixture": {
+    "path": "../fixtures/tiny_node_project",
+    "ignore": [
+      ".git/**",
+      "node_modules/**",
+      "runs/**"
+    ]
+  },
+  "matrix": [
+    {
+      "provider": "codex",
+      "harness_variant_id": "code_executor.codex.default.high.v1",
+      "repetitions": 1,
+      "timeout_ms": 900000
+    }
+  ],
+  "expectations": {
+    "provider_ok": true,
+    "files": {
+      "patch_required": true,
+      "allowed_changed": [
+        "src/**",
+        "checks/**"
+      ],
+      "forbidden_changed": [
+        "package.json",
+        "package-lock.json",
+        ".env",
+        "**/.env"
+      ]
+    },
+    "commands": [
+      {
+        "command": "npm",
+        "args": [
+          "test"
+        ],
+        "timeout_ms": 120000,
+        "required": true
+      }
+    ]
+  }
+}

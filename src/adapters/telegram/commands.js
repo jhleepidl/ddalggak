@@ -157,7 +157,7 @@ const HELP_TEXT = [
   "- /chat 또는 /c <message>: 이 Telegram room에 요청하기",
   "- /ask 또는 /a <question>: legacy quick-question alias. 일반 사용은 /chat 권장",
   "- /team 또는 /t <goal>: 팀 검토/리뷰 깊이로 답변",
-  "- /loop 또는 /l [--loops n|n] <goal>: bounded loop 작업 시작",
+  "- /loop 또는 /l [--loops n] <goal>: bounded loop 작업 시작",
   "- /room 또는 /r: 이 채팅방의 AI Room / Room Package 설정 보기",
   "- /companions 또는 /companion: room companion roster와 memory boundary 보기",
   "- /context project-only|clean-slate|exclude <source>|reset: context 사용 범위 조절",

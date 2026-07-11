@@ -24,3 +24,12 @@
 - Human-authored preset specs belong under `presets/*` and should remain text-first (`preset.yaml` + `prompt.md`).
 - Conversation-level `/agents` semantics are preference-based: pin/ban presets, suppress roles/skills, and adjust control/review settings. Legacy commands remain aliases over that preference state.
 - `SupervisorRuntime` is a control actor layered on runtime execution, not a worker role.
+
+## Cross-repository development workflow
+
+- Canonical architecture and development coordination live in the separate AI Rooms docs repository, not in this repository's ignored `docs/` directory.
+- Before implementation, read the active `TASK-####` contract from `coordination/active/` in the docs repository.
+- Work only in an isolated task branch/worktree. Do not import ZIP snapshots into `main`, the management checkout, or a deployed release.
+- A task has one writer. When assigned as reviewer, do not edit the writer's worktree.
+- Source-development agents and Telegram runtime agents are separate. Runtime runs must not modify development repositories, task worktrees, or releases.
+- External patches must carry `PATCH_MANIFEST.json` and pass the docs repository's `scripts/dev/import-patch.sh` checks.

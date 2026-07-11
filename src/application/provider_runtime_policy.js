@@ -93,8 +93,54 @@ export function resolveProviderRuntimeOptions({
       sandboxMode: clean(actionInputs.codex_sandbox_mode || actionInputs.codexSandboxMode || merged.sandbox_mode) || 'workspace-write',
       approvalPolicy: clean(actionInputs.codex_approval_policy || actionInputs.codexApprovalPolicy || merged.approval_policy) || (approvalMatrix.codex_exec === 'ask' ? 'untrusted' : 'never'),
       profile: clean(actionInputs.codex_profile || actionInputs.codexProfile || merged.profile),
+      reasoningEffort: clean(actionInputs.codex_reasoning_effort || actionInputs.codexReasoningEffort || merged.reasoning_effort || merged.config_overrides?.model_reasoning_effort),
+      harnessVariantId: clean(actionInputs.harness_variant_id || actionInputs.harnessVariantId || actionInputs.codex_harness_variant_id || actionInputs.codexHarnessVariantId || merged.harness_variant_id),
       addDirs,
       configOverrides,
+      providerPolicy: merged,
+      approvalMatrix,
+    };
+  }
+
+  if (String(provider || '').trim().toLowerCase() === 'claude') {
+    const merged = {
+      ...providerPolicy,
+      ...providerAgentPolicy,
+      ...actionProviderPolicy,
+      extra_env: mergeConfigObjects(
+        mergeConfigObjects(providerPolicy.extra_env, providerAgentPolicy.extra_env),
+        actionProviderPolicy.extra_env,
+      ),
+    };
+    return {
+      effort: clean(actionInputs.claude_effort || actionInputs.claudeEffort || actionInputs.reasoning_effort || actionInputs.reasoningEffort || merged.effort),
+      reasoningEffort: clean(actionInputs.claude_effort || actionInputs.claudeEffort || actionInputs.reasoning_effort || actionInputs.reasoningEffort || merged.effort),
+      harnessVariantId: clean(actionInputs.harness_variant_id || actionInputs.harnessVariantId || actionInputs.claude_harness_variant_id || actionInputs.claudeHarnessVariantId || merged.harness_variant_id),
+      extraEnv: merged.extra_env,
+      providerPolicy: merged,
+      approvalMatrix,
+    };
+  }
+
+  if (String(provider || '').trim().toLowerCase() === 'antigravity') {
+    const merged = {
+      ...providerPolicy,
+      ...providerAgentPolicy,
+      ...actionProviderPolicy,
+      workspace_settings: mergeConfigObjects(
+        mergeConfigObjects(providerPolicy.workspace_settings, providerAgentPolicy.workspace_settings),
+        actionProviderPolicy.workspace_settings,
+      ),
+      extra_env: mergeConfigObjects(
+        mergeConfigObjects(providerPolicy.extra_env, providerAgentPolicy.extra_env),
+        actionProviderPolicy.extra_env,
+      ),
+    };
+    return {
+      reasoningEffort: clean(actionInputs.antigravity_reasoning_effort || actionInputs.antigravityReasoningEffort || actionInputs.reasoning_effort || actionInputs.reasoningEffort || merged.reasoning_effort),
+      harnessVariantId: clean(actionInputs.harness_variant_id || actionInputs.harnessVariantId || actionInputs.antigravity_harness_variant_id || actionInputs.antigravityHarnessVariantId || merged.harness_variant_id),
+      workspaceSettings: merged.workspace_settings,
+      extraEnv: merged.extra_env,
       providerPolicy: merged,
       approvalMatrix,
     };
@@ -151,10 +197,18 @@ export function buildProviderRuntimePolicySummary({ runtimeExecutionPolicy = {},
     lines.push(`sandbox_mode=${clean(options.sandboxMode || policy.providers?.codex?.sandbox_mode || '') || 'workspace-write'}`);
     lines.push(`approval_policy=${clean(options.approvalPolicy || policy.providers?.codex?.approval_policy || '') || 'never'}`);
     if (clean(options.profile || policy.providers?.codex?.profile || '')) lines.push(`profile=${clean(options.profile || policy.providers?.codex?.profile || '')}`);
+    if (clean(options.reasoningEffort || policy.providers?.codex?.reasoning_effort || '')) lines.push(`reasoning_effort=${clean(options.reasoningEffort || policy.providers?.codex?.reasoning_effort || '')}`);
+    if (clean(options.harnessVariantId || policy.providers?.codex?.harness_variant_id || '')) lines.push(`harness_variant_id=${clean(options.harnessVariantId || policy.providers?.codex?.harness_variant_id || '')}`);
     const addDirs = uniqStrings(options.addDirs || policy.providers?.codex?.add_dirs || [], { limit: 16 });
     if (addDirs.length > 0) lines.push(`add_dirs=${addDirs.join(', ')}`);
     const mcpNames = Object.keys(asObject(options.providerPolicy?.mcp_servers || policy.providers?.codex?.mcp_servers));
     if (mcpNames.length > 0) lines.push(`mcp_servers=${mcpNames.join(', ')}`);
+  } else if (providerKey === 'claude') {
+    lines.push(`reasoning_effort=${clean(options.reasoningEffort || options.effort || policy.providers?.claude?.effort || '') || 'provider_default'}`);
+    if (clean(options.harnessVariantId || policy.providers?.claude?.harness_variant_id || '')) lines.push(`harness_variant_id=${clean(options.harnessVariantId || policy.providers?.claude?.harness_variant_id || '')}`);
+  } else if (providerKey === 'antigravity') {
+    lines.push(`reasoning_effort=${clean(options.reasoningEffort || policy.providers?.antigravity?.reasoning_effort || '') || 'provider_default'}`);
+    if (clean(options.harnessVariantId || policy.providers?.antigravity?.harness_variant_id || '')) lines.push(`harness_variant_id=${clean(options.harnessVariantId || policy.providers?.antigravity?.harness_variant_id || '')}`);
   } else if (providerKey === 'gemini') {
     lines.push(`approval_mode=${clean(options.approvalMode || policy.providers?.gemini?.approval_mode || '') || 'default'}`);
     lines.push(`settings_overwrite=${clean(options.settingsOverwrite || policy.providers?.gemini?.settings_overwrite || '') || 'merge'}`);

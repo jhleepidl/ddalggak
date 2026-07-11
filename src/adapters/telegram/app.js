@@ -16,6 +16,7 @@ import {
 import { createTelegramUploadService } from "./uploads.js";
 import * as runtimeCore from "../../application/telegram_runtime_ops.js";
 import { startModelCatalogRefreshScheduler } from "../../application/model_catalog_refresh.js";
+import { createDefaultRuntimeCommandHandlers, startRuntimeCommandWorker } from "../../runtime_capabilities/runtime_command_worker.js";
 import {
   sendChatStatus,
   sendAgentOrToolListQuick,
@@ -253,11 +254,19 @@ export async function startTelegramApp({ token = runtimeCore.TOKEN } = {}) {
   }
 
   const modelCatalogRefreshScheduler = startModelCatalogRefreshScheduler({ logger: console });
+  const runtimeCommandWorker = startRuntimeCommandWorker({
+    client: runtimeCore.gocReady ? runtimeCore.gocClient : null,
+    handlers: createDefaultRuntimeCommandHandlers({
+      cancelJobExecution: runtimeCore.cancelJobExecution,
+    }),
+    logger: console,
+  });
 
   const shutdown = createShutdownHandler({
     bot,
     releaseLock: () => {
       try { modelCatalogRefreshScheduler.stop(); } catch {}
+      try { runtimeCommandWorker.stop(); } catch {}
       singleInstanceLock.release();
     },
     processImpl: process,
@@ -350,5 +359,6 @@ export async function startTelegramApp({ token = runtimeCore.TOKEN } = {}) {
     onMessage,
     shutdown,
     uploadService,
+    runtimeCommandWorker,
   };
 }

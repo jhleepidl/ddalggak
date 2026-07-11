@@ -5,6 +5,7 @@ import { getModelNode } from './model_node_registry.js';
 import { formatProviderFailoverNote, resolveProviderFailoverDecision } from './provider_failover_policy.js';
 import { isTaskLoopRuntimeExecutionPolicy } from './execution_requirements.js';
 import { migrateProviderAwayFromGemini, sanitizeGeminiModelForProvider } from '../provider_migration.js';
+import { applyHarnessVariantToPrompt } from '../evaluation/harness_variant_registry.js';
 
 
 function shouldUseCodexAssistForNonCodingRole({ roleId = '', act = null, runtimeExecutionPolicy = {} } = {}) {
@@ -167,7 +168,16 @@ export async function runAgentProviderExecution({
 
   if (cleanProvider === 'claude') {
     const { runClaudeCliPrompt, buildClaudeAgentTelemetryRow } = await import('../claude_cli.js');
-    const promptText = String(prompts.instruction || prompts.goal || prompts.chatQuestion || '');
+    const basePromptText = String(prompts.instruction || prompts.goal || prompts.chatQuestion || '');
+    const harnessAdaptation = applyHarnessVariantToPrompt({
+      basePrompt: basePromptText,
+      provider: 'claude',
+      role: roleId || 'assistant',
+      model: cleanModel || '',
+      reasoningEffort: providerOptions.reasoningEffort || providerOptions.effort || '',
+      variantId: providerOptions.harnessVariantId || providerOptions.harness_variant_id || '',
+    });
+    const promptText = harnessAdaptation.prompt;
     const result = await runClaudeCliPrompt({
       workspaceRoot: providerOptions.workspaceRoot || providerOptions.workspace_root || process.cwd(),
       cwd: providerOptions.cwd || process.cwd(),
@@ -175,11 +185,12 @@ export async function runAgentProviderExecution({
       signal,
       jobId,
       model: cleanModel || '',
+      effort: providerOptions.effort || providerOptions.reasoningEffort || harnessAdaptation.variant?.reasoning_effort || '',
       surface: 'agent_provider_execution',
       agentId,
       roleId,
       timeoutMs: Number(providerOptions.timeoutMs || providerOptions.timeout_ms || process.env.CLAUDE_CLI_TIMEOUT_MS || 0),
-      traceMetadata: { provider: cleanProvider },
+      traceMetadata: { provider: cleanProvider, harness_variant_id: harnessAdaptation.variant?.id || null, harness_variant_hash: harnessAdaptation.variant?.variant_hash || null, reasoning_effort: providerOptions.effort || providerOptions.reasoningEffort || harnessAdaptation.variant?.reasoning_effort || null },
     });
     if (!result.ok) throw new Error(result.stderr || `Claude CLI provider failed for agent ${agentId}`);
     const output = result.stdout || '';
@@ -202,7 +213,16 @@ export async function runAgentProviderExecution({
 
   if (cleanProvider === 'antigravity') {
     const { runAntigravityPrompt } = await import('../antigravity.js');
-    const promptText = String(prompts.instruction || prompts.goal || prompts.chatQuestion || '');
+    const basePromptText = String(prompts.instruction || prompts.goal || prompts.chatQuestion || '');
+    const harnessAdaptation = applyHarnessVariantToPrompt({
+      basePrompt: basePromptText,
+      provider: 'antigravity',
+      role: roleId || 'assistant',
+      model: cleanModel || '',
+      reasoningEffort: providerOptions.reasoningEffort || '',
+      variantId: providerOptions.harnessVariantId || providerOptions.harness_variant_id || '',
+    });
+    const promptText = harnessAdaptation.prompt;
     const result = await runAntigravityPrompt({
       workspaceRoot: providerOptions.workspaceRoot || providerOptions.workspace_root || process.cwd(),
       cwd: providerOptions.cwd || process.cwd(),
@@ -214,7 +234,7 @@ export async function runAgentProviderExecution({
       agentId,
       roleId,
       timeoutMs: Number(providerOptions.timeoutMs || providerOptions.timeout_ms || process.env.ANTIGRAVITY_TIMEOUT_MS || 0),
-      traceMetadata: { provider: cleanProvider, migrated_from_provider: providerMigration.migrated_from_gemini ? 'gemini' : undefined },
+      traceMetadata: { provider: cleanProvider, migrated_from_provider: providerMigration.migrated_from_gemini ? 'gemini' : undefined, harness_variant_id: harnessAdaptation.variant?.id || null, harness_variant_hash: harnessAdaptation.variant?.variant_hash || null, reasoning_effort: providerOptions.reasoningEffort || harnessAdaptation.variant?.reasoning_effort || null },
     });
     if (!result.ok) throw new Error(result.stderr || `Antigravity provider failed for agent ${agentId}`);
     const output = result.stdout || '';

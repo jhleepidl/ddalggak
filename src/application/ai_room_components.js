@@ -50,6 +50,69 @@ export function stripPrivateRoomComponentFields(value, depth = 0) {
   return out;
 }
 
+
+
+const DOMAIN_AGENT_ALIAS_SPECS = Object.freeze({
+  creative_writing: [
+    {
+      canonical: 'canon_reviewer',
+      aliases: ['continuity_reviewer', 'continuity_checker', 'canon_checker'],
+      title: 'Canon Reviewer',
+      description: 'Review canon facts, character voice, motivation, and setting consistency.',
+    },
+    {
+      canonical: 'continuity_checker',
+      aliases: ['continuity_reviewer', 'canon_reviewer', 'timeline_reviewer'],
+      title: 'Continuity Checker',
+      description: 'Check timeline, plot continuity, unresolved contradictions, and foreshadowing.',
+    },
+    {
+      canonical: 'story_planner',
+      aliases: ['plot_planner', 'outline_planner'],
+      title: 'Story Planner',
+      description: 'Plan story structure, scenes, character arcs, and plot progression.',
+    },
+    {
+      canonical: 'revision_synthesizer',
+      aliases: ['style_editor', 'revision_editor', 'reader_advocate'],
+      title: 'Revision Synthesizer',
+      description: 'Combine draft and review findings into a coherent revision plan or revised draft.',
+    },
+  ],
+});
+
+function agentIdentity(raw = {}) {
+  if (typeof raw === 'string') return slugify(raw, 'agent');
+  const row = asObject(raw);
+  return slugify(row.local_id || row.role || row.role_id || row.id || row.agent_id || row.title || row.name || 'agent', 'agent');
+}
+
+function ensureDomainAgentAliases(agentRows = [], domainLabel = '') {
+  const rows = [...asArray(agentRows)];
+  const specs = asArray(DOMAIN_AGENT_ALIAS_SPECS[slugify(domainLabel, 'general_workbench')]);
+  if (!specs.length) return rows;
+  const existing = new Set(rows.map(agentIdentity));
+  for (const spec of specs) {
+    const canonical = slugify(spec.canonical, 'agent');
+    if (existing.has(canonical)) continue;
+    const aliasSet = new Set(asArray(spec.aliases).map((value) => slugify(value, 'agent')));
+    const source = rows.find((row) => aliasSet.has(agentIdentity(row)));
+    const base = typeof source === 'string' ? {} : asObject(source);
+    rows.push({
+      ...base,
+      id: canonical,
+      agent_id: canonical,
+      role: canonical,
+      title: cleanText(spec.title || canonical, { maxLen: 120 }),
+      description: cleanText(base.description || base.summary || spec.description || '', { maxLen: 1200 }),
+      alias_of: source ? agentIdentity(source) : undefined,
+      tags: uniqueStrings([...(asArray(base.tags)), domainLabel, canonical, ...(asArray(spec.aliases))], { max: 32, lower: true }),
+    });
+    existing.add(canonical);
+  }
+  return rows;
+}
+
 export const ROOM_COMPONENT_TYPES = Object.freeze({
   AGENT: 'agent_card',
   MEMORY_SCHEMA: 'memory_schema_card',
@@ -167,7 +230,8 @@ export function buildRoomComponentsFromPackage(roomPackage = {}) {
     : asArray(pkg.agent_cards || pkg.agentCards).length
       ? asArray(pkg.agent_cards || pkg.agentCards)
       : uniqueStrings(pkg.agents || pkg.agent_roles || pkg.agentRoles || [], { max: 32, lower: true });
-  const agents = agentRows.map((agent) => normalizeAgentCard(agent, { sourcePackageId: packageId, domainLabel }));
+  const agents = ensureDomainAgentAliases(agentRows, domainLabel)
+    .map((agent) => normalizeAgentCard(agent, { sourcePackageId: packageId, domainLabel }));
   const memorySchema = normalizeMemorySchemaCard(
     asObject(rawComponents.memory_schema || rawComponents.memorySchema || pkg.memory_schema || pkg.memorySchema),
     { sourcePackageId: packageId, domainLabel },
@@ -240,6 +304,10 @@ export function augmentRoomPackageWithComponents(roomPackage = {}) {
   const library = buildRoomComponentsFromPackage(pkg);
   return {
     ...pkg,
+    agents: uniqueStrings([
+      ...asArray(pkg.agents || pkg.agent_roles || pkg.agentRoles),
+      ...library.agents.map((agent) => agent.local_id || agent.role),
+    ], { max: 32, lower: true }),
     component_model: 'composable_room_components_v1',
     components: library,
     composition_policy: {

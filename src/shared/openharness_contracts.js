@@ -274,14 +274,37 @@ export function buildHarnessPackageRef(raw = {}) {
 
 export function buildRunTraceRecord(eventType = '', payload = {}, extra = {}) {
   const cleanType = cleanText(eventType, { lower: true, maxLen: 96 });
+  const normalizedPayload = asObject(payload);
+  const jobId = cleanText(extra.jobId || extra.job_id || '', { maxLen: 128 }) || undefined;
+  const runId = cleanText(extra.runId || extra.run_id || normalizedPayload.run_id || normalizedPayload.runId || '', { maxLen: 128 }) || undefined;
+  const eventId = cleanText(extra.eventId || extra.event_id || '', { maxLen: 200 }) || `evt_${crypto.randomUUID()}`;
+  const eventSequence = Math.max(0, Math.floor(Number(extra.eventSequence ?? extra.event_sequence ?? 0) || 0));
+  const aggregateType = cleanText(extra.aggregateType || extra.aggregate_type || (runId ? 'run' : (jobId ? 'job' : 'runtime')), { lower: true, maxLen: 64 }) || 'runtime';
+  const aggregateId = cleanText(extra.aggregateId || extra.aggregate_id || runId || jobId || eventId, { maxLen: 160 }) || eventId;
   return {
     schema_version: OPENHARNESS_RUN_TRACE_SCHEMA_VERSION,
     sync_schema_version: OPENHARNESS_RUN_SYNC_SCHEMA_VERSION,
+    event_id: eventId,
+    idempotency_key: eventId,
+    event_sequence: eventSequence,
+    correlation_id: cleanText(extra.correlationId || extra.correlation_id || runId || jobId || eventId, { maxLen: 200 }) || eventId,
+    causation_id: cleanText(extra.causationId || extra.causation_id || normalizedPayload.causation_id || '', { maxLen: 200 }) || undefined,
+    command_id: cleanText(extra.commandId || extra.command_id || normalizedPayload.command_id || normalizedPayload.commandId || '', { maxLen: 200 }) || undefined,
+    aggregate_type: aggregateType,
+    aggregate_id: aggregateId,
+    aggregate_revision: Math.max(0, Math.floor(Number(extra.aggregateRevision ?? extra.aggregate_revision ?? eventSequence) || 0)),
+    occurred_at: cleanText(extra.occurredAt || extra.occurred_at || new Date().toISOString(), { maxLen: 64 }),
     source: cleanText(extra.source || 'ddalggak', { lower: true, maxLen: 64 }) || 'ddalggak',
     target: cleanText(extra.target || 'local', { lower: true, maxLen: 64 }) || 'local',
-    job_id: cleanText(extra.jobId || extra.job_id || '', { maxLen: 128 }) || undefined,
-    run_id: cleanText(extra.runId || extra.run_id || payload?.run_id || payload?.runId || '', { maxLen: 128 }) || undefined,
+    producer: {
+      name: cleanText(extra.producerName || extra.producer_name || 'ddalggak', { lower: true, maxLen: 64 }) || 'ddalggak',
+      version: cleanText(extra.producerVersion || extra.producer_version || process.env.npm_package_version || 'dev', { maxLen: 64 }) || 'dev',
+    },
+    privacy_class: cleanText(extra.privacyClass || extra.privacy_class || 'internal_runtime', { lower: true, maxLen: 64 }) || 'internal_runtime',
+    payload_digest: stableJsonHash(normalizedPayload, { length: 24 }),
+    job_id: jobId,
+    run_id: runId,
     event_type: cleanType,
-    payload: asObject(payload),
+    payload: normalizedPayload,
   };
 }

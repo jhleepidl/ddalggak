@@ -316,13 +316,30 @@ export function buildRoomProfileFromGoal({ chatId = '', goal = '', roomName = ''
   const compositionBaseId = composition?.base_package?.package_id || '';
   const compositionBase = compositionBaseId ? getDefaultRoomPackage(compositionBaseId) : null;
   const inferred = inferRoomDomain(goal, { attachmentKinds });
-  const basePreset = explicitPreset || compositionBase || selected.preset;
+  const inferredDomainPreset = !explicitPreset && inferred.matched_score >= 5
+    ? listDefaultRoomPackages().find((item) => item.domain_label === inferred.domain_label)
+    : null;
+  const compositionDomain = compositionBase?.domain_label || '';
+  // Creative-writing goals are especially vulnerable to generic package retrieval
+  // because words such as "draft", "review", and "loop" also occur in code and
+  // research presets. Keep catalog composition authoritative for mixed research/code
+  // requests, but let a strong creative-domain signal select the canonical writing room.
+  const preferInferredDomain = !explicitPreset
+    && inferredDomainPreset
+    && inferred.domain_label === 'creative_writing'
+    && compositionDomain
+    && compositionDomain !== inferred.domain_label
+    && inferred.confidence >= 0.65;
+  const basePreset = explicitPreset || (preferInferredDomain ? inferredDomainPreset : (compositionBase || selected.preset || inferredDomainPreset));
   const presetTemplate = basePreset ? roomTemplateFromDefaultPackage(basePreset) : null;
   const template = presetTemplate || inferred.template;
   const now = new Date().toISOString();
   const domainLabel = basePreset?.domain_label || inferred.domain_label;
   const defaultDepth = template.default_depth || 'team';
-  const borrowed = asArray(composition?.borrowed_packages);
+  const borrowed = asArray(composition?.borrowed_packages).filter((item) => {
+    if (!preferInferredDomain) return true;
+    return item?.domain_label === domainLabel || Number(item?.score || 0) >= 5;
+  });
   const borrowedSkills = borrowed.flatMap((item) => asArray(asObject(item.borrowed_components).skills));
   const borrowedMemory = borrowed.flatMap((item) => asArray(asObject(item.borrowed_components).memory_schema));
   const borrowedHierarchy = borrowed.flatMap((item) => asArray(asObject(item.borrowed_components).memory_hierarchy));
