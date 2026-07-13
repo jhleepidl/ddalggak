@@ -551,17 +551,20 @@ function includesAny(text = '', values = []) {
 }
 
 function packageSearchText(pkg = {}) {
+  const memorySchema = asObject(pkg.memory_schema);
   return cleanText([
     pkg.package_id,
     pkg.title,
     pkg.description,
     pkg.domain_label,
-    ...(pkg.tags || []),
-    ...(pkg.activation_cues || []),
-    ...(pkg.agents || []),
-    ...(pkg.skills || []),
-    ...(pkg.memory_schema || []),
-    ...(pkg.memory_hierarchy || []),
+    ...asArray(pkg.tags),
+    ...asArray(pkg.activation_cues),
+    ...asArray(pkg.agents),
+    ...asArray(pkg.skills),
+    ...asArray(pkg.memory_schema),
+    ...asArray(memorySchema.object_types || memorySchema.objectTypes),
+    ...asArray(memorySchema.hierarchy),
+    ...asArray(pkg.memory_hierarchy),
   ].join(' '), { lower: true, maxLen: 6000 });
 }
 
@@ -878,7 +881,19 @@ export function scoreDefaultRoomPackage(goal = '', pkg = {}) {
   if (!text) return 0;
   let score = 0;
   const goalTokens = tokenSet(text);
-  const fields = [pkg.title, pkg.description, pkg.domain_label, ...(pkg.tags || []), ...(pkg.activation_cues || []), ...(pkg.agents || []), ...(pkg.skills || []), ...(pkg.memory_schema || [])].join(' ');
+  const memorySchema = asObject(pkg.memory_schema);
+  const fields = [
+    pkg.title,
+    pkg.description,
+    pkg.domain_label,
+    ...asArray(pkg.tags),
+    ...asArray(pkg.activation_cues),
+    ...asArray(pkg.agents),
+    ...asArray(pkg.skills),
+    ...asArray(pkg.memory_schema),
+    ...asArray(memorySchema.object_types || memorySchema.objectTypes),
+    ...asArray(memorySchema.hierarchy),
+  ].join(' ');
   const pkgTokens = tokenSet(fields);
   for (const token of goalTokens) {
     if (pkgTokens.has(token)) score += 1;

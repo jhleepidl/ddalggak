@@ -3,6 +3,7 @@
   "id": "room_user_journey_core",
   "title": "AI Rooms core user journeys",
   "scenarios": [
+    "room_settings_multiturn_cli.json",
     "memory_approval_reuse.json",
     "unapproved_memory_suppression.json",
     "correction_stale_memory.json"

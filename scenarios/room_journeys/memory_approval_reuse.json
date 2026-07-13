@@ -29,15 +29,60 @@
     }
   ],
   "assertions": [
-    { "id": "initial_turn_completed", "type": "step_ok", "step_id": "state_preference" },
-    { "id": "candidate_created", "type": "trace_event_count", "event_type": "memory.candidate_created", "min": 1 },
-    { "id": "memory_committed", "type": "memory_commit_count", "min": 1 },
-    { "id": "approved_memory_reprojected", "type": "approved_memory_projected" },
-    { "id": "followup_completed", "type": "step_ok", "step_id": "reuse_preference" }
+    {
+      "id": "initial_turn_completed",
+      "type": "step_ok",
+      "step_id": "state_preference"
+    },
+    {
+      "id": "candidate_created",
+      "type": "trace_event_count",
+      "event_type": "memory.candidate_created",
+      "min": 1
+    },
+    {
+      "id": "candidate_structured",
+      "type": "memory_candidate_shape",
+      "min": 1
+    },
+    {
+      "id": "memory_committed",
+      "type": "memory_commit_count",
+      "min": 1
+    },
+    {
+      "id": "committed_memory_structured",
+      "type": "memory_commit_shape",
+      "min": 1
+    },
+    {
+      "id": "approved_memory_reprojected",
+      "type": "approved_memory_projected"
+    },
+    {
+      "id": "followup_completed",
+      "type": "step_ok",
+      "step_id": "reuse_preference"
+    },
+    {
+      "id": "provider_cli_called",
+      "type": "cli_call_count",
+      "min": 2,
+      "quality_metric": false
+    }
   ],
   "semantic_rubric": [
-    { "id": "preference_uptake", "description": "후속 답변이 조용한 환경과 재추천 방지 선호를 자연스럽게 반영한다." },
-    { "id": "no_reexplanation", "description": "사용자에게 이미 제공한 선호를 다시 설명하라고 요구하지 않는다." },
-    { "id": "relevance", "description": "memory를 과도하게 노출하지 않고 현재 요청에 필요한 기준만 활용한다." }
+    {
+      "id": "preference_uptake",
+      "description": "후속 답변이 조용한 환경과 재추천 방지 선호를 자연스럽게 반영한다."
+    },
+    {
+      "id": "no_reexplanation",
+      "description": "사용자에게 이미 제공한 선호를 다시 설명하라고 요구하지 않는다."
+    },
+    {
+      "id": "relevance",
+      "description": "memory를 과도하게 노출하지 않고 현재 요청에 필요한 기준만 활용한다."
+    }
   ]
 }

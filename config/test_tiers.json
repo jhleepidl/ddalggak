@@ -11,6 +11,7 @@
     "gemini_context_isolation.test.js",
     "gemini_sticky_success.test.js",
     "gemini_timeout_no_inline_retry.test.js",
+    "headless_room_runtime.test.js",
     "live_scenario_runner.test.js",
     "model_node_discovery.test.js",
     "openai_compatible_provider.test.js",

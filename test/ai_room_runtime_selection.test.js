@@ -79,3 +79,48 @@ test('explicit parallel ideation profile changes team execution without scenario
   assert.ok(team.agents.some((agent) => /independent contribution lane/i.test(agent.purpose || '')));
   assert.ok(team.agents.length <= 5);
 });
+
+
+test('room-first team resolves role-fit providers and models from the general model-role router', () => {
+  const keys = {
+    DDALGGAK_MODEL_ROLE_SOURCE_GROUNDER_PROVIDER: process.env.DDALGGAK_MODEL_ROLE_SOURCE_GROUNDER_PROVIDER,
+    DDALGGAK_MODEL_ROLE_SOURCE_GROUNDER_MODEL: process.env.DDALGGAK_MODEL_ROLE_SOURCE_GROUNDER_MODEL,
+    DDALGGAK_MODEL_ROLE_VERIFIER_CRITIC_PROVIDER: process.env.DDALGGAK_MODEL_ROLE_VERIFIER_CRITIC_PROVIDER,
+    DDALGGAK_MODEL_ROLE_VERIFIER_CRITIC_MODEL: process.env.DDALGGAK_MODEL_ROLE_VERIFIER_CRITIC_MODEL,
+    DDALGGAK_MODEL_ROLE_DELIVERY_SYNTHESIZER_PROVIDER: process.env.DDALGGAK_MODEL_ROLE_DELIVERY_SYNTHESIZER_PROVIDER,
+    DDALGGAK_MODEL_ROLE_DELIVERY_SYNTHESIZER_MODEL: process.env.DDALGGAK_MODEL_ROLE_DELIVERY_SYNTHESIZER_MODEL,
+  };
+  try {
+    process.env.DDALGGAK_MODEL_ROLE_SOURCE_GROUNDER_PROVIDER = 'claude';
+    process.env.DDALGGAK_MODEL_ROLE_SOURCE_GROUNDER_MODEL = 'claude-source-test';
+    process.env.DDALGGAK_MODEL_ROLE_VERIFIER_CRITIC_PROVIDER = 'codex';
+    process.env.DDALGGAK_MODEL_ROLE_VERIFIER_CRITIC_MODEL = 'codex-review-test';
+    process.env.DDALGGAK_MODEL_ROLE_DELIVERY_SYNTHESIZER_PROVIDER = 'claude';
+    process.env.DDALGGAK_MODEL_ROLE_DELIVERY_SYNTHESIZER_MODEL = 'claude-delivery-test';
+
+    const pkg = buildRoomPackage({ goal: '팀 온보딩 방식의 대안을 비교하고 검토하는 방', chatId: 'portfolio' });
+    const selection = buildRoomFirstRuntimeSelection({
+      taskText: '독립적인 대안을 만들고 검토한 뒤 최종안을 합성해줘',
+      workMode: 'team_task',
+      roomPackage: pkg,
+      roomProfile: { kind: 'agent_room_profile_v1', collaboration_profile_id: 'parallel_ideation' },
+      chatId: 'portfolio',
+    });
+
+    const sourceAgent = selection.agents.find((agent) => agent.model_role === 'source_grounder');
+    const reviewerAgent = selection.agents.find((agent) => agent.model_role === 'verifier_critic');
+    const deliveryAgent = selection.agents.find((agent) => agent.model_role === 'delivery_synthesizer');
+    assert.equal(sourceAgent?.provider, 'claude');
+    assert.equal(sourceAgent?.model, 'claude-source-test');
+    assert.equal(reviewerAgent?.provider, 'codex');
+    assert.equal(reviewerAgent?.model, 'codex-review-test');
+    assert.equal(deliveryAgent?.provider, 'claude');
+    assert.equal(deliveryAgent?.model, 'claude-delivery-test');
+    assert.equal(sourceAgent?.model_role_resolution?.source, 'env_model_role_override');
+  } finally {
+    for (const [key, value] of Object.entries(keys)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});

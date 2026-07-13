@@ -1,0 +1,40 @@
+{
+  "schema_version": "ddalggak.room_journey_scenario/v1",
+  "id": "room_settings_multiturn_cli",
+  "title": "Room 설정이 멀티턴 CLI 호출에 유지되는지 검증",
+  "description": "실제 headless Room runtime에서 collaboration profile과 사용자 runtime rule을 설정한 뒤 여러 사용자 요청이 provider CLI 호출을 거치며 동일한 Room 설정을 유지하는지 검증한다.",
+  "steps": [
+    {
+      "id": "set_rule",
+      "action": "room_command",
+      "command": "/rule 결론을 먼저 한 문장으로 말하고, 이어서 반드시 '근거:'와 '다음 확인:' 섹션을 사용해줘."
+    },
+    {
+      "id": "set_collaboration",
+      "action": "set_collaboration_profile",
+      "profile": "solo"
+    },
+    {
+      "id": "state_goal",
+      "action": "send_message",
+      "text": "우리 팀의 주간 회의 시간을 줄이되 결정 품질은 유지하고 싶어. 먼저 어떤 문제를 측정해야 하는지 정리해줘."
+    },
+    {
+      "id": "followup_request",
+      "action": "send_message",
+      "text": "앞에서 정한 목표와 측정 항목을 이어서, 다음 주에 바로 시험할 수 있는 작은 운영 실험 하나를 제안해줘."
+    }
+  ],
+  "assertions": [
+    { "id": "rule_saved", "type": "room_rule_count", "step_id": "set_rule", "min": 1 },
+    { "id": "solo_profile_saved", "type": "collaboration_profile_is", "step_id": "set_collaboration", "value": "solo" },
+    { "id": "two_user_turns_completed", "type": "multiturn_message_count", "min": 2 },
+    { "id": "provider_cli_called_for_turns", "type": "cli_call_count", "min": 2, "quality_metric": false },
+    { "id": "room_rule_visible_in_followup", "type": "response_regex", "step_id": "followup_request", "pattern": "근거\\s*:.*다음 확인\\s*:", "flags": "is" }
+  ],
+  "semantic_rubric": [
+    { "id": "goal_continuity", "description": "두 번째 답변이 첫 번째 turn의 회의 시간 단축과 결정 품질 유지 목표를 자연스럽게 이어간다." },
+    { "id": "room_rule_uptake", "description": "답변 형식이 Room에 저장된 결론 우선, 근거, 다음 확인 규칙을 따른다." },
+    { "id": "experiment_quality", "description": "제안한 운영 실험이 작고 측정 가능하며 다음 주에 실행 가능하다." }
+  ]
+}

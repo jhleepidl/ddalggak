@@ -4,9 +4,21 @@
   "title": "단일 모델 대비 독립 근거 패널",
   "description": "같은 Room 사실을 독립적으로 해석하고 충돌을 판정하는 다중 모델 구성이 더 신뢰할 수 있는 결정을 만드는지 비교한다.",
   "experiment": {
-    "baseline": { "id": "solo", "title": "Strongest suitable single-model baseline", "collaboration_profile": "solo", "model_policy": "strongest_suitable_single" },
+    "baseline": {
+      "id": "solo",
+      "title": "Strongest suitable single-model baseline",
+      "collaboration_profile": "solo",
+      "model_policy": "strongest_suitable_single",
+      "input_kind": "normal"
+    },
     "challengers": [
-      { "id": "evidence_panel", "title": "Independent evidence panel", "collaboration_profile": "evidence_panel", "model_policy": "independent_evidence_models_then_adjudicate" }
+      {
+        "id": "evidence_panel",
+        "title": "Independent evidence panel",
+        "collaboration_profile": "evidence_panel",
+        "model_policy": "independent_evidence_models_then_adjudicate",
+        "input_kind": "team_task"
+      }
     ],
     "promotion_gate": {
       "min_quality_uplift": 0.08,
@@ -28,17 +40,83 @@
     }
   ],
   "assertions": [
-    { "id": "evidence_turn_completed", "type": "step_ok", "step_id": "provide_evidence" },
-    { "id": "decision_completed", "type": "step_ok", "step_id": "request_decision" },
-    { "id": "solo_one_model", "type": "distinct_model_count", "arms": ["solo"], "min": 1, "max": 1, "quality_metric": false },
-    { "id": "panel_multiple_roles", "type": "provider_role_count", "arms": ["evidence_panel"], "min": 3, "quality_metric": false },
-    { "id": "panel_distinct_models", "type": "distinct_model_count", "arms": ["evidence_panel"], "min": 2, "quality_metric": false }
+    {
+      "id": "evidence_turn_completed",
+      "type": "step_ok",
+      "step_id": "provide_evidence"
+    },
+    {
+      "id": "decision_completed",
+      "type": "step_ok",
+      "step_id": "request_decision"
+    },
+    {
+      "id": "solo_one_model",
+      "type": "distinct_model_count",
+      "arms": [
+        "solo"
+      ],
+      "min": 1,
+      "max": 1,
+      "quality_metric": false
+    },
+    {
+      "id": "panel_multiple_roles",
+      "type": "provider_role_count",
+      "arms": [
+        "evidence_panel"
+      ],
+      "min": 3,
+      "quality_metric": false
+    },
+    {
+      "id": "panel_distinct_models",
+      "type": "distinct_model_count",
+      "arms": [
+        "evidence_panel"
+      ],
+      "min": 2,
+      "quality_metric": false
+    },
+    {
+      "id": "solo_profile_applied",
+      "type": "collaboration_profile_is",
+      "arms": [
+        "solo"
+      ],
+      "value": "solo",
+      "quality_metric": false
+    },
+    {
+      "id": "evidence_panel_profile_applied",
+      "type": "collaboration_profile_is",
+      "arms": [
+        "evidence_panel"
+      ],
+      "value": "evidence_panel",
+      "quality_metric": false
+    }
   ],
   "semantic_rubric": [
-    { "id": "fact_fidelity", "description": "제공된 수치와 제약을 바꾸거나 새 사실을 꾸며내지 않는다." },
-    { "id": "fact_interpretation_separation", "description": "사실, 해석, 불확실성을 명확히 구분한다." },
-    { "id": "counterargument", "description": "선택하지 않은 안의 가장 강한 반대 논거를 공정하게 다룬다." },
-    { "id": "decision_quality", "description": "권고와 전환 조건이 인력·일정·복구 시간 제약에 연결된다." },
-    { "id": "independent_panel_value", "description": "독립 해석과 adjudication이 단일 답변보다 오류나 과신을 줄인다." }
+    {
+      "id": "fact_fidelity",
+      "description": "제공된 수치와 제약을 바꾸거나 새 사실을 꾸며내지 않는다."
+    },
+    {
+      "id": "fact_interpretation_separation",
+      "description": "사실, 해석, 불확실성을 명확히 구분한다."
+    },
+    {
+      "id": "counterargument",
+      "description": "선택하지 않은 안의 가장 강한 반대 논거를 공정하게 다룬다."
+    },
+    {
+      "id": "decision_quality",
+      "description": "권고와 전환 조건이 인력·일정·복구 시간 제약에 연결된다."
+    },
+    {
+      "id": "independent_panel_value",
+      "description": "독립 해석과 adjudication이 단일 답변보다 오류나 과신을 줄인다."
+    }
   ]
 }

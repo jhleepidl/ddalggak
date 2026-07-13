@@ -7,6 +7,7 @@ import { readRoomJourneyTrace } from '../application/room_journey_trace.js';
 import { runCodexExec } from '../codex.js';
 import { runClaudeCliPrompt } from '../claude_cli.js';
 import { runAntigravityPrompt } from '../antigravity.js';
+import { createHeadlessRoomRuntime } from './headless_room_runtime.js';
 
 function clean(value = '') { return String(value ?? '').trim(); }
 function asArray(value) { return Array.isArray(value) ? value : []; }
@@ -50,6 +51,8 @@ function normalizeArm(raw = {}, fallbackId = 'default') {
     title: clean(row.title || row.id || fallbackId) || fallbackId,
     collaboration_profile: clean(row.collaboration_profile || row.collaborationProfile || ''),
     model_policy: clean(row.model_policy || row.modelPolicy || ''),
+    input_kind: clean(row.input_kind || row.inputKind || ''),
+    force_mode: clean(row.force_mode || row.forceMode || ''),
     setup_commands: asArray(row.setup_commands || row.setupCommands).map(clean).filter(Boolean),
     metadata: asObject(row.metadata),
   };
@@ -92,6 +95,196 @@ function eventOutput(event = {}) {
   if (type === 'run.finish' || type === 'run.completed') return clean(payload.summary || payload.output || payload.reply || payload.response);
   if (type === 'run.failed') return clean(payload.error || payload.summary);
   return '';
+}
+
+function readJsonlFile(filePath = '') {
+  if (!filePath || !fs.existsSync(filePath)) return [];
+  const rows = [];
+  for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/g)) {
+    if (!line.trim()) continue;
+    try { rows.push(JSON.parse(line)); } catch {}
+  }
+  return rows;
+}
+
+function runtimeEventKey(event = {}, jobId = '') {
+  return clean(event.event_id)
+    || `${clean(jobId)}:${Number(event.event_sequence || 0)}:${clean(event.event_type)}:${clean(event.ts || event.occurred_at)}`;
+}
+
+function headlessMessageText(row = {}) {
+  return clean(row.text || row.caption || row.output || '');
+}
+
+export class HeadlessRoomJourneyTransport {
+  constructor({
+    threadId = '',
+    chatId = '',
+    userId = '',
+    runtimeRoot = '',
+    traceRoot = '',
+    responseTimeoutMs = 10 * 60 * 1000,
+    runtimeFactory = null,
+    resetRoom = true,
+  } = {}) {
+    this.threadId = clean(threadId || chatId);
+    this.chatId = clean(chatId || threadId);
+    this.userId = clean(userId || 'room_journey_benchmark');
+    this.runtimeRoot = path.resolve(runtimeRoot || 'runs/room_journey_headless_runtime');
+    this.traceRoot = traceRoot ? path.resolve(traceRoot) : '';
+    this.responseTimeoutMs = clamp(responseTimeoutMs, 10 * 60 * 1000, 1000, 60 * 60 * 1000);
+    this.runtimeFactory = typeof runtimeFactory === 'function' ? runtimeFactory : createHeadlessRoomRuntime;
+    this.resetRoom = resetRoom !== false;
+    this.runtime = null;
+    this.events = [];
+    this.seenRuntimeEventKeys = new Set();
+  }
+
+  async initialize() {
+    if (!this.chatId) throw new Error('Headless Room journey transport requires a synthetic Room id');
+    this.runtime = await this.runtimeFactory({ runtimeRoot: this.runtimeRoot, traceRoot: this.traceRoot });
+    const { chatSessionStore } = this.runtime.runtimeCore;
+    if (this.resetRoom && typeof chatSessionStore?.clear === 'function') chatSessionStore.clear(this.chatId);
+    chatSessionStore.upsert(this.chatId, (current = {}) => ({
+      ...current,
+      room_journey_trace_enabled: true,
+      room_journey_trace_until: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+      room_journey_trace_source: 'headless_room_journey_benchmark',
+      room_journey_identity: {
+        thread_id: this.threadId,
+        chat_id: this.chatId,
+        user_id: this.userId,
+        transport: 'headless',
+      },
+    }));
+    return { transport: 'headless', thread_id: this.threadId, chat_id: this.chatId, runtime_root: this.runtimeRoot };
+  }
+
+  _currentJobId() {
+    return clean(this.runtime?.runtimeCore?.resolveCurrentJobIdForChat?.(this.chatId));
+  }
+
+  _collectRuntimeEvents() {
+    const runtimeCore = this.runtime?.runtimeCore;
+    const jobId = this._currentJobId();
+    if (!runtimeCore || !jobId) return [];
+    let eventFile = '';
+    try { eventFile = path.join(runtimeCore.jobs.jobDir(jobId), 'runtime_events.jsonl'); } catch { return []; }
+    const fresh = [];
+    for (const event of readJsonlFile(eventFile)) {
+      const key = runtimeEventKey(event, jobId);
+      if (!key || this.seenRuntimeEventKeys.has(key)) continue;
+      this.seenRuntimeEventKeys.add(key);
+      const normalized = { ...event, job_id: clean(event.job_id || event.jobId || jobId) };
+      this.events.push(normalized);
+      fresh.push(normalized);
+    }
+    return fresh;
+  }
+
+  async _waitForIdle() {
+    const started = Date.now();
+    while (Date.now() - started < this.responseTimeoutMs) {
+      const managerBusy = this.runtime.chatRunManager.isRunning(this.chatId);
+      const state = clean(this.runtime.runtimeCore.chatSessionStore.get(this.chatId)?.state).toLowerCase();
+      if (!managerBusy && !['routing', 'executing'].includes(state)) return;
+      await sleep(100);
+    }
+    throw new Error(`Headless Room run timed out for ${this.chatId}`);
+  }
+
+  _capturedOutput(mark = 0) {
+    const rows = this.runtime.bot.messagesSince(mark, this.chatId)
+      .filter((row) => ['sendMessage', 'editMessageText'].includes(row.method))
+      .map(headlessMessageText)
+      .filter(Boolean);
+    return rows.join('\n\n').trim();
+  }
+
+  snapshotState() {
+    const session = this.runtime?.runtimeCore?.chatSessionStore?.get?.(this.chatId) || {};
+    const roomProfile = asObject(session.agent_room_profile || session.agentRoomProfile);
+    const rules = asArray(session.runtime_rules || session.runtimeRules)
+      .filter((row) => row?.enabled !== false && clean(row?.text))
+      .map((row) => ({ id: clean(row.id || row.rule_id), text: clean(row.text), source: clean(row.source || row.origin), enabled: row.enabled !== false }));
+    const candidates = asArray(session.room_idle_memory_candidates || session.roomIdleMemoryCandidates)
+      .map((row) => ({ candidate_id: clean(row.candidate_id || row.candidateId), observation_type: clean(row.observation_type || row.observationType), status: clean(row.status || 'pending'), review_required: row.review_required !== false }));
+    const memories = asArray(session.room_memory_items || session.roomMemoryItems)
+      .map((row) => ({ memory_id: clean(row.memory_id || row.memoryId), type: clean(row.type), status: clean(row.status), source_candidate_id: clean(row.source_candidate_id || row.sourceCandidateId) }));
+    return {
+      schema_version: 'ddalggak.headless_room_state/v1',
+      captured_at: nowIso(),
+      thread_id: this.threadId,
+      chat_id: this.chatId,
+      state: clean(session.state || 'idle'),
+      active_job_id: this._currentJobId() || null,
+      collaboration_profile_id: clean(roomProfile.collaboration_profile_id || 'auto') || 'auto',
+      agent_room_profile: roomProfile,
+      last_room_selection: asObject(session.last_room_selection || session.lastRoomSelection),
+      last_team_selection: asObject(session.last_team_selection || session.lastTeamSelection),
+      last_route: asObject(session.last_route || session.lastRoute),
+      recent_room_turn_count: asArray(session.recent_room_turns || session.recentRoomTurns).length,
+      runtime_rules: rules,
+      memory_candidates: candidates,
+      room_memory_items: memories,
+      pending_approval: Boolean(session.pending_approval),
+    };
+  }
+
+  async sendMessage(text = '', messageOptions = {}) {
+    if (!this.runtime) await this.initialize();
+    const message = clean(text);
+    if (!message) return { ok: false, output: '', error: 'empty_message' };
+    const mark = this.runtime.bot.mark();
+    const beforeCount = this.events.length;
+    const accepted = await this.runtime.chatRunManager.handleIncoming({
+      chatId: this.chatId,
+      userId: this.userId,
+      text: message,
+      kind: clean(messageOptions.kind || messageOptions.inputKind || 'normal') || 'normal',
+      forceMode: clean(messageOptions.forceMode || messageOptions.force_mode || 'normal') || 'normal',
+      teamConfig: messageOptions.teamConfig && typeof messageOptions.teamConfig === 'object' ? messageOptions.teamConfig : null,
+      chatInfo: { chat_id: this.chatId, title: 'Headless Room Journey', type: 'private' },
+    });
+    await this._waitForIdle();
+    const freshEvents = this._collectRuntimeEvents();
+    const runEvents = this.events.slice(beforeCount);
+    const terminal = [...runEvents].reverse().find((event) => eventType(event) === 'run.finish');
+    const status = clean(eventPayload(terminal).status || '').toLowerCase();
+    const output = eventOutput(terminal) || this._capturedOutput(mark);
+    return {
+      ok: Boolean(terminal) ? status !== 'error' : Boolean(output),
+      accepted,
+      output,
+      run_id: clean(terminal?.run_id),
+      job_id: this._currentJobId(),
+      events: freshEvents,
+      assistant_messages: this.runtime.bot.messagesSince(mark, this.chatId),
+      room_state: this.snapshotState(),
+    };
+  }
+
+  async sendCommand(commandText = '') {
+    if (!this.runtime) await this.initialize();
+    const command = clean(commandText);
+    if (!command.startsWith('/')) throw new Error(`Headless Room command must start with /: ${command}`);
+    const mark = this.runtime.bot.mark();
+    const commandResult = await this.runtime.handleRoomCommand({
+      text: command,
+      chatId: this.chatId,
+      userId: this.userId,
+    });
+    const freshEvents = this._collectRuntimeEvents();
+    const normalized = asObject(commandResult);
+    return {
+      ...normalized,
+      ok: normalized.ok !== false,
+      handled: normalized.ok !== false,
+      output: this._capturedOutput(mark),
+      events: freshEvents,
+      room_state: this.snapshotState(),
+    };
+  }
 }
 
 export class GocRoomJourneyTransport {
@@ -203,7 +396,13 @@ function resolveTemplate(template = '', step = {}, arm = {}) {
 
 async function executeStep({ step, arm, transport, options }) {
   const action = clean(step.action).toLowerCase();
-  if (action === 'send_message') return await transport.sendMessage(step.text);
+  if (action === 'send_message') {
+    return await transport.sendMessage(step.text, {
+      kind: clean(step.input_kind || step.inputKind || arm.input_kind || 'normal') || 'normal',
+      forceMode: clean(step.force_mode || step.forceMode || arm.force_mode || 'normal') || 'normal',
+      teamConfig: step.team_config || step.teamConfig || null,
+    });
+  }
   if (['room_command', 'inspect', 'branch', 'generate_memory_candidates', 'approve_memory', 'reject_memory', 'set_collaboration_profile'].includes(action)) {
     let command = clean(step.command || step.text);
     if (action === 'branch' && !command.startsWith('/branch')) command = `/branch ${command}`;
@@ -274,6 +473,61 @@ function assertionResult(assertion = {}, context = {}) {
   } else if (type === 'runtime_event_count') {
     const rows = context.runtimeEvents.filter((event) => !assertion.event_type || eventType(event) === clean(assertion.event_type).toLowerCase());
     observed = rows.length; passed = rows.length >= Number(assertion.min ?? 1);
+  } else if (type === 'cli_call_count') {
+    const rows = context.runtimeEvents.filter((event) => {
+      if (eventType(event) !== 'run.agent_start') return false;
+      const channel = clean(eventPayload(event).execution_channel).toLowerCase();
+      return channel === 'local_cli' || channel.endsWith('_cli') || channel === 'cli';
+    });
+    observed = rows.map((event) => ({
+      provider: clean(eventPayload(event).provider),
+      model: clean(eventPayload(event).model),
+      role: clean(eventPayload(event).model_role || eventPayload(event).role_id),
+    }));
+    passed = rows.length >= Number(assertion.min ?? 1) && rows.length <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
+  } else if (type === 'memory_candidate_shape') {
+    const rows = matchingTraceEvents(context.trace, { event_type: 'memory.candidate_created' });
+    const valid = rows.filter((event) => {
+      const payload = eventPayload(event);
+      return Boolean(clean(payload.candidate_id))
+        && Boolean(clean(payload.observation_type))
+        && Boolean(clean(payload.status))
+        && typeof payload.review_required === 'boolean';
+    });
+    observed = { total: rows.length, structurally_valid: valid.length };
+    const min = Number(assertion.min ?? 1);
+    passed = rows.length >= min && valid.length === rows.length;
+  } else if (type === 'memory_commit_shape') {
+    const rows = matchingTraceEvents(context.trace, { event_type: 'memory.committed' });
+    const valid = rows.filter((event) => {
+      const payload = eventPayload(event);
+      return Boolean(clean(payload.memory_id))
+        && Boolean(clean(payload.type))
+        && Boolean(clean(payload.status))
+        && Boolean(clean(payload.source_candidate_id));
+    });
+    observed = { total: rows.length, structurally_valid: valid.length };
+    const min = Number(assertion.min ?? 1);
+    passed = rows.length >= min && valid.length === rows.length;
+  } else if (type === 'room_rule_count') {
+    const snapshot = clean(assertion.step_id)
+      ? asObject(steps[clean(assertion.step_id)]?.result?.room_state)
+      : asObject(context.latestRoomState);
+    const count = asArray(snapshot.runtime_rules).length;
+    observed = { count, rules: asArray(snapshot.runtime_rules) };
+    passed = count >= Number(assertion.min ?? 1) && count <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
+  } else if (type === 'collaboration_profile_is') {
+    const snapshot = clean(assertion.step_id)
+      ? asObject(steps[clean(assertion.step_id)]?.result?.room_state)
+      : asObject(context.latestRoomState);
+    const actual = clean(snapshot.collaboration_profile_id || 'auto');
+    const expected = clean(assertion.value || assertion.profile || assertion.expected);
+    observed = { actual, expected };
+    passed = Boolean(expected) && actual === expected;
+  } else if (type === 'multiturn_message_count') {
+    const count = Object.values(steps).filter((row) => clean(row?.step?.action).toLowerCase() === 'send_message' && row?.result?.ok === true).length;
+    observed = count;
+    passed = count >= Number(assertion.min ?? 2) && count <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else {
     observed = 'unsupported_assertion'; passed = false;
   }
@@ -396,16 +650,35 @@ export function evaluatePortfolioPromotion({ baseline = null, challenger = null,
 }
 
 function writeTraceViews(runDir, trace, runtimeEvents, steps) {
+  const cliCalls = runtimeEvents.filter((row) => {
+    if (eventType(row) !== 'run.agent_start') return false;
+    const channel = clean(eventPayload(row).execution_channel).toLowerCase();
+    return channel === 'local_cli' || channel.endsWith('_cli') || channel === 'cli';
+  });
   const categories = {
     'memory_candidates.jsonl': trace.filter((row) => eventType(row) === 'memory.candidate_created'),
     'memory_decisions.jsonl': trace.filter((row) => eventType(row) === 'memory.decision'),
     'memory_commits.jsonl': trace.filter((row) => eventType(row) === 'memory.committed'),
     'context_projections.jsonl': trace.filter((row) => eventType(row) === 'context.projection_compiled'),
     'provider_invocations.jsonl': runtimeEvents.filter((row) => ['run.agent_start', 'run.agent_finish', 'run.agent_error'].includes(eventType(row))),
+    'cli_calls.jsonl': cliCalls,
   };
   for (const [name, rows] of Object.entries(categories)) fs.writeFileSync(path.join(runDir, name), rows.map((row) => JSON.stringify(row)).join('\n') + (rows.length ? '\n' : ''), 'utf8');
   fs.writeFileSync(path.join(runDir, 'runtime_events.jsonl'), runtimeEvents.map((row) => JSON.stringify(row)).join('\n') + (runtimeEvents.length ? '\n' : ''), 'utf8');
   fs.writeFileSync(path.join(runDir, 'turns.jsonl'), steps.filter((row) => clean(row.step?.action) === 'send_message').map((row) => JSON.stringify({ step_id: row.step.id, user: row.step.text, assistant: row.result?.output || '', run_id: row.result?.run_id || '' })).join('\n') + '\n', 'utf8');
+  const roomStates = steps
+    .filter((row) => row?.result?.room_state && typeof row.result.room_state === 'object')
+    .map((row) => ({ step_id: row.step.id, action: row.step.action, completed_at: row.completed_at, ...row.result.room_state }));
+  fs.writeFileSync(path.join(runDir, 'room_state_snapshots.jsonl'), roomStates.map((row) => JSON.stringify(row)).join('\n') + (roomStates.length ? '\n' : ''), 'utf8');
+  writeJson(path.join(runDir, 'room_configuration.json'), roomStates.length ? roomStates[roomStates.length - 1] : {});
+  writeJson(path.join(runDir, 'memory_structure.json'), {
+    schema_version: 'ddalggak.room_journey_memory_structure/v1',
+    candidate_ids: trace.filter((row) => eventType(row) === 'memory.candidate_created').map((row) => clean(eventPayload(row).candidate_id)).filter(Boolean),
+    committed_memory_ids: trace.filter((row) => eventType(row) === 'memory.committed').map((row) => clean(eventPayload(row).memory_id)).filter(Boolean),
+    projection_ids: trace.filter((row) => eventType(row) === 'context.projection_compiled').map((row) => clean(eventPayload(row).projection_id)).filter(Boolean),
+    approved_memory_ids_used: [...new Set(trace.filter((row) => eventType(row) === 'context.projection_compiled').flatMap((row) => asArray(eventPayload(row).approved_memory_ids)).map(clean).filter(Boolean))],
+    pending_candidate_ids_suppressed: [...new Set(trace.filter((row) => eventType(row) === 'context.projection_compiled').flatMap((row) => asArray(eventPayload(row).pending_memory_candidate_ids)).map(clean).filter(Boolean))],
+  });
 }
 
 export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot = 'runs/room_journeys', transport, execute = false, traceRoot = '', options = {} } = {}) {
@@ -429,6 +702,9 @@ export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot 
     let result;
     try { result = await executeStep({ step, arm: selectedArm, transport, options }); }
     catch (error) { result = { ok: false, error: String(error?.message || error) }; }
+    if ((!result?.room_state || typeof result.room_state !== 'object') && typeof transport.snapshotState === 'function') {
+      try { result = { ...asObject(result), room_state: transport.snapshotState() }; } catch {}
+    }
     const row = { step, started_at: stepStarted, completed_at: nowIso(), result };
     stepRows.push(row);
     appendJsonl(path.join(runDir, 'steps.jsonl'), row);
@@ -438,9 +714,10 @@ export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot 
   const trace = readRoomJourneyTrace({ chatId: traceChatId, traceRoot, afterTs: startedAt });
   const runtimeEvents = asArray(transport.events);
   const stepsById = Object.fromEntries(stepRows.map((row) => [row.step.id, row]));
+  const latestRoomState = [...stepRows].reverse().find((row) => row?.result?.room_state)?.result?.room_state || null;
   const assertions = asArray(scenario.assertions)
     .filter((assertion) => assertionApplies(assertion, selectedArm.id))
-    .map((assertion) => assertionResult(assertion, { trace, runtimeEvents, stepsById }));
+    .map((assertion) => assertionResult(assertion, { trace, runtimeEvents, stepsById, latestRoomState }));
   const executionFinishedAt = nowIso();
   let semanticJudgment = null;
   if (clean(options.judgeProvider) && scenario.semantic_judge !== false) {
@@ -487,6 +764,13 @@ export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot 
     metrics,
     assertions,
     semantic_judgment: semanticJudgment,
+    transport: {
+      type: transport instanceof HeadlessRoomJourneyTransport ? 'headless' : 'goc',
+      thread_id: clean(transport?.threadId) || null,
+      room_id: clean(transport?.chatId) || null,
+      user_id: clean(transport?.userId) || null,
+      runtime_root: clean(transport?.runtimeRoot) || null,
+    },
     trace_contract: {
       raw_provider_prompts_saved: false,
       raw_private_transcript_exported: false,
@@ -540,6 +824,16 @@ export async function runRoomJourneySuite({ suiteFile = '', scenarioFiles = [], 
     failed: results.filter((row) => row.summary.status === 'failed').length,
     results: results.map((row) => ({ run_dir: row.runDir, ...row.summary })),
     portfolio_comparisons: comparisons,
+    execution_environment: {
+      transport: clean(options.transport || (execute ? 'custom' : 'plan')),
+      session_id: clean(options.sessionId) || null,
+      output_root: path.resolve(outputRoot),
+      runtime_root: clean(options.runtimeRoot) ? path.resolve(options.runtimeRoot) : null,
+      trace_root: clean(traceRoot) ? path.resolve(traceRoot) : null,
+      telegram_required: false,
+      goc_room_required: clean(options.transport).toLowerCase() === 'goc',
+      model_role_map: options.modelRoleMap || null,
+    },
   };
   const root = ensureDir(path.resolve(outputRoot));
   if (syncGoc && execute) {

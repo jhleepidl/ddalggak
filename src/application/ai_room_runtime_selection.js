@@ -5,6 +5,7 @@ import { buildRoomTurnRoute } from './room_turn_router.js';
 import { buildStarterSingleAgentTeamConfiguration, validateTeamConfiguration } from './team_configuration.js';
 import { migrateProviderAwayFromGemini, sanitizeGeminiModelForProvider } from '../provider_migration.js';
 import { buildCollaborationInteractionPatch, resolveRoomCollaborationProfile } from './collaboration_profile_catalog.js';
+import { modelRoleForAgentRole, resolveRoomModelRole } from './room_model_role_router.js';
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -114,10 +115,17 @@ function findAgentCard(library = {}, role = '') {
   }) || null;
 }
 
-function makeAgentFromCard({ card = null, role = '', index = 0, taskText = '', workMode = 'ask' } = {}) {
+function makeAgentFromCard({ card = null, role = '', index = 0, taskText = '', workMode = 'ask', roomPackage = null, roomProfile = null } = {}) {
   const row = asObject(card);
   const roleId = cleanId(row.local_id || row.role || role || 'researcher', 'researcher');
-  const provider = defaultProviderForRole(roleId, { taskText, workMode });
+  const modelRole = modelRoleForAgentRole(roleId);
+  const modelResolution = resolveRoomModelRole({
+    modelRole,
+    roomPackage,
+    profile: roomProfile,
+  });
+  const provider = modelResolution.provider || clean(row.provider, { lower: true, maxLen: 80 }) || defaultProviderForRole(roleId, { taskText, workMode });
+  const model = modelResolution.model || clean(row.model, { maxLen: 160 });
   return {
     agent_id: roleId,
     id: roleId,
@@ -125,7 +133,15 @@ function makeAgentFromCard({ card = null, role = '', index = 0, taskText = '', w
     role: roleId,
     purpose: clean(row.description || `${roleId} for this AI Room turn`, { maxLen: 500 }) || `${roleId} for this AI Room turn`,
     provider,
-    model: '',
+    model,
+    model_role: modelRole,
+    model_role_resolution: {
+      source: modelResolution.source,
+      preferred_tier: modelResolution.preferred_tier,
+      fallback_tier: modelResolution.fallback_tier,
+      node_id: modelResolution.node_id || '',
+      route_footer: modelResolution.route_footer,
+    },
     order: index,
     component_ref: row.component_id || undefined,
     memory_access: {
@@ -246,7 +262,7 @@ export function buildRoomFirstRuntimeSelection({
   const mode = roomRoute.depth || initialMode;
   const library = buildRoomComponentsFromPackage(pkg);
   const baseRoles = rolesForRoomWorkMode({ roomPackage: pkg, workMode: mode, taskText });
-  const baseAgents = baseRoles.map((role, index) => makeAgentFromCard({ card: findAgentCard(library, role), role, index, taskText, workMode: mode }));
+  const baseAgents = baseRoles.map((role, index) => makeAgentFromCard({ card: findAgentCard(library, role), role, index, taskText, workMode: mode, roomPackage: pkg, roomProfile: profile }));
   const agents = mode === 'ask'
     ? baseAgents
     : expandAgentsForCollaboration({ agents: baseAgents, profile: collaborationProfile });

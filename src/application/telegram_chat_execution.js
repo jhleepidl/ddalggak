@@ -2513,7 +2513,7 @@ function buildSupervisorExecutionCallbacks({
         await runEventSink.recordAgentEvent("run.agent_start", {
           agent_id: cleanAgentId,
           role_id: roleKey || undefined,
-          model_role: actionInputs?.model_role || actionInputs?.modelRole || roleKey || undefined,
+          model_role: actionInputs?.model_role || actionInputs?.modelRole || activeAgentConfig?.model_role || activeAgentConfig?.modelRole || roleKey || undefined,
           provider: activeProvider || undefined,
           model: activeModel || undefined,
           execution_channel: activeExecutionChannel || undefined,
@@ -2826,9 +2826,11 @@ function buildSupervisorExecutionCallbacks({
           await runEventSink.recordAgentEvent("run.agent_finish", {
             agent_id: cleanAgentId,
             role_id: roleKey || undefined,
+            model_role: actionInputs?.model_role || actionInputs?.modelRole || activeAgentConfig?.model_role || activeAgentConfig?.modelRole || roleKey || undefined,
             goal: cleanGoal,
-            provider: String(result?.provider || "").trim().toLowerCase() || undefined,
-            model: String(result?.model || "").trim() || undefined,
+            provider: String(result?.provider || activeProvider || "").trim().toLowerCase() || undefined,
+            model: String(result?.model || activeModel || "").trim() || undefined,
+            execution_channel: activeExecutionChannel || undefined,
             output_chars: String(result?.output || "").length || 0,
             runtime_instance_id: runtimeInstanceId || undefined,
             slot_id: slotId || undefined,
@@ -2890,6 +2892,10 @@ function buildSupervisorExecutionCallbacks({
           await runEventSink.recordAgentEvent("run.agent_error", {
             agent_id: cleanAgentId,
             role_id: roleKey || undefined,
+            model_role: actionInputs?.model_role || actionInputs?.modelRole || activeAgentConfig?.model_role || activeAgentConfig?.modelRole || roleKey || undefined,
+            provider: activeProvider || undefined,
+            model: activeModel || undefined,
+            execution_channel: activeExecutionChannel || undefined,
             goal: cleanGoal,
             error: String(e?.message ?? e),
             runtime_instance_id: runtimeInstanceId || undefined,

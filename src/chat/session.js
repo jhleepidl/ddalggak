@@ -16,6 +16,17 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function plainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : {};
+}
+
+function boundedRoomStateArray(value, maxRows = 80) {
+  return (Array.isArray(value) ? value : [])
+    .filter((row) => row && typeof row === 'object' && !Array.isArray(row))
+    .slice(-Math.max(1, Math.floor(Number(maxRows) || 80)))
+    .map((row) => ({ ...row }));
+}
+
 function normalizeRuntimeCheckpointRef(raw) {
   if (!raw || typeof raw !== "object") return undefined;
   const row = { ...raw };
@@ -667,6 +678,20 @@ function normalizeSession(chatId, raw = {}) {
         : null),
     public_search_cache: normalizePublicSearchCache(row.public_search_cache),
     runtime_rules: normalizeRuntimeRules(row.runtime_rules || row.runtimeRules),
+    agent_room_profile: plainObject(row.agent_room_profile || row.agentRoomProfile),
+    room_companion_events: boundedRoomStateArray(row.room_companion_events || row.roomCompanionEvents, 80),
+    room_companion_state: plainObject(row.room_companion_state || row.roomCompanionState),
+    room_loop_events: boundedRoomStateArray(row.room_loop_events || row.roomLoopEvents, 80),
+    room_branches: boundedRoomStateArray(row.room_branches || row.roomBranches, 40),
+    room_idle_memory_candidates: boundedRoomStateArray(row.room_idle_memory_candidates || row.roomIdleMemoryCandidates || row.idle_memory_observations, 30),
+    room_idle_memory_maintenance: plainObject(row.room_idle_memory_maintenance || row.roomIdleMemoryMaintenance),
+    room_memory_items: boundedRoomStateArray(row.room_memory_items || row.roomMemoryItems, 100),
+    room_memory_updated_at: String(row.room_memory_updated_at || row.roomMemoryUpdatedAt || '').trim() || undefined,
+    room_memory_goc_sync_events: boundedRoomStateArray(row.room_memory_goc_sync_events || row.roomMemoryGocSyncEvents, 80),
+    room_journey_trace_enabled: row.room_journey_trace_enabled === true || row.roomJourneyTraceEnabled === true,
+    room_journey_trace_until: String(row.room_journey_trace_until || row.roomJourneyTraceUntil || '').trim() || undefined,
+    room_journey_trace_source: String(row.room_journey_trace_source || row.roomJourneyTraceSource || '').trim() || undefined,
+    room_journey_identity: plainObject(row.room_journey_identity || row.roomJourneyIdentity),
     team_config: normalizeSessionTeamConfig(row.team_config),
     awaiting_install_approval: row.awaiting_install_approval === true,
     pending_install_proposal: normalizeInstallProposalState(row.pending_install_proposal || row.pendingInstallProposal),

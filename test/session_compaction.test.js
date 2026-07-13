@@ -6,8 +6,15 @@ import assert from 'node:assert/strict';
 
 import { ChatSessionStore } from '../src/chat/session.js';
 
+const testTmpRoot = path.join(os.homedir(), 'tmp', 'ddalggak-tests');
+fs.mkdirSync(testTmpRoot, { recursive: true });
+
+function makeTestTempDir(prefix) {
+  return fs.mkdtempSync(path.join(testTmpRoot, prefix));
+}
+
 test('chat session store compacts heavy team and route state before persisting', () => {
-  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dd-session-'));
+  const baseDir = makeTestTempDir('dd-session-');
   try {
     const store = new ChatSessionStore({ baseDir });
     store.upsert('chat-1', {
@@ -111,7 +118,7 @@ test('chat session store compacts heavy team and route state before persisting',
 });
 
 test('chat session store preserves Room Concierge cross-path state', () => {
-  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dd-session-room-'));
+  const baseDir = makeTestTempDir('dd-session-room-');
   try {
     const store = new ChatSessionStore({ baseDir });
     store.upsert('chat-1', {
@@ -131,6 +138,51 @@ test('chat session store preserves Room Concierge cross-path state', () => {
     assert.equal(session.last_room_selection.room_action, 'use_current_or_inbox_room');
     assert.equal(session.last_team_selection.execution_mode, 'single_model_direct_answer');
     assert.equal(session.last_direct_ask.provider, 'antigravity');
+  } finally {
+    fs.rmSync(baseDir, { recursive: true, force: true });
+  }
+});
+
+test('chat session store preserves governed Room profile, memory lifecycle, and benchmark trace state', () => {
+  const baseDir = makeTestTempDir('dd-session-room-memory-');
+  try {
+    const store = new ChatSessionStore({ baseDir });
+    store.upsert('room-headless', {
+      agent_room_profile: {
+        kind: 'agent_room_profile_v1',
+        collaboration_profile_id: 'builder_reviewer',
+        memory_schema: { object_types: ['preference', 'correction'] },
+      },
+      room_idle_memory_candidates: [
+        { kind: 'room_memory_candidate_v1', candidate_id: 'candidate-1', status: 'pending', memory_summary: '조용한 장소를 선호함' },
+      ],
+      room_idle_memory_maintenance: { kind: 'room_idle_memory_maintenance_v1', candidate_only: true },
+      room_memory_items: [
+        { kind: 'room_memory_item_v1', memory_id: 'memory-1', status: 'active', summary: '조용한 장소를 선호함' },
+      ],
+      room_companion_events: [
+        { event_id: 'event-1', event_type: 'room_idle_memory_observation_proposed' },
+      ],
+      room_companion_state: { kind: 'room_companion_state_v1', active_companion: { id: 'planner' } },
+      room_journey_trace_enabled: true,
+      room_journey_trace_until: '2099-01-01T00:00:00.000Z',
+      room_journey_trace_source: 'headless_room_journey_benchmark',
+      room_journey_identity: { thread_id: 'synthetic-thread', chat_id: 'room-headless', user_id: 'benchmark-user', transport: 'headless' },
+      room_memory_updated_at: '2098-12-31T23:59:00.000Z',
+    });
+
+    const reloaded = new ChatSessionStore({ baseDir }).get('room-headless');
+    assert.equal(reloaded.agent_room_profile.collaboration_profile_id, 'builder_reviewer');
+    assert.deepEqual(reloaded.agent_room_profile.memory_schema.object_types, ['preference', 'correction']);
+    assert.equal(reloaded.room_idle_memory_candidates[0].candidate_id, 'candidate-1');
+    assert.equal(reloaded.room_idle_memory_maintenance.candidate_only, true);
+    assert.equal(reloaded.room_memory_items[0].memory_id, 'memory-1');
+    assert.equal(reloaded.room_companion_events[0].event_id, 'event-1');
+    assert.equal(reloaded.room_companion_state.active_companion.id, 'planner');
+    assert.equal(reloaded.room_journey_trace_enabled, true);
+    assert.equal(reloaded.room_journey_trace_source, 'headless_room_journey_benchmark');
+    assert.equal(reloaded.room_journey_identity.transport, 'headless');
+    assert.equal(reloaded.room_memory_updated_at, '2098-12-31T23:59:00.000Z');
   } finally {
     fs.rmSync(baseDir, { recursive: true, force: true });
   }

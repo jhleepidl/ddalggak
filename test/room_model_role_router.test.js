@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   formatRoomModelRolePlanForTelegram,
+  modelRoleForAgentRole,
   modelRoleForPhase,
   normalizeRoomModelRolePolicy,
   resolveRoomModelRole,
@@ -12,6 +13,15 @@ test('model role router maps runtime phases to room-scoped roles', () => {
   assert.equal(modelRoleForPhase('source'), 'source_grounder');
   assert.equal(modelRoleForPhase('code'), 'code_executor');
   assert.equal(modelRoleForPhase('synthesis'), 'delivery_synthesizer');
+});
+
+
+test('model role router maps Room agent roles without scenario-specific routing', () => {
+  assert.equal(modelRoleForAgentRole('researcher_lane_2'), 'source_grounder');
+  assert.equal(modelRoleForAgentRole('canon_reviewer'), 'verifier_critic');
+  assert.equal(modelRoleForAgentRole('implementation_planner'), 'code_executor');
+  assert.equal(modelRoleForAgentRole('revision_synthesizer'), 'delivery_synthesizer');
+  assert.equal(modelRoleForAgentRole('operator'), 'concierge_router');
 });
 
 test('model role router applies env overrides without exporting credentials', () => {

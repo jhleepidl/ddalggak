@@ -1,47 +1,51 @@
 {
-  "_note": "Replace every placeholder with a dedicated staging GoC thread and Telegram chat identity. Do not reuse a Room across benchmark cells.",
+  "_note": "Optional deployed GoC command-path integration only. Replace every placeholder with identities accepted by that staging runtime, and do not reuse a Room across benchmark cells. The default headless benchmark needs no room map or Telegram identity.",
+  "room_settings_multiturn_cli/default": {
+    "thread_id": "<goc-thread-room-settings>",
+    "chat_id": "<room-state-room-settings>"
+  },
   "memory_approval_reuse/default": {
     "thread_id": "<goc-thread-memory-approval>",
-    "chat_id": "<chat-memory-approval>"
+    "chat_id": "<room-state-memory-approval>"
   },
   "unapproved_memory_suppression/default": {
     "thread_id": "<goc-thread-unapproved-suppression>",
-    "chat_id": "<chat-unapproved-suppression>"
+    "chat_id": "<room-state-unapproved-suppression>"
   },
   "correction_stale_memory/default": {
     "thread_id": "<goc-thread-correction>",
-    "chat_id": "<chat-correction>"
+    "chat_id": "<room-state-correction>"
   },
   "memory_restart_continuation/default": {
     "thread_id": "<goc-thread-restart>",
-    "chat_id": "<chat-restart>"
+    "chat_id": "<room-state-restart>"
   },
   "model_swap_memory_continuation/default": {
     "thread_id": "<goc-thread-model-swap>",
-    "chat_id": "<chat-model-swap>"
+    "chat_id": "<room-state-model-swap>"
   },
   "portfolio_builder_reviewer/solo": {
     "thread_id": "<goc-thread-builder-solo>",
-    "chat_id": "<chat-builder-solo>"
+    "chat_id": "<room-state-builder-solo>"
   },
   "portfolio_builder_reviewer/builder_reviewer": {
     "thread_id": "<goc-thread-builder-reviewer>",
-    "chat_id": "<chat-builder-reviewer>"
+    "chat_id": "<room-state-builder-reviewer>"
   },
   "portfolio_parallel_ideation/solo": {
     "thread_id": "<goc-thread-ideation-solo>",
-    "chat_id": "<chat-ideation-solo>"
+    "chat_id": "<room-state-ideation-solo>"
   },
   "portfolio_parallel_ideation/parallel_ideation": {
     "thread_id": "<goc-thread-parallel-ideation>",
-    "chat_id": "<chat-parallel-ideation>"
+    "chat_id": "<room-state-parallel-ideation>"
   },
   "portfolio_evidence_panel/solo": {
     "thread_id": "<goc-thread-evidence-solo>",
-    "chat_id": "<chat-evidence-solo>"
+    "chat_id": "<room-state-evidence-solo>"
   },
   "portfolio_evidence_panel/evidence_panel": {
     "thread_id": "<goc-thread-evidence-panel>",
-    "chat_id": "<chat-evidence-panel>"
+    "chat_id": "<room-state-evidence-panel>"
   }
 }

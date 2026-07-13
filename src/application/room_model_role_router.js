@@ -43,6 +43,18 @@ export function modelRoleForPhase(phase = '') {
   return MODEL_ROLE_PHASE_MAP[key] || (key && DEFAULT_MODEL_ROLE_FALLBACKS[key] ? key : 'delivery_synthesizer');
 }
 
+export function modelRoleForAgentRole(agentRole = '') {
+  const key = cleanText(agentRole, { lower: true, maxLen: 160 }).replace(/[\s-]+/g, '_');
+  if (!key) return 'delivery_synthesizer';
+  if (/verifier|review|critic|checker|adjudicat|safety|quality/.test(key)) return 'verifier_critic';
+  if (/builder|implementation|executor|code|patch|test|developer|engineer/.test(key)) return 'code_executor';
+  if (/research|source|ground|evidence|scout|browse|retriev/.test(key)) return 'source_grounder';
+  if (/operator|planner|router|coordinator|concierge|orchestrat/.test(key)) return 'concierge_router';
+  if (/idle|memory|structur|curator/.test(key)) return 'idle_structurer';
+  if (/synth|delivery|writer|draft|answer|revision|editor/.test(key)) return 'delivery_synthesizer';
+  return modelRoleForPhase(key);
+}
+
 export function normalizeRoomModelRolePolicy({ roomPackage = null, profile = null } = {}) {
   const pkg = asObject(roomPackage);
   const prof = asObject(profile);

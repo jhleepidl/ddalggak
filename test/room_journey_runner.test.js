@@ -5,8 +5,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { appendRoomJourneyTrace } from '../src/application/room_journey_trace.js';
+const testTmpRoot = path.join(os.homedir(), 'tmp', 'ddalggak-tests');
+fs.mkdirSync(testTmpRoot, { recursive: true });
+
+function makeTestTempDir(prefix) {
+  return fs.mkdtempSync(path.join(testTmpRoot, prefix));
+}
+
 import {
   evaluatePortfolioPromotion,
+  HeadlessRoomJourneyTransport,
   loadRoomJourneyScenario,
   loadRoomJourneySuite,
   runRoomJourneyScenario,
@@ -61,14 +69,90 @@ test('room journey scenario loader and suite expose natural user and portfolio s
   const base = path.resolve('scenarios/room_journeys');
   const core = loadRoomJourneySuite(path.join(base, 'core_suite.json'));
   const portfolio = loadRoomJourneySuite(path.join(base, 'model_portfolio_suite.json'));
-  assert.equal(core.scenario_files.length, 3);
+  assert.equal(core.scenario_files.length, 4);
   assert.equal(portfolio.scenario_files.length, 3);
   const scenario = loadRoomJourneyScenario(portfolio.scenario_files[0]);
   assert.deepEqual(scenarioArms(scenario).map((arm) => arm.id), ['solo', 'builder_reviewer']);
 });
 
+test('headless transport uses synthetic Room identity and captures local CLI runtime events without Telegram', async () => {
+  const root = makeTestTempDir('room-journey-headless-');
+  try {
+    const sessions = new Map();
+    const eventFile = path.join(root, 'runtime_events.jsonl');
+    const botMessages = [];
+    let sequence = 0;
+    const bot = {
+      mark() { return sequence; },
+      messagesSince(mark, chatId) { return botMessages.filter((row) => row.sequence > mark && row.chat_id === chatId); },
+      async sendMessage(chatId, text) {
+        sequence += 1;
+        botMessages.push({ sequence, method: 'sendMessage', chat_id: chatId, text });
+        return { message_id: sequence, text };
+      },
+    };
+    const runtimeCore = {
+      chatSessionStore: {
+        clear(chatId) { sessions.delete(String(chatId)); },
+        get(chatId) { return sessions.get(String(chatId)) || { state: 'idle' }; },
+        upsert(chatId, patchOrUpdater) {
+          const current = this.get(chatId);
+          const patch = typeof patchOrUpdater === 'function' ? patchOrUpdater(current) : patchOrUpdater;
+          const next = { ...current, ...patch };
+          sessions.set(String(chatId), next);
+          return next;
+        },
+      },
+      resolveCurrentJobIdForChat() { return 'job-headless'; },
+      jobs: { jobDir() { return root; } },
+    };
+    const runtimeFactory = async () => ({
+      bot,
+      runtimeCore,
+      chatRunManager: {
+        isRunning() { return false; },
+        async handleIncoming({ chatId, text }) {
+          const events = [
+            runtimeEvent('run.start', { user_text: text }),
+            runtimeEvent('run.agent_start', { provider: 'codex', model: 'gpt-5.5', model_role: 'builder', execution_channel: 'local_cli' }),
+            runtimeEvent('run.finish', { status: 'done', summary: `headless reply: ${text}` }),
+          ];
+          fs.writeFileSync(eventFile, events.map((row, index) => JSON.stringify({ ...row, event_sequence: index + 1, job_id: 'job-headless' })).join('\n') + '\n');
+          await bot.sendMessage(chatId, `headless reply: ${text}`);
+          return { status: 'started' };
+        },
+      },
+      async handleRoomCommand({ chatId, text }) {
+        if (text.startsWith('/rule ')) {
+          runtimeCore.chatSessionStore.upsert(chatId, (session) => ({ ...session, runtime_rules: [{ id: 'rule-1', text: text.slice(6), source: 'user', enabled: true }] }));
+        }
+        await bot.sendMessage(chatId, 'command applied');
+        return true;
+      },
+    });
+    const transport = new HeadlessRoomJourneyTransport({
+      threadId: 'synthetic-thread',
+      chatId: 'synthetic-room',
+      userId: 'synthetic-user',
+      runtimeRoot: root,
+      traceRoot: path.join(root, 'trace'),
+      runtimeFactory,
+    });
+    await transport.initialize();
+    const command = await transport.sendCommand('/rule structured output');
+    const result = await transport.sendMessage('hello');
+    assert.equal(command.ok, true);
+    assert.equal(result.ok, true);
+    assert.match(result.output, /headless reply/);
+    assert.equal(transport.events.filter((row) => row.event_type === 'run.agent_start').length, 1);
+    assert.equal(result.room_state.runtime_rules.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('plan-only journey writes a plan without initializing transport', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'room-journey-plan-'));
+  const root = makeTestTempDir('room-journey-plan-');
   try {
     const scenario = { id: 'plan_case', title: 'Plan', steps: [{ id: 'one', action: 'send_message', text: 'hello' }] };
     const result = await runRoomJourneyScenario({
@@ -85,7 +169,7 @@ test('plan-only journey writes a plan without initializing transport', async () 
 });
 
 test('executed journey records memory lifecycle, projection, runtime events, and semantic judgment', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'room-journey-run-'));
+  const root = makeTestTempDir('room-journey-run-');
   const traceRoot = path.join(root, 'trace');
   try {
     const scenario = {
@@ -141,7 +225,7 @@ test('portfolio promotion requires measured uplift and optional semantic evidenc
 });
 
 test('suite compares isolated solo and multi-model arms without counting architecture assertions as quality', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'room-journey-suite-'));
+  const root = makeTestTempDir('room-journey-suite-');
   try {
     const scenarioFile = path.join(root, 'scenario.json');
     fs.writeFileSync(scenarioFile, JSON.stringify({

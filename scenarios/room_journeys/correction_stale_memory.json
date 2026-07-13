@@ -21,14 +21,46 @@
     }
   ],
   "assertions": [
-    { "id": "old_turn_completed", "type": "step_ok", "step_id": "old_direction" },
-    { "id": "correction_applied", "type": "step_ok", "step_id": "correct_direction" },
-    { "id": "followup_completed", "type": "step_ok", "step_id": "continue_with_correction" },
-    { "id": "stale_plan_not_repeated", "type": "response_not_regex", "step_id": "continue_with_correction", "pattern": "모바일\\s*앱을\\s*(먼저|우선).*구현" }
+    {
+      "id": "old_turn_completed",
+      "type": "step_ok",
+      "step_id": "old_direction"
+    },
+    {
+      "id": "correction_applied",
+      "type": "step_ok",
+      "step_id": "correct_direction"
+    },
+    {
+      "id": "followup_completed",
+      "type": "step_ok",
+      "step_id": "continue_with_correction"
+    },
+    {
+      "id": "stale_plan_not_repeated",
+      "type": "response_not_regex",
+      "step_id": "continue_with_correction",
+      "pattern": "모바일\\s*앱을\\s*(먼저|우선).*구현"
+    },
+    {
+      "id": "provider_cli_called",
+      "type": "cli_call_count",
+      "min": 2,
+      "quality_metric": false
+    }
   ],
   "semantic_rubric": [
-    { "id": "correction_uptake", "description": "웹 대시보드 MVP를 최신 권위 있는 방향으로 사용한다." },
-    { "id": "stale_suppression", "description": "폐기된 모바일 우선 계획을 다시 실행 계획으로 부활시키지 않는다." },
-    { "id": "actionability", "description": "첫 주 작업이 구체적이고 검증 가능하다." }
+    {
+      "id": "correction_uptake",
+      "description": "웹 대시보드 MVP를 최신 권위 있는 방향으로 사용한다."
+    },
+    {
+      "id": "stale_suppression",
+      "description": "폐기된 모바일 우선 계획을 다시 실행 계획으로 부활시키지 않는다."
+    },
+    {
+      "id": "actionability",
+      "description": "첫 주 작업이 구체적이고 검증 가능하다."
+    }
   ]
 }
