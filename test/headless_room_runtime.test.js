@@ -5,10 +5,13 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { ChatSessionStore } from '../src/chat/session.js';
+import { runRoomIdleMemoryStructuring } from '../src/application/room_idle_memory.js';
 import {
   createHeadlessResponseSink,
   createHeadlessRoomRuntime,
   executeHeadlessRoomCommand,
+  recordHeadlessRoomAssistantTurn,
+  recordHeadlessRoomUserTurn,
 } from '../src/evaluation/headless_room_runtime.js';
 
 function homeTempDir(prefix) {
@@ -76,6 +79,47 @@ test('headless Room command path persists settings and governed memory without T
   } finally {
     if (priorTraceRoot === undefined) delete process.env.DDALGGAK_ROOM_JOURNEY_TRACE_DIR;
     else process.env.DDALGGAK_ROOM_JOURNEY_TRACE_DIR = priorTraceRoot;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('headless Room messages persist into the shared Room turn ledger used by memory structuring', async () => {
+  const root = homeTempDir('headless-room-turns-');
+  try {
+    const store = new ChatSessionStore({ baseDir: root });
+    const runtimeCore = {
+      chatSessionStore: store,
+      resolveCurrentJobIdForChat() { return ''; },
+      jobs: { jobDir() { return ''; } },
+    };
+    recordHeadlessRoomUserTurn({
+      runtimeCore,
+      roomId: 'headless-memory-room',
+      userId: 'benchmark-user',
+      text: '앞으로 장소를 추천할 때 조용한 곳을 선호해. 이 선호는 기억해도 돼.',
+    });
+    recordHeadlessRoomAssistantTurn({
+      runtimeCore,
+      roomId: 'headless-memory-room',
+      userId: 'benchmark-user',
+      assistantText: '조용한 장소 선호를 다음 추천 기준으로 반영하겠습니다.',
+      provider: 'codex',
+    });
+    const session = store.get('headless-memory-room');
+    assert.equal(session.recent_room_turns.length, 2);
+    assert.equal(session.recent_room_turns[0].role, 'user');
+    assert.equal(session.recent_room_turns[1].role, 'assistant');
+
+    const result = runRoomIdleMemoryStructuring({
+      chatSessionStore: store,
+      chatId: 'headless-memory-room',
+      force: true,
+      minIntervalMs: 0,
+      source: 'headless_room_turn_test',
+    });
+    assert.equal(result.ok, true);
+    assert.ok(result.candidates_created >= 1);
+  } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { repairRoutePlanForTeamExecution } from '../src/application/team_route_repair.js';
+import { dedupeRoutePlanActions, repairRoutePlanForTeamExecution } from '../src/application/team_route_repair.js';
 
 test('locked implementation team repairs researcher-only route into build pipeline', () => {
   const runtime = {
@@ -171,4 +171,54 @@ test('locked parallel profile repairs a single route into independent lanes and 
   assert.equal(repaired.actions[1].type, 'run_agent');
   assert.equal(repaired.actions[1].agent_id, 'reviewer');
   assert.equal(repaired.actions[2].type, 'synthesize_final');
+});
+
+
+test('route action dedupe removes accidental duplicates while preserving independent collaboration lanes', () => {
+  const result = dedupeRoutePlanActions({
+    actions: [
+      {
+        type: 'run_agent',
+        agent_id: 'reviewer',
+        goal: '같은 결과를 검토해줘',
+        inputs: { model_role: 'verifier_critic' },
+        scope: { mode: 'shared_only' },
+      },
+      {
+        type: 'run_agent',
+        agent_id: 'reviewer',
+        goal: '같은 결과를 검토해줘',
+        inputs: { model_role: 'verifier_critic' },
+        scope: { mode: 'shared_only' },
+      },
+      {
+        type: 'spawn_agents',
+        agents: [
+          {
+            agent_id: 'researcher',
+            goal: '독립 근거를 분석해줘',
+            inputs: { model_role: 'source_grounder', lane_id: 'lane-1' },
+            scope: { mode: 'shared_only' },
+          },
+          {
+            agent_id: 'researcher',
+            goal: '독립 근거를 분석해줘',
+            inputs: { model_role: 'source_grounder', lane_id: 'lane-1' },
+            scope: { mode: 'shared_only' },
+          },
+          {
+            agent_id: 'researcher',
+            goal: '독립 근거를 분석해줘',
+            inputs: { model_role: 'source_grounder', lane_id: 'lane-2' },
+            scope: { mode: 'shared_only' },
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(result.actions.length, 2);
+  assert.equal(result.deduplicated_action_count, 1);
+  assert.equal(result.actions[1].agents.length, 2);
+  assert.deepEqual(result.actions[1].agents.map((row) => row.inputs.lane_id), ['lane-1', 'lane-2']);
 });

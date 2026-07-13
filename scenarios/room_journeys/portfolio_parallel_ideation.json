@@ -69,6 +69,28 @@
       "quality_metric": false
     },
     {
+      "id": "parallel_required_model_roles",
+      "type": "successful_model_roles_include",
+      "arms": [
+        "parallel_ideation"
+      ],
+      "values": [
+        "source_grounder",
+        "verifier_critic",
+        "delivery_synthesizer"
+      ],
+      "quality_metric": false
+    },
+    {
+      "id": "parallel_independent_lanes",
+      "type": "distinct_lane_count",
+      "arms": [
+        "parallel_ideation"
+      ],
+      "min": 2,
+      "quality_metric": false
+    },
+    {
       "id": "solo_profile_applied",
       "type": "collaboration_profile_is",
       "arms": [

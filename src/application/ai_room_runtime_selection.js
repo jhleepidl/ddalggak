@@ -130,7 +130,8 @@ function makeAgentFromCard({ card = null, role = '', index = 0, taskText = '', w
     profile: roomProfile,
   });
   const provider = modelResolution.provider || clean(row.provider, { lower: true, maxLen: 80 }) || defaultProviderForRole(roleId, { taskText, workMode });
-  const model = modelResolution.model || clean(row.model, { maxLen: 160 });
+  const configuredCardModel = clean(row.model, { maxLen: 160 });
+  const model = modelResolution.model || (modelResolution.provider ? '' : configuredCardModel);
   return {
     agent_id: roleId,
     id: roleId,
@@ -169,14 +170,32 @@ function expandAgentsForCollaboration({ agents = [], profile = null } = {}) {
   const pattern = cleanId(collaboration.execution_pattern || '');
   if (!['parallel_research_then_review_then_synthesize', 'multi_research_adjudication'].includes(pattern)) return rows;
 
-  const existingResearchers = rows.filter((agent) => cleanId(agent.role) === 'researcher');
-  const source = existingResearchers[0] || rows.find((agent) => !/review|critic|synthesizer|operator/.test(cleanId(agent.role)));
-  if (!source) return rows;
   const dimensions = asArray(asObject(collaboration.diversity_contract).dimensions)
     .map((item) => cleanId(item))
     .filter(Boolean);
-  const participantCap = Math.max(rows.length, Number(collaboration.max_participants || rows.length || 4));
-  const availableSlots = Math.max(0, participantCap - rows.length);
+  let researcherIndex = 0;
+  const laneRows = rows.map((agent) => {
+    if (cleanId(agent.role) !== 'researcher') return agent;
+    researcherIndex += 1;
+    const dimensionIndex = researcherIndex - 1;
+    const dimension = dimensions[dimensionIndex]
+      || dimensions[dimensionIndex % Math.max(1, dimensions.length)]
+      || `independent_angle_${researcherIndex}`;
+    return {
+      ...agent,
+      collaboration_lane: {
+        ...asObject(agent.collaboration_lane),
+        lane_id: cleanId(asObject(agent.collaboration_lane).lane_id || `lane_${researcherIndex}`),
+        diversity_dimension: cleanId(asObject(agent.collaboration_lane).diversity_dimension || dimension),
+        initial_visibility: clean(asObject(agent.collaboration_lane).initial_visibility || collaboration.initial_visibility || 'isolated_until_submission', { maxLen: 120 }),
+      },
+    };
+  });
+  const existingResearchers = laneRows.filter((agent) => cleanId(agent.role) === 'researcher');
+  const source = existingResearchers[0] || laneRows.find((agent) => !/review|critic|synthesizer|operator/.test(cleanId(agent.role)));
+  if (!source) return laneRows;
+  const participantCap = Math.max(laneRows.length, Number(collaboration.max_participants || laneRows.length || 4));
+  const availableSlots = Math.max(0, participantCap - laneRows.length);
   const desiredResearchers = Math.max(2, Math.min(3, existingResearchers.length + availableSlots));
   const additions = [];
   for (let index = existingResearchers.length; index < desiredResearchers; index += 1) {
@@ -188,7 +207,7 @@ function expandAgentsForCollaboration({ agents = [], profile = null } = {}) {
       name: `Independent Research Lane ${index + 1}`,
       role: 'researcher',
       purpose: `Explore an independent contribution lane focused on ${dimension}; do not duplicate other lanes.`,
-      order: rows.length + additions.length,
+      order: laneRows.length + additions.length,
       collaboration_lane: {
         lane_id: `lane_${index + 1}`,
         diversity_dimension: dimension,
@@ -196,7 +215,7 @@ function expandAgentsForCollaboration({ agents = [], profile = null } = {}) {
       },
     });
   }
-  return [...rows, ...additions].map((agent, index) => ({ ...agent, order: index }));
+  return [...laneRows, ...additions].map((agent, index) => ({ ...agent, order: index }));
 }
 
 function buildInteractionSpec({ workMode = 'ask', roles = [], agents = [], roomProfile = null } = {}) {

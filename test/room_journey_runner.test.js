@@ -251,6 +251,36 @@ test('portfolio comparison refuses to score faster failures as quality or latenc
   assert.ok(result.reasons.includes('challenger_invalid_execution'));
 });
 
+
+
+test('portfolio comparison is invalid when the collaboration graph did not materialize', () => {
+  const result = evaluatePortfolioPromotion({
+    baseline: {
+      quality_score: 0.7,
+      required_fail: 0,
+      duration_ms: 1000,
+      semantic_judge_present: true,
+      execution_status: 'valid_execution',
+      collaboration_execution_status: 'not_applicable',
+    },
+    challenger: {
+      quality_score: 0.8,
+      required_fail: 2,
+      duration_ms: 1100,
+      semantic_judge_present: true,
+      execution_status: 'valid_execution',
+      collaboration_execution_status: 'invalid_collaboration_execution',
+      collaboration_assertion_failures: ['roles', 'lanes'],
+    },
+    gate: { min_quality_uplift: 0.05 },
+  });
+  assert.equal(result.status, 'invalid_collaboration_execution');
+  assert.equal(result.promote, false);
+  assert.equal(result.quality_uplift, null);
+  assert.equal(result.latency_ratio, null);
+  assert.deepEqual(result.reasons, ['challenger_collaboration_graph_not_materialized', 'roles', 'lanes']);
+});
+
 test('negative response assertions fail when the requested turn failed or returned an empty response', async () => {
   const root = makeTestTempDir('room-journey-empty-response-');
   try {
