@@ -82,18 +82,29 @@ export function loadLiveScenario(filePath) {
   return { ...scenario, __file: path.resolve(filePath) };
 }
 
-function normalizeMatrix(scenario = {}, overrides = {}) {
-  const base = asArray(scenario.matrix).length ? asArray(scenario.matrix) : [asObject(scenario.execution)];
+export function normalizeScenarioMatrix(scenario = {}, overrides = {}) {
+  const allRows = asArray(scenario.matrix).length ? asArray(scenario.matrix) : [asObject(scenario.execution)];
+  const matrixIndex = Number.isInteger(overrides.matrixIndex) ? overrides.matrixIndex : null;
+  const base = matrixIndex === null ? allRows : (allRows[matrixIndex] ? [allRows[matrixIndex]] : []);
+  if (matrixIndex !== null && !base.length) throw new Error(`Scenario matrix index out of range: ${matrixIndex}`);
   const result = [];
+  const explicitProvider = clean(overrides.provider);
+  const explicitVariant = clean(overrides.variantId);
   for (const row of base) {
-    const provider = normalizeProviderName(overrides.provider || row.provider || scenario.provider || 'codex');
+    const scenarioProvider = normalizeProviderName(row.provider || scenario.provider || 'codex');
+    const provider = normalizeProviderName(explicitProvider || scenarioProvider);
     const repetitions = Math.max(1, Math.min(Number(overrides.repeat || row.repetitions || 1) || 1, 20));
+    const inheritedVariant = clean(row.harness_variant_id);
+    // A scenario may carry a provider-specific default variant. When the caller
+    // overrides the provider, do not silently keep the old provider's variant.
+    // An explicitly supplied --variant is still validated strictly by the registry.
+    const harnessVariantId = explicitVariant || (explicitProvider && provider !== scenarioProvider ? '' : inheritedVariant);
     for (let rep = 1; rep <= repetitions; rep += 1) {
       result.push({
         provider,
         model: clean(overrides.model || row.model),
         reasoning_effort: clean(overrides.reasoningEffort || row.reasoning_effort),
-        harness_variant_id: clean(overrides.variantId || row.harness_variant_id),
+        harness_variant_id: harnessVariantId,
         role: clean(row.role || scenario.role || 'code_executor'),
         timeout_ms: Number(row.timeout_ms || scenario.timeout_ms || 0) || 0,
         repetition: rep,
@@ -389,7 +400,7 @@ function aggregateResults(evaluationId, scenarioRuns, { suite = 'live', startedA
 }
 
 export async function runLiveScenarioSuite({
-  scenarioFiles = [], scenarioDir = '', outputDir = '', registryPath = '', provider = '', model = '', reasoningEffort = '', variantId = '', repeat = 0,
+  scenarioFiles = [], scenarioDir = '', outputDir = '', registryPath = '', provider = '', model = '', reasoningEffort = '', variantId = '', repeat = 0, matrixIndex = null,
   dryRun = false, keepWorkspaces = true, syncToGoc = false, providerExecutor = null, capabilityProbe = probeProviderCapability, commandRunner = runCommand,
 } = {}) {
   let files = asArray(scenarioFiles).map((file) => path.resolve(file));
@@ -409,7 +420,7 @@ export async function runLiveScenarioSuite({
   const capabilityCache = new Map();
 
   for (const scenario of scenarios) {
-    const matrix = normalizeMatrix(scenario, { provider, model, reasoningEffort, variantId, repeat });
+    const matrix = normalizeScenarioMatrix(scenario, { provider, model, reasoningEffort, variantId, repeat, matrixIndex });
     for (const cell of matrix) {
       const variant = resolveHarnessVariant({ registry, variantId: cell.harness_variant_id, provider: cell.provider, role: cell.role, model: cell.model, reasoningEffort: cell.reasoning_effort });
       const capabilityKey = `${variant.provider}|${variant.model}|${variant.reasoning_effort}`;

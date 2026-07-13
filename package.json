@@ -16,6 +16,7 @@
     "models:refresh": "node scripts/discover_model_nodes.js --refresh --stdout",
     "models:status": "node scripts/model_discovery_status.js",
     "models:bench-pending": "node scripts/benchmark_pending_models.js",
+    "models:bench-all": "node scripts/benchmark_all_models.js",
     "continuity:test": "node scripts/run_continuity_tests.js",
     "continuity:handoff": "node scripts/build_continuity_handoff.js",
     "test:user-paths": "node --test test/runtime_command_worker.test.js test/runtime_command_processor.test.js test/run_event_outbox.test.js test/continuity_scenario_runner.test.js test/continuity_handoff_builder.test.js"

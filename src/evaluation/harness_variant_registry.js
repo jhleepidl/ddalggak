@@ -82,10 +82,16 @@ export function loadHarnessVariantRegistry({ registryPath = '', cwd = process.cw
 export function resolveHarnessVariant({ registry, variantId = '', provider = '', role = 'code_executor', model = '', reasoningEffort = '' } = {}) {
   const source = registry?.variants ? registry : loadHarnessVariantRegistry();
   const variants = asArray(source.variants);
-  const direct = clean(variantId) ? variants.find((row) => row.id === clean(variantId)) : null;
-  if (direct) return { ...direct, model: clean(model) || direct.model, reasoning_effort: clean(reasoningEffort) || direct.reasoning_effort };
   const providerKey = normalizeProviderName(provider);
   const roleKey = clean(role || 'code_executor').toLowerCase();
+  const direct = clean(variantId) ? variants.find((row) => row.id === clean(variantId)) : null;
+  if (clean(variantId) && !direct) throw new Error(`Unknown harness variant: ${clean(variantId)}`);
+  if (direct) {
+    if (providerKey && direct.provider !== providerKey) {
+      throw new Error(`Harness variant provider mismatch: variant=${direct.id} provider=${direct.provider} requested_provider=${providerKey}`);
+    }
+    return { ...direct, model: clean(model) || direct.model, reasoning_effort: clean(reasoningEffort) || direct.reasoning_effort };
+  }
   const candidates = variants.filter((row) => row.provider === providerKey && row.role === roleKey && row.status !== 'archived');
   const chosen = candidates.find((row) => row.status === 'champion') || candidates[0];
   if (!chosen) throw new Error(`No harness variant for provider=${providerKey} role=${roleKey}`);

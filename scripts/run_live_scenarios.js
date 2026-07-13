@@ -16,6 +16,7 @@ function argsOf(argv) {
     else if (arg === '--reasoning') out.reasoningEffort = next();
     else if (arg === '--variant') out.variantId = next();
     else if (arg === '--repeat') out.repeat = Number(next());
+    else if (arg === '--matrix-index') out.matrixIndex = Number(next());
     else if (arg === '--output-dir') out.outputDir = next();
     else if (arg === '--registry') out.registryPath = next();
     else if (arg === '--dry-run') out.dryRun = true;

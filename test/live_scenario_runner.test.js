@@ -90,3 +90,25 @@ test('live scenario runner can use an isolated semantic judge and combine its sc
   assert.equal(calls.length, 2);
   assert.notEqual(calls[0].workspaceRoot, calls[1].workspaceRoot);
 });
+
+test('provider override drops a scenario provider-specific variant and auto-selects a compatible one', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'live-provider-override-'));
+  const scenarioFile = path.join(root, 'scenario.json');
+  fs.writeFileSync(scenarioFile, JSON.stringify({
+    id: 'provider_override', goal: 'No-op', role: 'task_worker',
+    fixture: { files: { 'input.txt': 'x' } },
+    matrix: [{ provider: 'codex', role: 'task_worker', harness_variant_id: 'task_worker.codex.default.medium.v1' }],
+    expectations: { provider_ok: true },
+  }));
+  try {
+    let selected = null;
+    const summary = await runLiveScenarioSuite({
+      scenarioFiles: [scenarioFile], outputDir: path.join(root, 'out'), provider: 'claude', model: 'sonnet-test',
+      capabilityProbe: async ({ provider }) => ({ provider, cli_available: true, cli_version: 'test' }),
+      providerExecutor: async ({ variant }) => { selected = variant; return { ok: true, stdout: 'ok', stderr: '', exitCode: 0, durationMs: 1, used_model: 'sonnet-test' }; },
+    });
+    assert.equal(summary.passed_run_count, 1);
+    assert.equal(selected.provider, 'claude');
+    assert.equal(selected.id, 'task_worker.claude.default.medium.v1');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

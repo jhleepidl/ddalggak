@@ -37,3 +37,19 @@ test('continuity handoff copies run evidence, excludes env/git/cache, and writes
   assert.doesNotMatch(fs.readFileSync(path.join(copiedRoot, 'RUNBOOK.md'), 'utf8'), /very-secret/);
   assert.match(fs.readFileSync(path.join(result.output_dir, 'scorecard.csv'), 'utf8'), /restart_continuation/);
 });
+
+test('continuity handoff includes an all-model benchmark matrix', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'continuity-matrix-handoff-'));
+  const matrix = path.join(root, 'model_matrix_test');
+  fs.mkdirSync(matrix, { recursive: true });
+  fs.writeFileSync(path.join(matrix, 'SUMMARY.md'), '# matrix\n');
+  fs.writeFileSync(path.join(matrix, 'results.tsv'), 'provider\tmodel\n');
+  try {
+    const result = await buildContinuityHandoff({
+      matrixDirs: [matrix], outDir: path.join(root, 'handoff'), createArchive: false, probe: false,
+    });
+    assert.equal(fs.existsSync(path.join(result.output_dir, 'model_matrices', 'model_matrix_test', 'SUMMARY.md')), true);
+    const manifest = JSON.parse(fs.readFileSync(path.join(result.output_dir, 'HANDOFF_MANIFEST.json'), 'utf8'));
+    assert.deepEqual(manifest.matrix_dirs, ['model_matrix_test']);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

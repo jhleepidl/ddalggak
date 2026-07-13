@@ -28,3 +28,11 @@ test('runtime prompt adaptation is opt-in unless runtime variants are globally e
   assert.match(adapted.prompt, /AI Rooms runtime harness variant/);
   assert.match(adapted.prompt, /original task/);
 });
+
+test('explicit harness variants reject provider mismatches', () => {
+  const registry = loadHarnessVariantRegistry({ cwd: process.cwd() });
+  assert.throws(
+    () => resolveHarnessVariant({ registry, variantId: 'code_executor.codex.default.high.v1', provider: 'claude', role: 'code_executor' }),
+    /provider mismatch/,
+  );
+});

@@ -141,11 +141,11 @@ function renderHandoff({ manifest, scoreRows }) {
   for (const item of manifest.provider_registry?.items || []) lines.push(`- ${item.provider}: ${item.cli_version || 'unavailable'} (${item.cli_available ? 'available' : 'unavailable'})`);
   lines.push('', '## Scenario Results', '');
   for (const row of scoreRows) lines.push(`- ${row.scenario_id} [${row.track}]: ${row.status}, manual=${row.manual_score || '-'}, judge=${row.judge_score || '-'}`);
-  lines.push('', '## Review order', '', '1. `scorecard.csv`', '2. `runs/<run>/state.json`', '3. `runs/<run>/RUNBOOK.md`', '4. `runs/<run>/judge_output.txt`', '5. `HANDOFF_MANIFEST.json`', '', '## Safety', '', '- `.env`, token, credential, Git metadata, dependency/build cache는 제외했습니다.', '- 텍스트 파일의 일반적인 key/token 패턴은 자동 redaction했습니다.', '- 개인 대화나 민감한 업로드 원문은 전달 전에 직접 검토하세요.', '');
+  lines.push('', '## Review order', '', '1. `scorecard.csv`', '2. `runs/<run>/state.json`', '3. `runs/<run>/RUNBOOK.md`', '4. `model_matrices/<matrix>/SUMMARY.md` (when included)', '5. `runs/<run>/judge_output.txt`', '6. `HANDOFF_MANIFEST.json`', '', '## Safety', '', '- `.env`, token, credential, Git metadata, dependency/build cache는 제외했습니다.', '- 텍스트 파일의 일반적인 key/token 패턴은 자동 redaction했습니다.', '- 개인 대화나 민감한 업로드 원문은 전달 전에 직접 검토하세요.', '');
   return lines.join('\n');
 }
 
-export async function buildContinuityHandoff({ runDirs = [], outDir = '', archivePath = '', repositories = {}, sourceZips = [], evaluationDirs = [], logFiles = [], createArchive = true, probe = true } = {}) {
+export async function buildContinuityHandoff({ runDirs = [], outDir = '', archivePath = '', repositories = {}, sourceZips = [], evaluationDirs = [], matrixDirs = [], logFiles = [], createArchive = true, probe = true } = {}) {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const root = ensureDir(path.resolve(outDir || path.join('continuity_handoff', `handoff_${timestamp}`)));
   const copied = [];
@@ -158,6 +158,10 @@ export async function buildContinuityHandoff({ runDirs = [], outDir = '', archiv
   for (const evalDir of evaluationDirs.map((entry) => path.resolve(entry))) {
     if (!fs.existsSync(evalDir)) continue;
     copyTree(evalDir, path.join(root, 'evaluations', safe(path.basename(evalDir))), copied);
+  }
+  for (const matrixDir of matrixDirs.map((entry) => path.resolve(entry))) {
+    if (!fs.existsSync(matrixDir)) continue;
+    copyTree(matrixDir, path.join(root, 'model_matrices', safe(path.basename(matrixDir))), copied);
   }
   for (const logFile of logFiles.map((entry) => path.resolve(entry))) {
     if (!fs.existsSync(logFile) || !fs.statSync(logFile).isFile()) continue;
@@ -176,7 +180,7 @@ export async function buildContinuityHandoff({ runDirs = [], outDir = '', archiv
   const manifest = {
     schema_version: 'ddalggak.continuity_handoff/v1', created_at: nowIso(), hostname: os.hostname(), platform: process.platform,
     node_version: process.version, repositories: repositoryRows, provider_registry: providerRegistry,
-    run_dirs: resolvedRuns.map((entry) => path.basename(entry)), evaluation_dirs: evaluationDirs.map((entry) => path.basename(entry)),
+    run_dirs: resolvedRuns.map((entry) => path.basename(entry)), evaluation_dirs: evaluationDirs.map((entry) => path.basename(entry)), matrix_dirs: matrixDirs.map((entry) => path.basename(entry)),
     included_source_zips: sourceZips.map((entry) => path.basename(entry)), copied_file_count: copied.length,
   };
   writeJson(path.join(root, 'HANDOFF_MANIFEST.json'), manifest);
