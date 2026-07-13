@@ -316,6 +316,25 @@ function normalizeDisplayModelCandidates(provider = '', raw = '') {
   return out;
 }
 
+
+export function parseAntigravityModelListOutput({ text = '', maxModels = 80 } = {}) {
+  const raw = String(text || '')
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+    .replace(/\u001b\[[0-9;?]*[ -\/]*[@-~]/g, '');
+  const ignored = /^(?:available\s+models?|models?|usage|warning|error|note|hint|loading|fetching|current)\b/i;
+  const rows = [];
+  for (const sourceLine of raw.split(/\r?\n/g)) {
+    const line = clean(sourceLine)
+      .replace(/^[>*•+\-\d.)\s]+/, '')
+      .replace(/\s+\(current\)\s*$/i, '')
+      .trim();
+    if (!line || line.length > 220 || ignored.test(line)) continue;
+    if (!/[a-z0-9]/i.test(line)) continue;
+    rows.push(line);
+  }
+  return uniqueStrings(rows, { max: maxModels });
+}
+
 export function parseCliModelListOutput({ provider = '', text = '', maxModels = 80 } = {}) {
   const raw = clean(text);
   if (!raw) return [];
@@ -508,35 +527,74 @@ export async function discoverClaudeCliModelNodes({ command = process.env.CLAUDE
   };
 }
 
-export async function discoverAntigravityCliModelNodes({ command = process.env.ANTIGRAVITY_CLI_COMMAND || process.env.GOOGLE_AI_CLI_COMMAND || 'agy', maxModels = 80 } = {}) {
-  // Antigravity versions do not consistently expose a non-interactive list command.
-  // Use explicit candidates when supplied; otherwise retain a provider-default
-  // benchmark selector so actual CLI scenarios can still validate the installed runtime.
-  const configured = configuredCliModelCandidates({ provider: 'antigravity' }).slice(0, maxModels);
-  if (!configured.length) {
+export async function discoverAntigravityCliModelNodes({
+  command = process.env.ANTIGRAVITY_CLI_COMMAND || process.env.GOOGLE_AI_CLI_COMMAND || 'agy',
+  args = splitEnvArgs(process.env.ANTIGRAVITY_MODEL_DISCOVERY_ARGS || ''),
+  timeoutMs = Number(process.env.CLI_MODEL_DISCOVERY_TIMEOUT_MS || 12000) || 12000,
+  maxModels = 80,
+  runner = runCommand,
+} = {}) {
+  const commandArgs = args.length ? args : ['models'];
+  const result = await runCliModelCommand({ command, args: commandArgs, timeoutMs, runner });
+  const listed = result.ok === true
+    ? parseAntigravityModelListOutput({ text: result.stdout, maxModels })
+    : [];
+  const configured = configuredCliModelCandidates({ provider: 'antigravity', includeProviderDefaults: false });
+  const namedCandidates = uniqueStrings([...listed, ...configured], { max: maxModels });
+
+  if (namedCandidates.length) {
+    const source = listed.length
+      ? 'antigravity_cli_models_command'
+      : 'antigravity_configured_candidates';
+    const warning = listed.length
+      ? ''
+      : discoveryFailureText([result], 'agy models returned no candidates; using configured Antigravity candidates.');
+    const nodes = nodesFromCandidates({
+      provider: 'antigravity',
+      runtime: 'antigravity_cli',
+      candidates: namedCandidates,
+      source,
+      command,
+    });
+    return {
+      ok: true,
+      runtime: 'antigravity_cli',
+      count: nodes.length,
+      nodes,
+      raw_model_count: listed.length,
+      warning,
+      discovery_source: source,
+      discovery_attempts: [{ args: commandArgs, ok: result.ok === true, exit_code: result.exitCode }],
+    };
+  }
+
+  const fallback = configuredCliModelCandidates({ provider: 'antigravity' }).slice(0, maxModels);
+  if (!fallback.length) {
     return {
       ok: false,
       runtime: 'antigravity_cli',
       nodes: [],
-      error: 'No Antigravity model candidates configured and provider-default fallback disabled.',
-      discovery_source: 'antigravity_configured_candidates',
+      error: discoveryFailureText([result], 'agy models returned no candidates and provider-default fallback is disabled.'),
+      discovery_source: 'antigravity_cli_models_command',
+      discovery_attempts: [{ args: commandArgs, ok: result.ok === true, exit_code: result.exitCode }],
     };
   }
-  const source = configured.some(isProviderDefaultSelector)
-    ? 'antigravity_provider_default_fallback'
-    : 'antigravity_configured_candidates';
-  const warning = configured.some(isProviderDefaultSelector)
-    ? 'Named Antigravity models were not configured; benchmark will exercise the provider default. Set ANTIGRAVITY_MODEL_CANDIDATES to test exact model IDs.'
-    : '';
-  const nodes = nodesFromCandidates({ provider: 'antigravity', runtime: 'antigravity_cli', candidates: configured, source, command });
+  const nodes = nodesFromCandidates({
+    provider: 'antigravity',
+    runtime: 'antigravity_cli',
+    candidates: fallback,
+    source: 'antigravity_provider_default_fallback',
+    command,
+  });
   return {
     ok: true,
     runtime: 'antigravity_cli',
     count: nodes.length,
     nodes,
-    raw_model_count: configured.filter((item) => !isProviderDefaultSelector(item)).length,
-    warning,
-    discovery_source: source,
+    raw_model_count: 0,
+    warning: `${discoveryFailureText([result], 'agy models returned no candidates.')} Benchmark will exercise the provider default.`,
+    discovery_source: 'antigravity_provider_default_fallback',
+    discovery_attempts: [{ args: commandArgs, ok: result.ok === true, exit_code: result.exitCode }],
   };
 }
 

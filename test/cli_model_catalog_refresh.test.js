@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { discoverAntigravityCliModelNodes, discoverClaudeCliModelNodes, discoverCodexCliModelNodes, discoverGeminiCliModelNodes, parseCliModelListOutput } from '../src/application/model_node_discovery.js';
+import { discoverAntigravityCliModelNodes, discoverClaudeCliModelNodes, discoverCodexCliModelNodes, discoverGeminiCliModelNodes, parseAntigravityModelListOutput, parseCliModelListOutput } from '../src/application/model_node_discovery.js';
 import { refreshModelCatalog } from '../src/application/model_catalog_refresh.js';
 import { listModelNodes } from '../src/application/model_node_registry.js';
 
@@ -13,6 +13,53 @@ test('CLI /model output parser extracts Codex and Gemini model ids', () => {
   assert.deepEqual(parseCliModelListOutput({ provider: 'codex', text: codexText }), ['gpt-5.5', 'gpt-5-codex', 'o4-mini']);
   const geminiText = 'Auto (Gemini 3): gemini-3.1-pro, gemini-3-flash\nManual: gemini-2.5-pro';
   assert.deepEqual(parseCliModelListOutput({ provider: 'gemini', text: geminiText }), ['gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro']);
+});
+
+test('Antigravity models output preserves display selectors and reasoning profiles', () => {
+  const text = [
+    '> Gemini 3.5 Flash (Medium)    (current)',
+    'Gemini 3.5 Flash (High)',
+    'Gemini 3.5 Flash (Low)',
+    'Gemini 3.1 Pro (Low)',
+    'Gemini 3.1 Pro (High)',
+    'Claude Sonnet 4.6 (Thinking)',
+    'Claude Opus 4.6 (Thinking)',
+    'GPT-OSS 120B (Medium)',
+  ].join('\n');
+  assert.deepEqual(parseAntigravityModelListOutput({ text }), [
+    'Gemini 3.5 Flash (Medium)',
+    'Gemini 3.5 Flash (High)',
+    'Gemini 3.5 Flash (Low)',
+    'Gemini 3.1 Pro (Low)',
+    'Gemini 3.1 Pro (High)',
+    'Claude Sonnet 4.6 (Thinking)',
+    'Claude Opus 4.6 (Thinking)',
+    'GPT-OSS 120B (Medium)',
+  ]);
+});
+
+test('Antigravity discovery calls agy models and builds one node per listed selector', async () => {
+  const fakeRunner = async (command, args, opts) => {
+    assert.equal(command, 'agy');
+    assert.deepEqual(args, ['models']);
+    assert.equal(Object.prototype.hasOwnProperty.call(opts, 'input'), false);
+    return {
+      ok: true,
+      stdout: 'Gemini 3.5 Flash (Medium)\nClaude Sonnet 4.6 (Thinking)\nGPT-OSS 120B (Medium)\n',
+      stderr: '',
+      exitCode: 0,
+    };
+  };
+  const result = await discoverAntigravityCliModelNodes({ runner: fakeRunner, timeoutMs: 1000 });
+  assert.equal(result.ok, true);
+  assert.equal(result.discovery_source, 'antigravity_cli_models_command');
+  assert.equal(result.raw_model_count, 3);
+  assert.deepEqual(result.nodes.map((node) => node.model), [
+    'Gemini 3.5 Flash (Medium)',
+    'Claude Sonnet 4.6 (Thinking)',
+    'GPT-OSS 120B (Medium)',
+  ]);
+  assert.equal(result.nodes.every((node) => node.model_catalog.discovered_from === 'antigravity_cli_models_command'), true);
 });
 
 test('Codex non-interactive discovery and Gemini legacy discovery build model nodes', async () => {
@@ -56,7 +103,7 @@ test('Claude aliases and Antigravity provider-default fallback create benchmarka
     assert.equal(claude.nodes.some((node) => node.model === 'sonnet'), true);
     assert.equal(claude.nodes.some((node) => node.model === 'fable'), true);
     assert.equal(claude.nodes.some((node) => node.model === 'claude-custom-test'), true);
-    const antigravity = await discoverAntigravityCliModelNodes();
+    const antigravity = await discoverAntigravityCliModelNodes({ runner: async () => ({ ok: false, stdout: '', stderr: 'unavailable', exitCode: 1 }) });
     assert.equal(antigravity.ok, true);
     assert.equal(antigravity.nodes[0].model, '@default');
     assert.equal(antigravity.nodes[0].model_catalog.default_selector, true);

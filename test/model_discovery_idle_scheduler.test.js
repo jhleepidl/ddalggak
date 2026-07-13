@@ -39,6 +39,7 @@ const ENV_KEYS = [
   'CLAUDE_MODEL_CANDIDATES',
   'CLAUDE_MODEL_DISCOVERY_INCLUDE_ALIASES',
   'ANTIGRAVITY_MODEL_CANDIDATES',
+  'ANTIGRAVITY_MODEL_DISCOVERY_ARGS',
   'MODEL_DISCOVERY_INCLUDE_PROVIDER_DEFAULT',
 ];
 
@@ -80,7 +81,7 @@ test('Claude aliases and Antigravity configured/default candidates are non-inter
     assert.deepEqual(parseCliModelListOutput({ provider: 'claude', text: 'Claude Opus 4.8\nsonnet\ngpt-5.6-sol' }), ['claude-opus-4-8', 'sonnet']);
     assert.deepEqual(parseCliModelListOutput({ provider: 'antigravity', text: 'Gemini 3.5 Flash\ngpt-5.6-sol' }), ['gemini-3.5-flash']);
     const claude = await discoverClaudeCliModelNodes();
-    const antigravity = await discoverAntigravityCliModelNodes();
+    const antigravity = await discoverAntigravityCliModelNodes({ runner: async () => ({ ok: false, stdout: '', stderr: 'unavailable', exitCode: 1 }) });
     assert.equal(claude.ok, true);
     assert.equal(claude.nodes.some((node) => node.model === 'sonnet'), true);
     assert.equal(claude.nodes.some((node) => node.model === 'claude-opus-4-8'), true);
