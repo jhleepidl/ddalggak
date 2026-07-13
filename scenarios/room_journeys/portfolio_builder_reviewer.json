@@ -1,0 +1,39 @@
+{
+  "schema_version": "ddalggak.room_journey_scenario/v1",
+  "id": "portfolio_builder_reviewer",
+  "title": "단일 모델 대비 구현-검토 협업",
+  "description": "명확한 산출물과 수용 기준이 있는 요청에서 독립 reviewer가 실제 품질을 높이는지 단일 specialist와 비교한다.",
+  "experiment": {
+    "baseline": { "id": "solo", "title": "Strongest suitable single-model baseline", "collaboration_profile": "solo", "model_policy": "strongest_suitable_single" },
+    "challengers": [
+      { "id": "builder_reviewer", "title": "Builder plus independent reviewer", "collaboration_profile": "builder_reviewer", "model_policy": "role_fit_distinct_models" }
+    ],
+    "promotion_gate": {
+      "min_quality_uplift": 0.05,
+      "max_cost_ratio": 3.0,
+      "max_latency_ratio": 3.0,
+      "require_semantic_evidence": true
+    }
+  },
+  "steps": [
+    {
+      "id": "request_artifact",
+      "action": "send_message",
+      "text": "우리 팀의 배포 전 점검표 초안을 만들어줘. 반드시 롤백 조건, 데이터 마이그레이션 검증, 담당자 승인, 배포 후 30분 관찰 항목을 포함하고, 실제 운영자가 바로 쓸 수 있는 체크박스 형식이어야 해. 마지막에는 빠진 위험이 없는지 스스로 검토해줘."
+    }
+  ],
+  "assertions": [
+    { "id": "request_completed", "type": "step_ok", "step_id": "request_artifact" },
+    { "id": "contains_rollback", "type": "response_regex", "step_id": "request_artifact", "pattern": "롤백" },
+    { "id": "contains_migration", "type": "response_regex", "step_id": "request_artifact", "pattern": "마이그레이션" },
+    { "id": "solo_one_model", "type": "distinct_model_count", "arms": ["solo"], "min": 1, "max": 1, "quality_metric": false },
+    { "id": "challenger_multiple_roles", "type": "provider_role_count", "arms": ["builder_reviewer"], "min": 2, "quality_metric": false },
+    { "id": "challenger_distinct_models", "type": "distinct_model_count", "arms": ["builder_reviewer"], "min": 2, "quality_metric": false }
+  ],
+  "semantic_rubric": [
+    { "id": "coverage", "description": "네 필수 영역이 모두 누락 없이 포함된다." },
+    { "id": "operational_usability", "description": "실제 운영자가 바로 체크할 수 있을 만큼 구체적이다." },
+    { "id": "independent_review_value", "description": "검토가 단순 반복이 아니라 누락·모호성·위험을 실질적으로 줄인다." },
+    { "id": "conciseness", "description": "협업으로 인해 불필요하게 장황해지지 않는다." }
+  ]
+}

@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { discoverAntigravityCliModelNodes, discoverClaudeCliModelNodes, discoverCodexCliModelNodes, discoverGeminiCliModelNodes, parseAntigravityModelListOutput, parseCliModelListOutput } from '../src/application/model_node_discovery.js';
-import { refreshModelCatalog } from '../src/application/model_catalog_refresh.js';
+import { recordModelExecutionIneligibility, refreshModelCatalog } from '../src/application/model_catalog_refresh.js';
 import { listModelNodes } from '../src/application/model_node_registry.js';
 
 test('CLI /model output parser extracts Codex and Gemini model ids', () => {
@@ -122,6 +122,8 @@ test('refreshModelCatalog writes discovered nodes and registry reads them', asyn
     DDALGGAK_MODEL_NODES_CONFIG: process.env.DDALGGAK_MODEL_NODES_CONFIG,
     MODEL_NODES_DISCOVERED_CONFIG: process.env.MODEL_NODES_DISCOVERED_CONFIG,
     MODEL_CATALOG_REFRESH_STATE_PATH: process.env.MODEL_CATALOG_REFRESH_STATE_PATH,
+    MODEL_DISCOVERY_REGISTRY_PATH: process.env.MODEL_DISCOVERY_REGISTRY_PATH,
+    MODEL_CAPABILITY_SNAPSHOT_PATH: process.env.MODEL_CAPABILITY_SNAPSHOT_PATH,
     OLLAMA_DISCOVERY_ENABLED: process.env.OLLAMA_DISCOVERY_ENABLED,
     OPENAI_COMPATIBLE_DISCOVERY_ENABLED: process.env.OPENAI_COMPATIBLE_DISCOVERY_ENABLED,
     CODEX_CLI_MODEL_DISCOVERY_ENABLED: process.env.CODEX_CLI_MODEL_DISCOVERY_ENABLED,
@@ -134,6 +136,8 @@ test('refreshModelCatalog writes discovered nodes and registry reads them', asyn
     process.env.DDALGGAK_MODEL_NODES_CONFIG = process.env.MODEL_NODES_CONFIG;
     process.env.MODEL_NODES_DISCOVERED_CONFIG = path.join(dir, 'model_nodes.discovered.json');
     process.env.MODEL_CATALOG_REFRESH_STATE_PATH = path.join(dir, 'state.json');
+    process.env.MODEL_DISCOVERY_REGISTRY_PATH = path.join(dir, 'registry.json');
+    process.env.MODEL_CAPABILITY_SNAPSHOT_PATH = path.join(dir, 'capabilities.json');
     process.env.OLLAMA_DISCOVERY_ENABLED = 'false';
     process.env.OPENAI_COMPATIBLE_DISCOVERY_ENABLED = 'false';
     process.env.CODEX_CLI_MODEL_DISCOVERY_ENABLED = 'true';
@@ -146,6 +150,10 @@ test('refreshModelCatalog writes discovered nodes and registry reads them', asyn
     assert.equal(fs.existsSync(process.env.MODEL_NODES_DISCOVERED_CONFIG), true);
     const nodes = listModelNodes({ includeDisabled: true });
     assert.equal(nodes.some((node) => node.id === 'codex_gpt-5_5'), true);
+    const discovered = JSON.parse(fs.readFileSync(process.env.MODEL_NODES_DISCOVERED_CONFIG, 'utf8'));
+    assert.equal(discovered.nodes.find((node) => node.model === 'gpt-5.5').discovery_runtime.cli_version, null);
+    const lifecycle = JSON.parse(fs.readFileSync(process.env.MODEL_DISCOVERY_REGISTRY_PATH, 'utf8'));
+    assert.equal(lifecycle.entries['codex:gpt-5.5'].discovered_cli_version, null);
   } finally {
     for (const [key, value] of Object.entries(old)) {
       if (value === undefined) delete process.env[key];
@@ -153,4 +161,27 @@ test('refreshModelCatalog writes discovered nodes and registry reads them', asyn
     }
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('execution ineligibility can seed a missing lifecycle entry from benchmark evidence', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ddalggak-model-lifecycle-seed-'));
+  const registryPath = path.join(dir, 'registry.json');
+  try {
+    const result = recordModelExecutionIneligibility({
+      provider: 'codex',
+      model: 'gpt-account-limited',
+      category: 'model_access_denied',
+      reason: 'model unavailable for current account',
+      errorScope: 'model',
+      cliVersion: JSON.stringify({ models: [{ slug: 'bad-version' }] }),
+      registryPath,
+    });
+    assert.equal(result.ok, true);
+    const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+    const row = registry.entries['codex:gpt-account-limited'];
+    assert.equal(row.discovery_source, 'benchmark_execution_observation');
+    assert.equal(row.execution_eligibility, 'ineligible');
+    assert.equal(row.execution_ineligibility.affected_scope, 'model');
+    assert.equal(row.execution_ineligibility.cli_version, null);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

@@ -240,3 +240,30 @@ test('room context projection includes active loop control state from room loop 
     fs.rmSync(jobDir, { recursive: true, force: true });
   }
 });
+
+test('approved Room memory is projected while pending candidates remain excluded', () => {
+  const snapshot = createRoomContextSnapshot({
+    session: {
+      room_memory_items: [{
+        memory_id: 'mem_quiet_places',
+        status: 'active',
+        type: 'preference',
+        summary: '장소 추천에서는 시끄러운 곳을 피한다.',
+        updated_at: new Date().toISOString(),
+      }],
+      room_idle_memory_candidates: [{
+        candidate_id: 'cand_unapproved',
+        status: 'pending',
+        observation_type: 'preference',
+        memory_summary: '창가 좌석만 추천한다.',
+      }],
+    },
+    latestUserText: '친구와 대화하기 편한 장소를 고르는 기준을 알려줘.',
+    command: '/chat',
+  });
+  const projection = buildBudgetedRoomContextProjection({ snapshot, tier: 'agent', maxChars: 1800 });
+  assert.deepEqual(projection.approved_memory_ids_used, ['mem_quiet_places']);
+  assert.match(projection.text, /APPROVED ROOM MEMORY/);
+  assert.match(projection.text, /시끄러운 곳을 피한다/);
+  assert.doesNotMatch(projection.text, /창가 좌석만 추천/);
+});

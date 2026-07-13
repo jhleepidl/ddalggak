@@ -10,6 +10,7 @@ import { runAntigravityPrompt } from '../antigravity.js';
 import { buildHarnessPrompt, loadHarnessVariantRegistry, resolveHarnessVariant } from './harness_variant_registry.js';
 import { normalizeProviderName, probeProviderCapability } from './provider_capability_registry.js';
 import { syncHarnessEvaluationToGoc } from './live_scenario_goc_sync.js';
+import { classifyProviderExecutionResult, isExecutionIneligible } from './provider_execution_classification.js';
 import { recordModelEvaluationObservation } from '../application/model_catalog_refresh.js';
 import { recordRecipeEvaluationObservation } from './recipe_evidence_store.js';
 
@@ -344,7 +345,7 @@ function buildRuntimeSignature(run = {}) {
   ].join('|');
 }
 
-function aggregateResults(evaluationId, scenarioRuns, { suite = 'live', startedAt, finishedAt }) {
+export function aggregateLiveScenarioResults(evaluationId, scenarioRuns, { suite = 'live', startedAt, finishedAt } = {}) {
   const variants = new Map();
   for (const run of scenarioRuns) {
     const key = buildRuntimeSignature(run);
@@ -361,33 +362,48 @@ function aggregateResults(evaluationId, scenarioRuns, { suite = 'live', startedA
       run_count: 0,
       passed_run_count: 0,
       failed_run_count: 0,
+      execution_error_run_count: 0,
+      quality_run_count: 0,
       total_score: 0,
       total_duration_ms: 0,
     };
     current.run_count += 1;
-    if (run.passed) current.passed_run_count += 1; else current.failed_run_count += 1;
-    current.total_score += Number(run.score || 0);
+    if (run.quality_eligible === false) current.execution_error_run_count += 1;
+    else {
+      current.quality_run_count += 1;
+      if (run.passed) current.passed_run_count += 1; else current.failed_run_count += 1;
+      current.total_score += Number(run.score || 0);
+    }
     current.total_duration_ms += Number(run.duration_ms || 0);
     variants.set(key, current);
   }
   const variantResults = [...variants.values()].map((row) => ({
     ...row,
-    success_rate: row.run_count ? row.passed_run_count / row.run_count : 0,
-    average_score: row.run_count ? row.total_score / row.run_count : 0,
+    success_rate: row.quality_run_count ? row.passed_run_count / row.quality_run_count : null,
+    average_score: row.quality_run_count ? row.total_score / row.quality_run_count : null,
     average_duration_ms: row.run_count ? row.total_duration_ms / row.run_count : 0,
-  })).sort((a, b) => b.success_rate - a.success_rate || b.average_score - a.average_score || a.average_duration_ms - b.average_duration_ms);
-  const recommended = variantResults[0] || null;
+  })).sort((a, b) => Number(b.success_rate ?? -1) - Number(a.success_rate ?? -1) || Number(b.average_score ?? -1) - Number(a.average_score ?? -1) || a.average_duration_ms - b.average_duration_ms);
+  const recommended = variantResults.find((row) => row.quality_run_count > 0) || null;
+  const passedRunCount = scenarioRuns.filter((run) => run.quality_eligible !== false && run.passed).length;
+  const failedRunCount = scenarioRuns.filter((run) => run.quality_eligible !== false && !run.passed).length;
+  const executionErrorRunCount = scenarioRuns.filter((run) => run.quality_eligible === false).length;
+  const qualityRunCount = passedRunCount + failedRunCount;
+  const status = failedRunCount > 0
+    ? (executionErrorRunCount > 0 ? 'completed_with_failures_and_execution_errors' : 'completed_with_failures')
+    : (executionErrorRunCount > 0 ? 'completed_with_execution_errors' : 'passed');
   return {
     schema_version: 'ddalggak.harness_evaluation_summary/v1',
     evaluation_id: evaluationId,
     suite,
-    status: scenarioRuns.every((run) => run.passed) ? 'passed' : 'completed_with_failures',
+    status,
     started_at: startedAt,
     finished_at: finishedAt,
     scenario_count: new Set(scenarioRuns.map((run) => run.scenario_id)).size,
     total_run_count: scenarioRuns.length,
-    passed_run_count: scenarioRuns.filter((run) => run.passed).length,
-    failed_run_count: scenarioRuns.filter((run) => !run.passed).length,
+    passed_run_count: passedRunCount,
+    failed_run_count: failedRunCount,
+    execution_error_run_count: executionErrorRunCount,
+    quality_run_count: qualityRunCount,
     variant_results: variantResults,
     recommendation: recommended ? {
       kind: 'evaluation_only_no_auto_promotion',
@@ -396,6 +412,55 @@ function aggregateResults(evaluationId, scenarioRuns, { suite = 'live', startedA
       reason: 'highest success rate, then score, then lower duration for this exact model/reasoning/CLI runtime signature',
     } : null,
     runs: scenarioRuns,
+  };
+}
+
+
+export function reconcileStoredLiveScenarioSummary(summary = {}) {
+  const source = asObject(summary);
+  const runs = asArray(source.runs).map((input) => {
+    const run = asObject(input);
+    if (run.quality_eligible === false && asObject(run.execution_error).kind === 'execution_error') return run;
+    const providerResult = asObject(run.provider_result);
+    const executionError = classifyProviderExecutionResult({
+      ...providerResult,
+      exitCode: Number.isInteger(providerResult.exitCode) ? providerResult.exitCode : providerResult.exit_code,
+    });
+    if (!executionError) {
+      return {
+        ...run,
+        outcome: clean(run.outcome) || (run.passed === true ? 'passed' : 'failed'),
+        quality_eligible: run.quality_eligible !== false,
+      };
+    }
+    return {
+      ...run,
+      outcome: 'execution_error',
+      quality_eligible: false,
+      execution_error: executionError,
+      passed: false,
+      score: 0,
+      provider_result: { ...providerResult, execution_error: executionError },
+    };
+  });
+  const reconciled = aggregateLiveScenarioResults(
+    clean(source.evaluation_id),
+    runs,
+    {
+      suite: clean(source.suite) || 'live',
+      startedAt: source.started_at || null,
+      finishedAt: source.finished_at || nowIso(),
+    },
+  );
+  return {
+    ...source,
+    ...reconciled,
+    reconciliation: {
+      schema_version: 'ddalggak.live_scenario_reconciliation/v1',
+      reconciled_at: nowIso(),
+      source_status: clean(source.status) || null,
+      newly_classified_execution_error_run_count: runs.filter((run, index) => run.quality_eligible === false && asArray(source.runs)[index]?.quality_eligible !== false).length,
+    },
   };
 }
 
@@ -451,14 +516,18 @@ export async function runLiveScenarioSuite({
       } else {
         providerResult = await executeProvider({ provider: variant.provider, workspaceRoot, prompt: built.prompt, jobId: evaluationId, variant, capabilityProfile, timeoutMs: cell.timeout_ms, providerExecutor });
       }
-      const commandResults = dryRun ? [] : await runExpectationCommands({ workspaceRoot, commands: asObject(scenario.expectations).commands, commandRunner });
+      const executionError = dryRun ? null : classifyProviderExecutionResult(providerResult);
+      const executionIneligible = isExecutionIneligible(executionError);
+      const commandResults = dryRun || executionIneligible ? [] : await runExpectationCommands({ workspaceRoot, commands: asObject(scenario.expectations).commands, commandRunner });
       const after = snapshotWorkspace(workspaceRoot, ignore);
       const diff = diffSnapshots(before, after);
       const durationMs = Date.now() - callStarted;
       const deterministic = dryRun
         ? { schema_version: 'ddalggak.live_scenario_deterministic_evaluation/v1', passed: true, score: 1, checks: [{ name: 'dry_run_execution_skipped', passed: true }] }
-        : evaluateDeterministic({ scenario, providerResult, diff, commandResults, workspaceRoot, durationMs });
-      const semantic = dryRun ? null : await runSemanticJudge({
+        : (executionIneligible
+          ? { schema_version: 'ddalggak.live_scenario_deterministic_evaluation/v1', passed: false, score: 0, checks: [{ name: 'provider_execution_eligible', passed: false, category: executionError.category }] }
+          : evaluateDeterministic({ scenario, providerResult, diff, commandResults, workspaceRoot, durationMs }));
+      const semantic = dryRun || executionIneligible ? null : await runSemanticJudge({
         scenario, runDir, registry, capabilityCache, capabilityProbe, providerExecutor,
         deterministic, diff, commandResults, providerResult,
       });
@@ -488,8 +557,11 @@ export async function runLiveScenarioSuite({
         prompt_hash: built.prompt_hash,
         repetition: cell.repetition,
         dry_run: dryRun,
+        outcome: executionIneligible ? 'execution_error' : (combinedPassed ? 'passed' : 'failed'),
+        quality_eligible: !executionIneligible,
+        execution_error: executionError,
         passed: combinedPassed,
-        score: combinedScore,
+        score: executionIneligible ? 0 : combinedScore,
         duration_ms: durationMs,
         provider_result: {
           ok: providerResult?.ok === true,
@@ -503,6 +575,7 @@ export async function runLiveScenarioSuite({
           usage: asObject(providerResult?.usage),
           cost_usd: Number(providerResult?.cost_usd || 0),
           llm_trace_id: clean(providerResult?.llm_trace_id) || null,
+          execution_error: executionError,
         },
         workspace_diff: diff,
         deterministic_evaluation: deterministic,
@@ -512,10 +585,10 @@ export async function runLiveScenarioSuite({
         completed_at: nowIso(),
       };
       writeJson(path.join(runDir, 'result.json'), result);
-      if (!dryRun && result.recipe_ids.length > 0) {
+      if (!dryRun && result.quality_eligible !== false && result.recipe_ids.length > 0) {
         recordRecipeEvaluationObservation({ recipeIds: result.recipe_ids, result });
       }
-      if (!dryRun && result.model && result.model !== 'provider-default-unresolved') {
+      if (!dryRun && result.quality_eligible !== false && result.model && result.model !== 'provider-default-unresolved') {
         recordModelEvaluationObservation({
           provider: result.provider,
           model: result.model,
@@ -532,7 +605,7 @@ export async function runLiveScenarioSuite({
     }
   }
   const finishedAt = nowIso();
-  const summary = aggregateResults(evaluationId, scenarioRuns, { suite: clean(scenarios[0]?.suite) || 'live', startedAt, finishedAt });
+  const summary = aggregateLiveScenarioResults(evaluationId, scenarioRuns, { suite: clean(scenarios[0]?.suite) || 'live', startedAt, finishedAt });
   if (dryRun) summary.status = 'dry_run';
   writeJson(path.join(root, 'summary.json'), summary);
   writeJson(path.join(root, 'capabilities.json'), { schema_version: 'ddalggak.evaluation_capabilities/v1', items: [...capabilityCache.values()] });

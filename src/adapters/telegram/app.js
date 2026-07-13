@@ -328,7 +328,15 @@ export async function startTelegramApp({ token = runtimeCore.TOKEN } = {}) {
     client: runtimeCore.gocReady ? runtimeCore.gocClient : null,
     handlers: createDefaultRuntimeCommandHandlers({
       cancelJobExecution: runtimeCore.cancelJobExecution,
-      executeRoomCommand: async ({ command, chatId, userId }) => {
+      executeRoomCommand: async ({ command, chatId, userId, payload }) => {
+        if (String(payload?.source || '').trim() === 'room_journey_benchmark') {
+          chatSessionStore.upsert(chatId, (current = {}) => ({
+            ...current,
+            room_journey_trace_enabled: true,
+            room_journey_trace_until: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+            room_journey_trace_source: 'room_journey_benchmark',
+          }));
+        }
         const handled = await handleTelegramCommand({
           msg: {
             chat: { id: chatId },
@@ -341,7 +349,15 @@ export async function startTelegramApp({ token = runtimeCore.TOKEN } = {}) {
         });
         return { handled: handled === true, delivery: 'telegram' };
       },
-      executeRoomMessage: async ({ message, chatId, userId, threadId }) => {
+      executeRoomMessage: async ({ message, chatId, userId, threadId, payload }) => {
+        if (String(payload?.source || '').trim() === 'room_journey_benchmark') {
+          chatSessionStore.upsert(chatId, (current = {}) => ({
+            ...current,
+            room_journey_trace_enabled: true,
+            room_journey_trace_until: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+            room_journey_trace_source: 'room_journey_benchmark',
+          }));
+        }
         await onMessage({
           message_id: Date.now(),
           chat: { id: chatId, type: 'private', title: 'GoC Room' },

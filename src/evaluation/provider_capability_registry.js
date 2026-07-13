@@ -3,6 +3,16 @@ import { runCommand } from '../proc.js';
 function clean(value = '') { return String(value || '').trim(); }
 function cleanKey(value = '') { return clean(value).toLowerCase(); }
 function asObject(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
+export function sanitizeProviderCliVersion(value = '') {
+  const lines = String(value ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const safe = lines.filter((line) => {
+    if (!line || line.length > 300) return false;
+    if (line.startsWith('{') || line.startsWith('[') || /\"models\"\s*:/.test(line)) return false;
+    return true;
+  });
+  return safe.find((line) => /(?:^|\s)(?:v?\d+\.)+\d+(?:[-+][0-9A-Za-z.-]+)?(?:$|\s)/.test(line) || /\b(?:version|cli)\b/i.test(line)) || safe[0] || '';
+}
+
 function bool(value, fallback = false) {
   if (typeof value === 'boolean') return value;
   const text = cleanKey(value);
@@ -89,7 +99,7 @@ export async function probeProviderCapability({ provider = '', model = '', reaso
     timeoutMs,
     env: { CI: '1', NO_COLOR: '1', FORCE_COLOR: '0' },
   });
-  const versionText = clean(versionResult.stdout || versionResult.stderr).split(/\r?\n/)[0] || '';
+  const versionText = sanitizeProviderCliVersion([versionResult.stdout, versionResult.stderr].filter(Boolean).join('\n'));
   return {
     schema_version: 'ddalggak.provider_capability_probe/v1',
     provider: key,

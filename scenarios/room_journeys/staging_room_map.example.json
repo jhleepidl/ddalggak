@@ -1,0 +1,47 @@
+{
+  "_note": "Replace every placeholder with a dedicated staging GoC thread and Telegram chat identity. Do not reuse a Room across benchmark cells.",
+  "memory_approval_reuse/default": {
+    "thread_id": "<goc-thread-memory-approval>",
+    "chat_id": "<chat-memory-approval>"
+  },
+  "unapproved_memory_suppression/default": {
+    "thread_id": "<goc-thread-unapproved-suppression>",
+    "chat_id": "<chat-unapproved-suppression>"
+  },
+  "correction_stale_memory/default": {
+    "thread_id": "<goc-thread-correction>",
+    "chat_id": "<chat-correction>"
+  },
+  "memory_restart_continuation/default": {
+    "thread_id": "<goc-thread-restart>",
+    "chat_id": "<chat-restart>"
+  },
+  "model_swap_memory_continuation/default": {
+    "thread_id": "<goc-thread-model-swap>",
+    "chat_id": "<chat-model-swap>"
+  },
+  "portfolio_builder_reviewer/solo": {
+    "thread_id": "<goc-thread-builder-solo>",
+    "chat_id": "<chat-builder-solo>"
+  },
+  "portfolio_builder_reviewer/builder_reviewer": {
+    "thread_id": "<goc-thread-builder-reviewer>",
+    "chat_id": "<chat-builder-reviewer>"
+  },
+  "portfolio_parallel_ideation/solo": {
+    "thread_id": "<goc-thread-ideation-solo>",
+    "chat_id": "<chat-ideation-solo>"
+  },
+  "portfolio_parallel_ideation/parallel_ideation": {
+    "thread_id": "<goc-thread-parallel-ideation>",
+    "chat_id": "<chat-parallel-ideation>"
+  },
+  "portfolio_evidence_panel/solo": {
+    "thread_id": "<goc-thread-evidence-solo>",
+    "chat_id": "<chat-evidence-solo>"
+  },
+  "portfolio_evidence_panel/evidence_panel": {
+    "thread_id": "<goc-thread-evidence-panel>",
+    "chat_id": "<chat-evidence-panel>"
+  }
+}

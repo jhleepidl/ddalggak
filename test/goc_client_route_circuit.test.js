@@ -29,3 +29,17 @@ test('GoC client route circuit breaker skips repeatedly failing optional routes'
     else process.env.GOC_ROUTE_CIRCUIT_BREAKER_COOLDOWN_MS = previousCooldown;
   }
 });
+
+test('GoC client exposes canonical runtime command creation, lookup, and event cursor routes', async () => {
+  const client = new GocClient({ apiBase: 'http://goc.test', serviceKey: 'k' });
+  const calls = [];
+  client._requestAny = async (input) => { calls.push(input); return { ok: true }; };
+  await client.createRuntimeCommand({ command_type: 'room_message', payload: { message: 'hello' } });
+  await client.getRuntimeCommand('cmd-1');
+  await client.listRuntimeEvents({ threadId: 'thread-1', afterEventId: 'event-1', limit: 50 });
+  assert.equal(calls[0].method, 'POST');
+  assert.equal(calls[0].attempts[0].path, '/api/runtime/commands');
+  assert.equal(calls[1].attempts[0].path, '/api/runtime/commands/cmd-1');
+  assert.equal(calls[2].attempts[0].path, '/api/runtime/events');
+  assert.deepEqual(calls[2].attempts[0].query, { run_id: '', thread_id: 'thread-1', after_event_id: 'event-1', limit: 50 });
+});

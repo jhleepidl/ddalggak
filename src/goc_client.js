@@ -2980,6 +2980,40 @@ export class GocClient {
     });
   }
 
+  async createRuntimeCommand(body = {}) {
+    const payload = body && typeof body === 'object' ? body : {};
+    if (!String(payload.command_type || '').trim()) throw new Error('createRuntimeCommand requires command_type');
+    return await this._requestAny({
+      method: 'POST',
+      attempts: [
+        { path: '/api/runtime/commands', body: payload },
+        { path: '/runtime/commands', body: payload },
+      ],
+    });
+  }
+
+  async getRuntimeCommand(commandId) {
+    const id = String(commandId || '').trim();
+    if (!id) throw new Error('getRuntimeCommand requires commandId');
+    return await this._requestAny({
+      method: 'GET',
+      attempts: [
+        { path: `/api/runtime/commands/${encodeURIComponent(id)}` },
+        { path: `/runtime/commands/${encodeURIComponent(id)}` },
+      ],
+    });
+  }
+
+  async listRuntimeEvents({ runId = '', threadId = '', afterEventId = '', limit = 200 } = {}) {
+    return await this._requestAny({
+      method: 'GET',
+      attempts: [
+        { path: '/api/runtime/events', query: { run_id: runId, thread_id: threadId, after_event_id: afterEventId, limit } },
+        { path: '/runtime/events', query: { run_id: runId, thread_id: threadId, after_event_id: afterEventId, limit } },
+      ],
+    });
+  }
+
   async acknowledgeRuntimeCommand(commandId, body = {}) {
     const id = String(commandId || '').trim();
     if (!id) throw new Error('acknowledgeRuntimeCommand requires commandId');

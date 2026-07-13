@@ -35,7 +35,7 @@ function parseArgs(argv = []) {
 }
 
 function usage() {
-  console.log(`All discovered model benchmark matrix\n\nUsage:\n  npm run models:bench-all -- [options]\n\nSafety:\n  The default is plan-only. Add --execute to call provider CLIs and incur usage/cost.\n\nOptions:\n  --scenario <file>          Repeatable live scenario file\n  --scenario-dir <dir>       Scenario directory (default: scenarios/live)\n  --provider <name>          Repeatable provider filter\n  --model <id|provider:id>   Repeatable exact model filter\n  --repeat <n>               Runs per model/scenario case (default: 1)\n  --pending-only             Benchmark only lifecycle pending models\n  --max-models <n>           Limit discovered model rows\n  --refresh                  Refresh discovery before planning\n  --execute                  Execute the planned provider calls\n  --resume <matrix-dir>      Continue an interrupted matrix\n  --retry-failed             Retry failed cases during resume\n  --fail-fast                Stop after the first failed case\n  --sync-goc                 Best-effort sync each evaluation to GoC\n  --discard-workspaces       Remove per-run workspaces after evaluation\n  --output-dir <dir>         Explicit matrix output directory\n  --json                     Print machine-readable summary\n`);
+  console.log(`All discovered model benchmark matrix\n\nUsage:\n  npm run models:bench-all -- [options]\n\nSafety:\n  The default is plan-only. Add --execute to call provider CLIs and incur usage/cost.\n\nOptions:\n  --scenario <file>          Repeatable live scenario file\n  --scenario-dir <dir>       Scenario directory (default: scenarios/live)\n  --provider <name>          Repeatable provider filter\n  --model <id|provider:id>   Repeatable exact model filter\n  --repeat <n>               Runs per model/scenario case (default: 1)\n  --pending-only             Benchmark only lifecycle pending models\n  --include-unavailable       Include unavailable or execution-ineligible discovered models\n  --max-models <n>           Limit discovered model rows\n  --refresh                  Refresh discovery before planning\n  --execute                  Execute the planned provider calls\n  --resume <matrix-dir>      Continue an interrupted matrix\n  --retry-failed             Retry quality failures, execution errors, and explicitly skipped access-denied cases during resume\n  --fail-fast                Stop after the first failed case\n  --sync-goc                 Best-effort sync each evaluation to GoC\n  --discard-workspaces       Remove per-run workspaces after evaluation\n  --output-dir <dir>         Explicit matrix output directory\n  --json                     Print machine-readable summary\n`);
 }
 
 async function main() {
@@ -50,7 +50,7 @@ async function main() {
   if (args.json) console.log(JSON.stringify(result, null, 2));
   else {
     console.log(`matrix=${result.matrix_id} status=${result.status}`);
-    console.log(`cases=${result.counts.total} passed=${result.counts.passed} failed=${result.counts.failed} pending=${result.counts.pending}`);
+    console.log(`cases=${result.counts.total} passed=${result.counts.passed} failed=${result.counts.failed} execution_errors=${result.counts.execution_error || 0} skipped=${result.counts.skipped} pending=${result.counts.pending}`);
     console.log(`planned_provider_calls=${result.planned_provider_calls}`);
     console.log(`output=${result.output_dir}`);
     if (result.plan_only) console.log('Plan only. Re-run with --execute, or resume this directory with --resume <dir> --execute.');

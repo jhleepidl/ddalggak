@@ -1,3 +1,5 @@
+import { isRoomJourneyTraceEnabled, traceMemoryDecision } from './room_journey_trace.js';
+
 function clean(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
@@ -231,7 +233,11 @@ export function updateRoomMemoryCandidateDecision({ chatSessionStore = null, cha
       };
     });
   }
-  return { ok: true, status, candidate: updatedCandidate, memory_item: memoryItem };
+  const result = { ok: true, status, candidate: updatedCandidate, memory_item: memoryItem };
+  if (isRoomJourneyTraceEnabled({ session: store?.get?.(chatId) || session })) {
+    try { traceMemoryDecision({ chatId, result, decision: accept ? 'approve' : 'reject', userId }); } catch {}
+  }
+  return result;
 }
 
 export function formatRoomMemoryListForTelegram(view = {}) {

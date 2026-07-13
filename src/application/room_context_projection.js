@@ -3,6 +3,7 @@ import { deriveRoomContextState, summarizeRoomContextState } from './room_contex
 import { readRoomSemanticObservations } from './room_semantic_observation_log.js';
 import { deriveActiveRoomLoop, formatActiveRoomLoopProjectionBlock, readRoomLoopEvents } from './room_loop_events.js';
 import { deriveRoomCompanionState, formatRoomCompanionProjectionBlock, readRoomCompanionEvents } from './room_companions.js';
+import { normalizeRoomMemoryItem } from './room_memory_view.js';
 
 function clean(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
@@ -19,6 +20,45 @@ function tinyHash(value = '') {
   let hash = 0;
   for (let i = 0; i < key.length; i += 1) hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
   return Math.abs(hash).toString(36);
+}
+
+function asArray(value) { return Array.isArray(value) ? value : []; }
+
+function tokenSet(value = '') {
+  return new Set(clean(value).toLowerCase().match(/[a-z0-9가-힣_]{2,}/g) || []);
+}
+
+function approvedRoomMemories(session = {}) {
+  return asArray(session?.room_memory_items || session?.roomMemoryItems)
+    .map(normalizeRoomMemoryItem)
+    .filter(Boolean)
+    .filter((item) => clean(item.status || 'active').toLowerCase() === 'active');
+}
+
+function scoreApprovedMemory(item = {}, latest = '') {
+  const query = tokenSet(latest);
+  const memory = tokenSet([item.type, item.title, item.summary, item.content].filter(Boolean).join(' '));
+  let overlap = 0;
+  for (const token of query) if (memory.has(token)) overlap += 1;
+  const type = clean(item.type).toLowerCase();
+  const durableBoost = /preference|boundary|exclusion|protocol|rule|correction/.test(type) ? 1.5 : 0;
+  const recency = Date.parse(item.updated_at || item.created_at || '') || 0;
+  const recencyBoost = recency ? Math.min(1, Math.max(0, (recency - (Date.now() - 90 * 86400000)) / (90 * 86400000))) : 0;
+  return overlap * 3 + durableBoost + recencyBoost + Math.min(1, Number(item.usage_count || 0) / 10);
+}
+
+export function selectApprovedRoomMemories({ session = {}, latestUserText = '', limit = 8 } = {}) {
+  const max = Math.max(1, Math.min(20, Math.floor(Number(limit) || 8)));
+  return approvedRoomMemories(session)
+    .map((item) => ({ ...item, projection_score: scoreApprovedMemory(item, latestUserText) }))
+    .sort((a, b) => b.projection_score - a.projection_score || clean(b.updated_at || b.created_at).localeCompare(clean(a.updated_at || a.created_at)))
+    .slice(0, max);
+}
+
+function renderApprovedMemory(item = {}, { maxChars = 260 } = {}) {
+  const owners = asArray(item.owner_companion_ids).filter(Boolean).join(',');
+  const meta = [item.memory_id, item.type, owners ? `owners=${owners}` : '', item.source_turn_id ? `source=${item.source_turn_id}` : ''].filter(Boolean).join(' · ');
+  return `- ${meta}: ${clip(item.summary || item.content || item.title, maxChars)}`;
 }
 
 const TIER_DEFAULTS = Object.freeze({
@@ -83,11 +123,13 @@ export function createRoomContextSnapshot({
     }
   }
   const sliced = turns.slice(-Math.max(1, Math.floor(Number(maxTurns) || 24)));
+  const approvedMemories = selectApprovedRoomMemories({ session: session || {}, latestUserText: cleanLatest, limit: 12 });
   const seed = JSON.stringify({
     latest: cleanLatest,
     last: sliced.slice(-6).map((turn) => [turn.role, turn.text, turn.command, turn.route]),
     room: roomSelection?.room_id || roomSelection?.execution_room || roomSelection?.roomId || '',
     team: teamSelection?.execution_mode || teamSelection?.mode || '',
+    memories: approvedMemories.map((item) => item.memory_id),
   });
   const semanticObservations = readRoomSemanticObservations({ jobDir, limit: 24 });
   const contextState = deriveRoomContextState({ turns: sliced, latestUserText: cleanLatest, semanticObservations });
@@ -109,9 +151,10 @@ export function createRoomContextSnapshot({
     companion_events: companionEvents,
     companion_state: companionState,
     semantic_observations: semanticObservations,
+    approved_room_memories: approvedMemories,
     room_loop_events: loopEvents,
     active_room_loop: activeLoop || undefined,
-    substrates: ['room_turn_ledger', 'session_recent_room_turns', ...(semanticObservations.length ? ['room_semantic_observations'] : []), ...(companionEvents.length || companionState ? ['room_companion_events'] : []), ...(activeLoop ? ['room_loop_events'] : [])],
+    substrates: ['room_turn_ledger', 'session_recent_room_turns', ...(approvedMemories.length ? ['approved_room_memory'] : []), ...(semanticObservations.length ? ['room_semantic_observations'] : []), ...(companionEvents.length || companionState ? ['room_companion_events'] : []), ...(activeLoop ? ['room_loop_events'] : [])],
     created_at: new Date().toISOString(),
   };
 }
@@ -165,6 +208,8 @@ export function buildBudgetedRoomContextProjection({
   const turns = focusedTurns.slice(-maxTurnCount);
   const latest = clean(snap.latest_user_request) || clean([...turns].reverse().find((turn) => turn.role === 'user')?.text || '');
   const dialogueRef = snap.context_state?.latest_dialogue_referent;
+  const memoryLimit = projectionTier === 'micro' ? 2 : projectionTier === 'search' ? 3 : projectionTier === 'team' ? 6 : 5;
+  const approvedMemories = asArray(snap.approved_room_memories).slice(0, memoryLimit);
   const lines = [
     '[ROOM CONTEXT SNAPSHOT]',
     `snapshot_id: ${snap.snapshot_id || 'roomctx_unknown'}`,
@@ -211,12 +256,20 @@ export function buildBudgetedRoomContextProjection({
     (projectionTier === 'search' && snap.context_state?.latest_user_requires_verification)
       ? 'verification_policy: Do not present prior assistant recommendations as verified external facts unless the context state shows verified evidence or this run produces explicit source evidence. If a DIALOGUE REFERENCE TARGET is present, verify that target rather than older recommendations.'
       : '',
+    approvedMemories.length ? '[APPROVED ROOM MEMORY — USER GOVERNED]' : '',
+    approvedMemories.length ? 'memory_policy: These entries were explicitly approved. Apply only when relevant; latest user correction or request overrides them. Do not expose hidden provenance or unrelated memories.' : '',
+    ...approvedMemories.map((item) => renderApprovedMemory(item, { maxChars: projectionTier === 'micro' ? 140 : projectionTier === 'search' ? 180 : 220 })),
     summarizeRoomContextState(snap.context_state || deriveRoomContextState({ turns: allTurns, latestUserText: latest, semanticObservations: snap.semantic_observations || [] }), { maxItems: projectionTier === 'micro' ? 4 : 6 }),
     formatRoomCompanionProjectionBlock({ state: snap.companion_state || deriveRoomCompanionState({ events: snap.companion_events || [] }), maxChars: projectionTier === 'micro' ? 760 : 1200 }),
     snap.active_room_loop ? formatActiveRoomLoopProjectionBlock({ loop: snap.active_room_loop, maxChars: projectionTier === 'micro' ? 760 : 1200 }) : '',
     turns.length ? '[RECENT SAME-ROOM TURNS]' : '',
     ...turns.map((turn) => renderTurn(turn, { turnChars: defaults.turnChars })),
   ].filter(Boolean);
+  const text = clip(lines.join('\n'), charBudget);
+  const approvedMemoryIdsUsed = approvedMemories
+    .map((item) => item.memory_id)
+    .filter(Boolean)
+    .filter((memoryId) => text.includes(`- ${memoryId} ·`) || text.includes(`- ${memoryId}:`));
   return {
     kind: 'budgeted_room_context_projection_v1',
     snapshot_id: snap.snapshot_id || 'roomctx_unknown',
@@ -224,7 +277,9 @@ export function buildBudgetedRoomContextProjection({
     max_chars: charBudget,
     turn_limit: maxTurnCount,
     turns_used: turns.length,
-    text: clip(lines.join('\n'), charBudget),
+    approved_memory_ids_used: approvedMemoryIdsUsed,
+    approved_memory_count: approvedMemoryIdsUsed.length,
+    text,
   };
 }
 

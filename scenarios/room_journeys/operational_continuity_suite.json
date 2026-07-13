@@ -1,0 +1,9 @@
+{
+  "schema_version": "ddalggak.room_journey_suite/v1",
+  "id": "room_operational_continuity",
+  "title": "AI Rooms operational continuity journeys",
+  "scenarios": [
+    "memory_restart_continuation.json",
+    "model_swap_memory_continuation.json"
+  ]
+}

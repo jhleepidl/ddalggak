@@ -1,3 +1,5 @@
+import { isRoomJourneyTraceEnabled, traceMemoryCandidates } from './room_journey_trace.js';
+
 function clean(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
@@ -233,6 +235,9 @@ export function runRoomIdleMemoryStructuring({ chatSessionStore = null, chatId =
         },
       };
     });
+  }
+  if (isRoomJourneyTraceEnabled({ session: store?.get?.(chatId) || session })) {
+    try { traceMemoryCandidates({ chatId, candidates: created, source }); } catch {}
   }
   return { ok: true, skipped: false, candidates_created: created.length, candidates: created, events };
 }

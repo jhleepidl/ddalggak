@@ -103,3 +103,31 @@ test('room_message accepts bounded plain chat text and rejects commands', async 
     /plain chat messages/,
   );
 });
+
+test('room_command permits explicit memory review and collaboration profile commands for journey evaluation', async () => {
+  const seen = [];
+  const handlers = createDefaultRuntimeCommandHandlers({
+    async executeRoomCommand({ command }) { seen.push(command); return { handled: true }; },
+  });
+  for (const command of [
+    '/memory idle',
+    '/memory proposals',
+    '/memory approve latest',
+    '/memory reject latest temporary condition',
+    '/collab use builder_reviewer',
+    '/collab reset',
+    '/room model-router',
+  ]) {
+    const result = await handlers.room_command({ threadId: 'thread-1', payload: { command, chat_id: 'chat-1' } });
+    assert.equal(result.ok, true);
+  }
+  assert.deepEqual(seen, [
+    '/memory idle',
+    '/memory proposals',
+    '/memory approve latest',
+    '/memory reject latest temporary condition',
+    '/collab use builder_reviewer',
+    '/collab reset',
+    '/room model-router',
+  ]);
+});

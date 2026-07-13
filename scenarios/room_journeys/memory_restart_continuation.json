@@ -1,0 +1,32 @@
+{
+  "schema_version": "ddalggak.room_journey_scenario/v1",
+  "id": "memory_restart_continuation",
+  "title": "서비스 재시작 후 승인 memory 이어가기",
+  "description": "승인된 사용자 선호가 서비스 재시작 이후에도 복구되고 다음 provider 호출의 context projection에 포함되는지 검증한다.",
+  "steps": [
+    {
+      "id": "state_preference",
+      "action": "send_message",
+      "text": "업무 계획을 정리할 때는 하루에 핵심 작업을 세 개 넘게 잡지 말아줘. 이 방식은 앞으로도 기억해도 돼."
+    },
+    { "id": "generate_candidate", "action": "generate_memory_candidates" },
+    { "id": "approve_candidate", "action": "approve_memory" },
+    { "id": "restart_runtime", "action": "restart_service" },
+    {
+      "id": "continue_after_restart",
+      "action": "send_message",
+      "text": "내일 해야 할 일을 우선순위대로 정리해줘."
+    }
+  ],
+  "assertions": [
+    { "id": "memory_committed", "type": "memory_commit_count", "min": 1 },
+    { "id": "restart_succeeded", "type": "step_ok", "step_id": "restart_runtime" },
+    { "id": "memory_reprojected", "type": "approved_memory_projected" },
+    { "id": "continuation_completed", "type": "step_ok", "step_id": "continue_after_restart" }
+  ],
+  "semantic_rubric": [
+    { "id": "restart_continuity", "description": "재시작 이후에도 하루 핵심 작업 세 개 제한을 유지한다." },
+    { "id": "no_reexplanation", "description": "사용자에게 제한을 다시 설명하라고 요구하지 않는다." },
+    { "id": "useful_plan", "description": "제한 안에서 우선순위가 분명한 계획을 제공한다." }
+  ]
+}

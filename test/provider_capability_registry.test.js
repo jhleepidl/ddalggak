@@ -12,3 +12,30 @@ test('provider capability probe records CLI version and capability surface', asy
   assert.equal(row.capabilities.native_subagents, true);
   assert.equal(row.capabilities.reasoning_effort, true);
 });
+
+test('provider capability probe rejects model-catalog JSON as a CLI version', async () => {
+  const row = await probeProviderCapability({
+    provider: 'codex',
+    runner: async () => ({
+      ok: true,
+      exitCode: 0,
+      stdout: JSON.stringify({ models: [{ slug: 'gpt-5.5' }] }),
+      stderr: '',
+    }),
+  });
+  assert.equal(row.cli_available, true);
+  assert.equal(row.cli_version, null);
+});
+
+test('provider capability probe recovers a version from stderr when stdout contains catalog JSON', async () => {
+  const row = await probeProviderCapability({
+    provider: 'codex',
+    runner: async () => ({
+      ok: true,
+      exitCode: 0,
+      stdout: JSON.stringify({ models: [{ slug: 'gpt-5.5' }] }),
+      stderr: 'codex-cli 0.144.1\n',
+    }),
+  });
+  assert.equal(row.cli_version, 'codex-cli 0.144.1');
+});

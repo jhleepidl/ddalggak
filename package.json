@@ -25,7 +25,8 @@
     "models:bench-all": "node scripts/benchmark_all_models.js",
     "continuity:test": "node scripts/run_continuity_tests.js",
     "continuity:handoff": "node scripts/build_continuity_handoff.js",
-    "test:user-paths": "node --test test/runtime_command_worker.test.js test/runtime_command_processor.test.js test/run_event_outbox.test.js test/continuity_scenario_runner.test.js test/continuity_handoff_builder.test.js"
+    "test:user-paths": "node --test test/runtime_command_worker.test.js test/runtime_command_processor.test.js test/run_event_outbox.test.js test/continuity_scenario_runner.test.js test/continuity_handoff_builder.test.js test/room_journey_trace.test.js test/room_journey_runner.test.js",
+    "room:journey-bench": "node scripts/run_room_journey_bench.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

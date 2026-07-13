@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import path from 'node:path';
 
-import { listPendingModelBenchmarks } from '../src/application/model_catalog_refresh.js';
+import { listPendingModelBenchmarks, recordModelExecutionIneligibility } from '../src/application/model_catalog_refresh.js';
 import { runLiveScenarioSuite } from '../src/evaluation/live_scenario_runner.js';
+import { shouldMarkModelExecutionIneligible } from '../src/evaluation/provider_execution_classification.js';
+import { sanitizeProviderCliVersion } from '../src/evaluation/provider_capability_registry.js';
 
 function arg(name, fallback = '') {
   const argv = process.argv.slice(2);
@@ -36,7 +38,7 @@ if (!candidates.length) {
 
 console.log(`Pending model benchmark plan · candidates=${candidates.length} · repeat=${repeat} · scenario=${scenario}`);
 for (const row of candidates) {
-  console.log(`- ${row.provider}/${row.model} · status=${row.benchmark_status} · cli=${row.discovered_cli_version || '-'}`);
+  console.log(`- ${row.provider}/${row.model} · status=${row.benchmark_status} · cli=${sanitizeProviderCliVersion(row.discovered_cli_version) || '-'}`);
 }
 
 if (!execute) {
@@ -54,11 +56,30 @@ for (const row of candidates) {
     repeat,
     syncToGoc,
   });
+  const executionErrors = Array.isArray(result.runs)
+    ? result.runs.map((run) => run?.execution_error || run?.provider_result?.execution_error).filter((entry) => entry?.kind === 'execution_error')
+    : [];
+  const modelIneligibility = executionErrors.find((entry) => shouldMarkModelExecutionIneligible(entry));
+  if (Number(result.quality_run_count || 0) === 0 && modelIneligibility) {
+    recordModelExecutionIneligibility({
+      provider: row.provider,
+      model: row.model,
+      category: modelIneligibility.category,
+      reason: modelIneligibility.message,
+      retryable: false,
+      errorScope: modelIneligibility.scope || 'model',
+      evaluationId: result.evaluation_id,
+      runId: result.runs?.[0]?.run_id || '',
+      cliVersion: result.runs?.[0]?.cli_version || row.discovered_cli_version || '',
+    });
+  }
   console.log(JSON.stringify({
     evaluation_id: result.evaluation_id,
     status: result.status,
     total_run_count: result.total_run_count,
     passed_run_count: result.passed_run_count,
+    execution_error_run_count: result.execution_error_run_count || 0,
+    quality_run_count: result.quality_run_count || 0,
     recommendation: result.recommendation,
   }, null, 2));
 }

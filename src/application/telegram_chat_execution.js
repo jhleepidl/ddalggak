@@ -88,7 +88,7 @@ import {
 import { formatActiveArtifactContext, recordArtifactObservationFromAgentOutput } from "./artifact_context.js";
 import { recordVisualArtifactCapsuleFromAgentOutput } from "./visual_artifact_memory_capsule.js";
 import { seedRoomConversationLedgerIntoJob } from "./room_conversation_ledger.js";
-import { createRoomContextSnapshot, formatRoomContextProjectionBlock } from "./room_context_projection.js";
+import { createRoomContextSnapshot, formatRoomContextProjectionBlock, selectApprovedRoomMemories } from "./room_context_projection.js";
 import { hasProviderFileToolLimitation, materializeArtifactsFromLlmOutput } from "./llm_output_artifact_materializer.js";
 import { formatActiveUserFactContext, recordUserFactEvents } from "./user_fact_context.js";
 import { buildScopedPromptAssembly, hydrateRuntimeScopesViaGoC, resolveScopeExecutionState } from "./goc_scope_runtime.js";
@@ -213,6 +213,7 @@ import { buildHandoffDeltaFromAgentResult, appendHandoffDelta } from "./handoff_
 import { createGocTrackingIo } from "./telegram_goc_tracking_io.js";
 import { buildRoomFirstTeamConfiguration } from "./ai_room_runtime_selection.js";
 import { getAgentRoomProfile } from "./agent_room_profile.js";
+import { appendRoomJourneyTrace, isRoomJourneyTraceEnabled } from "./room_journey_trace.js";
 
 function normalizeForceMode(raw) {
   return normalizeForceModeDomain(raw);
@@ -1184,7 +1185,7 @@ async function geminiResearch(jobId, goal, signal = null, opts = {}) {
     })
     : '';
   const roomContextProjection = formatRoomContextProjectionBlock({
-    snapshot: createRoomContextSnapshot({ jobDir: safeRunDir(jobId), latestUserText: cleanUserRequest || rawGoal, command: '/chat', route: 'standard_workbench' }),
+    snapshot: createRoomContextSnapshot({ jobDir: safeRunDir(jobId), session: chatSessionStore.get(opts.chatId || '') || {}, latestUserText: cleanUserRequest || rawGoal, command: '/chat', route: 'standard_workbench', roomProfile: getAgentRoomProfile(chatSessionStore, opts.chatId || '') }),
     tier: 'agent',
     maxChars: Number(process.env.DDALGGAK_AGENT_CONTEXT_MAX_CHARS || 2600),
     turnLimit: Number(process.env.DDALGGAK_AGENT_CONTEXT_TURNS || 8),
@@ -1526,7 +1527,7 @@ async function codexAssist(jobId, instruction, signal = null, opts = {}) {
     runtimePolicy: opts.runtime?.harnessRuntimePolicy || opts.runtime?.openharnessInstallState?.runtime_policy || null,
   });
   const roomContextProjection = formatRoomContextProjectionBlock({
-    snapshot: createRoomContextSnapshot({ jobDir: safeRunDir(jobId), latestUserText: cleanUserRequest || instruction, command: '/chat', route: 'standard_workbench' }),
+    snapshot: createRoomContextSnapshot({ jobDir: safeRunDir(jobId), session: chatSessionStore.get(opts.chatId || '') || {}, latestUserText: cleanUserRequest || instruction, command: '/chat', route: 'standard_workbench', roomProfile: getAgentRoomProfile(chatSessionStore, opts.chatId || '') }),
     tier: 'agent',
     maxChars: Number(process.env.DDALGGAK_AGENT_CONTEXT_MAX_CHARS || 2600),
     turnLimit: Number(process.env.DDALGGAK_AGENT_CONTEXT_TURNS || 8),
@@ -2512,6 +2513,10 @@ function buildSupervisorExecutionCallbacks({
         await runEventSink.recordAgentEvent("run.agent_start", {
           agent_id: cleanAgentId,
           role_id: roleKey || undefined,
+          model_role: actionInputs?.model_role || actionInputs?.modelRole || roleKey || undefined,
+          provider: activeProvider || undefined,
+          model: activeModel || undefined,
+          execution_channel: activeExecutionChannel || undefined,
           goal: cleanGoal,
           runtime_instance_id: runtimeInstanceId || undefined,
           slot_id: slotId || undefined,
@@ -2558,6 +2563,67 @@ function buildSupervisorExecutionCallbacks({
         runDir: safeRunDir(jobId),
       });
       activePreparedContext = attachCompiledProjectionToPreparedContext(prepared, compiledProjection);
+      const roomSessionForProjection = chatSessionStore.get(chatId) || {};
+      const eligibleApprovedMemories = selectApprovedRoomMemories({
+        session: roomSessionForProjection,
+        latestUserText: cleanGoal,
+        limit: 12,
+      });
+      const approvedBlock = String(prepared?.final_prompt || '').match(/\[APPROVED ROOM MEMORY[^\]]*\]([\s\S]*?)(?=\n\[[A-Z]|$)/)?.[1] || '';
+      const approvedMemoryIdsInPrompt = [...approvedBlock.matchAll(/^[-*]\s+([^·:\s]+)\s*(?:·|:)/gm)]
+        .map((match) => String(match?.[1] || '').trim())
+        .filter(Boolean);
+      const eligibleApprovedMemoryIds = eligibleApprovedMemories.map((item) => String(item?.memory_id || '').trim()).filter(Boolean);
+      const approvedMemoryIdsForProjection = approvedMemoryIdsInPrompt;
+      const selectedMemoryIdSet = new Set(approvedMemoryIdsForProjection);
+      const pendingMemoryCandidateRows = Array.isArray(roomSessionForProjection.room_idle_memory_candidates)
+        ? roomSessionForProjection.room_idle_memory_candidates
+        : (Array.isArray(roomSessionForProjection.roomIdleMemoryCandidates) ? roomSessionForProjection.roomIdleMemoryCandidates : []);
+      const pendingMemoryCandidateIds = pendingMemoryCandidateRows
+        .filter((candidate) => String(candidate?.status || 'pending').trim().toLowerCase() === 'pending')
+        .map((candidate) => String(candidate?.candidate_id || candidate?.candidateId || '').trim())
+        .filter(Boolean)
+        .slice(0, 32);
+      const projectionTracePayload = {
+        job_id: jobId,
+        projection_id: compiledProjection.projection_id,
+        snapshot_id: compiledProjection.snapshot_id,
+        role_id: roleKey || cleanAgentId,
+        agent_id: cleanAgentId,
+        task_type: compiledProjection.task_type,
+        model_node: compiledProjection.model_node,
+        budget_tokens: compiledProjection.query?.budget_tokens,
+        selected_atom_ids: Array.isArray(compiledProjection.projection?.atoms)
+          ? compiledProjection.projection.atoms.map((atom) => String(atom?.id || atom?.atom_id || '').trim()).filter(Boolean).slice(0, 32)
+          : [],
+        selected_atom_types: Array.isArray(compiledProjection.projection?.atoms)
+          ? compiledProjection.projection.atoms.map((atom) => String(atom?.atom_type || atom?.type || '').trim()).filter(Boolean).slice(0, 32)
+          : [],
+        approved_memory_ids: approvedMemoryIdsForProjection,
+        approved_memory_count: approvedMemoryIdsForProjection.length,
+        eligible_approved_memory_ids: eligibleApprovedMemoryIds,
+        excluded_approved_memory_ids: eligibleApprovedMemoryIds.filter((memoryId) => !selectedMemoryIdSet.has(memoryId)),
+        pending_memory_candidate_ids: pendingMemoryCandidateIds,
+        memory_selection_reasons: eligibleApprovedMemories.map((item) => ({
+          memory_id: item.memory_id,
+          selected: selectedMemoryIdSet.has(String(item.memory_id || '').trim()),
+          reason: selectedMemoryIdSet.has(String(item.memory_id || '').trim())
+            ? 'active_approved_memory_selected_for_current_projection'
+            : 'approved_memory_not_present_after_projection_budgeting',
+          projection_score: Number(item.projection_score || 0),
+        })),
+        pending_memory_suppression_reason: pendingMemoryCandidateIds.length ? 'review_pending_not_canonical_not_projected' : undefined,
+        selected_link_count: compiledProjection.metrics?.selected_link_count || 0,
+        selected_atom_count: compiledProjection.metrics?.selected_atom_count || 0,
+        context_tokens: compiledProjection.metrics?.context_tokens || 0,
+        cache_hit: compiledProjection.metrics?.cache_hit === true,
+      };
+      if (isRoomJourneyTraceEnabled({ session: roomSessionForProjection })) {
+        try { appendRoomJourneyTrace({ chatId, eventType: 'context.projection_compiled', payload: projectionTracePayload }); } catch {}
+        if (runEventSink && typeof runEventSink.recordAgentEvent === 'function') {
+          await runEventSink.recordAgentEvent('room.context_projection', projectionTracePayload, { jobId }).catch(() => null);
+        }
+      }
     } catch (projectionError) {
       activePreparedContext = {
         ...(prepared || {}),

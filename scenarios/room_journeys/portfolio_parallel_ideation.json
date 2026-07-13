@@ -1,0 +1,37 @@
+{
+  "schema_version": "ddalggak.room_journey_scenario/v1",
+  "id": "portfolio_parallel_ideation",
+  "title": "단일 모델 대비 독립 병렬 아이디어 탐색",
+  "description": "열린 문제에서 서로 독립적인 모델의 관점이 중복 없는 대안을 늘리고 의사결정을 개선하는지 비교한다.",
+  "experiment": {
+    "baseline": { "id": "solo", "title": "Strongest suitable single-model baseline", "collaboration_profile": "solo", "model_policy": "strongest_suitable_single" },
+    "challengers": [
+      { "id": "parallel_ideation", "title": "Independent parallel ideation", "collaboration_profile": "parallel_ideation", "model_policy": "diverse_models_isolated_then_synthesize" }
+    ],
+    "promotion_gate": {
+      "min_quality_uplift": 0.08,
+      "max_cost_ratio": 4.0,
+      "max_latency_ratio": 3.5,
+      "require_semantic_evidence": true
+    }
+  },
+  "steps": [
+    {
+      "id": "request_options",
+      "action": "send_message",
+      "text": "신입 구성원이 첫 2주 안에 팀의 실제 업무 흐름을 이해하도록 돕는 온보딩 방식을 제안해줘. 서로 접근 방식이 겹치지 않는 세 가지 안을 만들고, 각 안의 핵심 가정·사용자 가치·위험·언제 선택하면 좋은지를 비교한 뒤 하나를 추천해줘."
+    }
+  ],
+  "assertions": [
+    { "id": "request_completed", "type": "step_ok", "step_id": "request_options" },
+    { "id": "solo_one_model", "type": "distinct_model_count", "arms": ["solo"], "min": 1, "max": 1, "quality_metric": false },
+    { "id": "parallel_multiple_roles", "type": "provider_role_count", "arms": ["parallel_ideation"], "min": 3, "quality_metric": false },
+    { "id": "parallel_distinct_models", "type": "distinct_model_count", "arms": ["parallel_ideation"], "min": 2, "quality_metric": false }
+  ],
+  "semantic_rubric": [
+    { "id": "diversity", "description": "세 안이 이름만 다르고 내용이 같은 중복안이 아니라 가정과 메커니즘이 다르다." },
+    { "id": "tradeoff_quality", "description": "각 안의 가치와 위험을 비교해 선택 기준을 제공한다." },
+    { "id": "synthesis", "description": "추천이 앞선 비교에서 논리적으로 도출된다." },
+    { "id": "collaboration_value", "description": "추가 모델이 단일 모델보다 실제 선택지를 확장하거나 맹점을 줄인다." }
+  ]
+}

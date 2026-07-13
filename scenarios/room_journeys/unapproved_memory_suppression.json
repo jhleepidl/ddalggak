@@ -1,0 +1,36 @@
+{
+  "schema_version": "ddalggak.room_journey_scenario/v1",
+  "id": "unapproved_memory_suppression",
+  "title": "미승인 memory의 durable commit 억제",
+  "description": "대화에서 후보가 생겨도 사용자가 승인하지 않으면 canonical Room memory로 커밋되지 않는지 검증한다.",
+  "steps": [
+    {
+      "id": "state_temporary_fact",
+      "action": "send_message",
+      "text": "오늘 회의에 한해서만 발표 순서를 디자인, 개발, 운영 순으로 해줘. 이건 오늘만 쓰는 임시 조건이야."
+    },
+    {
+      "id": "generate_candidate",
+      "action": "generate_memory_candidates"
+    },
+    {
+      "id": "inspect_candidate",
+      "action": "inspect",
+      "command": "/memory proposals"
+    },
+    {
+      "id": "next_request",
+      "action": "send_message",
+      "text": "다른 프로젝트의 발표 순서를 정할 때 고려할 일반 원칙만 알려줘."
+    }
+  ],
+  "assertions": [
+    { "id": "candidate_observed", "type": "trace_event_count", "event_type": "memory.candidate_created", "min": 0 },
+    { "id": "no_unapproved_commit", "type": "no_unapproved_memory_commit" },
+    { "id": "next_turn_completed", "type": "step_ok", "step_id": "next_request" }
+  ],
+  "semantic_rubric": [
+    { "id": "temporary_scope", "description": "오늘만 쓰는 임시 조건을 다른 프로젝트의 지속 선호처럼 강제하지 않는다." },
+    { "id": "general_answer", "description": "새 요청에는 일반적인 발표 순서 결정 원칙을 제시한다." }
+  ]
+}

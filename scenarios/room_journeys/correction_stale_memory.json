@@ -1,0 +1,34 @@
+{
+  "schema_version": "ddalggak.room_journey_scenario/v1",
+  "id": "correction_stale_memory",
+  "title": "사용자 정정 이후 stale 계획 억제",
+  "description": "사용자가 이전 방향을 명시적으로 철회하면 다음 호출에서 최신 정정을 권위 있는 상태로 사용하는지 검증한다.",
+  "steps": [
+    {
+      "id": "old_direction",
+      "action": "send_message",
+      "text": "이번 내부 도구는 우선 모바일 앱으로 만드는 방향으로 계획을 잡아줘."
+    },
+    {
+      "id": "correct_direction",
+      "action": "room_command",
+      "command": "/correct 모바일 앱 계획은 폐기하고, 사내 웹 대시보드 MVP를 먼저 만든다."
+    },
+    {
+      "id": "continue_with_correction",
+      "action": "send_message",
+      "text": "그 결정에 맞춰 첫 번째 구현 주간의 작업을 정리해줘."
+    }
+  ],
+  "assertions": [
+    { "id": "old_turn_completed", "type": "step_ok", "step_id": "old_direction" },
+    { "id": "correction_applied", "type": "step_ok", "step_id": "correct_direction" },
+    { "id": "followup_completed", "type": "step_ok", "step_id": "continue_with_correction" },
+    { "id": "stale_plan_not_repeated", "type": "response_not_regex", "step_id": "continue_with_correction", "pattern": "모바일\\s*앱을\\s*(먼저|우선).*구현" }
+  ],
+  "semantic_rubric": [
+    { "id": "correction_uptake", "description": "웹 대시보드 MVP를 최신 권위 있는 방향으로 사용한다." },
+    { "id": "stale_suppression", "description": "폐기된 모바일 우선 계획을 다시 실행 계획으로 부활시키지 않는다." },
+    { "id": "actionability", "description": "첫 주 작업이 구체적이고 검증 가능하다." }
+  ]
+}

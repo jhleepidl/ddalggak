@@ -10,7 +10,7 @@ import {
   discoverOpenAICompatibleModelNodes,
 } from './model_node_discovery.js';
 import { geminiCliDisabledByDefault } from '../provider_migration.js';
-import { probeProviderCapabilities } from '../evaluation/provider_capability_registry.js';
+import { probeProviderCapabilities, sanitizeProviderCliVersion } from '../evaluation/provider_capability_registry.js';
 
 function clean(value = '') {
   return String(value || '').trim();
@@ -66,7 +66,7 @@ function capabilityMap(registry = {}) {
 
 function capabilityVersionFingerprint(registry = {}) {
   return asArray(registry?.items)
-    .map((row) => `${clean(row?.provider).toLowerCase()}=${clean(row?.cli_version) || 'unavailable'}`)
+    .map((row) => `${clean(row?.provider).toLowerCase()}=${sanitizeProviderCliVersion(row?.cli_version) || 'unavailable'}`)
     .filter(Boolean)
     .sort()
     .join('|');
@@ -223,7 +223,7 @@ export async function discoverConfiguredModelCatalog({
     return {
       ...node,
       discovery_runtime: {
-        cli_version: capability.cli_version || null,
+        cli_version: sanitizeProviderCliVersion(capability.cli_version) || null,
         cli_available: capability.cli_available === true,
         probed_at: capability.probed_at || null,
       },
@@ -282,7 +282,7 @@ function buildDiscoveryRegistry({ previousRegistry = {}, previousPayload = {}, p
     currentKeys.add(key);
     const previous = asObject(previousEntries[key]);
     const isNew = !previous.model;
-    const cliVersion = clean(node?.discovery_runtime?.cli_version) || null;
+    const cliVersion = sanitizeProviderCliVersion(node?.discovery_runtime?.cli_version) || null;
     const benchmarkEligible = ['codex', 'claude', 'antigravity'].includes(provider);
     const revalidationRequired = benchmarkEligible && revalidationProviders.has(provider);
     const benchmarkStatus = isNew && benchmarkEligible
@@ -299,6 +299,8 @@ function buildDiscoveryRegistry({ previousRegistry = {}, previousPayload = {}, p
       availability: 'available',
       benchmark_status: benchmarkStatus,
       revalidation_required: revalidationRequired || previous.revalidation_required === true && benchmarkStatus !== 'evaluated',
+      execution_eligibility: revalidationRequired ? 'unknown' : (clean(previous.execution_eligibility) || 'unknown'),
+      execution_ineligibility: revalidationRequired ? null : (previous.execution_ineligibility || null),
       discovered_cli_version: cliVersion,
       discovery_source: clean(node?.model_catalog?.discovered_from) || previous.discovery_source || null,
       last_refresh_reason: reason || null,
@@ -322,7 +324,7 @@ function buildDiscoveryRegistry({ previousRegistry = {}, previousPayload = {}, p
   }
 
   const benchmarkCandidates = Object.values(entries)
-    .filter((row) => row?.availability === 'available' && ['benchmark_pending', 'benchmark_running', 'revalidation_pending'].includes(clean(row?.benchmark_status)))
+    .filter((row) => row?.availability === 'available' && clean(row?.execution_eligibility) !== 'ineligible' && ['benchmark_pending', 'benchmark_running', 'revalidation_pending'].includes(clean(row?.benchmark_status)))
     .sort((a, b) => String(b.first_seen_at || '').localeCompare(String(a.first_seen_at || '')));
 
   return {
@@ -337,7 +339,7 @@ function buildDiscoveryRegistry({ previousRegistry = {}, previousPayload = {}, p
 
 export function listPendingModelBenchmarks({ registryPath = modelDiscoveryRegistryPath() } = {}) {
   const registry = readJson(registryPath) || {};
-  return asArray(registry.benchmark_candidates).filter((row) => row?.availability === 'available');
+  return asArray(registry.benchmark_candidates).filter((row) => row?.availability === 'available' && clean(row?.execution_eligibility) !== 'ineligible');
 }
 
 export function markModelBenchmarkStatus({ provider = '', model = '', status = 'evaluated', metadata = {}, registryPath = modelDiscoveryRegistryPath() } = {}) {
@@ -358,7 +360,7 @@ export function markModelBenchmarkStatus({ provider = '', model = '', status = '
     updated_at: now,
     entries,
     benchmark_candidates: Object.values(entries)
-      .filter((row) => row?.availability === 'available' && ['benchmark_pending', 'benchmark_running', 'revalidation_pending'].includes(clean(row?.benchmark_status))),
+      .filter((row) => row?.availability === 'available' && clean(row?.execution_eligibility) !== 'ineligible' && ['benchmark_pending', 'benchmark_running', 'revalidation_pending'].includes(clean(row?.benchmark_status))),
   };
   writeJson(registryPath, next);
   return { ok: true, key, entry: entries[key], registry: next };
@@ -381,6 +383,8 @@ export function recordModelEvaluationObservation({ provider = '', model = '', pa
   entries[key] = {
     ...current,
     benchmark_status: status,
+    execution_eligibility: 'eligible',
+    execution_ineligibility: null,
     revalidation_required: status !== 'evaluated' && current.revalidation_required === true,
     benchmark_updated_at: now,
     evaluation_observations: {
@@ -401,7 +405,54 @@ export function recordModelEvaluationObservation({ provider = '', model = '', pa
     updated_at: now,
     entries,
     benchmark_candidates: Object.values(entries)
-      .filter((row) => row?.availability === 'available' && ['benchmark_pending', 'benchmark_running', 'revalidation_pending'].includes(clean(row?.benchmark_status))),
+      .filter((row) => row?.availability === 'available' && clean(row?.execution_eligibility) !== 'ineligible' && ['benchmark_pending', 'benchmark_running', 'revalidation_pending'].includes(clean(row?.benchmark_status))),
+  };
+  writeJson(registryPath, next);
+  return { ok: true, key, entry: entries[key], registry: next };
+}
+
+export function recordModelExecutionIneligibility({
+  provider = '', model = '', category = 'provider_execution_error', reason = '', retryable = false, errorScope = 'model',
+  evaluationId = '', runId = '', cliVersion = '', registryPath = modelDiscoveryRegistryPath(),
+} = {}) {
+  const registry = readJson(registryPath) || { version: 1, entries: {} };
+  const entries = { ...asObject(registry.entries) };
+  const key = modelKey(provider, model);
+  const current = asObject(entries[key]);
+  const now = new Date().toISOString();
+  const base = current.model ? current : {
+    provider: clean(provider).toLowerCase(),
+    model: clean(model),
+    availability: 'available',
+    first_seen_at: now,
+    last_seen_at: now,
+    discovery_source: 'benchmark_execution_observation',
+  };
+  if (!base.provider || !base.model) return { ok: false, reason: 'provider_and_model_required', key };
+  entries[key] = {
+    ...base,
+    benchmark_status: retryable ? (clean(current.benchmark_status) || 'benchmark_pending') : 'execution_ineligible',
+    execution_eligibility: retryable ? 'unknown' : 'ineligible',
+    execution_ineligibility: {
+      category: clean(category) || 'provider_execution_error',
+      reason: clean(reason).slice(0, 1200) || null,
+      retryable: retryable === true,
+      scope: 'current_runtime_credentials',
+      affected_scope: clean(errorScope) || 'model',
+      observed_at: now,
+      evaluation_id: clean(evaluationId) || null,
+      run_id: clean(runId) || null,
+      cli_version: sanitizeProviderCliVersion(cliVersion) || null,
+    },
+    benchmark_updated_at: now,
+    revalidation_required: false,
+  };
+  const next = {
+    ...registry,
+    updated_at: now,
+    entries,
+    benchmark_candidates: Object.values(entries)
+      .filter((row) => row?.availability === 'available' && clean(row?.execution_eligibility) !== 'ineligible' && ['benchmark_pending', 'benchmark_running', 'revalidation_pending'].includes(clean(row?.benchmark_status))),
   };
   writeJson(registryPath, next);
   return { ok: true, key, entry: entries[key], registry: next };

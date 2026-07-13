@@ -1,0 +1,10 @@
+{
+  "schema_version": "ddalggak.room_journey_suite/v1",
+  "id": "room_model_portfolio",
+  "title": "AI Rooms single-model baseline versus model portfolios",
+  "scenarios": [
+    "portfolio_builder_reviewer.json",
+    "portfolio_parallel_ideation.json",
+    "portfolio_evidence_panel.json"
+  ]
+}

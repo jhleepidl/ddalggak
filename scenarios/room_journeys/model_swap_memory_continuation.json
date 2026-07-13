@@ -1,0 +1,37 @@
+{
+  "schema_version": "ddalggak.room_journey_scenario/v1",
+  "id": "model_swap_memory_continuation",
+  "title": "모델 교체 후 Room memory 이어가기",
+  "description": "provider/model을 교체해도 모델 세션이 아니라 Room memory와 최근 대화에서 사용자 규칙을 이어받는지 검증한다.",
+  "steps": [
+    {
+      "id": "state_rule",
+      "action": "send_message",
+      "text": "의사결정안을 작성할 때는 추천안 하나만 쓰지 말고, 항상 가장 강한 반대 근거와 전환 조건도 함께 적어줘. 이 규칙은 기억해도 돼."
+    },
+    { "id": "generate_candidate", "action": "generate_memory_candidates" },
+    { "id": "approve_candidate", "action": "approve_memory" },
+    {
+      "id": "switch_model",
+      "action": "switch_model",
+      "provider": "claude",
+      "model": "provider-default"
+    },
+    {
+      "id": "continue_after_swap",
+      "action": "send_message",
+      "text": "우리 팀이 주간 배포와 격주 배포 중 무엇을 택할지 짧은 결정 메모로 정리해줘."
+    }
+  ],
+  "assertions": [
+    { "id": "memory_committed", "type": "memory_commit_count", "min": 1 },
+    { "id": "model_switch_succeeded", "type": "step_ok", "step_id": "switch_model" },
+    { "id": "memory_reprojected", "type": "approved_memory_projected" },
+    { "id": "continuation_completed", "type": "step_ok", "step_id": "continue_after_swap" }
+  ],
+  "semantic_rubric": [
+    { "id": "rule_transfer", "description": "교체된 모델도 추천, 가장 강한 반대 근거, 전환 조건을 모두 제공한다." },
+    { "id": "room_not_session", "description": "이전 모델 세션에 의존하지 않고 Room 상태로 자연스럽게 이어간다." },
+    { "id": "decision_quality", "description": "배포 주기의 실제 장단점과 선택 조건이 분명하다." }
+  ]
+}

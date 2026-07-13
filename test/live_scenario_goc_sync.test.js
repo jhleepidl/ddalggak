@@ -18,3 +18,21 @@ test('GoC harness evaluation sync strips raw provider stdout and stderr while pr
   assert.equal(payload.runs[0].runtime_signature, 'v|codex|m|high|cli');
   assert.equal(payload.runs[0].provider_result.usage.input_tokens, 10);
 });
+
+test('GoC sync preserves execution-error classification without raw provider text', () => {
+  const payload = buildHarnessEvaluationSyncPayload({
+    evaluation_id: 'eval-2', suite: 'live', status: 'completed_with_execution_errors',
+    total_run_count: 1, execution_error_run_count: 1, quality_run_count: 0,
+    runs: [{
+      evaluation_id: 'eval-2', run_id: 'r2', scenario_id: 's2', provider: 'codex', model: 'gpt-5-codex',
+      quality_eligible: false, outcome: 'execution_error',
+      execution_error: { kind: 'execution_error', category: 'model_access_denied', retryable: false, message: 'safe summary' },
+      provider_result: { ok: false, stderr: 'RAW SECRET ERROR' },
+    }],
+  });
+  assert.equal(payload.execution_error_run_count, 1);
+  assert.equal(payload.quality_run_count, 0);
+  assert.equal(payload.runs[0].quality_eligible, false);
+  assert.equal(payload.runs[0].execution_error.category, 'model_access_denied');
+  assert.equal(payload.runs[0].provider_result.stderr, undefined);
+});

@@ -1,0 +1,43 @@
+{
+  "schema_version": "ddalggak.room_journey_scenario/v1",
+  "id": "memory_approval_reuse",
+  "title": "승인된 사용자 선호의 다음 호출 재사용",
+  "description": "자연스러운 대화에서 memory 후보를 만들고 사용자가 승인한 뒤, 다음 요청의 context projection과 답변에 재사용되는지 검증한다.",
+  "steps": [
+    {
+      "id": "state_preference",
+      "action": "send_message",
+      "text": "앞으로 장소나 모임을 추천할 때 너무 시끄러운 곳은 피하고, 이미 갔다고 말한 곳은 다시 추천하지 말아줘. 이 선호는 기억해도 돼."
+    },
+    {
+      "id": "generate_candidate",
+      "action": "generate_memory_candidates"
+    },
+    {
+      "id": "inspect_candidate",
+      "action": "inspect",
+      "command": "/memory proposals"
+    },
+    {
+      "id": "approve_candidate",
+      "action": "approve_memory"
+    },
+    {
+      "id": "reuse_preference",
+      "action": "send_message",
+      "text": "그럼 다음 주말에 친구 두 명과 편하게 이야기할 장소를 고를 때 어떤 기준으로 추려야 할지 짧게 정리해줘."
+    }
+  ],
+  "assertions": [
+    { "id": "initial_turn_completed", "type": "step_ok", "step_id": "state_preference" },
+    { "id": "candidate_created", "type": "trace_event_count", "event_type": "memory.candidate_created", "min": 1 },
+    { "id": "memory_committed", "type": "memory_commit_count", "min": 1 },
+    { "id": "approved_memory_reprojected", "type": "approved_memory_projected" },
+    { "id": "followup_completed", "type": "step_ok", "step_id": "reuse_preference" }
+  ],
+  "semantic_rubric": [
+    { "id": "preference_uptake", "description": "후속 답변이 조용한 환경과 재추천 방지 선호를 자연스럽게 반영한다." },
+    { "id": "no_reexplanation", "description": "사용자에게 이미 제공한 선호를 다시 설명하라고 요구하지 않는다." },
+    { "id": "relevance", "description": "memory를 과도하게 노출하지 않고 현재 요청에 필요한 기준만 활용한다." }
+  ]
+}

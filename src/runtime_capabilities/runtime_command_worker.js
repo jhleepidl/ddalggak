@@ -13,8 +13,28 @@ function clampInt(value, fallback, min, max) {
 function normalizeSafeRoomCommand(value = '') {
   const command = String(value || '').trim();
   if (!command.startsWith('/')) throw new Error('room_command requires a Telegram command');
-  const safeExact = new Set(['/brief', '/continue', '/sources', '/rules', '/context project-only', '/context clean-slate', '/context reset']);
-  const safePrefixes = ['/correct ', '/rule ', '/context exclude ', '/branch '];
+  const safeExact = new Set([
+    '/brief',
+    '/continue',
+    '/sources',
+    '/rules',
+    '/context project-only',
+    '/context clean-slate',
+    '/context reset',
+    '/memory idle',
+    '/memory proposals',
+    '/collab reset',
+    '/room model-router',
+  ]);
+  const safePrefixes = [
+    '/correct ',
+    '/rule ',
+    '/context exclude ',
+    '/branch ',
+    '/memory approve ',
+    '/memory reject ',
+    '/collab use ',
+  ];
   if (!safeExact.has(command) && !safePrefixes.some((prefix) => command.startsWith(prefix))) {
     throw new Error(`room_command is not allowed: ${command.split(/\s+/)[0]}`);
   }

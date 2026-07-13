@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runLiveScenarioSuite } from '../src/evaluation/live_scenario_runner.js';
+import { reconcileStoredLiveScenarioSummary, runLiveScenarioSuite } from '../src/evaluation/live_scenario_runner.js';
 
 test('live scenario runner uses a real workspace contract and deterministic command evaluation', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'live-scenario-'));
@@ -111,4 +111,112 @@ test('provider override drops a scenario provider-specific variant and auto-sele
     assert.equal(selected.provider, 'claude');
     assert.equal(selected.id, 'task_worker.claude.default.medium.v1');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('live scenario runner separates model access denial from model quality and skips downstream checks', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'live-scenario-access-denied-'));
+  const scenarioPath = path.join(root, 'scenario.json');
+  fs.writeFileSync(scenarioPath, JSON.stringify({
+    id: 'access_denied', goal: 'Create output',
+    fixture: { files: { 'input.txt': 'x' } },
+    matrix: [{ provider: 'codex', model: 'gpt-5-codex' }],
+    expectations: { provider_ok: true, commands: [{ command: 'node', args: ['-e', 'process.exit(0)'] }] },
+  }));
+  let commandCalls = 0;
+  try {
+    const summary = await runLiveScenarioSuite({
+      scenarioFiles: [scenarioPath], outputDir: path.join(root, 'out'),
+      capabilityProbe: async () => ({ provider: 'codex', cli_available: true, cli_version: 'codex-cli 0.144.1', capabilities: {} }),
+      providerExecutor: async () => ({
+        ok: false, exitCode: 1, stdout: '',
+        stderr: "The 'gpt-5-codex' model is not supported when using Codex with a ChatGPT account.",
+        used_model: 'gpt-5-codex', requested_model: 'gpt-5-codex', resolved_model: 'gpt-5-codex',
+      }),
+      commandRunner: async () => { commandCalls += 1; return { ok: true, exitCode: 0, stdout: '', stderr: '' }; },
+    });
+    assert.equal(commandCalls, 0);
+    assert.equal(summary.status, 'completed_with_execution_errors');
+    assert.equal(summary.quality_run_count, 0);
+    assert.equal(summary.failed_run_count, 0);
+    assert.equal(summary.execution_error_run_count, 1);
+    assert.equal(summary.recommendation, null);
+    assert.equal(summary.runs[0].quality_eligible, false);
+    assert.equal(summary.runs[0].execution_error.category, 'model_access_denied');
+    assert.equal(summary.variant_results[0].average_score, null);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('live scenario runner treats an unrecognized non-zero CLI exit as operational, not quality evidence', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'live-scenario-generic-cli-failure-'));
+  const scenarioPath = path.join(root, 'scenario.json');
+  fs.writeFileSync(scenarioPath, JSON.stringify({
+    id: 'generic_cli_failure', goal: 'Create output',
+    fixture: { files: { 'input.txt': 'x' } },
+    matrix: [{ provider: 'codex', model: 'gpt-test' }],
+    expectations: { provider_ok: true, commands: [{ command: 'node', args: ['-e', 'process.exit(0)'] }] },
+  }));
+  let commandCalls = 0;
+  try {
+    const summary = await runLiveScenarioSuite({
+      scenarioFiles: [scenarioPath], outputDir: path.join(root, 'out'),
+      capabilityProbe: async () => ({ provider: 'codex', cli_available: true, cli_version: 'codex-cli 1.0.0', capabilities: {} }),
+      providerExecutor: async () => ({ ok: false, exitCode: 7, stdout: '', stderr: 'unexpected provider subprocess failure', used_model: 'gpt-test' }),
+      commandRunner: async () => { commandCalls += 1; return { ok: true, exitCode: 0, stdout: '', stderr: '' }; },
+    });
+    assert.equal(commandCalls, 0);
+    assert.equal(summary.status, 'completed_with_execution_errors');
+    assert.equal(summary.quality_run_count, 0);
+    assert.equal(summary.failed_run_count, 0);
+    assert.equal(summary.execution_error_run_count, 1);
+    assert.equal(summary.runs[0].execution_error.category, 'provider_execution_failed');
+    assert.equal(summary.runs[0].execution_error.retryable, true);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('stored live scenario summaries can be reclassified without rerunning the provider', () => {
+  const stored = {
+    schema_version: 'ddalggak.harness_evaluation_summary/v1',
+    evaluation_id: 'eval-old',
+    suite: 'live',
+    status: 'completed_with_failures',
+    started_at: '2026-07-13T00:00:00.000Z',
+    finished_at: '2026-07-13T00:00:04.000Z',
+    total_run_count: 1,
+    passed_run_count: 0,
+    failed_run_count: 1,
+    runs: [{
+      schema_version: 'ddalggak.live_scenario_run_result/v1',
+      evaluation_id: 'eval-old',
+      run_id: 'run-old',
+      scenario_id: 'coding',
+      harness_variant_id: 'code_executor.codex.default.high.v1',
+      provider: 'codex',
+      model: 'gpt-5-codex',
+      reasoning_effort: 'high',
+      cli_version: 'codex-cli 0.144.1',
+      runtime_signature: 'code_executor.codex.default.high.v1|codex|gpt-5-codex|high|codex-cli 0.144.1',
+      passed: false,
+      score: 0.4,
+      duration_ms: 3980,
+      provider_result: {
+        ok: false,
+        exit_code: 1,
+        stdout: '',
+        stderr: "The 'gpt-5-codex' model is not supported when using Codex with a ChatGPT account.",
+      },
+    }],
+  };
+  const corrected = reconcileStoredLiveScenarioSummary(stored);
+  assert.equal(corrected.status, 'completed_with_execution_errors');
+  assert.equal(corrected.failed_run_count, 0);
+  assert.equal(corrected.quality_run_count, 0);
+  assert.equal(corrected.execution_error_run_count, 1);
+  assert.equal(corrected.variant_results[0].average_score, null);
+  assert.equal(corrected.recommendation, null);
+  assert.equal(corrected.runs[0].outcome, 'execution_error');
+  assert.equal(corrected.runs[0].execution_error.category, 'model_access_denied');
+  assert.equal(corrected.runs[0].provider_result.execution_error.exit_code, 1);
+  assert.equal(corrected.reconciliation.newly_classified_execution_error_run_count, 1);
 });
