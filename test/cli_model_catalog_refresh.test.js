@@ -50,7 +50,7 @@ test('Antigravity discovery calls agy models and builds one node per listed sele
       exitCode: 0,
     };
   };
-  const result = await discoverAntigravityCliModelNodes({ runner: fakeRunner, timeoutMs: 1000 });
+  const result = await discoverAntigravityCliModelNodes({ command: 'agy', args: ['models'], runner: fakeRunner, timeoutMs: 1000 });
   assert.equal(result.ok, true);
   assert.equal(result.discovery_source, 'antigravity_cli_models_command');
   assert.equal(result.raw_model_count, 3);

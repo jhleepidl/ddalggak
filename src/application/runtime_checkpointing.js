@@ -1,6 +1,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+let lastCheckpointEpochMs = 0;
+let checkpointSequenceWithinMs = 0;
+
+function nextCheckpointSequence(nowMs = Date.now()) {
+  const epochMs = Math.max(0, Math.floor(Number(nowMs) || 0));
+  if (epochMs === lastCheckpointEpochMs) checkpointSequenceWithinMs += 1;
+  else {
+    lastCheckpointEpochMs = epochMs;
+    checkpointSequenceWithinMs = 0;
+  }
+  return (epochMs * 1000) + Math.min(999, checkpointSequenceWithinMs);
+}
+
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
@@ -104,11 +117,13 @@ export function writeRuntimeCheckpointBundle({
   const dir = resolveRuntimeCheckpointDir({ sharedDir, workspaceRoot });
   fs.mkdirSync(dir, { recursive: true });
   const ts = new Date();
+  const checkpointSequence = nextCheckpointSequence(ts.getTime());
   const stamp = ts.toISOString().replace(/[:.]/g, '-');
-  const checkpointId = `${stamp}_${safeSlug(stage || trigger || 'checkpoint')}`;
+  const checkpointId = `${stamp}_${String(checkpointSequence).slice(-6).padStart(6, '0')}_${safeSlug(stage || trigger || 'checkpoint')}`;
   const payload = {
     checkpoint_id: checkpointId,
     created_at: ts.toISOString(),
+    checkpoint_sequence: checkpointSequence,
     job_id: clean(jobId),
     stage: clean(stage),
     trigger: clean(trigger),
@@ -126,7 +141,7 @@ export function writeRuntimeCheckpointBundle({
   const markdownFile = path.join(dir, `${checkpointId}.md`);
   fs.writeFileSync(jsonFile, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
   fs.writeFileSync(markdownFile, `${formatRuntimeCheckpointSummary(payload)}\n`, 'utf8');
-  fs.writeFileSync(path.join(dir, 'latest.json'), `${JSON.stringify({ checkpoint_id: checkpointId, json_file: jsonFile, markdown_file: markdownFile }, null, 2)}\n`, 'utf8');
+  fs.writeFileSync(path.join(dir, 'latest.json'), `${JSON.stringify({ checkpoint_id: checkpointId, checkpoint_sequence: checkpointSequence, created_at: payload.created_at, json_file: jsonFile, markdown_file: markdownFile }, null, 2)}\n`, 'utf8');
   return {
     checkpoint_id: checkpointId,
     directory: dir,
@@ -157,26 +172,39 @@ export function loadLatestRuntimeCheckpoint({ sharedDir = '', workspaceRoot = ''
       }
     }
   } catch {}
-  const jsonFiles = fs.readdirSync(dir)
-    .filter((entry) => entry.endsWith('.json') && entry !== 'latest.json')
-    .map((entry) => ({
-      file: path.join(dir, entry),
-      mtimeMs: fs.statSync(path.join(dir, entry)).mtimeMs,
-    }))
-    .sort((a, b) => b.mtimeMs - a.mtimeMs);
-  const latest = jsonFiles[0];
-  if (!latest) return null;
-  try {
-    const payload = JSON.parse(fs.readFileSync(latest.file, 'utf8'));
-    const markdownFile = latest.file.replace(/\.json$/i, '.md');
-    return {
-      checkpoint_id: clean(payload?.checkpoint_id),
-      json_file: latest.file,
-      markdown_file: markdownFile,
-      payload,
-      summary: formatRuntimeCheckpointSummary(payload),
-    };
-  } catch {
-    return null;
+  const candidates = [];
+  for (const entry of fs.readdirSync(dir)) {
+    if (!entry.endsWith('.json') || entry === 'latest.json') continue;
+    const file = path.join(dir, entry);
+    try {
+      const stat = fs.statSync(file, { bigint: true });
+      const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
+      candidates.push({
+        file,
+        entry,
+        payload,
+        createdAtMs: Date.parse(clean(payload?.created_at)) || 0,
+        checkpointSequence: Number(payload?.checkpoint_sequence || 0) || 0,
+        mtimeNs: stat.mtimeNs || 0n,
+      });
+    } catch {
+      // A damaged historical checkpoint must not prevent recovery from an older valid one.
+    }
   }
+  candidates.sort((a, b) => {
+    if (a.createdAtMs !== b.createdAtMs) return b.createdAtMs - a.createdAtMs;
+    if (a.checkpointSequence !== b.checkpointSequence) return b.checkpointSequence - a.checkpointSequence;
+    if (a.mtimeNs !== b.mtimeNs) return a.mtimeNs > b.mtimeNs ? -1 : 1;
+    return b.entry.localeCompare(a.entry);
+  });
+  const latest = candidates[0];
+  if (!latest) return null;
+  const markdownFile = latest.file.replace(/\.json$/i, '.md');
+  return {
+    checkpoint_id: clean(latest.payload?.checkpoint_id),
+    json_file: latest.file,
+    markdown_file: markdownFile,
+    payload: latest.payload,
+    summary: formatRuntimeCheckpointSummary(latest.payload),
+  };
 }

@@ -94,3 +94,34 @@ test('runtime checkpoint loader falls back when latest.json is corrupted', () =>
   assert.match(String(restored?.summary || ''), /resume/i);
   assert.notEqual(restored?.json_file, first.json_file);
 });
+
+test('runtime checkpoint loader skips a damaged newest historical checkpoint', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ddalggak-runtime-checkpoint-damaged-history-'));
+  const workspaceRoot = path.join(root, 'workspace');
+  const sharedDir = path.join(root, 'shared');
+  fs.mkdirSync(workspaceRoot, { recursive: true });
+  fs.mkdirSync(sharedDir, { recursive: true });
+
+  const first = writeRuntimeCheckpointBundle({
+    sharedDir,
+    jobId: 'job-valid',
+    stage: 'approval_pause',
+    trigger: 'pending_approval',
+    userText: '정상 체크포인트',
+    remainingActions: [],
+  });
+  const damaged = writeRuntimeCheckpointBundle({
+    sharedDir,
+    jobId: 'job-damaged',
+    stage: 'resume',
+    trigger: 'resume_after_approval',
+    userText: '손상될 체크포인트',
+    remainingActions: [],
+  });
+  fs.writeFileSync(damaged.json_file, '{damaged historical json', 'utf8');
+  fs.writeFileSync(path.join(sharedDir, 'runtime_checkpoints', 'latest.json'), '{damaged latest json', 'utf8');
+
+  const restored = loadLatestRuntimeCheckpoint({ workspaceRoot });
+  assert.equal(restored?.payload?.job_id, 'job-valid');
+  assert.equal(restored?.json_file, first.json_file);
+});

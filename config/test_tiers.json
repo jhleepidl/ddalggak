@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "policy": "Fast tests are deterministic and must not launch provider CLIs, wait on real backoff timers, build release bundles, or bootstrap the complete supervisor runtime.",
+  "integration": [
+    "antigravity_model_selector.test.js",
+    "artifact_delivery.test.js",
+    "claude_cli_provider.test.js",
+    "continuity_handoff_builder.test.js",
+    "gemini_abort_retry.test.js",
+    "gemini_capacity_model_switch.test.js",
+    "gemini_context_isolation.test.js",
+    "gemini_sticky_success.test.js",
+    "gemini_timeout_no_inline_retry.test.js",
+    "live_scenario_runner.test.js",
+    "model_node_discovery.test.js",
+    "openai_compatible_provider.test.js",
+    "proc_utf8_stream.test.js",
+    "runtime_execution_real_usage_fixes.test.js",
+    "telegram_provider_execution.test.js",
+    "telegram_rate_limit_retry.test.js",
+    "telegram_uploads.test.js",
+    "telegram_zip_bundle_io.test.js",
+    "tool_install_adapter.test.js",
+    "tool_proxy_runtime.test.js",
+    "trace_handoff_bundle.test.js"
+  ],
+  "system": [
+    "goc_run_bundle_smoke.test.js",
+    "improvement_debug_bundle.test.js",
+    "improvement_orchestrator.test.js",
+    "improvement_runtime.test.js",
+    "run_supervisor_chat_agent_update_text_smoke.test.js",
+    "run_supervisor_chat_bootstrap_smoke.test.js",
+    "source_bundle_hygiene.test.js",
+    "workspace_hygiene.test.js"
+  ]
+}

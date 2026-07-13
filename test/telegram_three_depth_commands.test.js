@@ -29,6 +29,10 @@ function makeSessionStore(initial = {}) {
 
 function makeHandler({ sent = [], incoming = [] } = {}) {
   return createTelegramCommandHandler({
+    runtimeEnv: {
+      DDALGGAK_DIRECT_ASK_FAST_PATH_ENABLED: 'false',
+      DDALGGAK_SEARCH_ASK_FAST_PATH_ENABLED: 'false',
+    },
     bot: makeBot(sent),
     sendLong: async (_bot, chatId, text) => {
       sent.push({ chatId, text });

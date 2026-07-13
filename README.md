@@ -423,8 +423,20 @@ npm start
 
 테스트:
 ```bash
+# 빠르고 결정적인 기본 회귀
 npm test
+
+# fake CLI, 로컬 서버, ZIP/파일 I/O
+npm run test:integration
+
+# 전체 runtime/release smoke
+npm run test:system
+
+# 세 계층을 순서대로 모두 실행
+npm run test:all
 ```
+
+`npm test`는 실제 provider CLI를 호출하지 않습니다. 인증된 모델 시나리오는 plan-only `npm run test:live`로 계획을 확인한 뒤 `--execute`를 명시해야 합니다. 자세한 정책은 `../docs/TEST_STRATEGY.md`를 참고하세요.
 
 ### 5) systemd로 상시 실행
 ```bash

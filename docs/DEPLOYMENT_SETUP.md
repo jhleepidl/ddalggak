@@ -328,6 +328,24 @@ This is intentionally conservative. Agents may propose model choices, but the ru
 
 ## 8. Smoke checks
 
+Test tiers:
+
+```bash
+# deterministic unit/contract tests; no authenticated provider calls
+npm test
+
+# bounded subprocess, local HTTP, filesystem, and archive tests
+npm run test:integration
+
+# whole-runtime and release hygiene smoke
+npm run test:system
+
+# release gate
+npm run test:all
+```
+
+`npm run test:live` delegates to the all-model scenario harness and remains plan-only unless `--execute` is supplied.
+
 ```bash
 node --check src/providers/openai_compatible.js
 node --check src/application/model_node_registry.js
