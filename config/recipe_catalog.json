@@ -1,0 +1,807 @@
+{
+  "schema_version": "ai_rooms.recipe_catalog/v1",
+  "catalog_version": "2026-07-12.recipe-catalog.v2",
+  "status_policy": {
+    "recommended": {
+      "min_live_runs": 8,
+      "min_success_rate": 0.85,
+      "max_policy_violations": 0,
+      "required_evidence_scope": [
+        "representative",
+        "broad"
+      ]
+    },
+    "evaluated": {
+      "min_live_runs": 3,
+      "min_success_rate": 0.8,
+      "max_policy_violations": 0
+    },
+    "revalidation_triggers": [
+      "model_change",
+      "cli_version_change",
+      "harness_variant_change",
+      "recipe_version_change"
+    ]
+  },
+  "recipes": [
+    {
+      "id": "coding.small_change",
+      "version": 1,
+      "title": "Small Code Change",
+      "title_ko": "작은 코드 변경",
+      "category": "coding",
+      "description": "Make one bounded repository change, keep the diff small, and verify it with an explicit command.",
+      "description_ko": "작은 범위의 코드 변경을 수행하고 명시적인 테스트 명령으로 완료 여부를 확인합니다.",
+      "recommended_room_package": "autonomous_code_loop",
+      "tags": [
+        "code",
+        "bounded-change",
+        "tests"
+      ],
+      "input_fields": [
+        {
+          "id": "goal",
+          "label": "목표",
+          "required": true,
+          "placeholder": "무엇을 바꾸고 싶은가요?"
+        },
+        {
+          "id": "scope",
+          "label": "허용 범위",
+          "required": false,
+          "placeholder": "예: src/**, test/**"
+        },
+        {
+          "id": "constraints",
+          "label": "금지 사항",
+          "required": false,
+          "placeholder": "예: DB schema와 공개 API는 변경하지 않기"
+        },
+        {
+          "id": "done_when",
+          "label": "완료 조건",
+          "required": true,
+          "placeholder": "예: npm test 통과, 관련 회귀 테스트 추가"
+        }
+      ],
+      "example": "src/math.js의 clamp 함수를 구현해줘. 변경은 src/** 안으로 제한하고 npm test가 통과해야 해.",
+      "task_contract_template": {
+        "goal": "{{goal}}",
+        "allowed_scope": "{{scope}}",
+        "constraints": "{{constraints}}",
+        "done_when": "{{done_when}}"
+      },
+      "evaluation": {
+        "suite_ids": [
+          "coding_smoke_add_clamp"
+        ],
+        "evidence_scope": "narrow",
+        "revalidation_required": true,
+        "revalidation_reason": "The attached evidence used Codex CLI 0.142.3 / gpt-5.5. The server Codex CLI has since been updated, so the recipe should be re-run before receiving a Recommended badge.",
+        "evidence": [
+          {
+            "source": "user_supplied_live_scenario_results_2026-07-11",
+            "provider": "codex",
+            "model": "gpt-5.5",
+            "reasoning_effort": "high",
+            "cli_version": "codex-cli 0.142.3",
+            "live_runs": 4,
+            "passed_runs": 4,
+            "success_rate": 1.0,
+            "average_score": 1.0,
+            "policy_violations": 0
+          }
+        ]
+      },
+      "recommended_collaboration_profile": "builder_reviewer",
+      "alternative_collaboration_profiles": []
+    },
+    {
+      "id": "coding.bug_fix",
+      "version": 1,
+      "title": "Bug Fix",
+      "title_ko": "버그 수정",
+      "category": "coding",
+      "description": "Describe the observed failure, expected behavior, protected areas, and a concrete verification condition.",
+      "description_ko": "현재 증상, 기대 동작, 건드리면 안 되는 영역, 검증 조건을 분리해 버그 수정을 요청합니다.",
+      "recommended_room_package": "autonomous_code_loop",
+      "tags": [
+        "code",
+        "bug",
+        "regression"
+      ],
+      "input_fields": [
+        {
+          "id": "symptom",
+          "label": "현재 증상",
+          "required": true,
+          "placeholder": "무엇이 잘못되고 있나요?"
+        },
+        {
+          "id": "expected",
+          "label": "기대 동작",
+          "required": true,
+          "placeholder": "어떻게 동작해야 하나요?"
+        },
+        {
+          "id": "reproduction",
+          "label": "재현 정보",
+          "required": false,
+          "placeholder": "재현 방법이나 관련 경로"
+        },
+        {
+          "id": "constraints",
+          "label": "금지 사항",
+          "required": false,
+          "placeholder": "예: DB schema 변경 금지"
+        },
+        {
+          "id": "done_when",
+          "label": "완료 조건",
+          "required": true,
+          "placeholder": "예: 회귀 테스트 추가 + 전체 테스트 통과"
+        }
+      ],
+      "example": "없는 사용자를 조회하면 500이 발생합니다. 404를 반환하도록 고치고 회귀 테스트를 추가해줘. DB schema는 변경하지 마.",
+      "task_contract_template": {
+        "goal": "{{expected}}",
+        "context": "{{symptom}}",
+        "reproduction": "{{reproduction}}",
+        "constraints": "{{constraints}}",
+        "done_when": "{{done_when}}"
+      },
+      "evaluation": {
+        "suite_ids": [
+          "coding_bug_fix_v1"
+        ],
+        "evidence_scope": "none",
+        "revalidation_required": false,
+        "evidence": []
+      },
+      "recommended_collaboration_profile": "builder_reviewer",
+      "alternative_collaboration_profiles": []
+    },
+    {
+      "id": "coding.feature",
+      "version": 1,
+      "title": "Feature Implementation",
+      "title_ko": "기능 구현",
+      "category": "coding",
+      "description": "Separate required behavior, non-goals, protected boundaries, and acceptance checks before implementation.",
+      "description_ko": "필수 기능, 비요구사항, 보호할 경계, 완료 조건을 분리해 기능 구현을 요청합니다.",
+      "recommended_room_package": "autonomous_code_loop",
+      "tags": [
+        "code",
+        "feature",
+        "acceptance"
+      ],
+      "input_fields": [
+        {
+          "id": "goal",
+          "label": "원하는 기능",
+          "required": true,
+          "placeholder": "사용자가 무엇을 할 수 있어야 하나요?"
+        },
+        {
+          "id": "requirements",
+          "label": "필수 요구사항",
+          "required": true,
+          "placeholder": "반드시 만족해야 할 조건"
+        },
+        {
+          "id": "non_goals",
+          "label": "비요구사항",
+          "required": false,
+          "placeholder": "이번 작업에서 하지 않을 것"
+        },
+        {
+          "id": "constraints",
+          "label": "제약 조건",
+          "required": false,
+          "placeholder": "변경 금지 영역이나 호환성 조건"
+        },
+        {
+          "id": "done_when",
+          "label": "완료 조건",
+          "required": true,
+          "placeholder": "테스트/빌드/사용 시나리오"
+        }
+      ],
+      "example": "사용자가 CSV를 업로드하면 미리보기를 보여주는 기능을 추가해줘. 기존 API 응답 형식은 바꾸지 말고 관련 테스트와 frontend build가 통과해야 해.",
+      "task_contract_template": {
+        "goal": "{{goal}}",
+        "requirements": "{{requirements}}",
+        "non_goals": "{{non_goals}}",
+        "constraints": "{{constraints}}",
+        "done_when": "{{done_when}}"
+      },
+      "evaluation": {
+        "suite_ids": [
+          "coding_feature_v1"
+        ],
+        "evidence_scope": "none",
+        "revalidation_required": false,
+        "evidence": []
+      },
+      "recommended_collaboration_profile": "builder_reviewer",
+      "alternative_collaboration_profiles": []
+    },
+    {
+      "id": "research.grounded",
+      "version": 1,
+      "title": "Grounded Research",
+      "title_ko": "근거 기반 조사",
+      "category": "research",
+      "description": "Make the research question, freshness requirement, source bar, and output decision explicit.",
+      "description_ko": "조사 질문, 최신성 요구, 신뢰할 출처 기준, 원하는 산출물을 명확히 지정합니다.",
+      "recommended_room_package": "literature_review_lab",
+      "tags": [
+        "research",
+        "sources",
+        "freshness"
+      ],
+      "input_fields": [
+        {
+          "id": "question",
+          "label": "조사 질문",
+          "required": true,
+          "placeholder": "무엇을 알고 싶나요?"
+        },
+        {
+          "id": "scope",
+          "label": "범위",
+          "required": false,
+          "placeholder": "포함/제외 범위"
+        },
+        {
+          "id": "freshness",
+          "label": "최신성 요구",
+          "required": false,
+          "placeholder": "예: 최근 12개월"
+        },
+        {
+          "id": "source_bar",
+          "label": "출처 기준",
+          "required": true,
+          "placeholder": "예: 공식 문서와 1차 연구 우선"
+        },
+        {
+          "id": "output",
+          "label": "원하는 결과",
+          "required": true,
+          "placeholder": "예: 비교표 + 추천 + 근거"
+        }
+      ],
+      "example": "최근 12개월의 agent memory 제품을 조사해줘. 공식 문서와 논문을 우선하고, 우리 시스템과의 차이를 비교표로 정리해줘.",
+      "task_contract_template": {
+        "goal": "{{question}}",
+        "scope": "{{scope}}",
+        "freshness": "{{freshness}}",
+        "source_bar": "{{source_bar}}",
+        "done_when": "{{output}}"
+      },
+      "evaluation": {
+        "suite_ids": [
+          "grounded_research_v1"
+        ],
+        "evidence_scope": "none",
+        "revalidation_required": false,
+        "evidence": []
+      },
+      "recommended_collaboration_profile": "evidence_panel",
+      "alternative_collaboration_profiles": []
+    },
+    {
+      "id": "decision.compare_options",
+      "version": 1,
+      "title": "Compare Options",
+      "title_ko": "선택지 비교",
+      "category": "decision",
+      "description": "Compare concrete options against explicit criteria and constraints instead of producing a generic pros/cons list.",
+      "description_ko": "선택지와 평가 기준, 제약을 먼저 고정해 일반적인 장단점 나열이 아니라 실제 결정을 돕습니다.",
+      "recommended_room_package": "decision_room",
+      "tags": [
+        "decision",
+        "comparison",
+        "criteria"
+      ],
+      "input_fields": [
+        {
+          "id": "options",
+          "label": "선택지",
+          "required": true,
+          "placeholder": "비교할 후보들"
+        },
+        {
+          "id": "criteria",
+          "label": "평가 기준",
+          "required": true,
+          "placeholder": "예: 품질, 비용, 속도, 유지보수"
+        },
+        {
+          "id": "constraints",
+          "label": "제약 조건",
+          "required": false,
+          "placeholder": "예산, 일정, 환경"
+        },
+        {
+          "id": "decision",
+          "label": "결정 필요 여부",
+          "required": true,
+          "placeholder": "추천 1개 / 조건별 추천 / 비교만"
+        }
+      ],
+      "example": "Claude Code, Codex, Antigravity를 코드 구현·리뷰·비용·원격 실행 기준으로 비교하고 우리 시스템에서의 역할을 추천해줘.",
+      "task_contract_template": {
+        "goal": "Compare {{options}}",
+        "criteria": "{{criteria}}",
+        "constraints": "{{constraints}}",
+        "done_when": "{{decision}}"
+      },
+      "evaluation": {
+        "suite_ids": [
+          "decision_compare_v1"
+        ],
+        "evidence_scope": "none",
+        "revalidation_required": false,
+        "evidence": []
+      },
+      "recommended_collaboration_profile": "parallel_ideation",
+      "alternative_collaboration_profiles": []
+    },
+    {
+      "id": "project.continue",
+      "version": 1,
+      "title": "Continue Project",
+      "title_ko": "프로젝트 이어가기",
+      "category": "continuity",
+      "description": "Continue a persistent Room without re-explaining everything, while making the current objective and protected prior decisions explicit.",
+      "description_ko": "이전 Room의 기억과 결정을 활용하되, 이번 목표와 유지해야 할 결정을 명시해 프로젝트를 이어갑니다.",
+      "recommended_room_package": "project_continuity_room",
+      "tags": [
+        "memory",
+        "continuity",
+        "project"
+      ],
+      "input_fields": [
+        {
+          "id": "goal",
+          "label": "이번 목표",
+          "required": true,
+          "placeholder": "이번에 어디까지 진행할까요?"
+        },
+        {
+          "id": "keep",
+          "label": "유지할 이전 결정",
+          "required": false,
+          "placeholder": "바꾸지 않을 설계/정책"
+        },
+        {
+          "id": "focus",
+          "label": "이번 집중 범위",
+          "required": true,
+          "placeholder": "이번 세션에서 다룰 부분"
+        },
+        {
+          "id": "done_when",
+          "label": "완료 조건",
+          "required": true,
+          "placeholder": "어떤 상태가 되면 이번 작업이 끝나나요?"
+        }
+      ],
+      "example": "이전 AI Rooms 설계 결정을 유지하면서, 이번에는 사용자용 Recipe UX만 구현해줘. runtime execution boundary는 바꾸지 말고 Telegram과 GoC에 사용 예시를 추가해줘.",
+      "task_contract_template": {
+        "goal": "{{goal}}",
+        "preserve": "{{keep}}",
+        "scope": "{{focus}}",
+        "done_when": "{{done_when}}"
+      },
+      "evaluation": {
+        "suite_ids": [
+          "project_continuity_v1"
+        ],
+        "evidence_scope": "none",
+        "revalidation_required": false,
+        "evidence": []
+      },
+      "recommended_collaboration_profile": "iterative_project",
+      "alternative_collaboration_profiles": []
+    },
+    {
+      "id": "recommendation.contextual",
+      "version": 1,
+      "title": "Context-aware recommendation",
+      "title_ko": "맥락 기반 추천",
+      "category": "recommendation",
+      "description": "Use current needs, durable preferences, recent outcomes, and explicit exclusions without requiring the user to repeat all context.",
+      "description_ko": "현재 필요, 누적된 선호, 최근 선택 결과, 명시적 제외 조건을 함께 사용해 추천합니다.",
+      "recommended_room_package": "personal_research_assistant",
+      "recommended_collaboration_profile": "solo",
+      "alternative_collaboration_profiles": [
+        "parallel_ideation"
+      ],
+      "tags": [
+        "recommendation",
+        "continuity",
+        "preferences",
+        "constraints"
+      ],
+      "input_fields": [
+        {
+          "id": "decision",
+          "label": "지금 결정할 것",
+          "required": true,
+          "placeholder": "무엇을 추천받고 싶나요?"
+        },
+        {
+          "id": "current_context",
+          "label": "현재 상황",
+          "required": false,
+          "placeholder": "시간, 장소, 최근 선택, 현재 상태"
+        },
+        {
+          "id": "preferences",
+          "label": "선호와 피하고 싶은 것",
+          "required": false,
+          "placeholder": "좋아하는 것, 제외할 것, 중요하게 보는 기준"
+        },
+        {
+          "id": "options",
+          "label": "이미 고민 중인 선택지",
+          "required": false,
+          "placeholder": "후보가 있으면 적어주세요."
+        },
+        {
+          "id": "done_when",
+          "label": "원하는 답변 형태",
+          "required": true,
+          "placeholder": "추천 1개 + 이유 / 조건별 후보 / 간단한 다음 행동"
+        }
+      ],
+      "example": "오늘 상황과 이전 선호를 반영해 저녁 선택을 도와줘. 최근에 먹은 것과 피하고 싶은 메뉴를 고려하고, 후보가 있으면 1개를 골라 이유를 짧게 설명해줘.",
+      "task_contract_template": {
+        "goal": "{{decision}}",
+        "current_context": "{{current_context}}",
+        "preferences_and_exclusions": "{{preferences}}",
+        "options": "{{options}}",
+        "done_when": "{{done_when}}"
+      },
+      "evaluation": {
+        "suite_ids": [
+          "contextual_recommendation_v1"
+        ],
+        "evidence_scope": "none",
+        "revalidation_required": false,
+        "evidence": []
+      }
+    },
+    {
+      "id": "source.file_grounded",
+      "version": 1,
+      "title": "File-grounded answer",
+      "title_ko": "업로드 파일 근거 답변",
+      "category": "grounding",
+      "description": "Treat an uploaded file or supplied dataset as the source of truth, identify conflicts with assumptions, and answer only from supported fields.",
+      "description_ko": "업로드 파일이나 제공된 데이터셋을 기준 정보로 삼고, 기존 가정과 충돌하면 파일 근거를 우선합니다.",
+      "recommended_room_package": "data_analysis_lab",
+      "recommended_collaboration_profile": "solo",
+      "alternative_collaboration_profiles": [
+        "evidence_panel"
+      ],
+      "tags": [
+        "file",
+        "dataset",
+        "grounding",
+        "source-of-truth"
+      ],
+      "input_fields": [
+        {
+          "id": "question",
+          "label": "파일을 바탕으로 답할 질문",
+          "required": true,
+          "placeholder": "파일에서 무엇을 판단해야 하나요?"
+        },
+        {
+          "id": "source_scope",
+          "label": "사용할 파일/열/범위",
+          "required": false,
+          "placeholder": "특정 파일, 시트, 열 또는 행 범위"
+        },
+        {
+          "id": "authority",
+          "label": "충돌 시 기준",
+          "required": true,
+          "placeholder": "예: 업로드 파일이 기존 대화 추정보다 우선"
+        },
+        {
+          "id": "output",
+          "label": "원하는 결과",
+          "required": true,
+          "placeholder": "추천, 요약, 오류 목록, 표 등"
+        }
+      ],
+      "example": "업로드한 보유 목록을 기준으로 다음 후보를 추천해줘. 일반적인 입수 난이도 추정보다 파일의 보유 상태를 우선하고, 근거가 된 항목도 함께 알려줘.",
+      "task_contract_template": {
+        "goal": "{{question}}",
+        "source_scope": "{{source_scope}}",
+        "source_of_truth": "{{authority}}",
+        "done_when": "{{output}}"
+      },
+      "evaluation": {
+        "suite_ids": [
+          "file_grounding_v1"
+        ],
+        "evidence_scope": "none",
+        "revalidation_required": false,
+        "evidence": []
+      }
+    },
+    {
+      "id": "thinking.parallel_ideas",
+      "version": 1,
+      "title": "Parallel idea search",
+      "title_ko": "병렬 아이디어 탐색",
+      "category": "thinking",
+      "description": "Search several independent directions before comparing novelty, feasibility, risk, and user value.",
+      "description_ko": "여러 독립 방향을 먼저 탐색한 뒤 참신성, 실현 가능성, 위험, 사용자 가치를 비교합니다.",
+      "recommended_room_package": "meeting_prep_council",
+      "recommended_collaboration_profile": "parallel_ideation",
+      "alternative_collaboration_profiles": [
+        "solo",
+        "evidence_panel"
+      ],
+      "tags": [
+        "ideas",
+        "hypotheses",
+        "parallel",
+        "diversity"
+      ],
+      "input_fields": [
+        {
+          "id": "question",
+          "label": "탐색할 질문",
+          "required": true,
+          "placeholder": "어떤 문제에 대한 서로 다른 아이디어가 필요한가요?"
+        },
+        {
+          "id": "constraints",
+          "label": "제약 조건",
+          "required": false,
+          "placeholder": "예산, 기술, 일정, 금지 조건"
+        },
+        {
+          "id": "diversity",
+          "label": "다르게 탐색할 관점",
+          "required": true,
+          "placeholder": "예: 사용자 가치, 기술 구조, 운영 위험, 새로운 가설"
+        },
+        {
+          "id": "selection",
+          "label": "최종 선택 기준",
+          "required": true,
+          "placeholder": "후보 수와 평가 기준"
+        }
+      ],
+      "example": "장기 작업 메모리를 개선할 서로 다른 접근을 탐색해줘. 각 제안은 다른 핵심 가정을 가져야 하고, 참신성·실현 가능성·검증 방법으로 비교한 뒤 상위 3개를 남겨줘.",
+      "task_contract_template": {
+        "goal": "{{question}}",
+        "constraints": "{{constraints}}",
+        "diversity_contract": "{{diversity}}",
+        "done_when": "{{selection}}"
+      },
+      "evaluation": {
+        "suite_ids": [
+          "parallel_ideation_v1"
+        ],
+        "evidence_scope": "none",
+        "revalidation_required": false,
+        "evidence": []
+      }
+    },
+    {
+      "id": "research.long_horizon",
+      "version": 1,
+      "title": "Long-horizon research project",
+      "title_ko": "장기 연구 프로젝트",
+      "category": "research",
+      "description": "Separate prior-art review, hypothesis generation, method design, experiment execution, and writing into resumable checkpoints.",
+      "description_ko": "선행연구, 가설, 방법론, 실험, 작성 단계를 재개 가능한 checkpoint로 나눕니다.",
+      "recommended_room_package": "research_paper_factory",
+      "recommended_collaboration_profile": "iterative_project",
+      "alternative_collaboration_profiles": [
+        "evidence_panel",
+        "parallel_ideation"
+      ],
+      "tags": [
+        "research",
+        "experiment",
+        "paper",
+        "long-horizon"
+      ],
+      "input_fields": [
+        {
+          "id": "research_goal",
+          "label": "연구 목표",
+          "required": true,
+          "placeholder": "어떤 문제와 기여를 목표로 하나요?"
+        },
+        {
+          "id": "novelty_bar",
+          "label": "새로움과 비교 기준",
+          "required": true,
+          "placeholder": "어떤 기존 연구와 어떻게 달라야 하나요?"
+        },
+        {
+          "id": "resources",
+          "label": "사용 가능한 데이터/코드/시간",
+          "required": false,
+          "placeholder": "실험 자원과 제약"
+        },
+        {
+          "id": "checkpoints",
+          "label": "단계별 산출물",
+          "required": true,
+          "placeholder": "조사, 방법론, 코드, 실험, 초안 등"
+        },
+        {
+          "id": "stop_conditions",
+          "label": "중단/검토 조건",
+          "required": false,
+          "placeholder": "근거 부족, 실험 실패, 비용 한도 등"
+        }
+      ],
+      "example": "새로운 메모리 관리 연구 방향을 찾고 싶어. 선행연구 조사, 서로 다른 가설 탐색, 방법론 설계, 최소 실험, 논문 초안을 단계별로 진행하고 각 단계에서 근거와 blocker를 남겨줘.",
+      "task_contract_template": {
+        "goal": "{{research_goal}}",
+        "novelty_bar": "{{novelty_bar}}",
+        "resources": "{{resources}}",
+        "checkpoints": "{{checkpoints}}",
+        "stop_conditions": "{{stop_conditions}}"
+      },
+      "evaluation": {
+        "suite_ids": [
+          "long_horizon_research_v1"
+        ],
+        "evidence_scope": "none",
+        "revalidation_required": false,
+        "evidence": []
+      }
+    },
+    {
+      "id": "artifact.prototype",
+      "version": 1,
+      "title": "Prototype deliverable",
+      "title_ko": "프로토타입 산출물",
+      "category": "artifact",
+      "description": "Create a runnable or reviewable prototype, verify the core user journey, and package the deliverable with limitations.",
+      "description_ko": "실행하거나 검토할 수 있는 프로토타입을 만들고 핵심 사용자 흐름을 검증해 제한사항과 함께 전달합니다.",
+      "recommended_room_package": "telegram_product_room",
+      "recommended_collaboration_profile": "builder_reviewer",
+      "alternative_collaboration_profiles": [
+        "iterative_project"
+      ],
+      "tags": [
+        "prototype",
+        "artifact",
+        "user-journey",
+        "delivery"
+      ],
+      "input_fields": [
+        {
+          "id": "user_value",
+          "label": "사용자 가치",
+          "required": true,
+          "placeholder": "누가 어떤 문제를 해결하나요?"
+        },
+        {
+          "id": "core_journey",
+          "label": "핵심 사용자 흐름",
+          "required": true,
+          "placeholder": "사용자가 처음부터 결과까지 무엇을 하나요?"
+        },
+        {
+          "id": "deliverable",
+          "label": "필요한 산출물",
+          "required": true,
+          "placeholder": "웹 프로토타입, 문서, 데이터 파일 등"
+        },
+        {
+          "id": "constraints",
+          "label": "제약과 비요구사항",
+          "required": false,
+          "placeholder": "기술, 범위, 배포 제외 등"
+        },
+        {
+          "id": "verification",
+          "label": "검증 방법",
+          "required": true,
+          "placeholder": "실행 명령, 사용자 시나리오, 검사 항목"
+        }
+      ],
+      "example": "사람들이 자신의 목록을 만들고 공유·비교할 수 있는 작은 프로토타입을 만들어줘. 핵심 사용자 흐름을 직접 검증하고 실행 방법, 생성 파일, 알려진 제한을 함께 전달해줘.",
+      "task_contract_template": {
+        "goal": "{{user_value}}",
+        "core_user_journey": "{{core_journey}}",
+        "deliverable": "{{deliverable}}",
+        "constraints": "{{constraints}}",
+        "done_when": "{{verification}}"
+      },
+      "evaluation": {
+        "suite_ids": [
+          "prototype_deliverable_v1"
+        ],
+        "evidence_scope": "none",
+        "revalidation_required": false,
+        "evidence": []
+      }
+    },
+    {
+      "id": "decision.risk_reviewed",
+      "version": 1,
+      "title": "Risk-reviewed decision",
+      "title_ko": "위험 검토 의사결정",
+      "category": "decision",
+      "description": "Separate evidence, assumptions, downside cases, uncertainty, and action thresholds before recommending a consequential decision.",
+      "description_ko": "중요한 결정을 내리기 전에 근거, 가정, 하방 위험, 불확실성, 실행 기준을 분리해 검토합니다.",
+      "recommended_room_package": "meeting_prep_council",
+      "recommended_collaboration_profile": "evidence_panel",
+      "alternative_collaboration_profiles": [
+        "parallel_ideation"
+      ],
+      "tags": [
+        "decision",
+        "risk",
+        "evidence",
+        "uncertainty"
+      ],
+      "input_fields": [
+        {
+          "id": "decision",
+          "label": "결정할 내용",
+          "required": true,
+          "placeholder": "무엇을 선택하거나 실행해야 하나요?"
+        },
+        {
+          "id": "evidence_bar",
+          "label": "필요한 근거 수준",
+          "required": true,
+          "placeholder": "최신 자료, 공식 자료, 수치 등"
+        },
+        {
+          "id": "risk_limits",
+          "label": "감수할 수 없는 위험",
+          "required": true,
+          "placeholder": "손실, 안전, 규정, 되돌릴 수 없는 조건"
+        },
+        {
+          "id": "uncertainty",
+          "label": "불확실할 때의 처리",
+          "required": false,
+          "placeholder": "보류, 조건부 실행, 추가 조사"
+        },
+        {
+          "id": "output",
+          "label": "원하는 결론 형태",
+          "required": true,
+          "placeholder": "조건부 추천, 시나리오별 행동, 보류 기준"
+        }
+      ],
+      "example": "중요한 선택을 추천하기 전에 최신 근거와 반대 근거를 독립적으로 검토하고, 실패 시나리오와 보류 조건을 명시해줘. 확신이 부족하면 단정하지 말고 추가로 필요한 정보를 알려줘.",
+      "task_contract_template": {
+        "goal": "{{decision}}",
+        "evidence_bar": "{{evidence_bar}}",
+        "risk_limits": "{{risk_limits}}",
+        "uncertainty_policy": "{{uncertainty}}",
+        "done_when": "{{output}}"
+      },
+      "evaluation": {
+        "suite_ids": [
+          "risk_reviewed_decision_v1"
+        ],
+        "evidence_scope": "none",
+        "revalidation_required": false,
+        "evidence": []
+      }
+    }
+  ]
+}

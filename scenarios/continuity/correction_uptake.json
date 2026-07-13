@@ -1,0 +1,17 @@
+{
+  "schema_version": "ddalggak.continuity_scenario/v1",
+  "id": "correction_uptake",
+  "title": "사용자 정정 지속성",
+  "description": "한 번 반영한 정정이 후속 요청과 재시작/모델 교체 뒤에도 유지되는지 확인한다.",
+  "steps": [
+    {"id":"initial_request","action":"send_message","title":"초기 추천 요청","text":"업로드한 읽은 목록을 참고해서 다음에 읽을 자료 3개를 추천해줘."},
+    {"id":"correction","action":"send_message","title":"명시적 정정","text":"/correct 이미 읽은 항목은 추천하지 말고, 업로드한 읽은 목록을 항상 확인해."},
+    {"id":"rules","action":"inspect","title":"정정 반영 확인","text":"/rules","observe":["정정 내용이 표시되는가"]},
+    {"id":"repeat_request","action":"send_message","title":"정정 이후 재요청","text":"다음에 읽을 자료 3개를 다시 추천해줘.","observe":["이미 읽은 항목을 제외하는가","읽은 목록을 근거로 쓰는가"]}
+  ],
+  "rubric": [
+    {"id":"correction_visible","label":"정정이 Room 규칙/정정 상태에 반영되었다","required":true},
+    {"id":"correction_applied","label":"후속 결과가 정정을 실제로 준수했다","required":true},
+    {"id":"repeat_error_avoided","label":"동일한 회피 가능한 오류를 반복하지 않았다","required":true}
+  ]
+}

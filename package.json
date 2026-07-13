@@ -12,7 +12,13 @@
     "maintenance:doctor": "node scripts/maintenance_doctor.js",
     "eval:live": "node scripts/run_live_scenarios.js",
     "eval:probe": "node scripts/probe_provider_capabilities.js",
-    "eval:replay": "node scripts/replay_live_scenario.js"
+    "eval:replay": "node scripts/replay_live_scenario.js",
+    "models:refresh": "node scripts/discover_model_nodes.js --refresh --stdout",
+    "models:status": "node scripts/model_discovery_status.js",
+    "models:bench-pending": "node scripts/benchmark_pending_models.js",
+    "continuity:test": "node scripts/run_continuity_tests.js",
+    "continuity:handoff": "node scripts/build_continuity_handoff.js",
+    "test:user-paths": "node --test test/runtime_command_worker.test.js test/runtime_command_processor.test.js test/run_event_outbox.test.js test/continuity_scenario_runner.test.js test/continuity_handoff_builder.test.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

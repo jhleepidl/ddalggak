@@ -1,3 +1,7 @@
+## User-facing Room continuity
+
+The primary Telegram experience is `/home`, `/brief`, `/continue`, `/sources`, `/rules`, `/correct`, and `/branch`. Agent/model/collaboration commands are advanced controls. Implement continuity from general Room state and contracts; do not add domain-keyword or scenario-specific routing rules. Treat strongest-current-single-model plus native subagents as the default quality baseline.
+
 # Agent Guidance
 
 - `telegram_runner.js` is the stable bootstrap shell only. Keep it limited to env/bootstrap, starting the Telegram app, and top-level fatal handling.
@@ -33,3 +37,10 @@
 - A task has one writer. When assigned as reviewer, do not edit the writer's worktree.
 - Source-development agents and Telegram runtime agents are separate. Runtime runs must not modify development repositories, task worktrees, or releases.
 - External patches must carry `PATCH_MANIFEST.json` and pass the docs repository's `scripts/dev/import-patch.sh` checks.
+
+## Routing and scenario generalization
+
+- Do not add scenario-specific keyword-to-Recipe, keyword-to-agent, or keyword-to-topology tables.
+- Represent recurring task forms as explicit contracts/capabilities and evaluate them through Live Scenario suites.
+- Keep deterministic branching for hard safety, authority, compatibility, and schema constraints.
+- New collaboration behavior must be explicit, inspectable, budget-bounded, and preserve provider-native orchestration where appropriate.

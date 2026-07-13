@@ -7,6 +7,7 @@ function sanitizeRun(run = {}) {
     run_id: run.run_id,
     scenario_id: run.scenario_id,
     scenario_title: run.scenario_title,
+    recipe_ids: Array.isArray(run.recipe_ids) ? run.recipe_ids : [],
     harness_variant_id: run.harness_variant_id,
     harness_variant_hash: run.harness_variant_hash,
     provider: run.provider,

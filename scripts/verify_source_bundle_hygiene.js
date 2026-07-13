@@ -9,10 +9,6 @@ if (!targets.length) targets.push(process.cwd());
 const forbiddenPatterns = [
   /(^|\/)\.git(\/|$)/,
   /(^|\/)runs(\/|$)/,
-  /(^|\/)ddalggak-main\/docs(\/|$)/,
-  /(^|\/)ddalggak\/docs(\/|$)/,
-  /(^|\/)graph-of-context-ui-main\/docs(\/|$)/,
-  /(^|\/)goc\/docs(\/|$)/,
   /(^|\/)chat_sessions\.jsonl?$/,
   /(^|\/)room_memory_data(\/|$)/,
   /(^|\/)paper4_data(\/|$)/,
@@ -28,7 +24,7 @@ const forbiddenPatterns = [
   /(^|\/)paper4-memory-schema-trials\/results(\/|$)/,
   /(^|\/)paper4-memory-schema-trials\/build(\/|$)/,
   /(^|\/)paper4-memory-schema-trials\/dist(\/|$)/,
-  /(^|\/)data(\/|$)/,
+  /(^|\/)goc\/backend\/data(\/|$)/,
   /(^|\/)models(\/|$)/,
   /(^|\/)reports(\/|$)/,
   /(^|\/)outputs(\/|$)/,
@@ -81,6 +77,12 @@ function listZip(zipPath) {
 const requiredBundleFiles = [
   'ddalggak/src/shared/openharness_contracts.js',
   'ddalggak/src/shared/team_structure_v2.js',
+  'ddalggak/config/recipe_catalog.json',
+  'goc/backend/app/data/recipe_catalog.json',
+  'ddalggak/config/collaboration_profiles.json',
+  'goc/backend/app/data/collaboration_profiles.json',
+  'docs/RECIPE_CATALOG_AND_STARTER_KITS.md',
+  'docs/GENERAL_TASK_RECIPES_AND_COLLABORATION_PROFILES.md',
 ];
 
 let failures = [];

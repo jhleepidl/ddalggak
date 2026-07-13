@@ -70,18 +70,40 @@ export function summarizeRoomUsage(events = []) {
   const domains = new Set();
   let corrections = 0;
   let approvals = 0;
+  let continuationAttempts = 0;
+  let continuationCompletions = 0;
+  let sourceBoundaryViews = 0;
+  let rulesViews = 0;
+  let briefViews = 0;
+  let branchProposals = 0;
   for (const row of rows) {
     const ev = asObject(row);
+    const type = String(ev.event_type || ev.command || '').toLowerCase();
     if (ev.room?.domain_label) domains.add(ev.room.domain_label);
     const pack = asObject(ev.signal_pack);
-    if (/correction|retry|reject|branch/i.test(ev.event_type || ev.command || '') || pack.correction_signal) corrections += 1;
-    if (/approve|promote|accept|apply/i.test(ev.event_type || ev.command || '')) approvals += 1;
+    if (/correction|retry|reject|branch/i.test(type) || pack.correction_signal) corrections += 1;
+    if (/approve|promote|accept|apply/i.test(type)) approvals += 1;
+    if (type.includes('room_continuation_requested')) continuationAttempts += 1;
+    if (type.includes('room_continuation_completed')) continuationCompletions += 1;
+    if (type.includes('room_source_boundary_view')) sourceBoundaryViews += 1;
+    if (type.includes('room_rules_view')) rulesViews += 1;
+    if (type.includes('room_continuity_brief_view')) briefViews += 1;
+    if (type.includes('room_branch_proposed')) branchProposals += 1;
   }
   return {
     task_count: rows.length,
     correction_count: corrections,
     approval_count: approvals,
     distinct_domains: domains.size,
+    continuity: {
+      continuation_attempt_count: continuationAttempts,
+      continuation_completion_count: continuationCompletions,
+      continuation_completion_rate: continuationAttempts > 0 ? continuationCompletions / continuationAttempts : null,
+      brief_view_count: briefViews,
+      source_boundary_view_count: sourceBoundaryViews,
+      rules_view_count: rulesViews,
+      branch_proposal_count: branchProposals,
+    },
   };
 }
 

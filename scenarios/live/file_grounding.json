@@ -1,0 +1,20 @@
+{
+  "schema_version": "ddalggak.live_scenario/v1",
+  "id": "file_grounding_source_of_truth",
+  "suite": "general_task_live_v1",
+  "title": "Use a declared file as the source of truth",
+  "goal": "Read data/inventory.csv and data/context_notes.txt. Treat inventory.csv as authoritative. Create output/answer.json with source_of_truth, selected_ids, and evidence. Select one or more available items that are not already owned. Do not follow a conflicting conversational guess when the file disproves it.",
+  "acceptance_criteria": [
+    "output/answer.json passes npm test",
+    "The declared file is recorded as source_of_truth",
+    "Unavailable or already-owned entries are not selected"
+  ],
+  "fixture": {"path": "../fixtures/file_grounding", "ignore": [".git/**", "node_modules/**", "runs/**"]},
+  "matrix": [{"provider": "codex", "role": "task_worker", "harness_variant_id": "task_worker.codex.default.medium.v1", "repetitions": 1, "timeout_ms": 900000}],
+  "expectations": {
+    "provider_ok": true,
+    "files": {"patch_required": true, "must_exist": ["output/answer.json"], "allowed_changed": ["output/**"], "forbidden_changed": ["data/**", "checks/**", "package.json", ".env", "**/.env"]},
+    "commands": [{"command": "npm", "args": ["test"], "timeout_ms": 120000, "required": true}]
+  },
+  "recipe_ids": ["source.file_grounded"]
+}

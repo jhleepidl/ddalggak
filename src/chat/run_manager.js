@@ -111,6 +111,11 @@ export class ChatRunManager {
     const debounceRaw = Number(interruptDebounceMs);
     this.interruptDebounceMs = Number.isFinite(debounceRaw) ? Math.max(0, Math.floor(debounceRaw)) : 500;
     this.chatState = new Map();
+    this.lastActivityAtMs = Date.now();
+  }
+
+  _touchActivity() {
+    this.lastActivityAtMs = Date.now();
   }
 
   _slot(chatId) {
@@ -226,10 +231,12 @@ export class ChatRunManager {
     const slot = this._slot(chatId);
     if (slot.running) return slot.promise;
     slot.running = true;
+    this._touchActivity();
     slot.promise = this._drainLoop(chatId)
       .finally(() => {
         slot.running = false;
         slot.promise = null;
+        this._touchActivity();
       });
     return slot.promise;
   }
@@ -319,6 +326,31 @@ export class ChatRunManager {
     };
   }
 
+  getActivityState() {
+    let activeRuns = 0;
+    let pendingMessages = 0;
+    for (const [chatId, slot] of this.chatState.entries()) {
+      if (slot?.running) activeRuns += 1;
+      try {
+        const session = this.sessionStore.get(chatId) || {};
+        pendingMessages += Array.isArray(session.pending_user_messages) ? session.pending_user_messages.length : 0;
+      } catch {}
+    }
+    const idleForMs = Math.max(0, Date.now() - Number(this.lastActivityAtMs || Date.now()));
+    return {
+      busy: activeRuns > 0 || pendingMessages > 0,
+      active_runs: activeRuns,
+      pending_messages: pendingMessages,
+      last_activity_at: new Date(Number(this.lastActivityAtMs || Date.now())).toISOString(),
+      idle_for_ms: idleForMs,
+    };
+  }
+
+  isIdle({ minIdleMs = 0 } = {}) {
+    const state = this.getActivityState();
+    return state.busy !== true && state.idle_for_ms >= Math.max(0, Number(minIdleMs || 0));
+  }
+
   async hardCancel({ chatId, reason = "", userId = "", telegramMessageId = null } = {}) {
     const cleanReason = String(reason || "").trim();
     const slot = this._slot(chatId);
@@ -354,6 +386,7 @@ export class ChatRunManager {
     teamConfig = null,
   } = {}) {
     const cleanText = String(text || "").trim();
+    this._touchActivity();
     if (!cleanText) return { status: "ignored" };
     const incomingKind = String(kind || "normal").trim().toLowerCase();
     const cleanForceMode = normalizeForceMode(forceMode);

@@ -20,6 +20,15 @@ test('source bundle hygiene accepts a clean source tree', () => {
     fs.writeFileSync(path.join(root, 'ddalggak', 'src', 'index.js'), 'export {};\n');
     fs.writeFileSync(path.join(root, 'ddalggak', 'src', 'shared', 'openharness_contracts.js'), 'export {};\n');
     fs.writeFileSync(path.join(root, 'ddalggak', 'src', 'shared', 'team_structure_v2.js'), 'export {};\n');
+    fs.mkdirSync(path.join(root, 'ddalggak', 'config'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'goc', 'backend', 'app', 'data'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'docs'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'ddalggak', 'config', 'recipe_catalog.json'), '{}\n');
+    fs.writeFileSync(path.join(root, 'goc', 'backend', 'app', 'data', 'recipe_catalog.json'), '{}\n');
+    fs.writeFileSync(path.join(root, 'ddalggak', 'config', 'collaboration_profiles.json'), '{}\n');
+    fs.writeFileSync(path.join(root, 'goc', 'backend', 'app', 'data', 'collaboration_profiles.json'), '{}\n');
+    fs.writeFileSync(path.join(root, 'docs', 'RECIPE_CATALOG_AND_STARTER_KITS.md'), '# Recipes\n');
+    fs.writeFileSync(path.join(root, 'docs', 'GENERAL_TASK_RECIPES_AND_COLLABORATION_PROFILES.md'), '# General tasks\n');
     const result = runCheck(root);
     assert.equal(result.status, 0, result.stderr || result.stdout);
   } finally {

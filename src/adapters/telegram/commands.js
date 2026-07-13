@@ -82,8 +82,10 @@ import { formatMemoryMaterializationPlanForTelegram, loadLatestMemoryMaterializa
 import { createShadowMemoryModule, findMaterializationCandidate, formatShadowMemoryModuleListForTelegram, formatShadowMemoryModuleResultForTelegram, listShadowMemoryModules } from '../../application/memory_materialization_store.js';
 import { buildClaimEvidenceLedger, buildPressureOverview, buildRuntimeReviewQueue, formatClaimEvidenceForTelegram, formatPressureOverviewForTelegram, formatReviewQueueForTelegram } from '../../application/runtime_review_inspector.js';
 import { listModelNodes } from '../../application/model_node_registry.js';
+import { buildRecipeTaskContract, formatRecipeContractForTelegram, formatRecipeDetailForTelegram, formatRecipeListForTelegram, formatRecipeTemplateForTelegram, getRecipe, parseRecipeForm } from '../../application/recipe_catalog.js';
+import { formatCollaborationProfileDetailForTelegram, formatCollaborationProfileListForTelegram, getCollaborationProfile, resolveRoomCollaborationProfile } from '../../application/collaboration_profile_catalog.js';
 import { summarizeModelCatalogEntry } from '../../application/model_node_catalog.js';
-import { discoverCodexCliModelNodes, discoverGeminiCliModelNodes, discoverOllamaModelNodes } from '../../application/model_node_discovery.js';
+import { discoverAntigravityCliModelNodes, discoverClaudeCliModelNodes, discoverCodexCliModelNodes, discoverGeminiCliModelNodes, discoverOllamaModelNodes } from '../../application/model_node_discovery.js';
 import { refreshModelCatalog } from '../../application/model_catalog_refresh.js';
 import { listModelNodesWithHealth } from '../../application/model_node_health.js';
 import { readRecentModelNodeUsage } from '../../application/model_node_usage_log.js';
@@ -150,40 +152,34 @@ import {
   setWatchTaskStatus,
   summarizeWatchTaskState,
 } from '../../application/watch_task_store.js';
+import {
+  buildRoomContinuitySnapshot,
+  createRoomBranch,
+  formatRoomBranchProposal,
+  formatRoomContinuityBrief,
+  formatRoomRulesAndCorrections,
+  formatRoomSourceBoundary,
+} from '../../application/room_continuity.js';
 
 const HELP_TEXT = [
   "Commands:",
-  "- /home 또는 /start: Telegram chat을 AI companion room doorway로 열기",
-  "- /chat 또는 /c <message>: 이 Telegram room에 요청하기",
-  "- /ask 또는 /a <question>: legacy quick-question alias. 일반 사용은 /chat 권장",
-  "- /team 또는 /t <goal>: 팀 검토/리뷰 깊이로 답변",
-  "- /loop 또는 /l [--loops n] <goal>: bounded loop 작업 시작",
-  "- /room 또는 /r: 이 채팅방의 AI Room / Room Package 설정 보기",
-  "- /companions 또는 /companion: room companion roster와 memory boundary 보기",
-  "- /context project-only|clean-slate|exclude <source>|reset: context 사용 범위 조절",
-  "- /agent mode fast|balanced|strict: companion agent 모드 조절",
-  "- /correct <정정>: 반복 오류 방지용 room correction 기록",
-  "- /task: 장기 작업/loop 상태 보기",
-  "- /task loop <목표>: legacy 반복 점검·개선 작업 시작",
-  "- /agents: 이 채팅방의 Agent Room 보기",
-  "- /agents suggest <목표>: 목표에 맞는 agent 구성 추천",
-  "- /review 또는 /rev: 승인/검토가 필요한 항목 보기",
-  "- /inbox: room decision inbox(job review, correction, memory exchange) 보기",
-  "- /memory 또는 /m: 이 room에 저장된 memory 보기",
-  "- /memory proposals|approve|reject|explain: memory 후보 검토/승인/설명",
-  "- /rule <자연어 지침>: 명시적 runtime rule 추가",
-  "- /skill 또는 /sk: skill 상태 보기",
-  "- /board 또는 /b: semantic memory/skill/rule board 요약",
-  "- /context 또는 /ctx: primitive context substrate/MVCC snapshot 요약",
-  "- /goc 또는 /g: GoC sync/review 링크와 상태 보기",
-  "- /config 또는 /cfg: 현재 runtime/provider 설정 요약, /config doctor: .env 진단",
-  "- /doctor: .env/provider/runtime 진단 바로 실행",
-  "- /status 또는 /st: 지금 진행 상황 보기",
-  "- /artifacts 또는 /art [limit]: 결과물 보기",
-  "- /send <번호|path>: 결과물 전송",
-  "- /files 또는 /f [all|workspace|uploads] [limit]: 파일 보기",
+  "- /home 또는 /start: 이 Room의 현재 상태와 다음 행동 보기",
+  "- /brief: 목표·현재 단계·다음 행동을 한 번에 보기",
+  "- /continue [jobId]: 현재 또는 지정한 작업 이어가기",
+  "- /sources: 이 Room이 사용하는 근거와 제외 범위 보기",
+  "- /rules: 현재 규칙과 반영된 정정 보기",
+  "- /correct <정정>: 같은 Room에서 반복하지 않아야 할 내용 기록",
+  "- /branch <새 방향>: 현재 상태를 유지한 채 다른 방향 제안 만들기",
+  "- /chat 또는 /c <message>: 이 Room에 질문하거나 작업 요청",
+  "- /status 또는 /st: 실행 중인 작업 상태 보기",
+  "- /artifacts 또는 /art [limit]: 누적 산출물 보기",
+  "- /examples [검색어]: 검증 상태가 표시된 사용 Recipe 보기",
+  "- /use <recipe_id> [작성 내용]: 구조화된 작업 요청 만들기",
+  "- /room 또는 /r: Room 목적과 package 설정 보기",
+  "- /review 또는 /inbox: 승인·검토 대기 항목 보기",
+  "- /memory 또는 /m: 이 Room의 memory와 후보 보기",
   "- /stop [jobId]: 실행 중지",
-  "- /help more: 고급/확장 명령 보기",
+  "- /help more: Agent·모델·협업·진단용 고급 명령 보기",
 ].join("\n");
 
 
@@ -215,6 +211,13 @@ const ADVANCED_HELP_TEXT = [
   "More commands:",
   "- /home 또는 /start: compact onboarding/dashboard 보기",
   "- /quickstart: /home과 같은 빠른 시작 가이드 보기",
+  "- /collab [list|show|use|reset]: Room 협업 패턴 보기/적용",
+  "- /companions 또는 /companion: companion roster와 memory boundary 보기",
+  "- /ask 또는 /a <question>: legacy quick-answer path (Room continuity가 필요 없을 때)",
+  "- /agents: Agent Room 보기, /agents suggest <목표>: 구성 추천",
+  "- /team 또는 /t <goal>: 명시적인 외부 team 검토/리뷰",
+  "- /loop 또는 /l [--loops n] <goal>: bounded multi-step 작업",
+  "- /models: provider model catalog 보기",
   "- /whoami: 현재 chat_id / user_id 확인",
   "- /running: 실행/대기 job 목록 확인",
   "- /credential ...: credential 바인딩/확인",
@@ -1225,29 +1228,41 @@ export function createTelegramCommandHandler(deps = {}) {
     const watchLabel = watchSummary
       ? `${watchSummary.status} · iteration ${watchSummary.current_iteration}/${watchSummary.max_iterations} · ${watchSummary.workflow_kind}`
       : '없음';
+    let continuity = null;
+    try {
+      continuity = buildRoomContinuitySnapshot({
+        roomProfile,
+        companionState,
+        session,
+        currentJobId,
+        watchSummary,
+      });
+    } catch {
+      continuity = null;
+    }
     const lines = [
-      '🏠 DdalGgak Home · Room Doorway',
-      '이 Telegram chat은 단순 bot UI가 아니라 evolving AI companion room으로 들어오는 front door입니다.',
+      '🏠 AI Room · Continuity Home',
+      '모델과 Agent가 바뀌어도 이 Room의 목표·근거·규칙·작업 상태는 유지됩니다.',
       '',
-      `- room: ${roomName || roomGoal || '아직 특화되지 않음'}`,
-      `- status: ${activeLabel}`,
-      `- loop/watch: ${watchLabel}`,
-      `- active companion: ${companionProfile?.label || companionProfile?.id || 'Research Companion'} · mode=${agentMode}`,
-      pendingTask?.goal ? `- pending goal: ${pendingTask.goal}` : '',
-      pendingApproval ? `- needs review: ${String(pendingApproval.reason || pendingApproval.action || 'pending approval')}` : '',
+      `- 목표: ${continuity?.goal || roomName || roomGoal || '아직 설정되지 않음'}`,
+      `- 현재 단계: ${continuity?.stage || (currentJobId ? 'active work' : 'idle')}`,
+      `- 다음 행동: ${continuity?.next_action || 'Room 목표를 설정하거나 다음 요청을 보내세요.'}`,
+      `- 적용 규칙: ${continuity?.rules?.length || 0}개 · 반영된 정정: ${continuity?.corrections?.length || 0}개`,
+      `- source 제외: ${continuity?.source_policy?.excluded_sources?.length || 0}개 · 검토 대기: ${(continuity?.pending?.reviews || 0) + (continuity?.pending?.memory_exchanges || 0)}개`,
       '',
-      'Room entry actions / 바로 쓰는 5개 명령:',
-      '1. /c <질문 또는 지시> — ask the room through the active companion',
-      '2. /council ask <메시지> — companion들이 먼저 visible backchannel에서 조율',
-      '3. /inbox — pending room decisions 확인',
-      '4. /companions — companion roster와 memory boundary 보기',
-      '5. /room apply <목표> — 이 Telegram chat의 room purpose 설정',
+      '바로 쓰는 명령:',
+      '1. /brief — 현재 목표·상태·다음 행동',
+      '2. /continue — 마지막 작업 이어가기',
+      '3. /sources — 사용하는 근거와 제외 범위',
+      '4. /rules — 규칙과 반영된 정정',
+      '5. /c <다음 요청> — Room에서 계속 작업',
       '',
       currentJobId
-        ? '현재 작업이 있으면: /status recent · /inbox · /artifacts 를 먼저 확인하세요.'
-        : '처음이면: /room apply <하고 싶은 일> 후 /c 또는 /council ask 로 시작하는 것을 권장합니다.',
+        ? '현재 작업이 있으면 /brief → /status → /continue 순서로 확인하세요.'
+        : '처음이면 /room apply <목표> 후 /c <첫 요청>으로 시작하세요.',
       '',
-      '운영: /doctor · 전체 명령: /help · 고급 명령: /help more',
+      '방향 수정: /correct <정정> · 다른 방향 보존: /branch <새 방향>',
+      'Recipe: /examples · 운영 진단: /doctor · 고급 기능: /help more',
     ].filter(Boolean);
 
     return lines.join('\n');
@@ -2595,6 +2610,7 @@ export function createTelegramCommandHandler(deps = {}) {
         default_agents: [],
         default_workflow: 'task_adaptive',
         default_depth: 'ask',
+        collaboration_profile_id: 'auto',
         current_goal: '',
         memory_schema: { object_types: [] },
         reasons: [],
@@ -2620,6 +2636,210 @@ export function createTelegramCommandHandler(deps = {}) {
 
     if (cmd === "/start" || cmd === "/home" || cmd === "/quickstart") {
       await sendLong(bot, chatId, buildDdalggakHomeText(chatId));
+      return true;
+    }
+
+    if (cmd === "/examples" || cmd === "/recipes") {
+      await sendLong(bot, chatId, formatRecipeListForTelegram({ query: args }));
+      return true;
+    }
+
+    if (cmd === "/example") {
+      const recipeId = String(args || '').trim().split(/\s+/)[0] || '';
+      if (!recipeId) {
+        await sendLong(bot, chatId, [
+          '사용법: /example <recipe_id>',
+          '',
+          formatRecipeListForTelegram(),
+        ].join('\n'));
+        return true;
+      }
+      const recipe = getRecipe(recipeId);
+      if (!recipe) {
+        await sendLong(bot, chatId, `Recipe를 찾지 못했습니다: ${recipeId}\n\n${formatRecipeListForTelegram({ query: recipeId })}`);
+        return true;
+      }
+      await sendLong(bot, chatId, formatRecipeDetailForTelegram(recipe));
+      return true;
+    }
+
+    if (cmd === "/use") {
+      const trimmed = String(args || '').trim();
+      const firstBreak = trimmed.search(/\s/);
+      const recipeId = firstBreak < 0 ? trimmed : trimmed.slice(0, firstBreak);
+      const payload = firstBreak < 0 ? '' : trimmed.slice(firstBreak).trim();
+      if (!recipeId) {
+        await sendLong(bot, chatId, [
+          '사용법: /use <recipe_id>',
+          '작성한 form을 같은 명령 뒤에 붙이면 task contract로 정리합니다.',
+          '',
+          formatRecipeListForTelegram(),
+        ].join('\n'));
+        return true;
+      }
+      const recipe = getRecipe(recipeId);
+      if (!recipe) {
+        await sendLong(bot, chatId, `Recipe를 찾지 못했습니다: ${recipeId}\n\n${formatRecipeListForTelegram({ query: recipeId })}`);
+        return true;
+      }
+      if (!payload) {
+        await sendLong(bot, chatId, formatRecipeTemplateForTelegram(recipe));
+        return true;
+      }
+      const values = parseRecipeForm(recipe, payload);
+      const contract = buildRecipeTaskContract(recipe, values);
+      await sendLong(bot, chatId, formatRecipeContractForTelegram(recipe, values));
+      recordRoomEvent({
+        chatId,
+        userId,
+        eventType: contract?.ready ? 'recipe_task_contract_ready' : 'recipe_task_contract_incomplete',
+        command: `/use ${recipe.id}`,
+        profile: getAgentRoomProfile(chatSessionStore, chatId),
+        extra: {
+          recipe_id: recipe.id,
+          recipe_version: recipe.version,
+          ready: contract?.ready === true,
+          missing_fields: contract?.required_missing || [],
+          recommended_room_package: recipe.recommended_room_package || null,
+          recommended_collaboration_profile: recipe.recommended_collaboration_profile || 'auto',
+          evidence_status: recipe.evidence_summary?.status || 'experimental',
+        },
+      });
+      return true;
+    }
+
+    if (cmd === "/collab" || cmd === "/collaboration") {
+      const trimmed = String(args || '').trim();
+      const [subRaw = '', ...restArgs] = trimmed.split(/\s+/).filter(Boolean);
+      const sub = String(subRaw || '').toLowerCase();
+      const profileId = restArgs.join(' ').trim();
+      const currentRoom = getAgentRoomProfile(chatSessionStore, chatId) || {};
+      const currentProfile = resolveRoomCollaborationProfile(currentRoom);
+
+      if (!sub || sub === 'list') {
+        await sendLong(bot, chatId, [
+          `현재 Room 협업: ${currentProfile?.id || 'auto'} · ${currentProfile?.title_ko || currentProfile?.title || '작업 적응형'}`,
+          '',
+          formatCollaborationProfileListForTelegram(),
+        ].join('\n'));
+        return true;
+      }
+      if (sub === 'show' || sub === 'detail') {
+        const target = getCollaborationProfile(profileId);
+        if (!target) {
+          await sendLong(bot, chatId, `Collaboration profile을 찾지 못했습니다: ${profileId}\n\n${formatCollaborationProfileListForTelegram({ query: profileId })}`);
+          return true;
+        }
+        await sendLong(bot, chatId, formatCollaborationProfileDetailForTelegram(target));
+        return true;
+      }
+      if (sub === 'use' || sub === 'apply' || sub === 'set') {
+        const target = getCollaborationProfile(profileId);
+        if (!target) {
+          await sendLong(bot, chatId, `Collaboration profile을 찾지 못했습니다: ${profileId}\n\n${formatCollaborationProfileListForTelegram({ query: profileId })}`);
+          return true;
+        }
+        if (target.runtime_support !== 'native') {
+          await sendLong(bot, chatId, [
+            formatCollaborationProfileDetailForTelegram(target),
+            '',
+            '현재 runtime에서는 preview profile을 강제 적용하지 않습니다. native support가 있는 profile을 선택하세요.',
+          ].join('\n'));
+          return true;
+        }
+        const saved = upsertAgentRoomProfile(chatSessionStore, chatId, {
+          collaboration_profile_id: target.id,
+          collaboration_profile_source: 'telegram_explicit',
+        });
+        recordRoomEvent({
+          chatId,
+          userId,
+          eventType: 'room_collaboration_profile_applied',
+          command: `/collab use ${target.id}`,
+          profile: saved,
+          extra: {
+            collaboration_profile_id: target.id,
+            execution_pattern: target.execution_pattern,
+            runtime_support: target.runtime_support,
+          },
+        });
+        await sendLong(bot, chatId, [
+          `✅ Room 협업 profile을 적용했습니다: ${target.id}`,
+          `실행 패턴: ${target.execution_pattern}`,
+          '일반 /c 요청은 계속 가볍게 처리하고, /team·/loop 같은 Room 작업에서 이 profile을 사용합니다.',
+          '',
+          formatCollaborationProfileDetailForTelegram(target),
+        ].join('\n'));
+        return true;
+      }
+      if (sub === 'reset' || sub === 'auto') {
+        const saved = upsertAgentRoomProfile(chatSessionStore, chatId, {
+          collaboration_profile_id: 'auto',
+          collaboration_profile_source: 'telegram_reset',
+        });
+        recordRoomEvent({ chatId, userId, eventType: 'room_collaboration_profile_reset', command: '/collab reset', profile: saved, extra: { collaboration_profile_id: 'auto' } });
+        await bot.sendMessage(chatId, '✅ Room 협업 profile을 auto로 초기화했습니다. 작업마다 가장 가벼운 충분한 패턴을 선택합니다.');
+        return true;
+      }
+      const direct = getCollaborationProfile(sub);
+      if (direct) {
+        await sendLong(bot, chatId, formatCollaborationProfileDetailForTelegram(direct));
+        return true;
+      }
+      await sendLong(bot, chatId, ['사용법:', '- /collab', '- /collab show parallel_ideation', '- /collab use parallel_ideation', '- /collab reset', '', formatCollaborationProfileListForTelegram({ query: trimmed })].join('\n'));
+      return true;
+    }
+
+    if (cmd === "/brief") {
+      const session = chatSessionStore?.get?.(chatId) || {};
+      const current = getCurrentJobDirForChat(chatId);
+      let watchSummary = null;
+      try { watchSummary = current.jobDir ? summarizeWatchTaskState(current.jobDir) : null; } catch { watchSummary = null; }
+      const snapshot = buildRoomContinuitySnapshot({
+        roomProfile: getAgentRoomProfile(chatSessionStore, chatId),
+        companionState: getCurrentCompanionControlState(chatId),
+        session,
+        currentJobId: current.jobId || resolveLiveJobIdForChat(chatId) || '',
+        watchSummary,
+      });
+      recordRoomEvent({ chatId, userId, eventType: 'room_continuity_brief_view', command: '/brief', profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { stage: snapshot.stage, active_job_id: snapshot.active_job_id } });
+      await sendLong(bot, chatId, formatRoomContinuityBrief(snapshot));
+      return true;
+    }
+
+    if (cmd === "/sources") {
+      const snapshot = buildRoomContinuitySnapshot({
+        roomProfile: getAgentRoomProfile(chatSessionStore, chatId),
+        companionState: getCurrentCompanionControlState(chatId),
+        session: chatSessionStore?.get?.(chatId) || {},
+        currentJobId: resolveLiveJobIdForChat(chatId) || '',
+      });
+      recordRoomEvent({ chatId, userId, eventType: 'room_source_boundary_view', command: '/sources', profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { context_mode: snapshot.source_policy.mode, excluded_count: snapshot.source_policy.excluded_sources.length } });
+      await sendLong(bot, chatId, formatRoomSourceBoundary(snapshot));
+      return true;
+    }
+
+    if (cmd === "/rules") {
+      const snapshot = buildRoomContinuitySnapshot({
+        roomProfile: getAgentRoomProfile(chatSessionStore, chatId),
+        companionState: getCurrentCompanionControlState(chatId),
+        session: chatSessionStore?.get?.(chatId) || {},
+        currentJobId: resolveLiveJobIdForChat(chatId) || '',
+      });
+      recordRoomEvent({ chatId, userId, eventType: 'room_rules_view', command: '/rules', profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { rule_count: snapshot.rules.length, correction_count: snapshot.corrections.length } });
+      await sendLong(bot, chatId, formatRoomRulesAndCorrections(snapshot));
+      return true;
+    }
+
+    if (cmd === "/branch") {
+      const direction = String(args || '').trim();
+      if (!direction) {
+        await bot.sendMessage(chatId, 'Usage: /branch <현재 상태를 유지하면서 탐색할 새 방향>');
+        return true;
+      }
+      const branch = createRoomBranch({ sessionStore: chatSessionStore, chatId, direction, parentJobId: resolveLiveJobIdForChat(chatId) || '' });
+      recordRoomEvent({ chatId, userId, eventType: 'room_branch_proposed', command: '/branch', goal: direction, profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { branch_id: branch?.branch_id || '', parent_job_id: branch?.parent_job_id || '' } });
+      await sendLong(bot, chatId, formatRoomBranchProposal(branch));
       return true;
     }
 
@@ -3454,11 +3674,15 @@ export function createTelegramCommandHandler(deps = {}) {
             ? await discoverOllamaModelNodes({ baseUrl: url, trustedContext, timeoutMs: common.timeoutMs, maxModels: common.maxModels })
             : kind === 'codex'
               ? await discoverCodexCliModelNodes(common)
-              : kind === 'gemini'
-                ? await discoverGeminiCliModelNodes(common)
-                : null;
+              : kind === 'claude'
+                ? await discoverClaudeCliModelNodes(common)
+                : kind === 'antigravity'
+                  ? await discoverAntigravityCliModelNodes(common)
+                  : kind === 'gemini'
+                    ? await discoverGeminiCliModelNodes(common)
+                    : null;
           if (!result) {
-            await bot.sendMessage(chatId, 'Usage: /models discover <ollama|codex|gemini> [url-for-ollama] [trusted|untrusted]');
+            await bot.sendMessage(chatId, 'Usage: /models discover <ollama|codex|claude|antigravity|gemini> [url-for-ollama] [trusted|untrusted]');
             return true;
           }
           if (!result.ok) {
@@ -4929,15 +5153,17 @@ size=${formatByteSize(sentBundle.size)}`
     }
 
     if (cmd === "/continue") {
-      if (!args) {
-        await bot.sendMessage(chatId, "Usage: /continue <jobId>");
+      const targetJobId = String(args || resolveLiveJobIdForChat(chatId) || lastChatJobByChat?.get?.(String(chatId)) || chatSessionStore?.get?.(chatId)?.jobId || '').trim();
+      if (!targetJobId) {
+        await bot.sendMessage(chatId, "이어갈 작업을 찾지 못했습니다. /brief에서 현재 상태를 확인하거나 /continue <jobId>를 사용하세요.");
         return true;
       }
+      recordRoomEvent({ chatId, userId, eventType: 'room_continuation_requested', command: '/continue', profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { job_id: targetJobId, implicit_job_resolution: !String(args || '').trim() } });
       await executeContinueCommand({
         bot,
         chatId,
         userId,
-        jobId: args,
+        jobId: targetJobId,
         resetJobAbortController,
         activeJobByChat,
         jobAbortControllers,
@@ -4952,6 +5178,7 @@ size=${formatByteSize(sentBundle.size)}`
         suggestNextPrompt,
         isCancelledError,
       });
+      recordRoomEvent({ chatId, userId, eventType: 'room_continuation_completed', command: '/continue', profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { job_id: targetJobId } });
       return true;
     }
 

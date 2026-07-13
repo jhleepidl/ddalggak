@@ -50,5 +50,8 @@
         "required": true
       }
     ]
-  }
+  },
+  "recipe_ids": [
+    "coding.small_change"
+  ]
 }

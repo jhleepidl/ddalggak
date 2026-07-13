@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
 const MODEL_ALIASES = new Map([
   ['gemini 2.5', 'gemini-2.5-pro'],
   ['gemini 2.5 pro', 'gemini-2.5-pro'],
@@ -36,16 +39,61 @@ export const SUPPORTED_MODELS = [
   { id: 'local-model', label: 'Local/OpenAI-Compatible Model' },
 ];
 
+function clean(value = '') {
+  return String(value || '').trim();
+}
+
+function discoveredConfigPath() {
+  const explicit = clean(process.env.MODEL_NODES_DISCOVERED_CONFIG || process.env.MODEL_NODES_DISCOVERED_PATH);
+  if (explicit) return path.resolve(explicit);
+  return path.resolve(process.cwd(), 'config', 'model_nodes.discovered.json');
+}
+
+function readDiscoveredModels() {
+  try {
+    const file = discoveredConfigPath();
+    if (!fs.existsSync(file)) return [];
+    const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const rows = Array.isArray(payload?.nodes) ? payload.nodes : [];
+    const seen = new Set();
+    return rows
+      .map((row) => ({
+        id: clean(row?.model),
+        label: clean(row?.label || row?.model),
+        provider: clean(row?.provider).toLowerCase(),
+        runtime: clean(row?.runtime).toLowerCase(),
+        discovered: true,
+      }))
+      .filter((row) => {
+        const key = row.id.toLowerCase();
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  } catch {
+    return [];
+  }
+}
+
 export function listSupportedModels() {
-  return SUPPORTED_MODELS.map((row) => ({ ...row }));
+  const rows = SUPPORTED_MODELS.map((row) => ({ ...row }));
+  const seen = new Set(rows.map((row) => row.id.toLowerCase()));
+  for (const row of readDiscoveredModels()) {
+    if (seen.has(row.id.toLowerCase())) continue;
+    seen.add(row.id.toLowerCase());
+    rows.push({ ...row });
+  }
+  return rows;
 }
 
 export function resolveSupportedModel(raw = '') {
   const text = String(raw || '').trim();
   if (!text) return '';
-  const clean = text.toLowerCase();
-  if (SUPPORTED_MODELS.some((row) => row.id === clean)) return clean;
-  return MODEL_ALIASES.get(clean) || '';
+  const key = text.toLowerCase();
+  const all = listSupportedModels();
+  const exact = all.find((row) => row.id.toLowerCase() === key);
+  if (exact) return exact.id;
+  return MODEL_ALIASES.get(key) || '';
 }
 
 export function requireSupportedModel(raw = '') {
@@ -55,11 +103,15 @@ export function requireSupportedModel(raw = '') {
 }
 
 export function inferProviderForModel(raw = '') {
-  const model = resolveSupportedModel(raw) || String(raw || '').trim().toLowerCase();
+  const input = String(raw || '').trim();
+  const model = resolveSupportedModel(input) || input.toLowerCase();
   if (!model) return '';
+  const discovered = readDiscoveredModels().find((row) => row.id.toLowerCase() === model.toLowerCase());
+  if (discovered?.provider) return discovered.provider;
   if (model.startsWith('gemini')) return 'gemini';
   if (model.includes('codex')) return 'codex';
   if (model === 'local-model' || model.startsWith('gemma') || model.startsWith('llama') || model.startsWith('qwen') || model.startsWith('mistral') || model.startsWith('deepseek')) return 'openai_compatible';
   if (model.startsWith('gpt-')) return 'chatgpt';
+  if (model.startsWith('claude-')) return 'claude';
   return '';
 }

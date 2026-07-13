@@ -59,3 +59,23 @@ test('room-first code review may use builder only for code review room', () => {
   assert.ok(selection.roles.includes('verifier'));
   assert.equal(selection.policies.source_room_private_memory_read, false);
 });
+
+
+test('explicit parallel ideation profile changes team execution without scenario-specific keyword matching', () => {
+  const pkg = buildRoomPackage({ goal: '일반적인 선택지 탐색 공간', chatId: 'ideas' });
+  const team = buildRoomFirstTeamConfiguration({
+    taskText: '서로 다른 접근을 검토해줘',
+    workMode: 'team_task',
+    roomPackage: pkg,
+    roomProfile: { kind: 'agent_room_profile_v1', collaboration_profile_id: 'parallel_ideation' },
+    chatId: 'ideas',
+  });
+
+  assert.equal(team.interaction_spec.execution_pattern, 'parallel_research_then_review_then_synthesize');
+  assert.equal(team.interaction_spec.collaboration_profile_id, 'parallel_ideation');
+  assert.equal(team.interaction_spec.policies.initial_visibility, 'isolated_until_submission');
+  assert.equal(team.interaction_spec.policies.diversity_contract.required, true);
+  assert.ok(team.agents.filter((agent) => agent.role === 'researcher').length >= 2);
+  assert.ok(team.agents.some((agent) => /independent contribution lane/i.test(agent.purpose || '')));
+  assert.ok(team.agents.length <= 5);
+});

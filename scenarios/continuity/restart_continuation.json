@@ -1,0 +1,19 @@
+{
+  "schema_version": "ddalggak.continuity_scenario/v1",
+  "id": "restart_continuation",
+  "title": "서비스 재시작 후 이어가기",
+  "description": "Room 목표와 제약이 서비스 재시작 후에도 보존되는지 확인한다.",
+  "steps": [
+    {"id":"establish_goal","action":"send_message","title":"목표와 제약 설정","text":"이 Room에서 Ubuntu 서버용 설치 가이드를 작성해줘. 기존 .env를 유지하고 systemd를 사용하며, 지금은 코드 변경 없이 목차와 계획만 만들어줘.","observe":["목표와 제약을 구분하는가","코드 변경을 시작하지 않는가"]},
+    {"id":"brief_before","action":"inspect","title":"재시작 전 Brief 확인","text":"/brief","observe":["목표","제약","다음 행동"]},
+    {"id":"restart","action":"restart_service","title":"staging 서비스 재시작","instruction":"운영이 아닌 staging ddalggak 서비스를 재시작한다."},
+    {"id":"continue","action":"send_message","title":"설명 없이 이어가기","text":"/continue","observe":["목표를 다시 묻지 않는가","이전 목차의 다음 단계로 이어가는가"]},
+    {"id":"brief_after","action":"inspect","title":"재시작 후 Brief 확인","text":"/brief","observe":["기존 제약이 유지되는가","완료한 부분을 반복하지 않는가"]}
+  ],
+  "rubric": [
+    {"id":"goal_preserved","label":"재시작 후에도 원래 목표가 보존되었다","required":true},
+    {"id":"constraints_preserved","label":".env 유지, systemd, 코드 변경 금지 제약이 보존되었다","required":true},
+    {"id":"progress_continued","label":"이미 만든 계획을 반복하지 않고 다음 단계로 이어갔다","required":true},
+    {"id":"no_reexplanation","label":"사용자가 전체 맥락을 다시 설명할 필요가 없었다","required":true}
+  ]
+}

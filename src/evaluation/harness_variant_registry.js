@@ -119,6 +119,13 @@ function rolePolicy(role = '') {
     '- Do not modify files unless the task contract explicitly asks for a review fix.',
     '- Report concrete findings with evidence and severity; avoid inventing issues.',
   ].join('\n');
+  if (['task_worker', 'researcher', 'analyst'].includes(key)) return [
+    'Role policy: bounded task worker',
+    '- Inspect the supplied workspace, files, and declared sources before answering.',
+    '- Treat the task contract as authoritative and create only the requested reviewable artifacts.',
+    '- Separate evidence from assumptions and preserve explicit constraints.',
+    '- Run provided deterministic checks before claiming completion.',
+  ].join('\n');
   return [
     'Role policy: code executor',
     '- Inspect the repository before editing.',

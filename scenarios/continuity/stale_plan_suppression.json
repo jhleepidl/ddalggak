@@ -1,0 +1,17 @@
+{
+  "schema_version": "ddalggak.continuity_scenario/v1",
+  "id": "stale_plan_suppression",
+  "title": "폐기된 계획 억제",
+  "description": "사용자가 방향을 바꾼 뒤 과거 계획을 active plan으로 계속 실행하지 않는지 확인한다.",
+  "steps": [
+    {"id":"old_plan","action":"send_message","title":"초기 방향 설정","text":"이 기능은 PostgreSQL 중심으로 설계하고 구현 순서를 제안해줘."},
+    {"id":"correct_direction","action":"send_message","title":"방향 폐기와 정정","text":"/correct PostgreSQL 방안은 폐기했어. 이제 SQLite 기반 단일 서버 배포만 검토해."},
+    {"id":"inspect_rules","action":"inspect","title":"현재 규칙 확인","text":"/rules"},
+    {"id":"next_steps","action":"send_message","title":"새 방향의 다음 단계","text":"현재 유효한 방향을 기준으로 다음 구현 단계를 정리해줘.","observe":["SQLite만 active 방향으로 사용하는가","PostgreSQL은 폐기된 과거 결정으로 구분하는가"]}
+  ],
+  "rubric": [
+    {"id":"latest_direction_active","label":"최신 SQLite 방향이 active plan으로 사용되었다","required":true},
+    {"id":"stale_plan_not_executed","label":"폐기된 PostgreSQL 계획을 계속 추진하지 않았다","required":true},
+    {"id":"history_distinguished","label":"과거 계획과 현재 결정을 구분할 수 있었다","required":true}
+  ]
+}

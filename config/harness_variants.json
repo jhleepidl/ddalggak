@@ -46,6 +46,75 @@
           "durable state changes"
         ]
       }
+    },
+    {
+      "id": "task_worker.codex.default.medium.v1",
+      "role": "task_worker",
+      "provider": "codex",
+      "reasoning_effort": "medium",
+      "status": "challenger",
+      "provider_runtime": {
+        "config_overrides": {
+          "model_reasoning_effort": "medium"
+        }
+      },
+      "native_delegation": {
+        "mode": "allowed",
+        "max_depth": 2,
+        "max_parallel_agents": 3,
+        "prefer_native_for": [
+          "independent source inspection",
+          "bounded idea exploration"
+        ],
+        "prefer_room_external_for": [
+          "cross-provider review",
+          "durable state changes"
+        ]
+      }
+    },
+    {
+      "id": "task_worker.claude.default.medium.v1",
+      "role": "task_worker",
+      "provider": "claude",
+      "reasoning_effort": "medium",
+      "status": "challenger",
+      "provider_runtime": {
+        "effort": "medium"
+      },
+      "native_delegation": {
+        "mode": "allowed",
+        "max_depth": 2,
+        "max_parallel_agents": 3,
+        "prefer_native_for": [
+          "independent source inspection",
+          "bounded idea exploration"
+        ],
+        "prefer_room_external_for": [
+          "cross-provider review",
+          "durable state changes"
+        ]
+      }
+    },
+    {
+      "id": "task_worker.antigravity.default.v1",
+      "role": "task_worker",
+      "provider": "antigravity",
+      "reasoning_effort": "provider_default",
+      "status": "challenger",
+      "provider_runtime": {},
+      "native_delegation": {
+        "mode": "allowed",
+        "max_depth": 2,
+        "max_parallel_agents": 3,
+        "prefer_native_for": [
+          "independent source inspection",
+          "bounded idea exploration"
+        ],
+        "prefer_room_external_for": [
+          "cross-provider review",
+          "durable state changes"
+        ]
+      }
     }
   ]
 }

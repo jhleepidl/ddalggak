@@ -22,9 +22,12 @@ test('/help shows compact command surface and points to /help more', async () =>
 
   assert.equal(handled, true)
   assert.match(sent[0].text, /\/chat 또는 \/c <message>/)
-  assert.match(sent[0].text, /\/task loop <목표>/)
-  assert.match(sent[0].text, /\/agents suggest <목표>/)
+  assert.match(sent[0].text, /\/brief/)
+  assert.match(sent[0].text, /\/continue \[jobId\]/)
+  assert.match(sent[0].text, /\/sources/)
+  assert.match(sent[0].text, /\/rules/)
   assert.match(sent[0].text, /\/review/)
+  assert.doesNotMatch(sent[0].text, /\/agents suggest <목표>/)
   assert.match(sent[0].text, /\/help more/)
   assert.doesNotMatch(sent[0].text, /\/team suggest/)
   assert.doesNotMatch(sent[0].text, /\/outputs/)
@@ -315,11 +318,11 @@ test('/home and /start show an actionable room dashboard', async () => {
   await handler({ msg: { chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/home', chatId: 'chat-1', userId: 'user-1' })
   await handler({ msg: { chat: { id: 'chat-1' }, from: { id: 'user-1' } }, text: '/start', chatId: 'chat-1', userId: 'user-1' })
 
-  assert.match(sent[0].text, /DdalGgak Home/)
-  assert.match(sent[0].text, /바로 쓰는 5개 명령/)
+  assert.match(sent[0].text, /AI Room · Continuity Home/)
+  assert.match(sent[0].text, /바로 쓰는 명령/)
   assert.match(sent[0].text, /\/room apply <목표>/)
   assert.match(sent[0].text, /\/doctor/)
-  assert.match(sent[1].text, /DdalGgak Home/)
+  assert.match(sent[1].text, /AI Room · Continuity Home/)
 })
 
 test('/doctor is a friendly alias for config doctor without exposing secrets', async () => {

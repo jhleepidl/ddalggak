@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import {
+  discoverAntigravityCliModelNodes,
+  discoverClaudeCliModelNodes,
   discoverCodexCliModelNodes,
   discoverGeminiCliModelNodes,
   discoverOllamaModelNodes,
@@ -46,6 +48,8 @@ async function discoverOne(kind) {
   const apiKey = arg('api-key', kind === 'ollama' ? (process.env.OLLAMA_API_KEY || '') : (process.env.OPENAI_COMPATIBLE_API_KEY || process.env.OPENAI_API_KEY || ''));
   if (kind === 'ollama') return await discoverOllamaModelNodes({ baseUrl, trustedContext, timeoutMs, maxModels, apiKey });
   if (kind === 'codex') return await discoverCodexCliModelNodes({ timeoutMs, maxModels });
+  if (kind === 'claude') return await discoverClaudeCliModelNodes({ timeoutMs, maxModels });
+  if (kind === 'antigravity') return await discoverAntigravityCliModelNodes({ timeoutMs, maxModels });
   if (kind === 'gemini') return await discoverGeminiCliModelNodes({ timeoutMs, maxModels });
   return await discoverOpenAICompatibleModelNodes({ baseUrl, runtime: kind, trustedContext, timeoutMs, maxModels, apiKey });
 }

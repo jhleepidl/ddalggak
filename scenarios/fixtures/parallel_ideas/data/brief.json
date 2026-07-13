@@ -1,0 +1,5 @@
+{
+  "question": "How can a persistent agent room reduce stale-memory errors without making every turn expensive?",
+  "constraints": ["no silent durable writes", "must be provider-agnostic", "must support rollback"],
+  "evaluation_dimensions": ["user_value", "feasibility", "risk", "testability"]
+}

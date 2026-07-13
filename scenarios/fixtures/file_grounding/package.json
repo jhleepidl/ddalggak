@@ -1,0 +1,1 @@
+{"name":"file-grounding-fixture","private":true,"type":"module","scripts":{"test":"node checks/answer_check.js"}}

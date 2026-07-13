@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { runCommand } from './proc.js';
 import { recordLlmTrace } from './application/llm_trace_recorder.js';
+import { withRuntimeActivity } from './application/runtime_activity_registry.js';
 
 function splitArgs(value = '') {
   const text = String(value || '').trim();
@@ -42,7 +43,15 @@ function attachAntigravityTrace({ result, jobId, surface, agentId, roleId, model
     workspaceRoot,
     metadata,
   });
-  const withModel = { ...(result && typeof result === 'object' ? result : {}), used_model: String(model || '').trim() || 'antigravity' };
+  const requestedModel = String(model || '').trim();
+  const resolvedModel = requestedModel && requestedModel !== 'auto' ? requestedModel : '';
+  const withModel = {
+    ...(result && typeof result === 'object' ? result : {}),
+    requested_model: requestedModel && requestedModel !== 'auto' ? requestedModel : null,
+    resolved_model: resolvedModel || null,
+    model_resolution_source: resolvedModel ? 'explicit_request' : 'unresolved_provider_default',
+    used_model: resolvedModel || 'default',
+  };
   return trace ? { ...withModel, llm_trace_id: trace.trace_id, llm_trace_dir: trace.trace_dir } : withModel;
 }
 
@@ -57,7 +66,7 @@ export async function runAntigravityPrompt({ workspaceRoot, prompt, signal, cwd,
   const effectiveTimeoutMs = Number(timeoutMs || process.env.ANTIGRAVITY_TIMEOUT_MS || process.env.GOOGLE_AI_TIMEOUT_MS || 0) > 0
     ? Number(timeoutMs || process.env.ANTIGRAVITY_TIMEOUT_MS || process.env.GOOGLE_AI_TIMEOUT_MS)
     : 240000;
-  const result = await runCommand(command, [...baseArgs, ...modelArgs], {
+  const result = await withRuntimeActivity({ provider: 'antigravity', kind: 'provider_execution', jobId, metadata: { surface, model: requestedModel || null, workspace: workspacePath } }, async () => await runCommand(command, [...baseArgs, ...modelArgs], {
     cwd: commandCwd,
     timeoutMs: effectiveTimeoutMs,
     input: String(prompt || ''),
@@ -68,7 +77,7 @@ export async function runAntigravityPrompt({ workspaceRoot, prompt, signal, cwd,
       FORCE_COLOR: '0',
       ...env,
     },
-  });
+  }));
   return attachAntigravityTrace({
     result,
     jobId,

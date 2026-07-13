@@ -1,0 +1,15 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const context = JSON.parse(fs.readFileSync('data/context.json', 'utf8'));
+const answer = JSON.parse(fs.readFileSync('output/recommendation.json', 'utf8'));
+const candidate = context.candidates.find((row) => row.id === answer.selected_id);
+assert.ok(candidate, 'selected_id must reference a candidate');
+assert.ok(!context.recent_choices.includes(candidate.id), 'must avoid immediate repetition');
+assert.notEqual(candidate.cost, 'high', 'must honor high-cost exclusion');
+assert.notEqual(candidate.setting, 'outdoor', 'must honor outdoor exclusion');
+assert.ok(Array.isArray(answer.constraints_used));
+assert.ok(answer.constraints_used.includes('recent_choices'));
+assert.ok(answer.constraints_used.includes('exclusions'));
+assert.equal(typeof answer.reason, 'string');
+assert.ok(answer.reason.length >= 20);
+console.log('context-aware recommendation validated');

@@ -230,16 +230,38 @@ const NOISE_MODEL_TOKENS = new Set([
   'gpt-oss',
 ]);
 
+function normalizeDisplayModelCandidates(provider = '', raw = '') {
+  const out = [];
+  const key = clean(provider).toLowerCase();
+  if (key === 'claude') {
+    for (const match of raw.matchAll(/\b(?:claude[\s_-]+)?(opus|sonnet|haiku)[\s_-]+([0-9]+(?:\.[0-9]+)*)\b/gi)) {
+      out.push(`claude-${match[1].toLowerCase()}-${match[2].replaceAll('.', '-')}`);
+    }
+    for (const line of raw.split(/\r?\n/g)) {
+      const alias = clean(line).toLowerCase().replace(/^[>*•+\-\d.)\s]+/, '').split(/\s+/)[0];
+      if (['best', 'opus', 'sonnet', 'haiku'].includes(alias)) out.push(alias);
+    }
+  }
+  if (key === 'antigravity' || key === 'gemini') {
+    for (const match of raw.matchAll(/\bgemini[\s_-]+([0-9]+(?:\.[0-9]+)*)[\s_-]+(pro|flash|ultra|nano)(?:[\s_-]+(preview))?\b/gi)) {
+      out.push(`gemini-${match[1]}-${match[2].toLowerCase()}${match[3] ? '-preview' : ''}`);
+    }
+  }
+  return out;
+}
+
 export function parseCliModelListOutput({ provider = '', text = '', maxModels = 80 } = {}) {
   const raw = clean(text);
   if (!raw) return [];
-  const matches = [];
+  const matches = normalizeDisplayModelCandidates(provider, raw);
   for (const match of raw.matchAll(MODEL_ID_RE)) {
     const value = clean(match[0]).replace(/[),;]+$/g, '');
     const lower = value.toLowerCase();
     if (!value || NOISE_MODEL_TOKENS.has(lower)) continue;
     if (provider === 'gemini' && !lower.startsWith('gemini-')) continue;
-    if (provider === 'codex' && lower.startsWith('gemini-')) continue;
+    if (provider === 'codex' && (lower.startsWith('gemini-') || lower.startsWith('claude-'))) continue;
+    if (provider === 'claude' && !lower.startsWith('claude-') && !['best', 'opus', 'sonnet', 'haiku'].includes(lower)) continue;
+    if (provider === 'antigravity' && !lower.startsWith('gemini-')) continue;
     matches.push(value);
   }
   return uniqueStrings(matches, { max: maxModels });
@@ -251,7 +273,10 @@ function buildCliNode({ provider = '', runtime = '', model = '', source = '', co
   const id = cleanId(`${p}_${model}`).replace(/[:.]/g, '_');
   const catalog = inferModelCatalogEntry({ model, runtime: rt, provider: p });
   const isCodex = p === 'codex';
-  const isGemini = p === 'gemini';
+  const isClaude = p === 'claude';
+  const isAntigravity = p === 'antigravity';
+  const isGemini = p === 'gemini' || isAntigravity;
+  const canWriteWorkspace = isCodex || isClaude || isAntigravity;
   const node = {
     id,
     label: model,
@@ -271,15 +296,21 @@ function buildCliNode({ provider = '', runtime = '', model = '', source = '', co
     limits: {
       context_tokens: catalog.limits?.context_tokens,
       max_concurrent: 1,
-      timeout_ms: isCodex ? 45 * 60 * 1000 : 10 * 60 * 1000,
+      timeout_ms: isCodex ? 45 * 60 * 1000 : (isClaude ? 30 * 60 * 1000 : 15 * 60 * 1000),
     },
     permissions: {
       memory_read: 'project_scoped',
       memory_write: 'write_intent_only',
       workspace_read: true,
-      workspace_write: isCodex,
+      workspace_write: canWriteWorkspace,
     },
-    role_bias: isCodex ? ['builder', 'reviewer', 'verifier', 'code'] : ['planner', 'researcher', 'reviewer', 'draft'],
+    role_bias: isCodex
+      ? ['builder', 'reviewer', 'verifier', 'code']
+      : (isClaude
+        ? ['planner', 'builder', 'reviewer', 'researcher', 'synthesizer']
+        : (isAntigravity
+          ? ['planner', 'builder', 'reviewer', 'researcher', 'code']
+          : ['planner', 'researcher', 'reviewer', 'draft'])),
     tags: [p, 'cli', 'discovered'],
     cost_profile: catalog.cost_profile,
     latency_profile: catalog.latency_profile,
@@ -341,6 +372,31 @@ export async function discoverCodexCliModelNodes({ command = process.env.CODEX_C
   return { ok: true, runtime: 'codex_cli', count: nodes.length, nodes, raw_model_count: models.length, discovery_source: 'codex_cli_slash_model' };
 }
 
+
+
+export async function discoverClaudeCliModelNodes({ command = process.env.CLAUDE_CLI_COMMAND || 'claude', args = splitEnvArgs(process.env.CLAUDE_MODEL_DISCOVERY_ARGS || ''), timeoutMs = Number(process.env.CLI_MODEL_DISCOVERY_TIMEOUT_MS || 12000) || 12000, maxModels = 80, runner = runCommand } = {}) {
+  const input = process.env.CLAUDE_MODEL_DISCOVERY_INPUT || '/model\n/quit\n';
+  const result = await runSlashModelCommand({ command, args, input, timeoutMs, runner });
+  const text = `${result.stdout || ''}\n${result.stderr || ''}`;
+  const models = parseCliModelListOutput({ provider: 'claude', text, maxModels });
+  if (!models.length) {
+    return { ok: false, runtime: 'claude_cli', nodes: [], error: clean(result.stderr || result.stdout || 'no models parsed from Claude CLI /model output').slice(0, 600), exitCode: result.exitCode, discovery_source: 'claude_cli_slash_model' };
+  }
+  const nodes = models.map((model) => buildCliNode({ provider: 'claude', runtime: 'claude_cli', model, source: 'claude_cli_slash_model', command }));
+  return { ok: true, runtime: 'claude_cli', count: nodes.length, nodes, raw_model_count: models.length, discovery_source: 'claude_cli_slash_model' };
+}
+
+export async function discoverAntigravityCliModelNodes({ command = process.env.ANTIGRAVITY_CLI_COMMAND || process.env.GOOGLE_AI_CLI_COMMAND || 'agy', args = splitEnvArgs(process.env.ANTIGRAVITY_MODEL_DISCOVERY_ARGS || ''), timeoutMs = Number(process.env.CLI_MODEL_DISCOVERY_TIMEOUT_MS || 12000) || 12000, maxModels = 80, runner = runCommand } = {}) {
+  const input = process.env.ANTIGRAVITY_MODEL_DISCOVERY_INPUT || '/model\n/quit\n';
+  const result = await runSlashModelCommand({ command, args, input, timeoutMs, runner });
+  const text = `${result.stdout || ''}\n${result.stderr || ''}`;
+  const models = parseCliModelListOutput({ provider: 'antigravity', text, maxModels });
+  if (!models.length) {
+    return { ok: false, runtime: 'antigravity_cli', nodes: [], error: clean(result.stderr || result.stdout || 'no models parsed from Antigravity CLI /model output').slice(0, 600), exitCode: result.exitCode, discovery_source: 'antigravity_cli_slash_model' };
+  }
+  const nodes = models.map((model) => buildCliNode({ provider: 'antigravity', runtime: 'antigravity_cli', model, source: 'antigravity_cli_slash_model', command }));
+  return { ok: true, runtime: 'antigravity_cli', count: nodes.length, nodes, raw_model_count: models.length, discovery_source: 'antigravity_cli_slash_model' };
+}
 export async function discoverGeminiCliModelNodes({ command = process.env.GEMINI_CLI_COMMAND || 'gemini', args = splitEnvArgs(process.env.GEMINI_MODEL_DISCOVERY_ARGS || ''), timeoutMs = Number(process.env.CLI_MODEL_DISCOVERY_TIMEOUT_MS || 12000) || 12000, maxModels = 80, runner = runCommand } = {}) {
   const input = process.env.GEMINI_MODEL_DISCOVERY_INPUT || '/model\n/quit\n';
   const result = await runSlashModelCommand({ command, args, input, timeoutMs, runner });

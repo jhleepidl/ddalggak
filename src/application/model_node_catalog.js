@@ -65,6 +65,12 @@ function inferCapabilities(modelId = '', runtime = '', explicit = {}) {
 
 const KNOWN_MODEL_PATTERNS = [
   {
+    // Future GPT-5.x Codex models should remain usable before a code release adds a named entry.
+    // Exact routing promotion still depends on live evaluation evidence.
+    test: /^gpt-5\.(?:[6-9]|[1-9][0-9])(?:[-_.]|$)/,
+    spec: { cost_profile: { tier: 'premium', billing: 'subscription_or_metered' }, latency_profile: { tier: 'medium', expected: 'medium' }, quality_profile: { tier: 'frontier_candidate', reasoning: 'unknown_until_evaluated', coding: 'unknown_until_evaluated', factuality: 'unknown_until_evaluated', context: 'unknown' }, capabilities: { chat: true, structured_json: true, tool_calling: true, code: true }, routing: { prefer_for: ['benchmark_candidate'] } },
+  },
+  {
     test: /^gpt-5\.5|^gpt-5_5|^gpt-5$/,
     spec: { cost_profile: { tier: 'premium', billing: 'subscription_or_metered' }, latency_profile: { tier: 'medium', expected: 'medium' }, quality_profile: { tier: 'frontier', reasoning: 'frontier', coding: 'frontier', factuality: 'strong', context: 'very_large' }, capabilities: { chat: true, structured_json: true, tool_calling: true, code: true }, routing: { prefer_for: ['hard_reasoning', 'architecture', 'synthesis', 'reviewer', 'verifier'] } },
   },

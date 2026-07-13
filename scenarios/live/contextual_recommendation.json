@@ -1,0 +1,16 @@
+{
+  "schema_version": "ddalggak.live_scenario/v1",
+  "id": "contextual_recommendation_constraints",
+  "suite": "general_task_live_v1",
+  "title": "Recommend from durable preferences, exclusions, and recent outcomes",
+  "goal": "Read data/context.json and create output/recommendation.json with selected_id, reason, and constraints_used. Choose one candidate that fits the current need and preferences while respecting exclusions and avoiding an immediate repeat.",
+  "acceptance_criteria": ["output/recommendation.json passes npm test", "Exclusions and recent choices are used", "The reason is user-facing and grounded in context"],
+  "fixture": {"path": "../fixtures/contextual_recommendation", "ignore": [".git/**", "node_modules/**", "runs/**"]},
+  "matrix": [{"provider": "codex", "role": "task_worker", "harness_variant_id": "task_worker.codex.default.medium.v1", "repetitions": 1, "timeout_ms": 900000}],
+  "expectations": {
+    "provider_ok": true,
+    "files": {"patch_required": true, "must_exist": ["output/recommendation.json"], "allowed_changed": ["output/**"], "forbidden_changed": ["data/**", "checks/**", "package.json", ".env", "**/.env"]},
+    "commands": [{"command": "npm", "args": ["test"], "timeout_ms": 120000, "required": true}]
+  },
+  "recipe_ids": ["recommendation.contextual"]
+}

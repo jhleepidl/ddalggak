@@ -1,0 +1,18 @@
+{
+  "schema_version": "ddalggak.continuity_scenario/v1",
+  "id": "model_swap_continuation",
+  "title": "모델 교체 후 이어가기",
+  "description": "한 provider가 만든 상태를 다른 provider가 Room state를 통해 이어받는지 확인한다.",
+  "steps": [
+    {"id":"initial_work","action":"send_message","title":"첫 모델에서 계획 생성","text":"현재 프로젝트 문서를 정본으로 사용해 구현 우선순위 3개와 각 근거를 정리해줘.","observe":["정본 source를 명시하는가","우선순위와 근거를 남기는가"]},
+    {"id":"brief","action":"inspect","title":"교체 전 Brief 확인","text":"/brief"},
+    {"id":"switch","action":"switch_model","title":"다른 provider/model로 전환","provider":"claude","model":"","instruction":"Room 실행 provider를 현재 사용 중인 모델과 다른 provider로 전환한다. 정확한 모델은 서버의 최신 사용 가능 모델을 선택한다."},
+    {"id":"review","action":"send_message","title":"새 모델이 이전 결과 검토","text":"방금 우선순위 중 첫 번째 항목의 위험을 독립적으로 검토해줘. 기존 결론을 그대로 반복하지 말고 근거가 부족한 부분을 지적해줘.","observe":["이전 결과를 인식하는가","독립 검토를 수행하는가","전체 맥락 재설명을 요구하지 않는가"]}
+  ],
+  "rubric": [
+    {"id":"handoff_without_private_session","label":"새 모델이 이전 모델의 사적 세션 없이 Room 상태로 이어받았다","required":true},
+    {"id":"source_preserved","label":"기존 source boundary가 유지되었다","required":true},
+    {"id":"independent_review","label":"이전 결론을 맹목적으로 반복하지 않고 독립 검토했다","required":true},
+    {"id":"no_reexplanation","label":"사용자가 전체 맥락을 다시 설명하지 않았다","required":true}
+  ]
+}

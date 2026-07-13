@@ -16,6 +16,7 @@ import {
 import { createTelegramUploadService } from "./uploads.js";
 import * as runtimeCore from "../../application/telegram_runtime_ops.js";
 import { startModelCatalogRefreshScheduler } from "../../application/model_catalog_refresh.js";
+import { getRuntimeActivityState } from "../../application/runtime_activity_registry.js";
 import { createDefaultRuntimeCommandHandlers, startRuntimeCommandWorker } from "../../runtime_capabilities/runtime_command_worker.js";
 import {
   sendChatStatus,
@@ -253,14 +254,22 @@ export async function startTelegramApp({ token = runtimeCore.TOKEN } = {}) {
     throw error;
   }
 
-  const modelCatalogRefreshScheduler = startModelCatalogRefreshScheduler({ logger: console });
-  const runtimeCommandWorker = startRuntimeCommandWorker({
-    client: runtimeCore.gocReady ? runtimeCore.gocClient : null,
-    handlers: createDefaultRuntimeCommandHandlers({
-      cancelJobExecution: runtimeCore.cancelJobExecution,
-    }),
+  const modelCatalogRefreshScheduler = startModelCatalogRefreshScheduler({
     logger: console,
+    getActivityState: () => {
+      const chat = chatRunManager.getActivityState();
+      const provider = getRuntimeActivityState();
+      return {
+        busy: chat.busy === true || provider.busy === true,
+        active_runs: Number(chat.active_runs || 0) + Number(provider.active_runs || 0),
+        pending_messages: Number(chat.pending_messages || 0),
+        idle_for_ms: Math.min(Number(chat.idle_for_ms ?? Number.POSITIVE_INFINITY), Number(provider.idle_for_ms ?? Number.POSITIVE_INFINITY)),
+        chat_activity: chat,
+        provider_activity: provider,
+      };
+    },
   });
+  let runtimeCommandWorker = { enabled: false, stop() {} };
 
   const shutdown = createShutdownHandler({
     bot,
@@ -314,6 +323,36 @@ export async function startTelegramApp({ token = runtimeCore.TOKEN } = {}) {
       ...groupedDeps.runtimeOps,
       handleTelegramCommand,
     },
+  });
+  runtimeCommandWorker = startRuntimeCommandWorker({
+    client: runtimeCore.gocReady ? runtimeCore.gocClient : null,
+    handlers: createDefaultRuntimeCommandHandlers({
+      cancelJobExecution: runtimeCore.cancelJobExecution,
+      executeRoomCommand: async ({ command, chatId, userId }) => {
+        const handled = await handleTelegramCommand({
+          msg: {
+            chat: { id: chatId },
+            from: { id: userId },
+            text: command,
+          },
+          text: command,
+          chatId,
+          userId,
+        });
+        return { handled: handled === true, delivery: 'telegram' };
+      },
+      executeRoomMessage: async ({ message, chatId, userId, threadId }) => {
+        await onMessage({
+          message_id: Date.now(),
+          chat: { id: chatId, type: 'private', title: 'GoC Room' },
+          from: { id: userId },
+          text: message,
+          goc_thread_id: threadId,
+        });
+        return { handled: true, delivery: 'telegram_and_goc', queued: true };
+      },
+    }),
+    logger: console,
   });
 
   bot.on("callback_query", async (query) => {

@@ -78,3 +78,32 @@ test('LocalRunEventSink resumes sequence from persisted runtime events after rec
   const rows = fs.readFileSync(path.join(root, 'job_1', 'runtime_events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(rows.map((row) => row.event_sequence), [1, 2]);
 });
+
+test('runtime outbox batches ordered events and accepts duplicate confirmations', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-outbox-batch-'));
+  const jobs = new JobsStub(root);
+  const calls = [];
+  const client = {
+    async ingestOpenHarnessRuntimeEvents(events) {
+      calls.push(events.map((event) => event.event_id));
+      return {
+        accepted: Math.max(0, events.length - 1),
+        duplicates: events.length > 0 ? 1 : 0,
+        accepted_event_ids: events.slice(1).map((event) => event.event_id),
+        duplicate_event_ids: events.slice(0, 1).map((event) => event.event_id),
+      };
+    },
+  };
+  const outbox = new OpenHarnessRunEventOutbox({ jobs, client, autoFlush: false, batchSize: 3 });
+  for (let index = 1; index <= 5; index += 1) {
+    outbox.enqueue(buildRunTraceRecord('run.metadata', { run_id: 'run_batch', index }, {
+      jobId: 'job_batch',
+      runId: 'run_batch',
+      eventSequence: index,
+    }), { jobId: 'job_batch' });
+  }
+  const result = await outbox.flush({ jobId: 'job_batch', limit: 10 });
+  assert.equal(result.delivered, 5);
+  assert.equal(result.pending, 0);
+  assert.deepEqual(calls.map((rows) => rows.length), [3, 2]);
+});

@@ -1,0 +1,13 @@
+{
+  "schema_version": "ddalggak.continuity_suite/v1",
+  "id": "room_continuity_core",
+  "title": "Room Continuity Core Suite",
+  "scenarios": [
+    "./restart_continuation.json",
+    "./model_swap_continuation.json",
+    "./correction_uptake.json",
+    "./source_replacement.json",
+    "./stale_plan_suppression.json",
+    "./branch_non_destructive.json"
+  ]
+}

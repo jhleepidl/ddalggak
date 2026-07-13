@@ -1,0 +1,1 @@
+A prior conversational guess said Beta was probably the best choice. This note is not authoritative; inventory.csv is the declared source of truth.

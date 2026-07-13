@@ -10,6 +10,8 @@ import { runAntigravityPrompt } from '../antigravity.js';
 import { buildHarnessPrompt, loadHarnessVariantRegistry, resolveHarnessVariant } from './harness_variant_registry.js';
 import { normalizeProviderName, probeProviderCapability } from './provider_capability_registry.js';
 import { syncHarnessEvaluationToGoc } from './live_scenario_goc_sync.js';
+import { recordModelEvaluationObservation } from '../application/model_catalog_refresh.js';
+import { recordRecipeEvaluationObservation } from './recipe_evidence_store.js';
 
 function clean(value = '') { return String(value || '').trim(); }
 function asObject(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
@@ -340,6 +342,8 @@ function aggregateResults(evaluationId, scenarioRuns, { suite = 'live', startedA
       harness_variant_id: run.harness_variant_id,
       harness_variant_hash: run.harness_variant_hash,
       provider: run.provider,
+      requested_model: run.requested_model || null,
+      resolved_model: run.resolved_model || null,
       model: run.model || null,
       reasoning_effort: run.reasoning_effort || null,
       cli_version: run.cli_version || null,
@@ -456,14 +460,17 @@ export async function runLiveScenarioSuite({
         run_id: runId,
         scenario_id: scenario.id,
         scenario_title: clean(scenario.title),
+        recipe_ids: asArray(scenario.recipe_ids).map((value) => clean(value)).filter(Boolean),
         harness_variant_id: variant.id,
         harness_variant_hash: variant.variant_hash,
         provider: variant.provider,
-        model: providerResult?.used_model || variant.model || null,
+        requested_model: providerResult?.requested_model || variant.model || null,
+        resolved_model: providerResult?.resolved_model || null,
+        model: providerResult?.resolved_model || providerResult?.used_model || variant.model || 'provider-default-unresolved',
         reasoning_effort: variant.reasoning_effort,
         cli_version: capabilityProfile.cli_version || null,
         runtime_signature: buildRuntimeSignature({
-          harness_variant_id: variant.id, provider: variant.provider, model: providerResult?.used_model || variant.model || null,
+          harness_variant_id: variant.id, provider: variant.provider, requested_model: providerResult?.requested_model || variant.model || null, resolved_model: providerResult?.resolved_model || null, model: providerResult?.resolved_model || providerResult?.used_model || variant.model || 'provider-default-unresolved',
           reasoning_effort: variant.reasoning_effort, cli_version: capabilityProfile.cli_version || null,
         }),
         native_delegation: variant.native_delegation,
@@ -475,6 +482,9 @@ export async function runLiveScenarioSuite({
         duration_ms: durationMs,
         provider_result: {
           ok: providerResult?.ok === true,
+          requested_model: providerResult?.requested_model || variant.model || null,
+          resolved_model: providerResult?.resolved_model || null,
+          model_resolution_source: providerResult?.model_resolution_source || null,
           exit_code: Number.isInteger(providerResult?.exitCode) ? providerResult.exitCode : null,
           stdout: String(providerResult?.stdout || ''),
           stderr: String(providerResult?.stderr || ''),
@@ -491,6 +501,20 @@ export async function runLiveScenarioSuite({
         completed_at: nowIso(),
       };
       writeJson(path.join(runDir, 'result.json'), result);
+      if (!dryRun && result.recipe_ids.length > 0) {
+        recordRecipeEvaluationObservation({ recipeIds: result.recipe_ids, result });
+      }
+      if (!dryRun && result.model && result.model !== 'provider-default-unresolved') {
+        recordModelEvaluationObservation({
+          provider: result.provider,
+          model: result.model,
+          passed: result.passed,
+          score: result.score,
+          evaluationId: result.evaluation_id,
+          runId: result.run_id,
+          runtimeSignature: result.runtime_signature,
+        });
+      }
       appendJsonl(path.join(root, 'results.jsonl'), result);
       scenarioRuns.push(result);
       if (!keepWorkspaces) fs.rmSync(workspaceRoot, { recursive: true, force: true });

@@ -1,0 +1,204 @@
+{
+  "schema_version": "ai_rooms.collaboration_profile_catalog/v1",
+  "catalog_version": "2026-07-12.collaboration-profiles.v1",
+  "profiles": [
+    {
+      "id": "auto",
+      "title": "Task-adaptive",
+      "title_ko": "작업 적응형",
+      "status": "stable",
+      "runtime_support": "native",
+      "description": "Keep the current room router in control and choose the lightest sufficient execution pattern for the task.",
+      "description_ko": "현재 Room Router가 작업에 필요한 가장 가벼운 실행 패턴을 선택합니다.",
+      "execution_pattern": "task_adaptive",
+      "min_participants": 1,
+      "max_participants": 6,
+      "relative_cost": "adaptive",
+      "room_awareness": "shared_goal_and_roles",
+      "initial_visibility": "adaptive",
+      "synthesis_required": false,
+      "good_for": [
+        "default room operation",
+        "mixed workloads",
+        "uncertain task shape"
+      ],
+      "not_for": [
+        "forcing a specific collaboration experiment"
+      ]
+    },
+    {
+      "id": "solo",
+      "title": "Solo specialist",
+      "title_ko": "단일 전문 Agent",
+      "status": "stable",
+      "runtime_support": "native",
+      "description": "Use one primary agent and allow provider-native tools or subagents inside that execution capsule.",
+      "description_ko": "하나의 주 Agent가 처리하고 필요하면 provider 내부 subagent와 도구를 사용합니다.",
+      "execution_pattern": "single_specialist",
+      "min_participants": 1,
+      "max_participants": 1,
+      "relative_cost": "1x",
+      "room_awareness": "shared_goal_only",
+      "initial_visibility": "private",
+      "synthesis_required": false,
+      "good_for": [
+        "clear bounded requests",
+        "continuity-heavy personal assistance",
+        "low-risk direct answers"
+      ],
+      "not_for": [
+        "independent cross-provider review",
+        "diverse hypothesis search"
+      ]
+    },
+    {
+      "id": "parallel_ideation",
+      "title": "Parallel ideation",
+      "title_ko": "병렬 아이디어 탐색",
+      "status": "experimental",
+      "runtime_support": "native",
+      "description": "Generate independent proposals from isolated context projections, cluster duplicates, and synthesize the strongest distinct options.",
+      "description_ko": "독립적인 context projection으로 여러 제안을 만든 뒤 중복을 묶고 서로 다른 강한 후보를 종합합니다.",
+      "execution_pattern": "parallel_research_then_review_then_synthesize",
+      "min_participants": 3,
+      "max_participants": 5,
+      "relative_cost": "2-4x",
+      "room_awareness": "shared_goal_roles_and_diversity_contract",
+      "initial_visibility": "isolated_until_submission",
+      "synthesis_required": true,
+      "diversity_contract": {
+        "required": true,
+        "dimensions": [
+          "assumptions",
+          "approach",
+          "risk",
+          "user_value"
+        ],
+        "duplicate_penalty": true
+      },
+      "good_for": [
+        "open-ended ideas",
+        "architecture alternatives",
+        "research hypotheses",
+        "creative directions"
+      ],
+      "not_for": [
+        "simple deterministic fixes",
+        "format conversion",
+        "routine lookup"
+      ]
+    },
+    {
+      "id": "evidence_panel",
+      "title": "Independent evidence panel",
+      "title_ko": "독립 근거 패널",
+      "status": "experimental",
+      "runtime_support": "native",
+      "description": "Separate evidence collection and interpretation lanes, then use an independent reviewer or synthesizer to adjudicate disagreements.",
+      "description_ko": "근거 수집과 해석을 독립 lane으로 나누고 reviewer 또는 synthesizer가 충돌을 판정합니다.",
+      "execution_pattern": "multi_research_adjudication",
+      "min_participants": 3,
+      "max_participants": 5,
+      "relative_cost": "2-5x",
+      "room_awareness": "shared_question_and_evidence_contract",
+      "initial_visibility": "isolated_until_evidence_submission",
+      "synthesis_required": true,
+      "diversity_contract": {
+        "required": true,
+        "dimensions": [
+          "source_set",
+          "interpretation",
+          "risk_case"
+        ],
+        "duplicate_penalty": true
+      },
+      "good_for": [
+        "source-grounded decisions",
+        "high-uncertainty comparisons",
+        "claim verification"
+      ],
+      "not_for": [
+        "casual low-stakes chat",
+        "tasks with no evidence requirement"
+      ]
+    },
+    {
+      "id": "builder_reviewer",
+      "title": "Builder-reviewer loop",
+      "title_ko": "구현-검토 반복",
+      "status": "stable",
+      "runtime_support": "native",
+      "description": "One agent creates an artifact and an independent reviewer checks acceptance criteria before delivery.",
+      "description_ko": "한 Agent가 산출물을 만들고 독립 reviewer가 완료 조건을 확인한 뒤 전달합니다.",
+      "execution_pattern": "builder_reviewer_loop",
+      "min_participants": 2,
+      "max_participants": 4,
+      "relative_cost": "1.5-3x",
+      "room_awareness": "shared_goal_artifact_and_acceptance",
+      "initial_visibility": "artifact_handoff",
+      "synthesis_required": true,
+      "good_for": [
+        "code or document artifacts",
+        "prototype creation",
+        "bounded revisions"
+      ],
+      "not_for": [
+        "pure brainstorming without a deliverable"
+      ]
+    },
+    {
+      "id": "iterative_project",
+      "title": "Bounded iterative project",
+      "title_ko": "제한된 반복 프로젝트",
+      "status": "experimental",
+      "runtime_support": "native",
+      "description": "Run a checkpointed project loop with explicit progress, verification, stop conditions, and resumable handoffs.",
+      "description_ko": "진행 상황, 검증, 종료 조건, 재개 가능한 handoff를 가진 제한된 프로젝트 loop를 실행합니다.",
+      "execution_pattern": "operator_gated_workflow",
+      "min_participants": 2,
+      "max_participants": 6,
+      "relative_cost": "task-dependent",
+      "room_awareness": "shared_project_state_and_checkpoints",
+      "initial_visibility": "stage_scoped",
+      "synthesis_required": true,
+      "good_for": [
+        "long-horizon research",
+        "experiment and writing pipelines",
+        "multi-stage deliverables"
+      ],
+      "not_for": [
+        "one-turn questions",
+        "tasks without a verifiable checkpoint"
+      ]
+    },
+    {
+      "id": "selective_panel",
+      "title": "Selective volunteer panel",
+      "title_ko": "선별 지원 패널",
+      "status": "preview",
+      "runtime_support": "metadata_only",
+      "description": "Candidate agents submit short bounded contribution bids; the coordinator selects only non-duplicate high-value contributors.",
+      "description_ko": "후보 Agent가 짧은 기여 제안을 제출하고 coordinator가 중복되지 않는 고가치 기여자만 선택합니다.",
+      "execution_pattern": "multi_research_adjudication",
+      "min_participants": 2,
+      "max_participants": 4,
+      "relative_cost": "1.3-3x",
+      "room_awareness": "shared_goal_roles_and_bid_contract",
+      "initial_visibility": "bid_only_then_isolated",
+      "synthesis_required": true,
+      "activation_policy": {
+        "mode": "volunteer_bid",
+        "max_candidates": 6,
+        "max_selected": 2,
+        "max_bid_tokens": 160
+      },
+      "good_for": [
+        "rooms with many available specialists",
+        "uncertain need for multi-agent work"
+      ],
+      "not_for": [
+        "production default until bid execution is implemented and evaluated"
+      ]
+    }
+  ]
+}

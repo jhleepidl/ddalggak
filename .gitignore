@@ -149,6 +149,8 @@ commands.md
 # Generated model discovery state
 config/model_nodes.discovered.json
 config/model_catalog_refresh_state.json
+config/model_discovery_registry.json
+config/provider_capabilities.discovered.json
 
 # Local implementation notes / handoff scratch files
 # Reusable docs are tracked under docs/. Temporary memos live in these ignored folders.

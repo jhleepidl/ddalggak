@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { runCommand } from './proc.js';
 import { recordLlmTrace } from './application/llm_trace_recorder.js';
+import { withRuntimeActivity } from './application/runtime_activity_registry.js';
 
 function splitArgs(value = '') {
   const text = String(value || '').trim();
@@ -122,7 +123,7 @@ export async function runClaudeCliPrompt({
   const effectiveTimeoutMs = Number(timeoutMs || process.env.CLAUDE_CLI_TIMEOUT_MS || 0) > 0
     ? Number(timeoutMs || process.env.CLAUDE_CLI_TIMEOUT_MS)
     : 300000;
-  const result = await runCommand(command, [...baseArgs, ...modelArgs, ...effortArgs, '-p', '--output-format', 'json'], {
+  const result = await withRuntimeActivity({ provider: 'claude', kind: 'provider_execution', jobId, metadata: { surface, model: requestedModel || null, workspace: workspacePath } }, async () => await runCommand(command, [...baseArgs, ...modelArgs, ...effortArgs, '-p', '--output-format', 'json'], {
     cwd: commandCwd,
     timeoutMs: effectiveTimeoutMs,
     input: String(prompt || ''),
@@ -133,16 +134,20 @@ export async function runClaudeCliPrompt({
       FORCE_COLOR: '0',
       ...env,
     },
-  });
+  }));
   const parsed = parseClaudeCliJsonOutput(result.stdout || '');
   const ok = Boolean(result.ok) && !parsed.is_error;
   const answer = parsed.parsed ? parsed.result_text : String(result.stdout || '');
-  const usedModel = parsed.model || requestedModel || 'claude';
+  const resolvedModel = parsed.model || requestedModel || '';
+  const usedModel = resolvedModel || 'default';
   const enriched = {
     ...result,
     ok,
     stdout: answer,
     raw_stdout: result.stdout,
+    requested_model: requestedModel || null,
+    resolved_model: resolvedModel || null,
+    model_resolution_source: parsed.model ? 'provider_reported' : (requestedModel ? 'explicit_request' : 'unresolved_provider_default'),
     used_model: usedModel,
     usage: parsed.usage || { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
     cost_usd: parsed.cost_usd || 0,

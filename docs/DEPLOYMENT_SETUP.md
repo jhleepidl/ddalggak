@@ -231,26 +231,37 @@ Security notes:
 
 ## 6. CLI model catalog refresh
 
-At runtime startup, ddalggak can refresh a machine-readable discovered model catalog.
-It then repeats the refresh once per day by default. The generated file is loaded
-before `config/model_nodes.json`, so hand-written config can override discovered rows
-with the same `id`.
+ddalggak keeps a machine-readable discovered model catalog, but discovery stays off the user request path.
+A background scheduler checks periodically and only opens provider `/model` surfaces when the runtime is idle.
+The normal refresh interval is once per day; a provider CLI version change can trigger an earlier refresh at the next idle window.
+The generated file is loaded before `config/model_nodes.json`, so hand-written config can override discovered rows with the same `id`.
 
 ```env
 MODEL_CATALOG_REFRESH_ENABLED=true
 MODEL_CATALOG_REFRESH_INTERVAL_MS=86400000
-MODEL_NODES_DISCOVERED_CONFIG=./config/model_nodes.discovered.json
+MODEL_CATALOG_REFRESH_CHECK_INTERVAL_MS=300000
+MODEL_CATALOG_REFRESH_STARTUP_DELAY_MS=30000
+MODEL_CATALOG_REFRESH_IDLE_MIN_MS=60000
+MODEL_CATALOG_REFRESH_CLI_VERSION_CHECK_INTERVAL_MS=3600000
+MODEL_CATALOG_REFRESH_ON_CLI_VERSION_CHANGE=true
 CODEX_CLI_MODEL_DISCOVERY_ENABLED=true
-GEMINI_CLI_MODEL_DISCOVERY_ENABLED=true
+CLAUDE_CLI_MODEL_DISCOVERY_ENABLED=true
+ANTIGRAVITY_CLI_MODEL_DISCOVERY_ENABLED=true
+MODEL_BENCHMARK_MIN_RUNS=3
+MODEL_NODES_DISCOVERED_CONFIG=./config/model_nodes.discovered.json
+GEMINI_CLI_MODEL_DISCOVERY_ENABLED=false
 CLI_MODEL_DISCOVERY_TIMEOUT_MS=12000
 ```
 
-Manual refresh:
+Manual refresh and status:
 
 ```bash
+npm run models:refresh
+npm run models:status
 node scripts/discover_model_nodes.js --kind all --refresh
 node scripts/discover_model_nodes.js --kind codex --stdout
-node scripts/discover_model_nodes.js --kind gemini --stdout
+node scripts/discover_model_nodes.js --kind claude --stdout
+node scripts/discover_model_nodes.js --kind antigravity --stdout
 ```
 
 Telegram:
@@ -258,6 +269,8 @@ Telegram:
 ```text
 /models refresh
 /models discover codex
+/models discover claude
+/models discover antigravity
 /models discover gemini
 ```
 
@@ -714,3 +727,6 @@ Telegram commands:
 ```
 
 Fast/normal low-risk writes commit directly. High-risk writes such as learned rule activation, package publish, canonical memory switch, destructive writes, or high-risk external/financial claims are stored as proposals and require review. RDB/VDB/HTML/Semantic Board views should write back through structured context operations rather than directly mutating the source of truth.
+
+
+For the idle-only discovery and benchmark lifecycle, see `docs/MODEL_DISCOVERY_LIFECYCLE.md`.

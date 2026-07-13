@@ -1,0 +1,1 @@
+{"name":"contextual-recommendation-fixture","private":true,"type":"module","scripts":{"test":"node checks/recommendation_check.js"}}

@@ -4,12 +4,31 @@ function clean(v=''){return String(v||'').trim()}
 function cleanId(v=''){return clean(v).toLowerCase()}
 function uniq(list=[]){const out=[];const seen=new Set();for(const raw of asArray(list)){const v=clean(raw);if(!v||seen.has(v))continue;seen.add(v);out.push(v);}return out;}
 
+function normalizeCollaborationContract(raw = {}) {
+  const row = asObject(raw);
+  const diversity = asObject(row.diversity_contract || row.diversityContract);
+  const activation = asObject(row.activation_policy || row.activationPolicy);
+  return {
+    profile_id: cleanId(row.profile_id || row.profileId),
+    room_awareness: cleanId(row.room_awareness || row.roomAwareness || 'shared_goal_only'),
+    initial_visibility: cleanId(row.initial_visibility || row.initialVisibility || 'adaptive'),
+    min_participants: Math.max(1, Number(row.min_participants || row.minParticipants || 1)),
+    max_participants: Math.max(1, Number(row.max_participants || row.maxParticipants || row.min_participants || row.minParticipants || 1)),
+    synthesis_required: row.synthesis_required === true || row.synthesisRequired === true,
+    runtime_support: cleanId(row.runtime_support || row.runtimeSupport || 'native'),
+    diversity_contract: Object.keys(diversity).length ? diversity : undefined,
+    activation_policy: Object.keys(activation).length ? activation : undefined,
+  };
+}
+
 export function defaultInteractionPolicies(){
   return {
     reviewer_visibility: 'summaries_plus_selected_evidence',
     synthesizer_visibility: 'upstream_outputs_only',
     builder_direct_response: false,
     require_reviewer_before_final: true,
+    room_awareness: 'shared_goal_only',
+    initial_visibility: 'adaptive',
   };
 }
 
@@ -93,8 +112,19 @@ function hasDebateSignals(text = '') {
 export function normalizeInteractionSpec(raw = {}) {
   const row = asObject(raw);
   const policies = { ...defaultInteractionPolicies(), ...asObject(row.policies) };
+  const collaborationContract = normalizeCollaborationContract(row.collaboration_contract || row.collaborationContract || {});
+  const collaborationProfileId = cleanId(
+    row.collaboration_profile_id
+      || row.collaborationProfileId
+      || collaborationContract.profile_id
+      || 'auto'
+  ) || 'auto';
   return {
     execution_pattern: cleanId(row.execution_pattern || row.executionPattern || 'single_specialist') || 'single_specialist',
+    collaboration_profile_id: collaborationProfileId,
+    collaboration_contract: collaborationProfileId !== 'auto' || Object.keys(asObject(row.collaboration_contract || row.collaborationContract)).length
+      ? { ...collaborationContract, profile_id: collaborationProfileId }
+      : undefined,
     final_answer_owner: clean(row.final_answer_owner || row.finalAnswerOwner),
     handoffs: asArray(row.handoffs).map((entry) => ({
       from: clean(entry?.from),
@@ -106,6 +136,11 @@ export function normalizeInteractionSpec(raw = {}) {
       synthesizer_visibility: cleanId(policies.synthesizer_visibility || 'upstream_outputs_only'),
       builder_direct_response: policies.builder_direct_response === true,
       require_reviewer_before_final: policies.require_reviewer_before_final !== false,
+      room_awareness: cleanId(policies.room_awareness || collaborationContract.room_awareness || 'shared_goal_only'),
+      initial_visibility: cleanId(policies.initial_visibility || collaborationContract.initial_visibility || 'adaptive'),
+      diversity_contract: Object.keys(asObject(policies.diversity_contract || policies.diversityContract || collaborationContract.diversity_contract)).length
+        ? asObject(policies.diversity_contract || policies.diversityContract || collaborationContract.diversity_contract)
+        : undefined,
     },
     selection_reason: clean(row.selection_reason || row.selectionReason),
   };
@@ -174,6 +209,8 @@ export function buildRouterInteractionContract(spec = {}) {
   const row = normalizeInteractionSpec(spec);
   return {
     execution_pattern: row.execution_pattern,
+    collaboration_profile_id: row.collaboration_profile_id,
+    collaboration_contract: row.collaboration_contract,
     final_answer_owner: row.final_answer_owner,
     handoffs: row.handoffs,
     policies: row.policies,
@@ -187,6 +224,11 @@ export function buildAgentLocalInteractionContract(spec = {}, agentName = '') {
   const outgoing = row.handoffs.filter((entry) => entry.from === target);
   return {
     execution_pattern: row.execution_pattern,
+    collaboration_profile_id: row.collaboration_profile_id,
+    collaboration_contract: row.collaboration_contract,
+    room_awareness: row.policies.room_awareness,
+    initial_visibility: row.policies.initial_visibility,
+    diversity_contract: row.policies.diversity_contract,
     final_answer_owner: row.final_answer_owner,
     can_answer_user_directly: row.final_answer_owner ? row.final_answer_owner === target : true,
     require_reviewer_before_final: row.policies.require_reviewer_before_final === true,

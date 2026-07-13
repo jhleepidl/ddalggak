@@ -4,6 +4,7 @@ import { buildWorkModeConfig, summarizeWorkModeConfig } from './work_mode.js';
 import { buildRoomTurnRoute } from './room_turn_router.js';
 import { buildStarterSingleAgentTeamConfiguration, validateTeamConfiguration } from './team_configuration.js';
 import { migrateProviderAwayFromGemini, sanitizeGeminiModelForProvider } from '../provider_migration.js';
+import { buildCollaborationInteractionPatch, resolveRoomCollaborationProfile } from './collaboration_profile_catalog.js';
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -141,12 +142,53 @@ function makeAgentFromCard({ card = null, role = '', index = 0, taskText = '', w
   };
 }
 
-function buildInteractionSpec({ workMode = 'ask', roles = [], agents = [] } = {}) {
+function expandAgentsForCollaboration({ agents = [], profile = null } = {}) {
+  const rows = asArray(agents).map((agent) => ({ ...asObject(agent) }));
+  const collaboration = asObject(profile);
+  const pattern = cleanId(collaboration.execution_pattern || '');
+  if (!['parallel_research_then_review_then_synthesize', 'multi_research_adjudication'].includes(pattern)) return rows;
+
+  const existingResearchers = rows.filter((agent) => cleanId(agent.role) === 'researcher');
+  const source = existingResearchers[0] || rows.find((agent) => !/review|critic|synthesizer|operator/.test(cleanId(agent.role)));
+  if (!source) return rows;
+  const dimensions = asArray(asObject(collaboration.diversity_contract).dimensions)
+    .map((item) => cleanId(item))
+    .filter(Boolean);
+  const participantCap = Math.max(rows.length, Number(collaboration.max_participants || rows.length || 4));
+  const availableSlots = Math.max(0, participantCap - rows.length);
+  const desiredResearchers = Math.max(2, Math.min(3, existingResearchers.length + availableSlots));
+  const additions = [];
+  for (let index = existingResearchers.length; index < desiredResearchers; index += 1) {
+    const dimension = dimensions[index] || dimensions[index % Math.max(1, dimensions.length)] || `independent_angle_${index + 1}`;
+    additions.push({
+      ...source,
+      agent_id: `researcher_lane_${index + 1}`,
+      id: `researcher_lane_${index + 1}`,
+      name: `Independent Research Lane ${index + 1}`,
+      role: 'researcher',
+      purpose: `Explore an independent contribution lane focused on ${dimension}; do not duplicate other lanes.`,
+      order: rows.length + additions.length,
+      collaboration_lane: {
+        lane_id: `lane_${index + 1}`,
+        diversity_dimension: dimension,
+        initial_visibility: collaboration.initial_visibility || 'isolated_until_submission',
+      },
+    });
+  }
+  return [...rows, ...additions].map((agent, index) => ({ ...agent, order: index }));
+}
+
+function buildInteractionSpec({ workMode = 'ask', roles = [], agents = [], roomProfile = null } = {}) {
   const roster = asArray(agents);
+  const collaborationProfile = resolveRoomCollaborationProfile(roomProfile || {});
+  const collaborationPatch = collaborationProfile?.runtime_support === 'native'
+    ? buildCollaborationInteractionPatch(collaborationProfile)
+    : {};
   const ownerName = clean(roster[roster.length - 1]?.name || roles[roles.length - 1] || 'Agent', { maxLen: 160 });
   if (workMode === 'ask') {
     return {
       execution_pattern: 'single_specialist',
+      collaboration_profile_id: collaborationProfile?.id || 'auto',
       final_answer_owner: clean(roster[0]?.name || roles[0] || 'Room Answerer', { maxLen: 160 }),
       handoffs: [],
       policies: {
@@ -154,12 +196,16 @@ function buildInteractionSpec({ workMode = 'ask', roles = [], agents = [] } = {}
         synthesizer_visibility: 'upstream_outputs_only',
         builder_direct_response: false,
         require_reviewer_before_final: false,
+        room_awareness: collaborationProfile?.room_awareness || 'shared_goal_only',
       },
       selection_reason: 'Room Router kept this turn lightweight and used a single reusable component',
     };
   }
+  const basePattern = workMode === 'team_loop_task' && roles.includes('operator') ? 'operator_gated_workflow' : 'sequential_pipeline';
   return {
-    execution_pattern: workMode === 'team_loop_task' && roles.includes('operator') ? 'operator_gated_workflow' : 'sequential_pipeline',
+    execution_pattern: collaborationPatch.execution_pattern || basePattern,
+    collaboration_profile_id: collaborationProfile?.id || 'auto',
+    collaboration_contract: collaborationPatch.collaboration_contract,
     final_answer_owner: ownerName,
     handoffs: [],
     policies: {
@@ -167,8 +213,11 @@ function buildInteractionSpec({ workMode = 'ask', roles = [], agents = [] } = {}
       synthesizer_visibility: 'upstream_outputs_only',
       builder_direct_response: false,
       require_reviewer_before_final: roles.some((role) => /review|critic|checker|verifier/.test(role)),
+      room_awareness: collaborationProfile?.room_awareness || 'shared_goal_and_roles',
+      initial_visibility: collaborationProfile?.initial_visibility || 'adaptive',
+      diversity_contract: Object.keys(asObject(collaborationProfile?.diversity_contract)).length ? collaborationProfile.diversity_contract : undefined,
     },
-    selection_reason: `Room Router selected ${workMode} and chose component sequence: ${roles.join(' -> ')}`,
+    selection_reason: `Room Router selected ${workMode}; collaboration=${collaborationProfile?.id || 'auto'}; components: ${roles.join(' -> ')}`,
   };
 }
 
@@ -182,6 +231,7 @@ export function buildRoomFirstRuntimeSelection({
 } = {}) {
   const initialMode = summarizeWorkModeConfig(buildWorkModeConfig({ request: taskText, explicitMode: workMode || '' })).work_mode;
   const profile = asObject(roomProfile);
+  const collaborationProfile = resolveRoomCollaborationProfile(profile);
   const pkg = asObject(roomPackage).kind
     ? asObject(roomPackage)
     : buildRoomPackage({ profile: profile.kind ? profile : buildRoomProfileFromGoal({ chatId, goal: taskText, source }), goal: taskText, chatId, source });
@@ -195,10 +245,14 @@ export function buildRoomFirstRuntimeSelection({
   });
   const mode = roomRoute.depth || initialMode;
   const library = buildRoomComponentsFromPackage(pkg);
-  const roles = rolesForRoomWorkMode({ roomPackage: pkg, workMode: mode, taskText });
-  const agents = roles.map((role, index) => makeAgentFromCard({ card: findAgentCard(library, role), role, index, taskText, workMode: mode }));
+  const baseRoles = rolesForRoomWorkMode({ roomPackage: pkg, workMode: mode, taskText });
+  const baseAgents = baseRoles.map((role, index) => makeAgentFromCard({ card: findAgentCard(library, role), role, index, taskText, workMode: mode }));
+  const agents = mode === 'ask'
+    ? baseAgents
+    : expandAgentsForCollaboration({ agents: baseAgents, profile: collaborationProfile });
+  const roles = agents.map((agent) => cleanId(agent.role)).filter(Boolean);
   const borrowed = [];
-  for (const role of roles) {
+  for (const role of unique(roles)) {
     const card = findAgentCard(library, role);
     if (!card) continue;
     const invocation = createBorrowedAgentInvocation({
@@ -228,6 +282,7 @@ export function buildRoomFirstRuntimeSelection({
     agents,
     component_summary: library.summary || {},
     borrowed_agent_invocations: borrowed,
+    collaboration_profile: collaborationProfile,
     policies: {
       source_room_private_memory_read: false,
       target_room_projection_only: true,
@@ -268,7 +323,7 @@ export function buildRoomFirstTeamConfiguration({
       ...starter,
       team_name: `room_ask_${cleanId(selection.room.domain_label || 'room')}`,
       agents: [agent],
-      interaction_spec: buildInteractionSpec({ workMode: 'ask', roles: [agent.role || role], agents: [agent] }),
+      interaction_spec: buildInteractionSpec({ workMode: 'ask', roles: [agent.role || role], agents: [agent], roomProfile }),
       lock_after_apply: false,
       task_archetype: selection.room.domain_label || starter.task_archetype || 'research',
       planner_metadata: {
@@ -280,6 +335,7 @@ export function buildRoomFirstTeamConfiguration({
         room_router_depth: selection.room_turn_route?.depth || selection.work_mode,
         room_package_id: selection.room.package_id,
         room_domain_label: selection.room.domain_label,
+        collaboration_profile_id: selection.collaboration_profile?.id || 'auto',
         reasoning_summary: [
           `room-first /ask selected one reusable agent component: ${agent.role || role}`,
           'ask uses a single-turn component projection; active room team is not overwritten',
@@ -316,7 +372,7 @@ export function buildRoomFirstTeamConfiguration({
     lock_after_apply: selection.work_mode !== 'ask',
     ephemeral: false,
     agents: selection.agents,
-    interaction_spec: buildInteractionSpec({ workMode: selection.work_mode, roles, agents: selection.agents }),
+    interaction_spec: buildInteractionSpec({ workMode: selection.work_mode, roles, agents: selection.agents, roomProfile }),
     shortcut_policy: { max_recent_turns: 6, followup_mode: 'room_component_handoff' },
     status: 'active',
     task_brief: clean(taskText, { maxLen: 1000 }),
@@ -338,6 +394,7 @@ export function buildRoomFirstTeamConfiguration({
       room_router_depth: selection.room_turn_route?.depth || selection.work_mode,
       room_package_id: selection.room.package_id,
       room_domain_label: selection.room.domain_label,
+      collaboration_profile_id: selection.collaboration_profile?.id || 'auto',
       selected_component_ids: selection.agents.map((agent) => agent.component_ref).filter(Boolean),
       reasoning_summary: [
         `room-first ${selection.work_mode} selected reusable room components`,
@@ -363,6 +420,7 @@ export function buildRoomFirstTeamConfiguration({
       room_router_depth: selection.room_turn_route?.depth || selection.work_mode,
       room_package_id: selection.room.package_id,
       room_domain_label: selection.room.domain_label,
+      collaboration_profile_id: selection.collaboration_profile?.id || 'auto',
       selected_component_ids: selection.agents.map((agent) => agent.component_ref).filter(Boolean),
     },
   };

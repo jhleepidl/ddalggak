@@ -1,0 +1,12 @@
+{
+  "current_need": "choose one activity for a two-hour evening slot",
+  "preferences": ["quiet", "creative", "low setup"],
+  "exclusions": ["outdoor", "high cost"],
+  "recent_choices": ["reading"],
+  "candidates": [
+    {"id":"reading","traits":["quiet","low setup"],"cost":"low","setting":"indoor"},
+    {"id":"sketching","traits":["quiet","creative","low setup"],"cost":"low","setting":"indoor"},
+    {"id":"concert","traits":["creative"],"cost":"high","setting":"indoor"},
+    {"id":"night_walk","traits":["quiet","low setup"],"cost":"low","setting":"outdoor"}
+  ]
+}

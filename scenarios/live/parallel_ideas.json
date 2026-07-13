@@ -1,0 +1,16 @@
+{
+  "schema_version": "ddalggak.live_scenario/v1",
+  "id": "parallel_ideas_diversity_contract",
+  "suite": "general_task_live_v1",
+  "title": "Generate distinct idea directions before synthesis",
+  "goal": "Read data/brief.json. Independently explore at least three materially different approaches. Create output/ideas.json as an array of objects with id, proposal, core_assumption, validation, and risk. Then create output/synthesis.json with top_choices and a comparison across the supplied evaluation dimensions. Avoid cosmetic variations of one idea.",
+  "acceptance_criteria": ["At least three distinct core assumptions", "Each idea includes validation and risk", "Synthesis selects and compares one to three candidates", "npm test passes"],
+  "fixture": {"path": "../fixtures/parallel_ideas", "ignore": [".git/**", "node_modules/**", "runs/**"]},
+  "matrix": [{"provider": "codex", "role": "task_worker", "harness_variant_id": "task_worker.codex.default.medium.v1", "repetitions": 1, "timeout_ms": 900000}],
+  "expectations": {
+    "provider_ok": true,
+    "files": {"patch_required": true, "must_exist": ["output/ideas.json", "output/synthesis.json"], "allowed_changed": ["output/**"], "forbidden_changed": ["data/**", "checks/**", "package.json", ".env", "**/.env"]},
+    "commands": [{"command": "npm", "args": ["test"], "timeout_ms": 120000, "required": true}]
+  },
+  "recipe_ids": ["thinking.parallel_ideas"]
+}

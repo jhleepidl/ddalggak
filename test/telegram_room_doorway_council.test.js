@@ -41,7 +41,7 @@ function makeHandler({ sent = [], sessionStore = makeSessionStore() } = {}) {
   });
 }
 
-test('/home frames Telegram as the room doorway and exposes council/inbox entry actions', async () => {
+test('/home frames Telegram as the continuity doorway and points advanced controls to help more', async () => {
   const sent = [];
   const sessionStore = makeSessionStore();
   const handler = makeHandler({ sent, sessionStore });
@@ -54,11 +54,13 @@ test('/home frames Telegram as the room doorway and exposes council/inbox entry 
   });
 
   assert.equal(handled, true);
-  assert.match(sent.at(-1).text, /Room Doorway/);
-  assert.match(sent.at(-1).text, /Telegram chat/);
-  assert.match(sent.at(-1).text, /\/council ask/);
-  assert.match(sent.at(-1).text, /\/inbox/);
-  assert.match(sent.at(-1).text, /\/companions/);
+  assert.match(sent.at(-1).text, /Continuity Home/);
+  assert.match(sent.at(-1).text, /목표·근거·규칙·작업 상태/);
+  assert.match(sent.at(-1).text, /\/brief/);
+  assert.match(sent.at(-1).text, /\/continue/);
+  assert.match(sent.at(-1).text, /\/sources/);
+  assert.match(sent.at(-1).text, /\/rules/);
+  assert.match(sent.at(-1).text, /\/help more/);
 });
 
 test('/companions describes a companion room roster with memory boundaries', async () => {

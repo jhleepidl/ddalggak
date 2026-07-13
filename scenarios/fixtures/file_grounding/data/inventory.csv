@@ -1,0 +1,5 @@
+id,name,available,already_owned,score
+item-a,Alpha,true,true,9
+item-b,Beta,false,false,10
+item-c,Gamma,true,false,8
+item-d,Delta,true,false,7
