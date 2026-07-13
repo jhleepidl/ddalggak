@@ -230,6 +230,72 @@ const NOISE_MODEL_TOKENS = new Set([
   'gpt-oss',
 ]);
 
+export const PROVIDER_DEFAULT_MODEL_SELECTOR = '@default';
+
+function parseCandidateList(value = '') {
+  const text = clean(value);
+  if (!text) return [];
+  if (text.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) return uniqueStrings(parsed.map(clean).filter(Boolean));
+    } catch {}
+  }
+  return uniqueStrings(text.split(/[\n,;]+/g).map(clean).filter(Boolean));
+}
+
+function configuredRouteModels(provider = '', env = process.env) {
+  const target = clean(provider).toLowerCase();
+  const out = [];
+  for (const prefix of ['FAST', 'SEARCH', 'WORK']) {
+    const routeProvider = clean(env[`DDALGGAK_${prefix}_PROVIDER`]).toLowerCase();
+    const routeModel = clean(env[`DDALGGAK_${prefix}_MODEL`]);
+    if (routeProvider === target && routeModel) out.push(routeModel);
+  }
+  return out;
+}
+
+export function configuredCliModelCandidates({ provider = '', env = process.env, includeProviderDefaults = true } = {}) {
+  const key = clean(provider).toLowerCase();
+  let rows = [];
+  if (key === 'codex') {
+    rows = [
+      ...parseCandidateList(env.CODEX_MODEL_CANDIDATES),
+      clean(env.CODEX_MODEL),
+      clean(env.CODEX_ASSIST_MODEL),
+      ...configuredRouteModels('codex', env),
+    ];
+  } else if (key === 'claude') {
+    const includeAliases = env.CLAUDE_MODEL_DISCOVERY_INCLUDE_ALIASES === undefined
+      ? true
+      : truthy(env.CLAUDE_MODEL_DISCOVERY_INCLUDE_ALIASES);
+    rows = [
+      ...(includeAliases ? ['sonnet', 'opus', 'haiku', 'fable'] : []),
+      ...parseCandidateList(env.CLAUDE_MODEL_CANDIDATES),
+      clean(env.CLAUDE_CLI_MODEL),
+      clean(env.CLAUDE_MODEL),
+      ...configuredRouteModels('claude', env),
+    ];
+  } else if (key === 'antigravity') {
+    rows = [
+      ...parseCandidateList(env.ANTIGRAVITY_MODEL_CANDIDATES),
+      clean(env.ANTIGRAVITY_MODEL),
+      clean(env.GOOGLE_AI_MODEL),
+      ...configuredRouteModels('antigravity', env),
+    ];
+  }
+  const candidates = uniqueStrings(rows.filter(Boolean));
+  if (candidates.length || !includeProviderDefaults) return candidates;
+  const allowDefault = env.MODEL_DISCOVERY_INCLUDE_PROVIDER_DEFAULT === undefined
+    ? true
+    : truthy(env.MODEL_DISCOVERY_INCLUDE_PROVIDER_DEFAULT);
+  return allowDefault ? [PROVIDER_DEFAULT_MODEL_SELECTOR] : [];
+}
+
+function isProviderDefaultSelector(model = '') {
+  return clean(model).toLowerCase() === PROVIDER_DEFAULT_MODEL_SELECTOR;
+}
+
 function normalizeDisplayModelCandidates(provider = '', raw = '') {
   const out = [];
   const key = clean(provider).toLowerCase();
@@ -239,7 +305,7 @@ function normalizeDisplayModelCandidates(provider = '', raw = '') {
     }
     for (const line of raw.split(/\r?\n/g)) {
       const alias = clean(line).toLowerCase().replace(/^[>*•+\-\d.)\s]+/, '').split(/\s+/)[0];
-      if (['best', 'opus', 'sonnet', 'haiku'].includes(alias)) out.push(alias);
+      if (['best', 'opus', 'sonnet', 'haiku', 'fable'].includes(alias)) out.push(alias);
     }
   }
   if (key === 'antigravity' || key === 'gemini') {
@@ -260,7 +326,7 @@ export function parseCliModelListOutput({ provider = '', text = '', maxModels = 
     if (!value || NOISE_MODEL_TOKENS.has(lower)) continue;
     if (provider === 'gemini' && !lower.startsWith('gemini-')) continue;
     if (provider === 'codex' && (lower.startsWith('gemini-') || lower.startsWith('claude-'))) continue;
-    if (provider === 'claude' && !lower.startsWith('claude-') && !['best', 'opus', 'sonnet', 'haiku'].includes(lower)) continue;
+    if (provider === 'claude' && !lower.startsWith('claude-') && !['best', 'opus', 'sonnet', 'haiku', 'fable'].includes(lower)) continue;
     if (provider === 'antigravity' && !lower.startsWith('gemini-')) continue;
     matches.push(value);
   }
@@ -279,7 +345,7 @@ function buildCliNode({ provider = '', runtime = '', model = '', source = '', co
   const canWriteWorkspace = isCodex || isClaude || isAntigravity;
   const node = {
     id,
-    label: model,
+    label: isProviderDefaultSelector(model) ? 'Provider default' : model,
     provider: p,
     runtime: rt,
     base_url: '',
@@ -311,7 +377,7 @@ function buildCliNode({ provider = '', runtime = '', model = '', source = '', co
         : (isAntigravity
           ? ['planner', 'builder', 'reviewer', 'researcher', 'code']
           : ['planner', 'researcher', 'reviewer', 'draft'])),
-    tags: [p, 'cli', 'discovered'],
+    tags: [p, 'cli', 'discovered', ...(isProviderDefaultSelector(model) ? ['provider-default'] : [])],
     cost_profile: catalog.cost_profile,
     latency_profile: catalog.latency_profile,
     quality_profile: catalog.quality_profile,
@@ -341,65 +407,142 @@ function buildCliNode({ provider = '', runtime = '', model = '', source = '', co
       quantization_level: catalog.quantization_level || '',
       discovered_from: source,
       discovery_command: command,
-      confidence: catalog.catalog_confidence === 'default_estimate' ? 'cli_model_list_name_only' : catalog.catalog_confidence,
+      confidence: isProviderDefaultSelector(model) ? 'provider_default_unresolved' : (catalog.catalog_confidence === 'default_estimate' ? 'cli_model_list_name_only' : catalog.catalog_confidence),
+      default_selector: isProviderDefaultSelector(model),
     },
   };
   return applyModelCatalogToNode(node);
 }
 
-async function runSlashModelCommand({ command = '', args = [], input = '/model\n/quit\n', timeoutMs = 12000, runner = runCommand, cwd = process.cwd(), env = {} } = {}) {
+async function runCliModelCommand({ command = '', args = [], input = undefined, timeoutMs = 12000, runner = runCommand, cwd = process.cwd(), env = {} } = {}) {
   const cmd = clean(command);
   if (!cmd) return { ok: false, stdout: '', stderr: 'missing command', exitCode: -1 };
   return await runner(cmd, args, {
     cwd,
     timeoutMs,
-    input,
-    maxStdoutChars: 400000,
-    maxStderrChars: 200000,
-    env,
+    ...(input === undefined ? {} : { input }),
+    maxStdoutChars: 1_000_000,
+    maxStderrChars: 300_000,
+    env: {
+      CI: '1',
+      NO_COLOR: '1',
+      FORCE_COLOR: '0',
+      ...env,
+    },
   });
 }
 
+function nodesFromCandidates({ provider = '', runtime = '', candidates = [], source = '', command = '' } = {}) {
+  return uniqueStrings(candidates).map((model) => buildCliNode({ provider, runtime, model, source, command }));
+}
+
+function discoveryFailureText(attempts = [], fallback = '') {
+  const messages = attempts
+    .map((row) => clean(row?.stderr || row?.stdout || row?.error))
+    .filter(Boolean)
+    .map((row) => row.slice(0, 300));
+  return clean(messages.join(' | ') || fallback || 'no model candidates discovered').slice(0, 900);
+}
+
 export async function discoverCodexCliModelNodes({ command = process.env.CODEX_CLI_COMMAND || 'codex', args = splitEnvArgs(process.env.CODEX_MODEL_DISCOVERY_ARGS || ''), timeoutMs = Number(process.env.CLI_MODEL_DISCOVERY_TIMEOUT_MS || 12000) || 12000, maxModels = 80, runner = runCommand } = {}) {
-  const input = process.env.CODEX_MODEL_DISCOVERY_INPUT || '/model\n/quit\n';
-  const result = await runSlashModelCommand({ command, args, input, timeoutMs, runner });
+  const attempts = [];
+  const commandArgs = args.length ? args : ['debug', 'models'];
+  const result = await runCliModelCommand({ command, args: commandArgs, timeoutMs, runner });
+  attempts.push(result);
   const text = `${result.stdout || ''}\n${result.stderr || ''}`;
-  const models = parseCliModelListOutput({ provider: 'codex', text, maxModels });
-  if (!models.length) {
-    return { ok: false, runtime: 'codex_cli', nodes: [], error: clean(result.stderr || result.stdout || 'no models parsed from Codex CLI /model output').slice(0, 600), exitCode: result.exitCode, discovery_source: 'codex_cli_slash_model' };
+  const machineModels = parseCliModelListOutput({ provider: 'codex', text, maxModels });
+  const configured = configuredCliModelCandidates({ provider: 'codex', includeProviderDefaults: false });
+  const candidates = uniqueStrings([...machineModels, ...configured], { max: maxModels });
+  const finalCandidates = candidates.length ? candidates : configuredCliModelCandidates({ provider: 'codex' });
+  if (!finalCandidates.length) {
+    return {
+      ok: false,
+      runtime: 'codex_cli',
+      nodes: [],
+      error: discoveryFailureText(attempts, 'codex debug models returned no model candidates'),
+      exitCode: result.exitCode,
+      discovery_source: 'codex_debug_models',
+      discovery_attempts: [{ args: commandArgs, ok: result.ok === true, exit_code: result.exitCode }],
+    };
   }
-  const nodes = models.map((model) => buildCliNode({ provider: 'codex', runtime: 'codex_cli', model, source: 'codex_cli_slash_model', command }));
-  return { ok: true, runtime: 'codex_cli', count: nodes.length, nodes, raw_model_count: models.length, discovery_source: 'codex_cli_slash_model' };
+  const source = machineModels.length
+    ? 'codex_debug_models'
+    : (configured.length ? 'codex_configured_candidates' : 'codex_provider_default_fallback');
+  const warning = machineModels.length ? '' : discoveryFailureText(attempts, 'Codex model catalog unavailable; using configured/default candidates.');
+  const nodes = nodesFromCandidates({ provider: 'codex', runtime: 'codex_cli', candidates: finalCandidates, source, command });
+  return {
+    ok: true,
+    runtime: 'codex_cli',
+    count: nodes.length,
+    nodes,
+    raw_model_count: machineModels.length,
+    warning,
+    discovery_source: source,
+    discovery_attempts: [{ args: commandArgs, ok: result.ok === true, exit_code: result.exitCode }],
+  };
 }
 
-
-
-export async function discoverClaudeCliModelNodes({ command = process.env.CLAUDE_CLI_COMMAND || 'claude', args = splitEnvArgs(process.env.CLAUDE_MODEL_DISCOVERY_ARGS || ''), timeoutMs = Number(process.env.CLI_MODEL_DISCOVERY_TIMEOUT_MS || 12000) || 12000, maxModels = 80, runner = runCommand } = {}) {
-  const input = process.env.CLAUDE_MODEL_DISCOVERY_INPUT || '/model\n/quit\n';
-  const result = await runSlashModelCommand({ command, args, input, timeoutMs, runner });
-  const text = `${result.stdout || ''}\n${result.stderr || ''}`;
-  const models = parseCliModelListOutput({ provider: 'claude', text, maxModels });
-  if (!models.length) {
-    return { ok: false, runtime: 'claude_cli', nodes: [], error: clean(result.stderr || result.stdout || 'no models parsed from Claude CLI /model output').slice(0, 600), exitCode: result.exitCode, discovery_source: 'claude_cli_slash_model' };
+export async function discoverClaudeCliModelNodes({ command = process.env.CLAUDE_CLI_COMMAND || 'claude', maxModels = 80 } = {}) {
+  // Claude Code exposes stable model aliases through --model but does not expose a
+  // documented machine-readable "list models" command. Keep discovery non-billable:
+  // seed official aliases plus operator-configured exact model IDs, then let the live
+  // benchmark validate account availability and record the provider-resolved model.
+  const candidates = configuredCliModelCandidates({ provider: 'claude' }).slice(0, maxModels);
+  if (!candidates.length) {
+    return {
+      ok: false,
+      runtime: 'claude_cli',
+      nodes: [],
+      error: 'No Claude model candidates configured and provider-default fallback disabled.',
+      discovery_source: 'claude_cli_alias_catalog',
+    };
   }
-  const nodes = models.map((model) => buildCliNode({ provider: 'claude', runtime: 'claude_cli', model, source: 'claude_cli_slash_model', command }));
-  return { ok: true, runtime: 'claude_cli', count: nodes.length, nodes, raw_model_count: models.length, discovery_source: 'claude_cli_slash_model' };
+  const nodes = nodesFromCandidates({ provider: 'claude', runtime: 'claude_cli', candidates, source: 'claude_cli_alias_catalog', command });
+  return {
+    ok: true,
+    runtime: 'claude_cli',
+    count: nodes.length,
+    nodes,
+    raw_model_count: candidates.length,
+    discovery_source: 'claude_cli_alias_catalog',
+  };
 }
 
-export async function discoverAntigravityCliModelNodes({ command = process.env.ANTIGRAVITY_CLI_COMMAND || process.env.GOOGLE_AI_CLI_COMMAND || 'agy', args = splitEnvArgs(process.env.ANTIGRAVITY_MODEL_DISCOVERY_ARGS || ''), timeoutMs = Number(process.env.CLI_MODEL_DISCOVERY_TIMEOUT_MS || 12000) || 12000, maxModels = 80, runner = runCommand } = {}) {
-  const input = process.env.ANTIGRAVITY_MODEL_DISCOVERY_INPUT || '/model\n/quit\n';
-  const result = await runSlashModelCommand({ command, args, input, timeoutMs, runner });
-  const text = `${result.stdout || ''}\n${result.stderr || ''}`;
-  const models = parseCliModelListOutput({ provider: 'antigravity', text, maxModels });
-  if (!models.length) {
-    return { ok: false, runtime: 'antigravity_cli', nodes: [], error: clean(result.stderr || result.stdout || 'no models parsed from Antigravity CLI /model output').slice(0, 600), exitCode: result.exitCode, discovery_source: 'antigravity_cli_slash_model' };
+export async function discoverAntigravityCliModelNodes({ command = process.env.ANTIGRAVITY_CLI_COMMAND || process.env.GOOGLE_AI_CLI_COMMAND || 'agy', maxModels = 80 } = {}) {
+  // Antigravity versions do not consistently expose a non-interactive list command.
+  // Use explicit candidates when supplied; otherwise retain a provider-default
+  // benchmark selector so actual CLI scenarios can still validate the installed runtime.
+  const configured = configuredCliModelCandidates({ provider: 'antigravity' }).slice(0, maxModels);
+  if (!configured.length) {
+    return {
+      ok: false,
+      runtime: 'antigravity_cli',
+      nodes: [],
+      error: 'No Antigravity model candidates configured and provider-default fallback disabled.',
+      discovery_source: 'antigravity_configured_candidates',
+    };
   }
-  const nodes = models.map((model) => buildCliNode({ provider: 'antigravity', runtime: 'antigravity_cli', model, source: 'antigravity_cli_slash_model', command }));
-  return { ok: true, runtime: 'antigravity_cli', count: nodes.length, nodes, raw_model_count: models.length, discovery_source: 'antigravity_cli_slash_model' };
+  const source = configured.some(isProviderDefaultSelector)
+    ? 'antigravity_provider_default_fallback'
+    : 'antigravity_configured_candidates';
+  const warning = configured.some(isProviderDefaultSelector)
+    ? 'Named Antigravity models were not configured; benchmark will exercise the provider default. Set ANTIGRAVITY_MODEL_CANDIDATES to test exact model IDs.'
+    : '';
+  const nodes = nodesFromCandidates({ provider: 'antigravity', runtime: 'antigravity_cli', candidates: configured, source, command });
+  return {
+    ok: true,
+    runtime: 'antigravity_cli',
+    count: nodes.length,
+    nodes,
+    raw_model_count: configured.filter((item) => !isProviderDefaultSelector(item)).length,
+    warning,
+    discovery_source: source,
+  };
 }
+
 export async function discoverGeminiCliModelNodes({ command = process.env.GEMINI_CLI_COMMAND || 'gemini', args = splitEnvArgs(process.env.GEMINI_MODEL_DISCOVERY_ARGS || ''), timeoutMs = Number(process.env.CLI_MODEL_DISCOVERY_TIMEOUT_MS || 12000) || 12000, maxModels = 80, runner = runCommand } = {}) {
   const input = process.env.GEMINI_MODEL_DISCOVERY_INPUT || '/model\n/quit\n';
-  const result = await runSlashModelCommand({ command, args, input, timeoutMs, runner });
+  const result = await runCliModelCommand({ command, args, input, timeoutMs, runner });
   const text = `${result.stdout || ''}\n${result.stderr || ''}`;
   const models = parseCliModelListOutput({ provider: 'gemini', text, maxModels });
   if (!models.length) {

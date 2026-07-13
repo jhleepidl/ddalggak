@@ -36,6 +36,26 @@ for (const row of Array.isArray(capabilities.items) ? capabilities.items : []) {
   console.log(`- ${row.provider}: ${row.cli_available ? 'available' : 'unavailable'} · ${row.cli_version || '-'}`);
 }
 console.log('');
+console.log('Discovered benchmark models:');
+const nodes = Array.isArray(catalog.nodes) ? catalog.nodes : [];
+if (!nodes.length) console.log('- none');
+for (const node of nodes) {
+  const source = node?.model_catalog?.discovered_from || '-';
+  const label = node?.model === '@default' ? 'provider default' : node?.model;
+  console.log(`- ${node?.provider}/${label} · source=${source} · cli=${node?.discovery_runtime?.cli_version || '-'}`);
+}
+
+const discoveryRows = Array.isArray(catalog.discovery_results) ? catalog.discovery_results : [];
+const notices = discoveryRows.filter((row) => row?.ok !== true || row?.warning);
+if (notices.length) {
+  console.log('');
+  console.log('Discovery notices:');
+  for (const row of notices) {
+    console.log(`- ${row.label}: ${row.ok === true ? 'fallback' : 'failed'} · ${row.warning || row.error || '-'}`);
+  }
+}
+
+console.log('');
 console.log('Pending model benchmarks:');
 if (!pending.length) console.log('- none');
 for (const row of pending) {

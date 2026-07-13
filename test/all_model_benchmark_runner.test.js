@@ -41,6 +41,26 @@ test('all-model plan maps provider overrides to provider-compatible variants', (
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test('provider-default selector stays distinct in the matrix but omits the CLI model override', () => {
+  const f = fixture();
+  try {
+    const defaultCatalog = path.join(f.root, 'default-models.json');
+    const defaultRegistry = path.join(f.root, 'default-registry.json');
+    writeJson(defaultCatalog, { nodes: [
+      { provider: 'antigravity', model: '@default', model_catalog: { default_selector: true }, discovery_runtime: { cli_available: true, cli_version: 'agy 1' } },
+    ] });
+    writeJson(defaultRegistry, { entries: {
+      'antigravity:@default': { provider: 'antigravity', model: '@default', availability: 'available', benchmark_status: 'unbenchmarked' },
+    } });
+    const models = listDiscoveredBenchmarkModels({ catalogPath: defaultCatalog, registryPath: defaultRegistry });
+    const plan = buildAllModelBenchmarkPlan({ models, scenarioFiles: [f.scenario], repeat: 1 });
+    assert.equal(plan.length, 1);
+    assert.equal(plan[0].model, '@default');
+    assert.equal(plan[0].execution_model, '');
+    assert.equal(plan[0].harness_variant_id, 'task_worker.antigravity.default.v1');
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test('pending-only filtering uses model lifecycle registry', () => {
   const f = fixture();
   try {

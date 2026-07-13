@@ -35,7 +35,7 @@ function boolArg(name, fallback = false) {
 }
 
 function outputPath() {
-  const out = arg('output', '');
+  const out = arg('output', '') || process.env.MODEL_NODES_DISCOVERED_CONFIG || process.env.MODEL_NODES_DISCOVERED_PATH || '';
   if (out) return path.resolve(out);
   return path.resolve(process.cwd(), 'config', 'model_nodes.discovered.json');
 }

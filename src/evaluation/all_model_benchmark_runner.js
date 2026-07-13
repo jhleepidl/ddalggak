@@ -26,6 +26,7 @@ function caseId(row = {}) {
   return sha256([row.provider, row.model, row.scenario_id, row.matrix_index, row.harness_variant_id, row.reasoning_effort, row.repeat].join('|')).slice(0, 16);
 }
 function modelKey(provider = '', model = '') { return `${clean(provider).toLowerCase()}:${clean(model).toLowerCase()}`; }
+function executionModel(model = '') { return clean(model).toLowerCase() === '@default' ? '' : clean(model); }
 function tsvCell(value = '') { return String(value ?? '').replace(/[\t\r\n]+/g, ' '); }
 
 export function listDiscoveredBenchmarkModels({
@@ -63,6 +64,7 @@ export function listDiscoveredBenchmarkModels({
       benchmark_status: clean(lifecycle.benchmark_status) || 'unknown',
       cli_version: clean(node?.discovery_runtime?.cli_version || lifecycle.discovered_cli_version) || null,
       discovery_source: clean(node?.model_catalog?.discovered_from || lifecycle.discovery_source) || null,
+      default_selector: node?.model_catalog?.default_selector === true || model.toLowerCase() === '@default',
     });
   }
 
@@ -84,6 +86,7 @@ export function listDiscoveredBenchmarkModels({
       benchmark_status: clean(lifecycle.benchmark_status) || 'unknown',
       cli_version: clean(lifecycle.discovered_cli_version) || null,
       discovery_source: clean(lifecycle.discovery_source) || null,
+      default_selector: model.toLowerCase() === '@default',
     });
   }
 
@@ -108,19 +111,21 @@ export function buildAllModelBenchmarkPlan({ models = [], scenarioFiles = [], re
   for (const scenarioFile of scenarioFiles) {
     const scenario = loadLiveScenario(scenarioFile);
     for (const modelRow of models) {
-      const cells = normalizeScenarioMatrix(scenario, { provider: modelRow.provider, model: modelRow.model, repeat: 1 });
+      const runnableModel = modelRow.default_selector === true ? '' : executionModel(modelRow.model);
+      const cells = normalizeScenarioMatrix(scenario, { provider: modelRow.provider, model: runnableModel, repeat: 1 });
       cells.forEach((cell, matrixIndex) => {
         const variant = resolveHarnessVariant({
           registry,
           variantId: cell.harness_variant_id,
           provider: cell.provider,
           role: cell.role,
-          model: modelRow.model,
+          model: runnableModel,
           reasoningEffort: cell.reasoning_effort,
         });
         const row = {
           provider: modelRow.provider,
           model: modelRow.model,
+          execution_model: runnableModel,
           cli_version: modelRow.cli_version || null,
           benchmark_status: modelRow.benchmark_status || 'unknown',
           scenario_id: scenario.id,
@@ -272,7 +277,7 @@ export async function runAllModelBenchmark({
         scenarioFiles: [row.scenario_file],
         outputDir: caseDir,
         provider: row.provider,
-        model: row.model,
+        model: row.execution_model ?? executionModel(row.model),
         reasoningEffort: row.reasoning_effort,
         variantId: row.harness_variant_id,
         repeat: row.repeat,

@@ -247,6 +247,7 @@ export async function discoverConfiguredModelCatalog({
       completed_at: entry.completed_at,
       count: entry.count,
       error: entry.error,
+      warning: clean(entry.result?.warning || ''),
       discovery_source: entry.result?.discovery_source || entry.result?.runtime || entry.label,
     })),
     nodes: decoratedNodes,

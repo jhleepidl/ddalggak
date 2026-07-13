@@ -36,6 +36,10 @@ const ENV_KEYS = [
   'OLLAMA_DISCOVERY_ENABLED',
   'OPENAI_COMPATIBLE_DISCOVERY_ENABLED',
   'MODEL_BENCHMARK_MIN_RUNS',
+  'CLAUDE_MODEL_CANDIDATES',
+  'CLAUDE_MODEL_DISCOVERY_INCLUDE_ALIASES',
+  'ANTIGRAVITY_MODEL_CANDIDATES',
+  'MODEL_DISCOVERY_INCLUDE_PROVIDER_DEFAULT',
 ];
 
 function withTempModelEnv(fn) {
@@ -61,28 +65,39 @@ function withTempModelEnv(fn) {
   return Promise.resolve().then(() => fn(dir)).finally(cleanup);
 }
 
-test('Claude and Antigravity model discovery parse provider-native model lists', async () => {
-  const runner = async (command, args, options) => {
-    assert.equal(options.input.includes('/model'), true);
-    if (command === 'claude') return { ok: true, stdout: 'Models\nclaude-opus-4-8\nclaude-sonnet-5\n', stderr: '', exitCode: 0 };
-    if (command === 'agy') return { ok: true, stdout: 'Models\ngemini-3.5-flash\ngemini-3.1-pro\n', stderr: '', exitCode: 0 };
-    return { ok: false, stdout: '', stderr: 'unexpected', exitCode: 1 };
+test('Claude aliases and Antigravity configured/default candidates are non-interactive', async () => {
+  const old = {
+    CLAUDE_MODEL_CANDIDATES: process.env.CLAUDE_MODEL_CANDIDATES,
+    CLAUDE_MODEL_DISCOVERY_INCLUDE_ALIASES: process.env.CLAUDE_MODEL_DISCOVERY_INCLUDE_ALIASES,
+    ANTIGRAVITY_MODEL_CANDIDATES: process.env.ANTIGRAVITY_MODEL_CANDIDATES,
+    MODEL_DISCOVERY_INCLUDE_PROVIDER_DEFAULT: process.env.MODEL_DISCOVERY_INCLUDE_PROVIDER_DEFAULT,
   };
-  assert.deepEqual(parseCliModelListOutput({ provider: 'claude', text: 'Claude Opus 4.8\nsonnet\ngpt-5.6-sol' }), ['claude-opus-4-8', 'sonnet']);
-  assert.deepEqual(parseCliModelListOutput({ provider: 'antigravity', text: 'Gemini 3.5 Flash\ngpt-5.6-sol' }), ['gemini-3.5-flash']);
-  const claude = await discoverClaudeCliModelNodes({ runner });
-  const antigravity = await discoverAntigravityCliModelNodes({ runner });
-  assert.equal(claude.ok, true);
-  assert.equal(claude.nodes[0].provider, 'claude');
-  assert.equal(antigravity.ok, true);
-  assert.equal(antigravity.nodes[0].provider, 'antigravity');
+  try {
+    process.env.CLAUDE_MODEL_DISCOVERY_INCLUDE_ALIASES = 'true';
+    process.env.CLAUDE_MODEL_CANDIDATES = 'claude-opus-4-8,claude-sonnet-5';
+    process.env.ANTIGRAVITY_MODEL_CANDIDATES = 'gemini-3.5-flash,gemini-3.1-pro';
+    process.env.MODEL_DISCOVERY_INCLUDE_PROVIDER_DEFAULT = 'true';
+    assert.deepEqual(parseCliModelListOutput({ provider: 'claude', text: 'Claude Opus 4.8\nsonnet\ngpt-5.6-sol' }), ['claude-opus-4-8', 'sonnet']);
+    assert.deepEqual(parseCliModelListOutput({ provider: 'antigravity', text: 'Gemini 3.5 Flash\ngpt-5.6-sol' }), ['gemini-3.5-flash']);
+    const claude = await discoverClaudeCliModelNodes();
+    const antigravity = await discoverAntigravityCliModelNodes();
+    assert.equal(claude.ok, true);
+    assert.equal(claude.nodes.some((node) => node.model === 'sonnet'), true);
+    assert.equal(claude.nodes.some((node) => node.model === 'claude-opus-4-8'), true);
+    assert.equal(antigravity.ok, true);
+    assert.equal(antigravity.nodes.some((node) => node.model === 'gemini-3.5-flash'), true);
+  } finally {
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
 });
 
 test('newly discovered CLI models become cached supported models and benchmark candidates', async () => {
   await withTempModelEnv(async () => {
     const runner = async (command, args, options = {}) => {
       if (args?.includes('--version')) return { ok: true, stdout: 'codex-cli 0.144.0\n', stderr: '', exitCode: 0 };
-      if (options.input?.includes('/model')) return { ok: true, stdout: 'gpt-5.6-sol\ngpt-5.6-terra\n', stderr: '', exitCode: 0 };
+      if (args?.[0] === 'debug' && args?.[1] === 'models') return { ok: true, stdout: JSON.stringify({ models: [{ slug: 'gpt-5.6-sol' }, { slug: 'gpt-5.6-terra' }] }), stderr: '', exitCode: 0 };
       return { ok: false, stdout: '', stderr: 'unexpected', exitCode: 1 };
     };
     const first = await refreshModelCatalog({ force: true, reason: 'test_new_model', runner, logger: { log() {}, error() {} } });
@@ -103,7 +118,7 @@ test('live evaluation observations advance a discovered model from pending to ev
     process.env.MODEL_BENCHMARK_MIN_RUNS = '3';
     const runner = async (command, args, options = {}) => {
       if (args?.includes('--version')) return { ok: true, stdout: 'codex-cli 0.144.0\n', stderr: '', exitCode: 0 };
-      if (options.input?.includes('/model')) return { ok: true, stdout: 'gpt-5.6-sol\n', stderr: '', exitCode: 0 };
+      if (args?.[0] === 'debug' && args?.[1] === 'models') return { ok: true, stdout: JSON.stringify({ models: [{ slug: 'gpt-5.6-sol' }] }), stderr: '', exitCode: 0 };
       return { ok: false, stdout: '', stderr: 'unexpected', exitCode: 1 };
     };
     await refreshModelCatalog({ force: true, reason: 'test_benchmark', runner, logger: { log() {}, error() {} } });
@@ -155,7 +170,7 @@ test('idle scheduler refreshes early when the CLI version changes', async () => 
     }));
     const runner = async (command, args, options = {}) => {
       if (args?.includes('--version')) return { ok: true, stdout: 'codex-cli 0.144.0\n', stderr: '', exitCode: 0 };
-      if (options.input?.includes('/model')) return { ok: true, stdout: 'gpt-5.6-sol\n', stderr: '', exitCode: 0 };
+      if (args?.[0] === 'debug' && args?.[1] === 'models') return { ok: true, stdout: JSON.stringify({ models: [{ slug: 'gpt-5.6-sol' }] }), stderr: '', exitCode: 0 };
       return { ok: false, stdout: '', stderr: 'unexpected', exitCode: 1 };
     };
     const scheduler = startModelCatalogRefreshScheduler({
