@@ -26,15 +26,56 @@
     }
   ],
   "assertions": [
-    { "id": "rule_saved", "type": "room_rule_count", "step_id": "set_rule", "min": 1 },
-    { "id": "solo_profile_saved", "type": "collaboration_profile_is", "step_id": "set_collaboration", "value": "solo" },
-    { "id": "two_user_turns_completed", "type": "multiturn_message_count", "min": 2 },
-    { "id": "provider_cli_called_for_turns", "type": "cli_call_count", "min": 2, "quality_metric": false },
-    { "id": "room_rule_visible_in_followup", "type": "response_regex", "step_id": "followup_request", "pattern": "근거\\s*:.*다음 확인\\s*:", "flags": "is" }
+    {
+      "id": "rule_saved",
+      "type": "room_rule_count",
+      "step_id": "set_rule",
+      "min": 1
+    },
+    {
+      "id": "solo_profile_saved",
+      "type": "collaboration_profile_is",
+      "step_id": "set_collaboration",
+      "value": "solo"
+    },
+    {
+      "id": "two_user_turns_completed",
+      "type": "multiturn_message_count",
+      "min": 2
+    },
+    {
+      "id": "provider_cli_succeeded_for_turns",
+      "type": "cli_success_count",
+      "min": 2,
+      "quality_metric": false
+    },
+    {
+      "id": "room_rule_visible_in_followup",
+      "type": "response_regex",
+      "step_id": "followup_request",
+      "pattern": "근거\\s*:.*다음 확인\\s*:",
+      "flags": "is"
+    },
+    {
+      "id": "provider_cli_has_no_failures",
+      "type": "cli_failure_count",
+      "min": 0,
+      "max": 0,
+      "quality_metric": false
+    }
   ],
   "semantic_rubric": [
-    { "id": "goal_continuity", "description": "두 번째 답변이 첫 번째 turn의 회의 시간 단축과 결정 품질 유지 목표를 자연스럽게 이어간다." },
-    { "id": "room_rule_uptake", "description": "답변 형식이 Room에 저장된 결론 우선, 근거, 다음 확인 규칙을 따른다." },
-    { "id": "experiment_quality", "description": "제안한 운영 실험이 작고 측정 가능하며 다음 주에 실행 가능하다." }
+    {
+      "id": "goal_continuity",
+      "description": "두 번째 답변이 첫 번째 turn의 회의 시간 단축과 결정 품질 유지 목표를 자연스럽게 이어간다."
+    },
+    {
+      "id": "room_rule_uptake",
+      "description": "답변 형식이 Room에 저장된 결론 우선, 근거, 다음 확인 규칙을 따른다."
+    },
+    {
+      "id": "experiment_quality",
+      "description": "제안한 운영 실험이 작고 측정 가능하며 다음 주에 실행 가능하다."
+    }
   ]
 }

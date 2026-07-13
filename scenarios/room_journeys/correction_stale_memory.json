@@ -43,9 +43,16 @@
       "pattern": "모바일\\s*앱을\\s*(먼저|우선).*구현"
     },
     {
-      "id": "provider_cli_called",
-      "type": "cli_call_count",
+      "id": "provider_cli_succeeded",
+      "type": "cli_success_count",
       "min": 2,
+      "quality_metric": false
+    },
+    {
+      "id": "provider_cli_has_no_failures",
+      "type": "cli_failure_count",
+      "min": 0,
+      "max": 0,
       "quality_metric": false
     }
   ],

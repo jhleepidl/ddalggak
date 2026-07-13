@@ -42,7 +42,7 @@
     },
     {
       "id": "solo_one_model",
-      "type": "distinct_model_count",
+      "type": "distinct_model_node_count",
       "arms": [
         "solo"
       ],
@@ -52,7 +52,7 @@
     },
     {
       "id": "parallel_multiple_roles",
-      "type": "provider_role_count",
+      "type": "successful_provider_role_count",
       "arms": [
         "parallel_ideation"
       ],
@@ -61,7 +61,7 @@
     },
     {
       "id": "parallel_distinct_models",
-      "type": "distinct_model_count",
+      "type": "distinct_model_node_count",
       "arms": [
         "parallel_ideation"
       ],
@@ -84,6 +84,19 @@
         "parallel_ideation"
       ],
       "value": "parallel_ideation",
+      "quality_metric": false
+    },
+    {
+      "id": "provider_cli_has_no_failures",
+      "type": "cli_failure_count",
+      "min": 0,
+      "max": 0,
+      "quality_metric": false
+    },
+    {
+      "id": "actual_cli_calls_match_model_role_map",
+      "type": "model_role_map_alignment",
+      "min": 1,
       "quality_metric": false
     }
   ],

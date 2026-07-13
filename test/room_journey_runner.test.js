@@ -55,7 +55,11 @@ class FakeJourneyTransport {
     this.turn += 1;
     const runId = `run-${this.turn}`;
     this.models.forEach((model, index) => {
-      this.events.push(runtimeEvent('run.agent_start', { provider: index % 2 ? 'claude' : 'codex', model, model_role: index === 0 ? 'builder' : 'reviewer' }, runId));
+      const provider = index % 2 ? 'claude' : 'codex';
+      const modelRole = index === 0 ? 'code_executor' : 'verifier_critic';
+      const agentId = index === 0 ? 'builder' : `reviewer_${index}`;
+      this.events.push(runtimeEvent('run.agent_start', { agent_id: agentId, provider, model, model_role: modelRole, execution_channel: 'local_cli' }, runId));
+      this.events.push(runtimeEvent('run.agent_finish', { agent_id: agentId, provider, model, model_role: modelRole, execution_channel: 'local_cli', output_chars: 32 }, runId));
     });
     if (this.turn > 1) {
       appendRoomJourneyTrace({ chatId: this.chatId, traceRoot: this.traceRoot, eventType: 'context.projection_compiled', payload: { approved_memory_ids: ['mem-1'], selected_atom_ids: ['goal-1'] } });
@@ -186,6 +190,7 @@ test('executed journey records memory lifecycle, projection, runtime events, and
         { id: 'commit', type: 'memory_commit_count', min: 1 },
         { id: 'projected', type: 'approved_memory_projected' },
         { id: 'completed', type: 'step_ok', step_id: 'reuse' },
+        { id: 'role_map', type: 'model_role_map_alignment', min: 1, quality_metric: false },
       ],
       semantic_rubric: [{ id: 'uptake', description: 'Uses approved preference' }],
     };
@@ -200,28 +205,73 @@ test('executed journey records memory lifecycle, projection, runtime events, and
         chatId: 'chat-1',
         judgeProvider: 'claude',
         judgeExecutor: async () => ({ ok: true, stdout: JSON.stringify({ passed: true, score: 0.92, summary: 'good', rubric: [], findings: [] }) }),
+        modelRoleMap: { assignments: { code_executor: { provider: 'codex', model: 'gpt-5.5' } } },
       },
     });
     assert.equal(result.summary.status, 'passed');
     assert.equal(result.summary.metrics.semantic_score, 0.92);
     assert.equal(result.summary.metrics.semantic_judge_present, true);
+    assert.equal(result.summary.metrics.execution_status, 'valid_execution');
+    assert.equal(result.summary.trace_contract.raw_provider_prompts_saved, true);
+    assert.equal(result.summary.trace_contract.sensitive_debug_artifacts_present, true);
     assert.ok(result.summary.assertions.find((row) => row.id === 'projected')?.passed);
     assert.ok(fs.existsSync(path.join(result.runDir, 'memory_commits.jsonl')));
     assert.ok(fs.existsSync(path.join(result.runDir, 'context_projections.jsonl')));
     assert.ok(fs.existsSync(path.join(result.runDir, 'provider_invocations.jsonl')));
+    const cliRows = fs.readFileSync(path.join(result.runDir, 'cli_calls.jsonl'), 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+    assert.ok(cliRows.length >= 2);
+    assert.ok(cliRows.every((row) => row.status === 'succeeded'));
+    assert.ok(result.summary.assertions.find((row) => row.id === 'role_map')?.passed);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
 test('portfolio promotion requires measured uplift and optional semantic evidence', () => {
-  const baseline = { quality_score: 0.70, required_fail: 0, duration_ms: 1000, cost_usd: 1, semantic_judge_present: true };
-  const challenger = { quality_score: 0.84, required_fail: 0, duration_ms: 1800, cost_usd: 2.2, semantic_judge_present: true };
+  const baseline = { quality_score: 0.70, required_fail: 0, duration_ms: 1000, cost_usd: 1, semantic_judge_present: true, execution_status: 'valid_execution' };
+  const challenger = { quality_score: 0.84, required_fail: 0, duration_ms: 1800, cost_usd: 2.2, semantic_judge_present: true, execution_status: 'valid_execution' };
   const promoted = evaluatePortfolioPromotion({ baseline, challenger, gate: { min_quality_uplift: 0.08, max_cost_ratio: 3, max_latency_ratio: 3, require_semantic_evidence: true } });
   assert.equal(promoted.promote, true);
   const noJudge = evaluatePortfolioPromotion({ baseline: { ...baseline, semantic_judge_present: false }, challenger, gate: { min_quality_uplift: 0.08, require_semantic_evidence: true } });
   assert.equal(noJudge.promote, false);
   assert.ok(noJudge.reasons.includes('semantic_evidence_missing'));
+});
+
+test('portfolio comparison refuses to score faster failures as quality or latency wins', () => {
+  const result = evaluatePortfolioPromotion({
+    baseline: { quality_score: 0.2, required_fail: 2, duration_ms: 4000, semantic_judge_present: true, execution_status: 'invalid_execution' },
+    challenger: { quality_score: 0.3, required_fail: 1, duration_ms: 1000, semantic_judge_present: true, execution_status: 'invalid_execution' },
+    gate: { min_quality_uplift: 0.05 },
+  });
+  assert.equal(result.status, 'invalid_execution');
+  assert.equal(result.promote, false);
+  assert.equal(result.quality_uplift, null);
+  assert.equal(result.latency_ratio, null);
+  assert.ok(result.reasons.includes('baseline_invalid_execution'));
+  assert.ok(result.reasons.includes('challenger_invalid_execution'));
+});
+
+test('negative response assertions fail when the requested turn failed or returned an empty response', async () => {
+  const root = makeTestTempDir('room-journey-empty-response-');
+  try {
+    const scenario = {
+      id: 'empty_negative_case',
+      steps: [{ id: 'request', action: 'send_message', text: 'hello' }],
+      assertions: [{ id: 'not_stale', type: 'response_not_regex', step_id: 'request', pattern: 'stale' }],
+    };
+    const transport = {
+      chatId: 'empty-room',
+      events: [runtimeEvent('run.agent_start', { provider: 'codex', model: 'gpt-test', execution_channel: 'local_cli' })],
+      async initialize() {},
+      async sendMessage() { return { ok: false, output: '' }; },
+    };
+    const result = await runRoomJourneyScenario({ scenario, outputRoot: root, execute: true, transport });
+    assert.equal(result.summary.status, 'failed');
+    assert.equal(result.summary.assertions[0].passed, false);
+    assert.equal(result.summary.assertions[0].observed.eligible, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('suite compares isolated solo and multi-model arms without counting architecture assertions as quality', async () => {
@@ -238,7 +288,7 @@ test('suite compares isolated solo and multi-model arms without counting archite
       steps: [{ id: 'request', action: 'send_message', text: 'artifact' }],
       assertions: [
         { id: 'done', type: 'step_ok', step_id: 'request' },
-        { id: 'multi', type: 'distinct_model_count', arms: ['builder_reviewer'], min: 2, quality_metric: false },
+        { id: 'multi', type: 'distinct_model_node_count', arms: ['builder_reviewer'], min: 2, quality_metric: false },
       ],
     }), 'utf8');
     const summary = await runRoomJourneySuite({

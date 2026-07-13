@@ -74,11 +74,12 @@ function roleRankForAsk(role = '', taskText = '') {
   return score;
 }
 
-function rolesForRoomWorkMode({ roomPackage = {}, workMode = 'ask', taskText = '' } = {}) {
+function rolesForRoomWorkMode({ roomPackage = {}, workMode = 'ask', taskText = '', collaborationProfile = null } = {}) {
   const pkg = asObject(roomPackage);
   const library = buildRoomComponentsFromPackage(pkg);
   const packageRoles = unique(asArray(library.agents).map((agent) => agent.local_id || agent.role), 24);
   const domain = cleanId(pkg.domain_label || library.domain_label || 'general_workbench');
+  const collaborationId = cleanId(asObject(collaborationProfile).id || asObject(collaborationProfile).profile_id || '');
 
   if (workMode === 'ask') {
     const ranked = packageRoles
@@ -89,6 +90,8 @@ function rolesForRoomWorkMode({ roomPackage = {}, workMode = 'ask', taskText = '
   }
 
   if (workMode === 'team_task') {
+    if (collaborationId === 'builder_reviewer') return ['builder', 'reviewer', 'synthesizer'];
+    if (['parallel_ideation', 'evidence_panel'].includes(collaborationId)) return ['researcher', 'reviewer', 'synthesizer'];
     if (domain === 'creative_writing') return unique(['story_planner', 'draft_writer', 'canon_reviewer', 'continuity_checker', 'revision_synthesizer'].filter((role) => packageRoles.includes(role) || packageRoles.length === 0), 8);
     if (domain === 'research_paper') return unique(['researcher', 'novelty_critic', 'method_reviewer', 'synthesizer', 'reviewer'].filter((role) => packageRoles.includes(role) || packageRoles.length === 0), 8);
     if (domain === 'code_review') return unique(['implementation_planner', 'builder', 'reviewer', 'verifier', 'delivery_synthesizer'].filter((role) => packageRoles.includes(role) || packageRoles.length === 0), 8);
@@ -97,6 +100,8 @@ function rolesForRoomWorkMode({ roomPackage = {}, workMode = 'ask', taskText = '
   }
 
   if (workMode === 'team_loop_task') {
+    if (collaborationId === 'builder_reviewer') return ['operator', 'builder', 'reviewer', 'synthesizer'];
+    if (['parallel_ideation', 'evidence_panel'].includes(collaborationId)) return ['operator', 'researcher', 'reviewer', 'synthesizer'];
     if (domain === 'code_review') return unique(['operator', 'implementation_planner', 'builder', 'reviewer', 'verifier', 'delivery_synthesizer'], 8);
     if (domain === 'creative_writing') return unique(['operator', 'story_planner', 'draft_writer', 'canon_reviewer', 'continuity_checker', 'revision_synthesizer'], 8);
     if (domain === 'research_paper') return unique(['operator', 'researcher', 'novelty_critic', 'method_reviewer', 'synthesizer', 'reviewer'], 8);
@@ -246,6 +251,7 @@ export function buildRoomFirstRuntimeSelection({
   source = 'room_first_runtime_selection',
 } = {}) {
   const initialMode = summarizeWorkModeConfig(buildWorkModeConfig({ request: taskText, explicitMode: workMode || '' })).work_mode;
+  const explicitMode = ['ask', 'team_task', 'team_loop_task'].includes(cleanId(workMode)) ? cleanId(workMode) : '';
   const profile = asObject(roomProfile);
   const collaborationProfile = resolveRoomCollaborationProfile(profile);
   const pkg = asObject(roomPackage).kind
@@ -259,9 +265,9 @@ export function buildRoomFirstRuntimeSelection({
     chatId,
     source: 'room_turn_router',
   });
-  const mode = roomRoute.depth || initialMode;
+  const mode = explicitMode || roomRoute.depth || initialMode;
   const library = buildRoomComponentsFromPackage(pkg);
-  const baseRoles = rolesForRoomWorkMode({ roomPackage: pkg, workMode: mode, taskText });
+  const baseRoles = rolesForRoomWorkMode({ roomPackage: pkg, workMode: mode, taskText, collaborationProfile });
   const baseAgents = baseRoles.map((role, index) => makeAgentFromCard({ card: findAgentCard(library, role), role, index, taskText, workMode: mode, roomPackage: pkg, roomProfile: profile }));
   const agents = mode === 'ask'
     ? baseAgents

@@ -7,7 +7,7 @@
     {
       "id": "state_temporary_fact",
       "action": "send_message",
-      "text": "오늘 회의에 한해서만 발표 순서를 디자인, 개발, 운영 순으로 해줘. 이건 오늘만 쓰는 임시 조건이야."
+      "text": "앞으로 장소를 추천할 때 야외 좌석이 있는 곳을 우선해줘. 다만 아직 이 선호를 기억하라고 승인하는 건 아니야."
     },
     {
       "id": "generate_candidate",
@@ -29,12 +29,12 @@
       "id": "candidate_observed",
       "type": "trace_event_count",
       "event_type": "memory.candidate_created",
-      "min": 0
+      "min": 1
     },
     {
       "id": "candidate_structured_when_present",
       "type": "memory_candidate_shape",
-      "min": 0
+      "min": 1
     },
     {
       "id": "no_unapproved_commit",
@@ -46,9 +46,16 @@
       "step_id": "next_request"
     },
     {
-      "id": "provider_cli_called",
-      "type": "cli_call_count",
+      "id": "provider_cli_succeeded",
+      "type": "cli_success_count",
       "min": 2,
+      "quality_metric": false
+    },
+    {
+      "id": "provider_cli_has_no_failures",
+      "type": "cli_failure_count",
+      "min": 0,
+      "max": 0,
       "quality_metric": false
     }
   ],

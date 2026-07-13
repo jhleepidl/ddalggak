@@ -434,6 +434,17 @@ function assertionApplies(assertion = {}, armId = '') {
   return true;
 }
 
+function isLocalCliEvent(event = {}) {
+  const channel = clean(eventPayload(event).execution_channel).toLowerCase();
+  return channel === 'local_cli' || channel.endsWith('_cli') || channel === 'cli';
+}
+
+function modelNodeKey(payload = {}) {
+  const provider = clean(payload.provider).toLowerCase();
+  const model = clean(payload.model) || '@provider_default';
+  return provider ? `${provider}:${model}` : '';
+}
+
 function assertionResult(assertion = {}, context = {}) {
   const type = clean(assertion.type).toLowerCase();
   const steps = asObject(context.stepsById);
@@ -441,9 +452,13 @@ function assertionResult(assertion = {}, context = {}) {
   if (type === 'step_ok') {
     const row = steps[clean(assertion.step_id)]; observed = row?.result?.ok === true; passed = observed;
   } else if (type === 'response_regex' || type === 'response_not_regex') {
-    const text = clean(steps[clean(assertion.step_id)]?.result?.output);
+    const stepResult = steps[clean(assertion.step_id)]?.result;
+    const text = clean(stepResult?.output);
     const regex = new RegExp(assertion.pattern, assertion.flags || 'i');
-    const matched = regex.test(text); observed = { matched, preview: text.slice(0, 240) }; passed = type === 'response_regex' ? matched : !matched;
+    const matched = regex.test(text);
+    const eligible = stepResult?.ok === true && (assertion.allow_empty === true || text.length > 0);
+    observed = { eligible, step_ok: stepResult?.ok === true, matched, preview: text.slice(0, 240) };
+    passed = eligible && (type === 'response_regex' ? matched : !matched);
   } else if (type === 'trace_event_count') {
     const count = matchingTraceEvents(context.trace, assertion).length;
     const min = Number.isFinite(Number(assertion.min)) ? Number(assertion.min) : 1;
@@ -456,12 +471,22 @@ function assertionResult(assertion = {}, context = {}) {
     const starts = context.runtimeEvents.filter((event) => eventType(event) === 'run.agent_start');
     const roles = new Set(starts.map((event) => clean(eventPayload(event).model_role || eventPayload(event).role_id)).filter(Boolean));
     observed = [...roles]; passed = roles.size >= Number(assertion.min ?? 1) && roles.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
+  } else if (type === 'successful_provider_role_count') {
+    const finishes = context.runtimeEvents.filter((event) => eventType(event) === 'run.agent_finish' && isLocalCliEvent(event));
+    const roles = new Set(finishes.map((event) => clean(eventPayload(event).model_role || eventPayload(event).role_id)).filter(Boolean));
+    observed = [...roles]; passed = roles.size >= Number(assertion.min ?? 1) && roles.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'distinct_provider_count') {
     const providers = new Set(context.runtimeEvents.filter((event) => ['run.agent_start', 'run.agent_finish'].includes(eventType(event))).map((event) => clean(eventPayload(event).provider)).filter(Boolean));
     observed = [...providers]; passed = providers.size >= Number(assertion.min ?? 1) && providers.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'distinct_model_count') {
     const models = new Set(context.runtimeEvents.filter((event) => ['run.agent_start', 'run.agent_finish'].includes(eventType(event))).map((event) => clean(eventPayload(event).model)).filter(Boolean));
     observed = [...models]; passed = models.size >= Number(assertion.min ?? 1) && models.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
+  } else if (type === 'distinct_model_node_count') {
+    const nodes = new Set(context.runtimeEvents
+      .filter((event) => eventType(event) === 'run.agent_finish' && isLocalCliEvent(event))
+      .map((event) => modelNodeKey(eventPayload(event)))
+      .filter(Boolean));
+    observed = [...nodes]; passed = nodes.size >= Number(assertion.min ?? 1) && nodes.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'approved_memory_projected') {
     const committed = new Set(matchingTraceEvents(context.trace, { event_type: 'memory.committed' }).map((event) => clean(eventPayload(event).memory_id)).filter(Boolean));
     const projected = new Set(matchingTraceEvents(context.trace, { event_type: 'context.projection_compiled' }).flatMap((event) => asArray(eventPayload(event).approved_memory_ids || eventPayload(event).approved_memory_ids_used)).map(clean).filter(Boolean));
@@ -485,6 +510,36 @@ function assertionResult(assertion = {}, context = {}) {
       role: clean(eventPayload(event).model_role || eventPayload(event).role_id),
     }));
     passed = rows.length >= Number(assertion.min ?? 1) && rows.length <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
+  } else if (type === 'cli_success_count' || type === 'cli_failure_count') {
+    const terminalType = type === 'cli_success_count' ? 'run.agent_finish' : 'run.agent_error';
+    const rows = context.runtimeEvents.filter((event) => eventType(event) === terminalType && isLocalCliEvent(event));
+    observed = rows.map((event) => ({
+      provider: clean(eventPayload(event).provider),
+      model: clean(eventPayload(event).model),
+      role: clean(eventPayload(event).model_role || eventPayload(event).role_id),
+      error: type === 'cli_failure_count' ? clean(eventPayload(event).error).slice(0, 240) : undefined,
+    }));
+    passed = rows.length >= Number(assertion.min ?? (type === 'cli_failure_count' ? 0 : 1))
+      && rows.length <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
+  } else if (type === 'model_role_map_alignment') {
+    const assignments = asObject(context.modelRoleMap?.assignments || context.modelRoleMap);
+    const finishes = context.runtimeEvents.filter((event) => eventType(event) === 'run.agent_finish' && isLocalCliEvent(event));
+    const rows = finishes.map((event) => {
+      const payload = eventPayload(event);
+      const role = clean(payload.model_role).toLowerCase();
+      const expected = asObject(assignments[role]);
+      const actual = {
+        provider: clean(payload.provider).toLowerCase(),
+        model: clean(payload.model),
+      };
+      const hasAssignment = Boolean(role && Object.keys(expected).length);
+      const providerMatches = !clean(expected.provider) || clean(expected.provider).toLowerCase() === actual.provider;
+      const modelMatches = !clean(expected.model) || clean(expected.model) === actual.model;
+      return { role, expected, actual, has_assignment: hasAssignment, matched: hasAssignment && providerMatches && modelMatches };
+    });
+    const requiredMin = Number(assertion.min ?? 1);
+    observed = rows;
+    passed = rows.length >= requiredMin && rows.every((row) => row.matched);
   } else if (type === 'memory_candidate_shape') {
     const rows = matchingTraceEvents(context.trace, { event_type: 'memory.candidate_created' });
     const valid = rows.filter((event) => {
@@ -601,10 +656,13 @@ function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '',
   const semanticScore = Number(semanticJudgment?.result?.score);
   const quality = Number.isFinite(semanticScore) ? Math.max(0, Math.min(1, semanticScore)) : deterministicQuality;
   const starts = runtimeEvents.filter((event) => eventType(event) === 'run.agent_start');
-  const lifecycle = runtimeEvents.filter((event) => ['run.agent_start', 'run.agent_finish'].includes(eventType(event)));
-  const providers = [...new Set(lifecycle.map((event) => clean(eventPayload(event).provider)).filter(Boolean))];
-  const models = [...new Set(lifecycle.map((event) => clean(eventPayload(event).model)).filter(Boolean))];
-  const roles = [...new Set(starts.map((event) => clean(eventPayload(event).model_role || eventPayload(event).role_id)).filter(Boolean))];
+  const finishes = runtimeEvents.filter((event) => eventType(event) === 'run.agent_finish' && isLocalCliEvent(event));
+  const errors = runtimeEvents.filter((event) => eventType(event) === 'run.agent_error' && isLocalCliEvent(event));
+  const attempts = starts.filter(isLocalCliEvent);
+  const providers = [...new Set(finishes.map((event) => clean(eventPayload(event).provider)).filter(Boolean))];
+  const models = [...new Set(finishes.map((event) => clean(eventPayload(event).model)).filter(Boolean))];
+  const modelNodes = [...new Set(finishes.map((event) => modelNodeKey(eventPayload(event))).filter(Boolean))];
+  const roles = [...new Set(finishes.map((event) => clean(eventPayload(event).model_role || eventPayload(event).role_id)).filter(Boolean))];
   let tokens = 0; let cost = 0; let hasTokens = false; let hasCost = false;
   for (const event of runtimeEvents) {
     const payload = eventPayload(event);
@@ -621,9 +679,16 @@ function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '',
     quality_assertion_count: qualityAssertions.length,
     duration_ms: Math.max(0, (Date.parse(finishedAt) || Date.now()) - (Date.parse(startedAt) || Date.now())),
     agent_call_count: starts.length,
+    cli_attempt_count: attempts.length,
+    cli_success_count: finishes.length,
+    cli_failure_count: errors.length,
+    execution_status: errors.length > 0 || finishes.length === 0 ? 'invalid_execution' : 'valid_execution',
+    execution_eligible: errors.length === 0 && finishes.length > 0,
     provider_count: providers.length,
     providers,
     models,
+    model_nodes: modelNodes,
+    model_node_count: modelNodes.length,
     model_roles: roles,
     total_tokens: hasTokens ? tokens : null,
     cost_usd: hasCost ? cost : null,
@@ -632,6 +697,19 @@ function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '',
 
 export function evaluatePortfolioPromotion({ baseline = null, challenger = null, gate = {} } = {}) {
   if (!baseline || !challenger) return { status: 'insufficient_evidence', promote: false, reasons: ['baseline_or_challenger_missing'] };
+  const invalidReasons = [];
+  if (clean(baseline.execution_status) !== 'valid_execution') invalidReasons.push('baseline_invalid_execution');
+  if (clean(challenger.execution_status) !== 'valid_execution') invalidReasons.push('challenger_invalid_execution');
+  if (invalidReasons.length) {
+    return {
+      status: 'invalid_execution',
+      promote: false,
+      quality_uplift: null,
+      cost_ratio: null,
+      latency_ratio: null,
+      reasons: invalidReasons,
+    };
+  }
   const minUplift = Number(gate.min_quality_uplift ?? 0.05);
   const maxCostRatio = Number(gate.max_cost_ratio ?? 3);
   const maxLatencyRatio = Number(gate.max_latency_ratio ?? 3);
@@ -649,12 +727,61 @@ export function evaluatePortfolioPromotion({ baseline = null, challenger = null,
   return { status: promote ? 'promotion_candidate' : (reasons.some((reason) => ['cost_evidence_missing', 'semantic_evidence_missing'].includes(reason)) ? 'insufficient_evidence' : 'not_promoted'), promote, quality_uplift: qualityUplift, cost_ratio: costRatio, latency_ratio: latencyRatio, reasons };
 }
 
+function buildCliCallRows(runtimeEvents = []) {
+  const calls = [];
+  const openByAgent = new Map();
+  for (const event of runtimeEvents) {
+    const type = eventType(event);
+    if (!['run.agent_start', 'run.agent_finish', 'run.agent_error'].includes(type) || !isLocalCliEvent(event)) continue;
+    const payload = eventPayload(event);
+    const key = [clean(payload.agent_id), clean(payload.runtime_instance_id), clean(payload.slot_id), clean(payload.scope_id)].join(':');
+    if (type === 'run.agent_start') {
+      const row = {
+        call_id: clean(event.event_id) || `${key}:${calls.length + 1}`,
+        agent_id: clean(payload.agent_id),
+        role_id: clean(payload.role_id),
+        model_role: clean(payload.model_role),
+        provider: clean(payload.provider),
+        model: clean(payload.model),
+        model_node: modelNodeKey(payload),
+        execution_channel: clean(payload.execution_channel),
+        goal: clean(payload.goal),
+        started_at: clean(event.occurred_at || event.ts),
+        status: 'attempted',
+      };
+      calls.push(row);
+      openByAgent.set(key, row);
+      continue;
+    }
+    const row = openByAgent.get(key) || {
+      call_id: clean(event.event_id) || `${key}:${calls.length + 1}`,
+      agent_id: clean(payload.agent_id),
+      role_id: clean(payload.role_id),
+      model_role: clean(payload.model_role),
+      provider: clean(payload.provider),
+      model: clean(payload.model),
+      model_node: modelNodeKey(payload),
+      execution_channel: clean(payload.execution_channel),
+      started_at: '',
+    };
+    if (!calls.includes(row)) calls.push(row);
+    row.status = type === 'run.agent_finish' ? 'succeeded' : 'failed';
+    row.finished_at = clean(event.occurred_at || event.ts);
+    row.output_chars = Number(payload.output_chars || 0);
+    row.error = type === 'run.agent_error' ? clean(payload.error) : '';
+    row.provider = clean(payload.provider || row.provider);
+    row.model = clean(payload.model || row.model);
+    row.model_node = modelNodeKey({ provider: row.provider, model: row.model });
+    const startMs = Date.parse(row.started_at || '');
+    const endMs = Date.parse(row.finished_at || '');
+    row.duration_ms = Number.isFinite(startMs) && Number.isFinite(endMs) ? Math.max(0, endMs - startMs) : null;
+    openByAgent.delete(key);
+  }
+  return calls;
+}
+
 function writeTraceViews(runDir, trace, runtimeEvents, steps) {
-  const cliCalls = runtimeEvents.filter((row) => {
-    if (eventType(row) !== 'run.agent_start') return false;
-    const channel = clean(eventPayload(row).execution_channel).toLowerCase();
-    return channel === 'local_cli' || channel.endsWith('_cli') || channel === 'cli';
-  });
+  const cliCalls = buildCliCallRows(runtimeEvents);
   const categories = {
     'memory_candidates.jsonl': trace.filter((row) => eventType(row) === 'memory.candidate_created'),
     'memory_decisions.jsonl': trace.filter((row) => eventType(row) === 'memory.decision'),
@@ -717,7 +844,13 @@ export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot 
   const latestRoomState = [...stepRows].reverse().find((row) => row?.result?.room_state)?.result?.room_state || null;
   const assertions = asArray(scenario.assertions)
     .filter((assertion) => assertionApplies(assertion, selectedArm.id))
-    .map((assertion) => assertionResult(assertion, { trace, runtimeEvents, stepsById, latestRoomState }));
+    .map((assertion) => assertionResult(assertion, {
+      trace,
+      runtimeEvents,
+      stepsById,
+      latestRoomState,
+      modelRoleMap: options.modelRoleMap || null,
+    }));
   const executionFinishedAt = nowIso();
   let semanticJudgment = null;
   if (clean(options.judgeProvider) && scenario.semantic_judge !== false) {
@@ -772,9 +905,14 @@ export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot 
       runtime_root: clean(transport?.runtimeRoot) || null,
     },
     trace_contract: {
-      raw_provider_prompts_saved: false,
-      raw_private_transcript_exported: false,
-      identifiers_hashes_and_redacted_previews_only: true,
+      raw_provider_prompts_saved: true,
+      raw_provider_prompt_scope: 'local_debug_runtime',
+      raw_provider_prompt_location: '_runtime/<job-id>/llm_traces/<trace-id>/prompt.txt',
+      raw_room_transcript_saved: true,
+      identifiers_hashes_and_redacted_previews_only: false,
+      sensitive_debug_artifacts_present: true,
+      external_share_requires_review: true,
+      retention_note: 'Raw prompts and test transcripts are intentionally retained for debugging until the benchmark is stabilized.',
     },
   };
   writeTraceViews(runDir, trace, runtimeEvents, stepRows);
@@ -833,6 +971,15 @@ export async function runRoomJourneySuite({ suiteFile = '', scenarioFiles = [], 
       telegram_required: false,
       goc_room_required: clean(options.transport).toLowerCase() === 'goc',
       model_role_map: options.modelRoleMap || null,
+      codex_skip_git_repo_check: execute && clean(options.transport).toLowerCase() === 'headless'
+        ? { enabled: true, allowed_root: path.resolve(outputRoot), scope: 'headless_benchmark_only' }
+        : { enabled: false },
+    },
+    trace_contract: {
+      raw_provider_prompts_saved: execute === true,
+      raw_provider_prompt_scope: execute ? 'local_debug_runtime' : 'not_executed',
+      sensitive_debug_artifacts_present: execute === true,
+      external_share_requires_review: execute === true,
     },
   };
   const root = ensureDir(path.resolve(outputRoot));

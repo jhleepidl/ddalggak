@@ -366,6 +366,94 @@ function normalizePublicSearchQuery(message) {
     .trim();
 }
 
+function resolveCollaborationExecutionPattern(activeTeam = null, runtimeTeamSnapshot = null) {
+  const sources = [
+    activeTeam,
+    runtimeTeamSnapshot,
+    activeTeam?.interaction_spec,
+    activeTeam?.interactionSpec,
+    runtimeTeamSnapshot?.interaction_spec,
+    runtimeTeamSnapshot?.interactionSpec,
+    runtimeTeamSnapshot?.team_plan?.interaction_spec,
+    runtimeTeamSnapshot?.teamPlan?.interactionSpec,
+  ];
+  for (const source of sources) {
+    const row = asObject(source);
+    const pattern = String(row.execution_pattern || row.executionPattern || row.interaction_spec?.execution_pattern || row.interactionSpec?.executionPattern || '').trim().toLowerCase();
+    if (pattern) return pattern;
+  }
+  return '';
+}
+
+export function buildCollaborationFallbackPlan(message, { agents = [], parallelSpawnAllowed = true, activeTeam = null, runtimeTeamSnapshot = null } = {}) {
+  const pattern = resolveCollaborationExecutionPattern(activeTeam, runtimeTeamSnapshot);
+  if (!pattern || ['single_specialist', 'sequential_pipeline', 'operator_gated_workflow'].includes(pattern)) return null;
+  const rows = (Array.isArray(agents) ? agents : [])
+    .map((agent) => ({
+      id: String(agent?.id || agent?.agent_id || agent?.agentId || '').trim().toLowerCase(),
+      role: String(agent?.role || agent?.role_id || agent?.roleId || '').trim().toLowerCase(),
+    }))
+    .filter((agent) => agent.id);
+  const findOne = (matcher, excluded = new Set()) => rows.find((agent) => !excluded.has(agent.id) && matcher(agent.role || agent.id)) || null;
+  const finalAgent = findOne((value) => /synth|delivery|writer|final/.test(value))
+    || findOne((value) => /review|critic|adjud/.test(value));
+
+  if (pattern === 'builder_reviewer_loop') {
+    const builder = findOne((value) => /builder|implement|coder|executor|draft/.test(value));
+    const reviewer = findOne((value) => /review|critic|verify|checker/.test(value), new Set(builder ? [builder.id] : []));
+    const synthesizer = finalAgent && ![builder?.id, reviewer?.id].includes(finalAgent.id) ? finalAgent : reviewer;
+    if (!builder || !reviewer) return null;
+    const actions = [
+      { type: 'run_agent', agent_id: builder.id, goal: `Produce the strongest complete candidate for this request:\n${message}`, risk: 'L1' },
+      { type: 'run_agent', agent_id: reviewer.id, goal: `Independently review the builder output against the user request. Identify concrete defects, missing constraints, and required fixes.\n${message}`, risk: 'L1' },
+    ];
+    if (synthesizer) actions.push({ type: 'synthesize_final', agent_id: synthesizer.id, goal: `Deliver the final corrected answer using the builder result and independent review.\n${message}`, risk: 'L1' });
+    return {
+      reason: `collaboration profile fallback: ${pattern}`,
+      actions,
+      final_response_style: 'concise',
+    };
+  }
+
+  if (['parallel_research_then_review_then_synthesize', 'multi_research_adjudication'].includes(pattern)) {
+    const lanes = rows.filter((agent) => /research|analyst|evidence|idea|lane/.test(agent.role || agent.id)).slice(0, 3);
+    if (lanes.length < 2) return null;
+    const used = new Set(lanes.map((agent) => agent.id));
+    const reviewer = findOne((value) => /review|critic|adjud|verify|checker/.test(value), used);
+    const synthesizer = findOne((value) => /synth|delivery|writer|final/.test(value), new Set([...used, reviewer?.id].filter(Boolean))) || reviewer || finalAgent;
+    const laneGoals = lanes.map((agent, index) => ({
+      agent_id: agent.id,
+      goal: `Work independently on lane ${index + 1}. Produce a distinct, non-duplicative candidate or evidence interpretation for the request. Do not assume other lanes' conclusions.\n${message}`,
+      risk: 'L1',
+    }));
+    const actions = parallelSpawnAllowed
+      ? [{ type: 'spawn_agents', summary: `Independent collaboration lanes for ${pattern}`, agents: laneGoals, risk: 'L1' }]
+      : laneGoals.map((lane) => ({ type: 'run_agent', ...lane }));
+    if (reviewer && reviewer.id !== synthesizer?.id) {
+      actions.push({
+        type: 'run_agent',
+        agent_id: reviewer.id,
+        goal: `Independently compare the submitted lanes, identify unsupported claims and meaningful differences, and produce review findings.\n${message}`,
+        risk: 'L1',
+      });
+    }
+    if (synthesizer) {
+      actions.push({
+        type: 'synthesize_final',
+        agent_id: synthesizer.id,
+        goal: `Compare the independent lanes, preserve meaningful differences, reject unsupported claims, and deliver the strongest final answer.\n${message}`,
+        risk: 'L1',
+      });
+    }
+    return {
+      reason: `collaboration profile fallback: ${pattern}`,
+      actions,
+      final_response_style: 'concise',
+    };
+  }
+  return null;
+}
+
 function fallbackPlan(message, { agents = [], tools = [], jobConfig = {}, parallelSpawnAllowed = true, activeTeam = null, runtimeTeamSnapshot = null } = {}) {
   const msg = String(message || "").trim();
   const config = asObject(jobConfig);
@@ -635,6 +723,14 @@ function fallbackPlan(message, { agents = [], tools = [], jobConfig = {}, parall
       route_contract: routeHeuristic.summary || undefined,
     };
   }
+
+  const collaborationPlan = buildCollaborationFallbackPlan(msg, {
+    agents,
+    parallelSpawnAllowed,
+    activeTeam,
+    runtimeTeamSnapshot,
+  });
+  if (collaborationPlan) return collaborationPlan;
 
   if (!defaultAgent) {
     return {

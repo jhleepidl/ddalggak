@@ -116,3 +116,59 @@ test('route repair assigns synthesize_final to declared final answer owner when 
   assert.equal(finalAction.agent_id, 'quality_reviewer');
   assert.equal(finalAction.agent, 'quality_reviewer');
 });
+
+test('locked non-code builder-reviewer profile repairs a single route into a collaboration pipeline', () => {
+  const runtime = {
+    teamLocked: true,
+    activeTeamConfig: {
+      task_archetype: 'general',
+      interaction_spec: { execution_pattern: 'builder_reviewer_loop' },
+      agents: [
+        { agent_id: 'builder', role: 'builder', provider: 'codex', model_role: 'code_executor' },
+        { agent_id: 'reviewer', role: 'reviewer', provider: 'claude', model_role: 'verifier_critic' },
+        { agent_id: 'synthesizer', role: 'synthesizer', provider: 'codex', model_role: 'delivery_synthesizer' },
+      ],
+    },
+  };
+  const repaired = repairRoutePlanForTeamExecution({
+    reason: 'router returned one agent',
+    actions: [{ type: 'run_agent', agent_id: 'reviewer', goal: '운영 점검표 작성', inputs: { role_id: 'reviewer' } }],
+    team_locked: true,
+  }, {
+    message: '운영 점검표를 작성하고 독립적으로 검토해줘',
+    runtime,
+  });
+  assert.match(repaired.reason, /repaired_builder_reviewer_collaboration/);
+  assert.deepEqual(repaired.actions.map((row) => row.type), ['run_agent', 'run_agent', 'synthesize_final']);
+  assert.deepEqual(repaired.actions.map((row) => row.inputs.model_role), ['code_executor', 'verifier_critic', 'delivery_synthesizer']);
+});
+
+test('locked parallel profile repairs a single route into independent lanes and synthesis', () => {
+  const runtime = {
+    teamLocked: true,
+    activeTeamConfig: {
+      task_archetype: 'general',
+      interaction_spec: { execution_pattern: 'parallel_research_then_review_then_synthesize' },
+      agents: [
+        { agent_id: 'researcher_lane_1', role: 'researcher', provider: 'claude', model_role: 'source_grounder' },
+        { agent_id: 'researcher_lane_2', role: 'researcher', provider: 'claude', model_role: 'source_grounder' },
+        { agent_id: 'reviewer', role: 'reviewer', provider: 'claude', model_role: 'verifier_critic' },
+        { agent_id: 'synthesizer', role: 'synthesizer', provider: 'codex', model_role: 'delivery_synthesizer' },
+      ],
+    },
+  };
+  const repaired = repairRoutePlanForTeamExecution({
+    reason: 'router returned one lane',
+    actions: [{ type: 'run_agent', agent_id: 'researcher_lane_1', goal: '대안 제안', inputs: { role_id: 'researcher' } }],
+    team_locked: true,
+  }, {
+    message: '겹치지 않는 대안을 비교해줘',
+    runtime,
+  });
+  assert.match(repaired.reason, /repaired_parallel_collaboration/);
+  assert.equal(repaired.actions[0].type, 'spawn_agents');
+  assert.equal(repaired.actions[0].agents.length, 2);
+  assert.equal(repaired.actions[1].type, 'run_agent');
+  assert.equal(repaired.actions[1].agent_id, 'reviewer');
+  assert.equal(repaired.actions[2].type, 'synthesize_final');
+});

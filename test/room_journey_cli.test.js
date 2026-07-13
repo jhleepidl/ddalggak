@@ -8,6 +8,7 @@ import test from 'node:test';
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const script = path.join(root, 'scripts', 'run_room_journey_bench.js');
 const coreSuite = path.join(root, 'scenarios', 'room_journeys', 'core_suite.json');
+const portfolioSuite = path.join(root, 'scenarios', 'room_journeys', 'model_portfolio_suite.json');
 const exampleMap = path.join(root, 'scenarios', 'room_journeys', 'staging_room_map.example.json');
 const testTmpRoot = path.join(os.homedir(), 'tmp', 'ddalggak-tests');
 mkdirSync(testTmpRoot, { recursive: true });
@@ -103,6 +104,18 @@ test('room journey CLI rejects unsupported model roles before provider execution
     const result = run(['--suite', coreSuite, '--execute', '--model-role-map', mapPath, '--out', path.join(dir, 'out')]);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /Unsupported model role/i);
+    assert.doesNotMatch(result.stderr, /run\.agent_start|provider CLI/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('portfolio execution requires an explicit model-role map before provider execution', () => {
+  const dir = makeTestTempDir('room-journey-required-role-map-');
+  try {
+    const result = run(['--suite', portfolioSuite, '--execute', '--out', path.join(dir, 'out')]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /requires --model-role-map/i);
     assert.doesNotMatch(result.stderr, /run\.agent_start|provider CLI/i);
   } finally {
     rmSync(dir, { recursive: true, force: true });

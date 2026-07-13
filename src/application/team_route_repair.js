@@ -55,6 +55,7 @@ function collectTeamAgents(runtime = {}) {
       name: String(row.name || row.display_label || row.displayLabel || row.label || row.agent_id || row.id || '').trim() || undefined,
       provider: cleanId(row.provider),
       model: String(row.model || '').trim() || undefined,
+      model_role: cleanId(row.model_role || row.modelRole),
       attached_skill_ids: asArray(row.attached_skill_ids || row.attachedSkillIds || row.skills),
     });
   };
@@ -169,6 +170,7 @@ function buildRunAction(agent = {}, message = '', { finalSynthesis = false } = {
       role_id: roleId || undefined,
       provider: cleanId(agent.provider) || undefined,
       model: String(agent.model || '').trim() || undefined,
+      model_role: cleanId(agent.model_role || agent.modelRole) || undefined,
       attached_skill_ids: asArray(agent.attached_skill_ids || agent.attachedSkillIds).filter(Boolean),
       final_synthesis: finalSynthesis === true || roleId === 'synthesizer' ? true : undefined,
     },
@@ -176,7 +178,7 @@ function buildRunAction(agent = {}, message = '', { finalSynthesis = false } = {
   };
 }
 
-function repairExistingGoals(actions = [], teamAgents = [], message = '') {
+function repairExistingGoals(actions = [], teamAgents = [], message = '', { finalOwnerAgent = null } = {}) {
   return asArray(actions).map((action) => {
     const type = cleanId(action?.type);
     if (type !== 'run_agent' && type !== 'agent_run' && type !== 'synthesize_final') return action;
@@ -201,6 +203,7 @@ function repairExistingGoals(actions = [], teamAgents = [], message = '') {
         role_id: cleanId(finalOwnerOverride?.role_id || roleId || matched.role_id) || undefined,
         provider: String(action?.inputs?.provider || finalOwnerOverride?.provider || matched.provider || '').trim() || undefined,
         model: String(action?.inputs?.model || finalOwnerOverride?.model || matched.model || '').trim() || undefined,
+        model_role: cleanId(action?.inputs?.model_role || action?.inputs?.modelRole || finalOwnerOverride?.model_role || matched.model_role) || undefined,
       },
       scope: action?.scope && typeof action.scope === 'object' ? action.scope : { mode: 'shared_only' },
     };
@@ -219,9 +222,78 @@ export function repairRoutePlanForTeamExecution(routePlan = {}, {
   if (teamAgents.length === 0) return row;
   const taskInterpretation = runtimeTeamSnapshot?.task_interpretation || row?.runtime_team_snapshot?.task_interpretation || null;
   const taskArchetype = runtime?.activeTeamConfig?.task_archetype || runtimeTeamSnapshot?.blueprint_summary?.task_archetype || '';
+  const preferredPattern = inferPreferredPattern(runtime, row, runtimeTeamSnapshot);
   const implementationLike = isImplementationLikeRequest(message, { taskInterpretation, taskArchetype });
   const builder = findRoleAgent(teamAgents, 'builder');
   const finalOwnerAgent = resolveFinalOwnerAgent(runtime, runtimeTeamSnapshot, teamAgents);
+
+  if (!implementationLike && preferredPattern === 'builder_reviewer_loop' && builder) {
+    const reviewer = findRoleAgent(teamAgents, 'reviewer');
+    const synthesizer = finalOwnerAgent || findRoleAgent(teamAgents, 'synthesizer') || reviewer;
+    const currentRoles = new Set(asArray(row.actions).map((action) => roleIdForAction(action, teamAgents)).filter(Boolean));
+    if (reviewer && (!currentRoles.has('builder') || !currentRoles.has('reviewer') || extractActionAgentIds(row.actions).length < 2)) {
+      const ordered = [builder, reviewer];
+      if (synthesizer && !ordered.some((agent) => cleanId(agent.agent_id) === cleanId(synthesizer.agent_id))) ordered.push(synthesizer);
+      const actions = ordered.slice(0, 3).map((agent, index, rows) => {
+        const built = buildRunAction(agent, message, { finalSynthesis: index === rows.length - 1 });
+        if (index === rows.length - 1) {
+          built.type = 'synthesize_final';
+          built.agent = built.agent_id;
+        }
+        return built;
+      });
+      return {
+        ...row,
+        reason: `${String(row.reason || 'supervisor route').trim() || 'supervisor route'}; repaired_builder_reviewer_collaboration`,
+        actions,
+        done: false,
+        await_user: false,
+      };
+    }
+  }
+
+  if (!implementationLike && ['parallel_research_then_review_then_synthesize', 'multi_research_adjudication'].includes(preferredPattern)) {
+    const researchers = teamAgents.filter((agent) => cleanId(agent.role_id) === 'researcher').slice(0, 3);
+    const reviewer = findRoleAgent(teamAgents, 'reviewer');
+    const finalAgent = finalOwnerAgent || findRoleAgent(teamAgents, 'synthesizer') || reviewer;
+    const currentAgentIds = extractActionAgentIds(row.actions);
+    const representedResearchers = researchers.filter((agent) => currentAgentIds.includes(cleanId(agent.agent_id)));
+    if (researchers.length >= 2 && representedResearchers.length < 2) {
+      const spawn = {
+        type: 'spawn_agents',
+        summary: `Independent lanes for ${preferredPattern}`,
+        agents: researchers.map((agent, index) => {
+          const built = buildRunAction(agent, `${message}\n독립 lane ${index + 1}로 다른 lane과 중복되지 않는 관점이나 근거를 제출하라.`);
+          return {
+            agent_id: built.agent_id,
+            goal: built.goal,
+            risk: built.risk,
+            inputs: built.inputs,
+            scope: built.scope,
+          };
+        }),
+        risk: 'L1',
+      };
+      const actions = [spawn];
+      if (reviewer && cleanId(reviewer.agent_id) !== cleanId(finalAgent?.agent_id)) {
+        actions.push(buildRunAction(reviewer, `${message}\n독립 lane 결과의 중복, 근거 부족, 누락된 반대 관점을 검토해 review findings를 남겨라.`));
+      }
+      if (finalAgent) {
+        const final = buildRunAction(finalAgent, `${message}\n독립 lane 결과를 비교하고 근거가 약한 주장을 제거한 뒤 최종안을 합성하라.`, { finalSynthesis: true });
+        final.type = 'synthesize_final';
+        final.agent = final.agent_id;
+        actions.push(final);
+      }
+      return {
+        ...row,
+        reason: `${String(row.reason || 'supervisor route').trim() || 'supervisor route'}; repaired_parallel_collaboration`,
+        actions,
+        done: false,
+        await_user: false,
+      };
+    }
+  }
+
   if (!implementationLike || !builder) {
     return {
       ...row,
@@ -232,7 +304,6 @@ export function repairRoutePlanForTeamExecution(routePlan = {}, {
   const reviewer = findRoleAgent(teamAgents, 'reviewer');
   const researcher = findRoleAgent(teamAgents, 'researcher');
   const synthesizer = findRoleAgent(teamAgents, 'synthesizer');
-  const preferredPattern = inferPreferredPattern(runtime, row, runtimeTeamSnapshot);
   const currentAgentIds = extractActionAgentIds(row.actions);
   const currentRoleIds = new Set(
     asArray(row.actions)

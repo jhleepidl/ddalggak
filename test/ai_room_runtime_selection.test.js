@@ -80,6 +80,24 @@ test('explicit parallel ideation profile changes team execution without scenario
   assert.ok(team.agents.length <= 5);
 });
 
+test('explicit team_task and builder-reviewer collaboration cannot be downgraded to a single ask route', () => {
+  const pkg = buildRoomPackage({ goal: '일반 운영 산출물을 만들고 독립 검토하는 방', chatId: 'builder-reviewer' });
+  const selection = buildRoomFirstRuntimeSelection({
+    taskText: '운영 체크리스트를 만든 뒤 독립적으로 검토하고 최종본을 정리해줘',
+    workMode: 'team_task',
+    roomPackage: pkg,
+    roomProfile: { kind: 'agent_room_profile_v1', collaboration_profile_id: 'builder_reviewer' },
+    chatId: 'builder-reviewer',
+  });
+
+  assert.equal(selection.work_mode, 'team_task');
+  assert.equal(selection.collaboration_profile.id, 'builder_reviewer');
+  assert.ok(selection.roles.includes('builder'));
+  assert.ok(selection.roles.includes('reviewer'));
+  assert.ok(selection.roles.includes('synthesizer'));
+  assert.ok(selection.agents.length >= 3);
+});
+
 
 test('room-first team resolves role-fit providers and models from the general model-role router', () => {
   const keys = {

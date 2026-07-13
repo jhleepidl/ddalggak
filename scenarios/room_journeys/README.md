@@ -11,7 +11,7 @@ synthetic user turn / Room command
   → Room package, rules, collaboration profile, and context projection
   → provider CLI calls
   → conversation ledger and governed memory lifecycle
-  → local runtime events and privacy-bounded journey traces
+  → local runtime events, governed-memory traces, and debug LLM prompt traces
 ```
 
 Suites:
@@ -59,8 +59,8 @@ npm run room:journey-bench -- \
   --out /home/jhlee/tmp/ai_rooms_room_journeys
 ```
 
-A multi-model arm is not promotable merely because it called more models. It must beat the strongest suitable solo baseline under the configured semantic quality, required assertion, cost, and latency gates. Runtime events must also prove that the claimed roles and distinct resolved models were actually invoked.
+A multi-model arm is not promotable merely because it called more models. It must beat the strongest suitable solo baseline under the configured semantic quality, required assertion, cost, and latency gates. Only successful local CLI finishes count as evidence. Runtime events must prove that claimed model roles and distinct `provider:model` nodes actually completed and match the supplied model-role map. If either arm has a CLI failure or no successful completion, the comparison is `invalid_execution` and no quality/cost/latency ratio is calculated.
 
 `--sync-goc` in headless mode uploads the completed evaluation summary to GoC; it does not require a GoC Room and does not route the test through Telegram. Use `--transport goc` plus a room map only when explicitly testing the GoC runtime-command boundary.
 
-Journey tracing is disabled globally and leased only for synthetic benchmark Rooms. Raw provider prompts and private memory source text are not exported in trace views.
+Journey tracing is disabled globally and leased only for synthetic benchmark Rooms. During benchmark stabilization, raw provider prompts are intentionally retained under `_runtime/<job-id>/llm_traces/<trace-id>/prompt.txt` for local debugging. These files may contain user text, Room rules, projected memory, and orchestration instructions. Treat the output directory as sensitive and review/redact it before external sharing.

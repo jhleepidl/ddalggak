@@ -39,6 +39,51 @@ function normalizeApprovalPolicyName(value = '') {
   return String(value || '').trim().toLowerCase().replace(/\s+/g, '-');
 }
 
+function isTruthy(value = '') {
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
+}
+
+export function resolveCodexGitRepoCheckPolicy({ workspacePath = '', requested = false, allowedRoot = '' } = {}) {
+  const skipRequested = requested === true || isTruthy(requested);
+  const resolvedWorkspace = path.resolve(String(workspacePath || '').trim() || process.cwd());
+  const cleanAllowedRoot = String(allowedRoot || '').trim();
+  if (!skipRequested) {
+    return {
+      requested: false,
+      enabled: false,
+      workspacePath: resolvedWorkspace,
+      allowedRoot: cleanAllowedRoot ? path.resolve(cleanAllowedRoot) : '',
+      error: '',
+    };
+  }
+  if (!cleanAllowedRoot) {
+    return {
+      requested: true,
+      enabled: false,
+      workspacePath: resolvedWorkspace,
+      allowedRoot: '',
+      error: 'skip-git-repo-check requires an explicit allowed root',
+    };
+  }
+  const resolvedAllowedRoot = path.resolve(cleanAllowedRoot);
+  if (!isPathInsideOrEqual(resolvedAllowedRoot, resolvedWorkspace)) {
+    return {
+      requested: true,
+      enabled: false,
+      workspacePath: resolvedWorkspace,
+      allowedRoot: resolvedAllowedRoot,
+      error: `skip-git-repo-check is limited to the configured benchmark root: workspace=${resolvedWorkspace} allowedRoot=${resolvedAllowedRoot}`,
+    };
+  }
+  return {
+    requested: true,
+    enabled: true,
+    workspacePath: resolvedWorkspace,
+    allowedRoot: resolvedAllowedRoot,
+    error: '',
+  };
+}
+
 export function resolveCodexWorkspaceApprovalPolicy({ approvalPolicy = '', sandboxMode = '', workspacePath = '', commandCwd = '', addDirs = [] } = {}) {
   const requestedApprovalPolicy = String(approvalPolicy || '').trim() || 'never';
   const normalized = normalizeApprovalPolicyName(requestedApprovalPolicy);
@@ -148,6 +193,11 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
   const requestedReasoningEffort = String(reasoningEffort || process.env.CODEX_REASONING_EFFORT || "").trim().toLowerCase();
   const requestedProfile = String(profile || process.env.CODEX_PROFILE || "").trim();
   const extraDirs = Array.isArray(addDirs) ? addDirs.map((entry) => String(entry || "").trim()).filter(Boolean) : [];
+  const gitRepoCheckResolution = resolveCodexGitRepoCheckPolicy({
+    workspacePath,
+    requested: process.env.DDALGGAK_CODEX_SKIP_GIT_REPO_CHECK || '',
+    allowedRoot: process.env.DDALGGAK_CODEX_SKIP_GIT_REPO_CHECK_ROOT || '',
+  });
   const approvalResolution = resolveCodexWorkspaceApprovalPolicy({
     approvalPolicy: requestedApprovalPolicy,
     sandboxMode: requestedSandboxMode,
@@ -168,13 +218,14 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
   };
   appendCodexDebugLog(`[codex] job=${String(jobId || "").trim() || "-"} cwd=${commandCwd} workspace=${workspacePath} model=${requestedModel || "(default)"} approval=${effectiveApprovalPolicy}${approvalResolution.workspaceAutoApprove ? '/workspace-auto' : ''}`);
 
-  if (approvalResolution.error) {
+  if (approvalResolution.error || gitRepoCheckResolution.error) {
+    const policyError = approvalResolution.error || gitRepoCheckResolution.error;
     const blocked = {
       ok: false,
       exitCode: -1,
       signal: null,
       stdout: '',
-      stderr: `[codex approval policy blocked] ${approvalResolution.error}`,
+      stderr: `[codex execution policy blocked] ${policyError}`,
       durationMs: 0,
       timedOut: false,
       aborted: false,
@@ -182,11 +233,11 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
       killedProcessGroup: false,
       earlyTerminated: false,
       stdoutChars: 0,
-      stderrChars: approvalResolution.error.length,
+      stderrChars: policyError.length,
       stdoutTruncated: false,
       stderrTruncated: false,
     };
-    return attachCodexTrace({ result: blocked, jobId, surface, agentId, roleId, model: requestedModel || requestedProfile || 'default', prompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { sandbox_mode: effectiveSandboxMode, approval_policy: effectiveApprovalPolicy, cli_approval_policy: cliApprovalPolicy, workspace_auto_approve: approvalResolution.workspaceAutoApprove, approval_policy_notes: approvalResolution.notes, add_dirs: extraDirs, profile: requestedProfile || null, requested_model: requestedModel || null, resolved_model: requestedModel || null, ...asObject(traceMetadata) } });
+    return attachCodexTrace({ result: blocked, jobId, surface, agentId, roleId, model: requestedModel || requestedProfile || 'default', prompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { sandbox_mode: effectiveSandboxMode, approval_policy: effectiveApprovalPolicy, cli_approval_policy: cliApprovalPolicy, workspace_auto_approve: approvalResolution.workspaceAutoApprove, approval_policy_notes: approvalResolution.notes, skip_git_repo_check_requested: gitRepoCheckResolution.requested, skip_git_repo_check_enabled: gitRepoCheckResolution.enabled, skip_git_repo_check_allowed_root: gitRepoCheckResolution.allowedRoot || null, add_dirs: extraDirs, profile: requestedProfile || null, requested_model: requestedModel || null, resolved_model: requestedModel || null, ...asObject(traceMetadata) } });
   }
 
   // Keep Codex workspace explicit (-C), while process CWD can be the run directory.
@@ -194,6 +245,7 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
   const modelArgs = requestedModel ? ["--model", requestedModel] : [];
   const profileArgs = requestedProfile ? ["--profile", requestedProfile] : [];
   const addDirArgs = extraDirs.flatMap((entry) => ["--add-dir", entry]);
+  const gitRepoCheckArgs = gitRepoCheckResolution.enabled ? ['--skip-git-repo-check'] : [];
   const configArgs = flattenConfigOverrides(mergedConfigOverrides).flatMap(([key, value]) => ["-c", `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`]);
   const commonTraceMetadata = {
     sandbox_mode: effectiveSandboxMode,
@@ -201,6 +253,9 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
     cli_approval_policy: cliApprovalPolicy,
     workspace_auto_approve: approvalResolution.workspaceAutoApprove,
     approval_policy_notes: approvalResolution.notes,
+    skip_git_repo_check_requested: gitRepoCheckResolution.requested,
+    skip_git_repo_check_enabled: gitRepoCheckResolution.enabled,
+    skip_git_repo_check_allowed_root: gitRepoCheckResolution.allowedRoot || null,
     timeout_ms: effectiveTimeoutMs,
     add_dirs: extraDirs,
     profile: requestedProfile || null,
@@ -211,7 +266,7 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
   };
   const traceModel = requestedModel || requestedProfile || "default";
   return await withRuntimeActivity({ provider: 'codex', kind: 'provider_execution', jobId, metadata: { surface, model: requestedModel || null, workspace: workspacePath } }, async () => {
-    const modernArgs = [...modelArgs, ...profileArgs, "exec", "-C", workspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "-c", `approval_policy=${cliApprovalPolicy}`, ...configArgs, "-"];
+    const modernArgs = [...modelArgs, ...profileArgs, "exec", ...gitRepoCheckArgs, "-C", workspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "-c", `approval_policy=${cliApprovalPolicy}`, ...configArgs, "-"];
     const modern = await runCommand(command, modernArgs, { cwd: commandCwd, timeoutMs: effectiveTimeoutMs, input: prompt, abortSignal: signal, env });
     if (modern.ok) return attachCodexTrace({ result: modern, jobId, surface, agentId, roleId, model: traceModel, prompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: modernArgs, compatibility_retry: false } });
 
@@ -224,7 +279,7 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
     ].some((needle) => (modern.stderr || "").toLowerCase().includes(needle.toLowerCase()));
     if (!optionCompatibilityError) return attachCodexTrace({ result: modern, jobId, surface, agentId, roleId, model: traceModel, prompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: modernArgs, compatibility_retry: false } });
 
-    const legacyArgs = [...modelArgs, ...profileArgs, "exec", "-C", workspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "--ask-for-approval", cliApprovalPolicy, "-"];
+    const legacyArgs = [...modelArgs, ...profileArgs, "exec", ...gitRepoCheckArgs, "-C", workspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "--ask-for-approval", cliApprovalPolicy, "-"];
     const legacy = await runCommand(command, legacyArgs, { cwd: commandCwd, timeoutMs: effectiveTimeoutMs, input: prompt, abortSignal: signal, env });
     if (legacy.ok) return attachCodexTrace({ result: legacy, jobId, surface, agentId, roleId, model: traceModel, prompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: legacyArgs, compatibility_retry: true, primary_error: modern.stderr || null } });
 

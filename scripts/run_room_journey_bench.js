@@ -197,10 +197,18 @@ async function main() {
   options.outputRoot = path.resolve(options.outputRoot);
   options.runtimeRoot = path.resolve(options.runtimeRoot || path.join(options.outputRoot, '_runtime'));
   options.traceRoot = path.resolve(options.traceRoot || path.join(options.outputRoot, '_trace'));
+  options.suite = options.suiteFile ? loadRoomJourneySuite(options.suiteFile) : null;
   if (options.roomMapPath) {
     options.roomMap = JSON.parse(fs.readFileSync(path.resolve(options.roomMapPath), 'utf8'));
   }
   if (options.modelRoleMapPath) options.modelRoleMap = loadAndApplyModelRoleMap(options.modelRoleMapPath);
+  if (options.execute && options.suite?.requires_model_role_map === true && !options.modelRoleMap) {
+    throw new Error('This suite requires --model-role-map so planned model roles can be verified against actual CLI calls');
+  }
+  if (options.execute && options.transport === 'headless') {
+    process.env.DDALGGAK_CODEX_SKIP_GIT_REPO_CHECK = '1';
+    process.env.DDALGGAK_CODEX_SKIP_GIT_REPO_CHECK_ROOT = options.outputRoot;
+  }
   await assertIsolation(options);
 
   let sharedClient = null;
@@ -254,6 +262,13 @@ async function main() {
     telegram_required: false,
     goc_room_required: options.transport === 'goc',
     model_role_map: options.modelRoleMap || null,
+    codex_skip_git_repo_check: options.execute && options.transport === 'headless'
+      ? {
+          enabled: true,
+          allowed_root: options.outputRoot,
+          scope: 'headless_benchmark_only',
+        }
+      : { enabled: false },
   };
   if (options.modelRoleMap) {
     fs.mkdirSync(options.outputRoot, { recursive: true });
