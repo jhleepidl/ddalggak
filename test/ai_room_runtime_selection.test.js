@@ -142,3 +142,86 @@ test('room-first team resolves role-fit providers and models from the general mo
     }
   }
 });
+
+
+test('provider-only model role assignments keep the selected provider default and preserve collaboration lanes', () => {
+  const keys = {
+    DDALGGAK_MODEL_ROLE_SOURCE_GROUNDER_PROVIDER: process.env.DDALGGAK_MODEL_ROLE_SOURCE_GROUNDER_PROVIDER,
+    DDALGGAK_MODEL_ROLE_SOURCE_GROUNDER_MODEL: process.env.DDALGGAK_MODEL_ROLE_SOURCE_GROUNDER_MODEL,
+    DDALGGAK_MODEL_ROLE_VERIFIER_CRITIC_PROVIDER: process.env.DDALGGAK_MODEL_ROLE_VERIFIER_CRITIC_PROVIDER,
+    DDALGGAK_MODEL_ROLE_VERIFIER_CRITIC_MODEL: process.env.DDALGGAK_MODEL_ROLE_VERIFIER_CRITIC_MODEL,
+    DDALGGAK_MODEL_ROLE_DELIVERY_SYNTHESIZER_PROVIDER: process.env.DDALGGAK_MODEL_ROLE_DELIVERY_SYNTHESIZER_PROVIDER,
+    DDALGGAK_MODEL_ROLE_DELIVERY_SYNTHESIZER_MODEL: process.env.DDALGGAK_MODEL_ROLE_DELIVERY_SYNTHESIZER_MODEL,
+  };
+  try {
+    process.env.DDALGGAK_MODEL_ROLE_SOURCE_GROUNDER_PROVIDER = 'claude';
+    delete process.env.DDALGGAK_MODEL_ROLE_SOURCE_GROUNDER_MODEL;
+    process.env.DDALGGAK_MODEL_ROLE_VERIFIER_CRITIC_PROVIDER = 'claude';
+    delete process.env.DDALGGAK_MODEL_ROLE_VERIFIER_CRITIC_MODEL;
+    process.env.DDALGGAK_MODEL_ROLE_DELIVERY_SYNTHESIZER_PROVIDER = 'codex';
+    delete process.env.DDALGGAK_MODEL_ROLE_DELIVERY_SYNTHESIZER_MODEL;
+
+    const pkg = buildRoomPackage({ goal: '독립 근거를 비교하고 합성하는 방', chatId: 'provider-defaults' });
+    const team = buildRoomFirstTeamConfiguration({
+      taskText: '독립적인 근거 두 개를 비교하고 검토한 뒤 최종안을 합성해줘',
+      workMode: 'team_task',
+      roomPackage: pkg,
+      roomProfile: { kind: 'agent_room_profile_v1', collaboration_profile_id: 'evidence_panel' },
+      chatId: 'provider-defaults',
+    });
+
+    const researchers = team.agents.filter((agent) => agent.model_role === 'source_grounder');
+    const reviewer = team.agents.find((agent) => agent.model_role === 'verifier_critic');
+    const synthesizer = team.agents.find((agent) => agent.model_role === 'delivery_synthesizer');
+    assert.ok(researchers.length >= 2);
+    assert.ok(researchers.every((agent) => agent.provider === 'claude' && agent.model === ''));
+    assert.ok(researchers.every((agent) => agent.collaboration_lane?.lane_id));
+    assert.equal(new Set(researchers.map((agent) => agent.collaboration_lane.lane_id)).size, researchers.length);
+    assert.equal(reviewer?.provider, 'claude');
+    assert.equal(reviewer?.model, '');
+    assert.equal(synthesizer?.provider, 'codex');
+    assert.equal(synthesizer?.model, '');
+  } finally {
+    for (const [key, value] of Object.entries(keys)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('parallel collaboration graph routes every independent lane through reviewer to synthesizer', () => {
+  const pkg = buildRoomPackage({ goal: '독립 대안을 비교하고 합성하는 방', chatId: 'graph-parallel' });
+  const team = buildRoomFirstTeamConfiguration({
+    taskText: '서로 독립적인 접근을 만들고 검토한 뒤 최종안을 합성해줘',
+    workMode: 'team_task',
+    roomPackage: pkg,
+    roomProfile: { kind: 'agent_room_profile_v1', collaboration_profile_id: 'parallel_ideation' },
+    chatId: 'graph-parallel',
+  });
+  const researchers = team.agents.filter((agent) => agent.role === 'researcher');
+  const reviewer = team.agents.find((agent) => agent.role === 'reviewer');
+  const synthesizer = team.agents.find((agent) => agent.role === 'synthesizer');
+  assert.ok(researchers.length >= 2);
+  assert.equal(team.interaction_spec.final_answer_owner, synthesizer.name);
+  for (const researcher of researchers) {
+    assert.ok(team.interaction_spec.handoffs.some((handoff) => handoff.from === researcher.name && handoff.to === reviewer.name));
+  }
+  assert.ok(team.interaction_spec.handoffs.some((handoff) => handoff.from === reviewer.name && handoff.to === synthesizer.name));
+});
+
+test('builder-reviewer collaboration graph ends at synthesizer rather than roster tail', () => {
+  const pkg = buildRoomPackage({ goal: '산출물 구현과 독립 검토', chatId: 'graph-builder' });
+  const team = buildRoomFirstTeamConfiguration({
+    taskText: '산출물을 만들고 검토한 뒤 최종본을 정리해줘',
+    workMode: 'team_task',
+    roomPackage: pkg,
+    roomProfile: { kind: 'agent_room_profile_v1', collaboration_profile_id: 'builder_reviewer' },
+    chatId: 'graph-builder',
+  });
+  const builder = team.agents.find((agent) => agent.role === 'builder');
+  const reviewer = team.agents.find((agent) => agent.role === 'reviewer');
+  const synthesizer = team.agents.find((agent) => agent.role === 'synthesizer');
+  assert.equal(team.interaction_spec.final_answer_owner, synthesizer.name);
+  assert.ok(team.interaction_spec.handoffs.some((handoff) => handoff.from === builder.name && handoff.to === reviewer.name));
+  assert.ok(team.interaction_spec.handoffs.some((handoff) => handoff.from === reviewer.name && handoff.to === synthesizer.name));
+});

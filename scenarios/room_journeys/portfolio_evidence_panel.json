@@ -79,6 +79,28 @@
       "quality_metric": false
     },
     {
+      "id": "panel_required_model_roles",
+      "type": "successful_model_roles_include",
+      "arms": [
+        "evidence_panel"
+      ],
+      "values": [
+        "source_grounder",
+        "verifier_critic",
+        "delivery_synthesizer"
+      ],
+      "quality_metric": false
+    },
+    {
+      "id": "panel_independent_lanes",
+      "type": "distinct_lane_count",
+      "arms": [
+        "evidence_panel"
+      ],
+      "min": 2,
+      "quality_metric": false
+    },
+    {
       "id": "solo_profile_applied",
       "type": "collaboration_profile_is",
       "arms": [

@@ -1771,7 +1771,15 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
       runtimeAgent.description,
       agentId,
     );
-    const model = resolveSupportedModel(entry.model || runtimeAgent.model || '') || defaultModelForRole(role, runtimeAgent.provider || entry.provider);
+    const explicitProvider = cleanId(entry.provider || '');
+    const runtimeProvider = cleanId(runtimeAgent.provider || inferProviderForModel(runtimeAgent.model || '') || '');
+    const requestedModel = clean(entry.model || '');
+    const inheritedModel = explicitProvider && runtimeProvider && explicitProvider !== runtimeProvider
+      ? ''
+      : clean(runtimeAgent.model || '');
+    const model = requestedModel
+      ? (resolveSupportedModel(requestedModel) || requestedModel)
+      : (explicitProvider ? '' : (resolveSupportedModel(inheritedModel) || inheritedModel || defaultModelForRole(role, runtimeProvider)));
     const rawName = clean(entry.name || runtimeAgent.name || agentId);
     const rawPurpose = shouldAutoRewritePurposeText(entry.purpose || runtimeAgent.description || '') ? '' : clean(entry.purpose || runtimeAgent.description || '');
     const autoRenamed = autoRenameGenericNames && shouldAutoRenameAgent(rawName);
@@ -1820,7 +1828,10 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
       }),
       matched_preset_id: cleanId(entry.matched_preset_id || entry.matchedPresetId || '' ) || undefined,
       matched_preset_name: clean(entry.matched_preset_name || entry.matchedPresetName || '' ) || undefined,
-      provider: cleanId(entry.provider || runtimeAgent.provider || inferProviderForModel(model) || ''),
+      provider: cleanId(explicitProvider || runtimeProvider || inferProviderForModel(model) || ''),
+      model_role: cleanId(entry.model_role || entry.modelRole || ''),
+      model_role_resolution: asObject(entry.model_role_resolution || entry.modelRoleResolution),
+      collaboration_lane: asObject(entry.collaboration_lane || entry.collaborationLane),
       context_policy: normalizeContextPolicy(entry.context_policy || entry.contextPolicy, { role, taskText: taskBrief, purpose }),
       source_agent: runtimeAgent,
     };
@@ -2620,7 +2631,7 @@ export function validateTeamConfiguration(raw = {}, { runtime = null } = {}) {
   const seenIds = new Set();
   const seenNames = new Set();
   for (const agent of team.agents) {
-    if (!agent.model) throw new Error(`unsupported or missing model for ${agent.name}`);
+    if (!agent.model && !agent.provider) throw new Error(`unsupported or missing provider/model for ${agent.name}`);
     agent.provider = cleanId(agent.provider || inferProviderForModel(agent.model) || inferLocalProviderForModel(agent.model) || '');
     if (!agent.provider) throw new Error(`unsupported provider for ${agent.name}`);
     const agentId = cleanId(agent.agent_id);
@@ -2760,6 +2771,9 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       role: normalizeTeamRole(configAgent.role || base.role || base.system_key || configAgent.agent_id),
       model: clean(configAgent.model || base.model),
       provider: cleanId(configAgent.provider || base.provider || inferProviderForModel(configAgent.model || base.model || '') || ''),
+      model_role: cleanId(configAgent.model_role || configAgent.modelRole || base.model_role || base.modelRole || ''),
+      model_role_resolution: asObject(configAgent.model_role_resolution || configAgent.modelRoleResolution || base.model_role_resolution || base.modelRoleResolution),
+      collaboration_lane: asObject(configAgent.collaboration_lane || configAgent.collaborationLane || base.collaboration_lane || base.collaborationLane),
       configured_model: clean(configAgent.model || base.model),
       capabilities: uniqueIds(configAgent.capabilities || configAgent.skills || []),
       skills: asArray(configAgent.capabilities || configAgent.skills).length > 0 ? uniqueIds(configAgent.capabilities || configAgent.skills) : asArray(base.skills),
@@ -2788,6 +2802,9 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
       role_id: merged.role,
       provider: cleanId(merged.provider || inferProviderForModel(merged.model) || ''),
       model: merged.model,
+      model_role: cleanId(merged.model_role || ''),
+      model_role_resolution: asObject(merged.model_role_resolution),
+      collaboration_lane: asObject(merged.collaboration_lane),
       attached_skill_ids: uniqueIds(merged.attached_skill_ids || merged.attachedSkillIds || merged.skills),
       capability_tags: uniqueIds(merged.capabilities || merged.skills),
       required_tool_ids: uniqueIds(merged.required_tool_ids || merged.requiredToolIds || []),

@@ -81,6 +81,19 @@
       "quality_metric": false
     },
     {
+      "id": "challenger_required_model_roles",
+      "type": "successful_model_roles_include",
+      "arms": [
+        "builder_reviewer"
+      ],
+      "values": [
+        "code_executor",
+        "verifier_critic",
+        "delivery_synthesizer"
+      ],
+      "quality_metric": false
+    },
+    {
       "id": "solo_profile_applied",
       "type": "collaboration_profile_is",
       "arms": [

@@ -324,6 +324,13 @@ function compactAgentDescriptor(raw = {}) {
     role: String(row.role || row.role_id || row.roleId || '').trim().toLowerCase() || undefined,
     model: String(row.model || '').trim() || undefined,
     provider: String(row.provider || '').trim().toLowerCase() || undefined,
+    model_role: String(row.model_role || row.modelRole || '').trim().toLowerCase() || undefined,
+    model_role_resolution: row.model_role_resolution && typeof row.model_role_resolution === 'object'
+      ? row.model_role_resolution
+      : (row.modelRoleResolution && typeof row.modelRoleResolution === 'object' ? row.modelRoleResolution : undefined),
+    collaboration_lane: row.collaboration_lane && typeof row.collaboration_lane === 'object'
+      ? row.collaboration_lane
+      : (row.collaborationLane && typeof row.collaborationLane === 'object' ? row.collaborationLane : undefined),
     purpose: clipSessionText(row.purpose || row.assigned_goal || row.assignedGoal || '', 160) || undefined,
     attached_skill_ids: clipSessionList(row.attached_skill_ids || row.attachedSkillIds || row.attached_skills || [], { max: 8, maxText: 80, lower: true }),
     runtime_capabilities_required: clipSessionList(execution.runtime_capabilities_required || [], { max: 8, maxText: 40, lower: true }),
@@ -354,6 +361,10 @@ function compactStructureV2ForSession(raw = {}) {
           label: clipSessionText(agent.label || agent.name || agent.display_label || '', 80) || undefined,
           provider: String(agent.provider || '').trim().toLowerCase() || undefined,
           model: String(agent.model || '').trim() || undefined,
+          model_role: String(agent.model_role || agent.modelRole || '').trim().toLowerCase() || undefined,
+          collaboration_lane: agent.collaboration_lane && typeof agent.collaboration_lane === 'object'
+            ? agent.collaboration_lane
+            : (agent.collaborationLane && typeof agent.collaborationLane === 'object' ? agent.collaborationLane : undefined),
           purpose: clipSessionText(agent.purpose || agent.goal || '', 160) || undefined,
           runtime_capabilities_required: clipSessionList(normalizeParticipantExecutionSchema(agent).runtime_capabilities_required || [], { max: 6, maxText: 40, lower: true }),
           runtime_capabilities_optional: clipSessionList(normalizeParticipantExecutionSchema(agent).runtime_capabilities_optional || [], { max: 6, maxText: 40, lower: true }),
@@ -568,15 +579,25 @@ function normalizeSession(chatId, raw = {}) {
     if (!entry || typeof entry !== "object") continue;
     const text = String(entry.text || "").trim();
     if (!text) continue;
+    const pendingTeamConfig = entry.team_config && typeof entry.team_config === "object"
+      ? compactSessionTeam(entry.team_config)
+      : (entry.teamConfig && typeof entry.teamConfig === "object" ? compactSessionTeam(entry.teamConfig) : null);
     pendingUserMessages.push({
       ts: String(entry.ts || nowIso()),
       user_id: String(entry.user_id || entry.userId || "").trim(),
       text,
+      kind: String(entry.kind || entry.input_kind || entry.inputKind || "normal").trim().toLowerCase() || "normal",
+      team_config: pendingTeamConfig,
       force_mode: String(entry.force_mode || entry.forceMode || "").trim().toLowerCase() === "work" ? "work" : "normal",
       telegram_message_id: Number.isFinite(Number(entry.telegram_message_id))
         ? Number(entry.telegram_message_id)
         : (Number.isFinite(Number(entry.telegramMessageId))
           ? Number(entry.telegramMessageId)
+          : null),
+      user_reply_to_message_id: Number.isFinite(Number(entry.user_reply_to_message_id))
+        ? Number(entry.user_reply_to_message_id)
+        : (Number.isFinite(Number(entry.userReplyToMessageId))
+          ? Number(entry.userReplyToMessageId)
           : null),
     });
     if (pendingUserMessages.length >= 50) break;

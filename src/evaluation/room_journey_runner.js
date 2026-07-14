@@ -8,6 +8,8 @@ import { runCodexExec } from '../codex.js';
 import { runClaudeCliPrompt } from '../claude_cli.js';
 import { runAntigravityPrompt } from '../antigravity.js';
 import { createHeadlessRoomRuntime } from './headless_room_runtime.js';
+import { getAgentRoomProfile, upsertAgentRoomProfile } from '../application/agent_room_profile.js';
+import { buildRoomFirstTeamConfiguration } from '../application/ai_room_runtime_selection.js';
 
 function clean(value = '') { return String(value ?? '').trim(); }
 function asArray(value) { return Array.isArray(value) ? value : []; }
@@ -126,6 +128,7 @@ export class HeadlessRoomJourneyTransport {
     responseTimeoutMs = 10 * 60 * 1000,
     runtimeFactory = null,
     resetRoom = true,
+    modelRoleMap = null,
   } = {}) {
     this.threadId = clean(threadId || chatId);
     this.chatId = clean(chatId || threadId);
@@ -135,6 +138,7 @@ export class HeadlessRoomJourneyTransport {
     this.responseTimeoutMs = clamp(responseTimeoutMs, 10 * 60 * 1000, 1000, 60 * 60 * 1000);
     this.runtimeFactory = typeof runtimeFactory === 'function' ? runtimeFactory : createHeadlessRoomRuntime;
     this.resetRoom = resetRoom !== false;
+    this.modelRoleMap = asObject(modelRoleMap);
     this.runtime = null;
     this.events = [];
     this.seenRuntimeEventKeys = new Set();
@@ -157,6 +161,28 @@ export class HeadlessRoomJourneyTransport {
         transport: 'headless',
       },
     }));
+    const assignments = asObject(this.modelRoleMap.assignments || this.modelRoleMap);
+    if (Object.keys(assignments).length > 0) {
+      const currentProfile = getAgentRoomProfile(chatSessionStore, this.chatId) || {};
+      upsertAgentRoomProfile(chatSessionStore, this.chatId, {
+        ...currentProfile,
+        model_policy: {
+          schema_version: 'ddalggak.room_model_role_policy/v1',
+          strategy: 'headless_room_journey_explicit_model_role_map',
+          default_assignment: Object.entries(assignments).map(([role, assignment]) => ({
+            role,
+            provider: clean(assignment?.provider).toLowerCase(),
+            model: clean(assignment?.model),
+            node_id: clean(assignment?.node_id || assignment?.nodeId),
+            purpose: 'Explicit headless Room journey model-role assignment',
+          })),
+          governance: {
+            source: 'headless_room_journey_model_role_map',
+            durable_model_policy_change: 'benchmark_ephemeral_only',
+          },
+        },
+      });
+    }
     return { transport: 'headless', thread_id: this.threadId, chat_id: this.chatId, runtime_root: this.runtimeRoot };
   }
 
@@ -220,6 +246,8 @@ export class HeadlessRoomJourneyTransport {
       active_job_id: this._currentJobId() || null,
       collaboration_profile_id: clean(roomProfile.collaboration_profile_id || 'auto') || 'auto',
       agent_room_profile: roomProfile,
+      model_role_map: this.modelRoleMap,
+      effective_model_policy: asObject(roomProfile.model_policy || roomProfile.modelPolicy),
       last_room_selection: asObject(session.last_room_selection || session.lastRoomSelection),
       last_team_selection: asObject(session.last_team_selection || session.lastTeamSelection),
       last_route: asObject(session.last_route || session.lastRoute),
@@ -237,13 +265,26 @@ export class HeadlessRoomJourneyTransport {
     if (!message) return { ok: false, output: '', error: 'empty_message' };
     const mark = this.runtime.bot.mark();
     const beforeCount = this.events.length;
+    const inputKind = clean(messageOptions.kind || messageOptions.inputKind || 'normal') || 'normal';
+    let teamConfig = messageOptions.teamConfig && typeof messageOptions.teamConfig === 'object' ? messageOptions.teamConfig : null;
+    if (!teamConfig && ['team_task', 'team_loop_task'].includes(inputKind)) {
+      const roomProfile = getAgentRoomProfile(this.runtime.runtimeCore.chatSessionStore, this.chatId) || {};
+      teamConfig = buildRoomFirstTeamConfiguration({
+        taskText: message,
+        workMode: inputKind,
+        roomProfile,
+        chatId: this.chatId,
+        runtime: null,
+        source: 'headless_room_journey_profile_materialization',
+      });
+    }
     const accepted = await this.runtime.chatRunManager.handleIncoming({
       chatId: this.chatId,
       userId: this.userId,
       text: message,
-      kind: clean(messageOptions.kind || messageOptions.inputKind || 'normal') || 'normal',
+      kind: inputKind,
       forceMode: clean(messageOptions.forceMode || messageOptions.force_mode || 'normal') || 'normal',
-      teamConfig: messageOptions.teamConfig && typeof messageOptions.teamConfig === 'object' ? messageOptions.teamConfig : null,
+      teamConfig,
       chatInfo: { chat_id: this.chatId, title: 'Headless Room Journey', type: 'private' },
     });
     await this._waitForIdle();
@@ -262,6 +303,36 @@ export class HeadlessRoomJourneyTransport {
       assistant_messages: this.runtime.bot.messagesSince(mark, this.chatId),
       room_state: this.snapshotState(),
     };
+  }
+
+
+  async clearTransientConversationContext() {
+    if (!this.runtime) await this.initialize();
+    const store = this.runtime.runtimeCore.chatSessionStore;
+    const session = store.get(this.chatId) || {};
+    const jobId = this._currentJobId();
+    let jobDir = '';
+    try { jobDir = jobId ? this.runtime.runtimeCore.jobs.jobDir(jobId) : ''; } catch {}
+    store.upsert(this.chatId, {
+      ...session,
+      recent_room_turns: [],
+      last_room_turn: null,
+      recent_agent_turns: [],
+    });
+    for (const relative of [
+      'local_memory/turns.jsonl',
+      'local_memory/room_turn_ledger.jsonl',
+      'local_memory/summary.md',
+      'local_memory/iteration_delta.md',
+      'local_memory/role_summaries',
+      'shared/room_turn_ledger.jsonl',
+      'conversation.jsonl',
+      'user_facts.jsonl',
+    ]) {
+      if (!jobDir) continue;
+      try { fs.rmSync(path.join(jobDir, relative), { recursive: true, force: true }); } catch {}
+    }
+    return { ok: true, action: 'clear_transient_conversation_context', room_state: this.snapshotState() };
   }
 
   async sendCommand(commandText = '') {
@@ -412,6 +483,10 @@ async function executeStep({ step, arm, transport, options }) {
     if (action === 'set_collaboration_profile') command = `/collab use ${clean(step.profile || arm.collaboration_profile)}`;
     return await transport.sendCommand(command);
   }
+  if (action === 'clear_transient_conversation_context') {
+    if (typeof transport.clearTransientConversationContext !== 'function') return { ok: false, error: 'transport_does_not_support_transient_context_clear' };
+    return await transport.clearTransientConversationContext();
+  }
   if (action === 'restart_service') return await runShell(resolveTemplate(options.restartCommand, step, arm), options);
   if (action === 'switch_model') return await runShell(resolveTemplate(options.switchModelCommand, step, arm), options);
   if (action === 'replace_source') return await runShell(resolveTemplate(options.replaceSourceCommand, step, arm), options);
@@ -475,6 +550,21 @@ function assertionResult(assertion = {}, context = {}) {
     const finishes = context.runtimeEvents.filter((event) => eventType(event) === 'run.agent_finish' && isLocalCliEvent(event));
     const roles = new Set(finishes.map((event) => clean(eventPayload(event).model_role || eventPayload(event).role_id)).filter(Boolean));
     observed = [...roles]; passed = roles.size >= Number(assertion.min ?? 1) && roles.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
+  } else if (type === 'successful_model_roles_include') {
+    const finishes = context.runtimeEvents.filter((event) => eventType(event) === 'run.agent_finish' && isLocalCliEvent(event));
+    const roles = new Set(finishes.map((event) => clean(eventPayload(event).model_role).toLowerCase()).filter(Boolean));
+    const expected = asArray(assertion.values || assertion.roles || assertion.expected).map((row) => clean(row).toLowerCase()).filter(Boolean);
+    const missing = expected.filter((role) => !roles.has(role));
+    observed = { expected, actual: [...roles], missing };
+    passed = expected.length > 0 && missing.length === 0;
+  } else if (type === 'distinct_lane_count') {
+    const finishes = context.runtimeEvents.filter((event) => eventType(event) === 'run.agent_finish' && isLocalCliEvent(event));
+    const lanes = new Set(finishes.map((event) => {
+      const payload = eventPayload(event);
+      return clean(payload.lane_id || payload.laneId || payload?.collaboration_lane?.lane_id || payload?.collaborationLane?.laneId);
+    }).filter(Boolean));
+    observed = [...lanes];
+    passed = lanes.size >= Number(assertion.min ?? 1) && lanes.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'distinct_provider_count') {
     const providers = new Set(context.runtimeEvents.filter((event) => ['run.agent_start', 'run.agent_finish'].includes(eventType(event))).map((event) => clean(eventPayload(event).provider)).filter(Boolean));
     observed = [...providers]; passed = providers.size >= Number(assertion.min ?? 1) && providers.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
@@ -649,7 +739,7 @@ export async function judgeRoomJourneyRun({ scenario = {}, arm = {}, stepRows = 
   };
 }
 
-function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '', finishedAt = '', semanticJudgment = null } = {}) {
+function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '', finishedAt = '', semanticJudgment = null, arm = null } = {}) {
   const required = assertions.filter((row) => row.required !== false);
   const qualityAssertions = required.filter((row) => row.quality_metric !== false);
   const deterministicQuality = qualityAssertions.length ? qualityAssertions.filter((row) => row.passed).length / qualityAssertions.length : 0;
@@ -663,6 +753,21 @@ function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '',
   const models = [...new Set(finishes.map((event) => clean(eventPayload(event).model)).filter(Boolean))];
   const modelNodes = [...new Set(finishes.map((event) => modelNodeKey(eventPayload(event))).filter(Boolean))];
   const roles = [...new Set(finishes.map((event) => clean(eventPayload(event).model_role || eventPayload(event).role_id)).filter(Boolean))];
+  const collaborationProfile = clean(arm?.collaboration_profile || arm?.collaborationProfile || '');
+  const collaborationAssertionTypes = new Set([
+    'successful_provider_role_count',
+    'successful_model_roles_include',
+    'distinct_model_node_count',
+    'distinct_lane_count',
+    'model_role_map_alignment',
+  ]);
+  const collaborationAssertions = required.filter((row) => collaborationAssertionTypes.has(clean(row.type).toLowerCase()));
+  const collaborationRequired = Boolean(collaborationProfile && collaborationProfile !== 'solo' && collaborationProfile !== 'auto');
+  const collaborationExecutionStatus = collaborationRequired
+    ? (collaborationAssertions.length > 0 && collaborationAssertions.every((row) => row.passed)
+      ? 'valid_collaboration_execution'
+      : 'invalid_collaboration_execution')
+    : 'not_applicable';
   let tokens = 0; let cost = 0; let hasTokens = false; let hasCost = false;
   for (const event of runtimeEvents) {
     const payload = eventPayload(event);
@@ -684,6 +789,9 @@ function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '',
     cli_failure_count: errors.length,
     execution_status: errors.length > 0 || finishes.length === 0 ? 'invalid_execution' : 'valid_execution',
     execution_eligible: errors.length === 0 && finishes.length > 0,
+    collaboration_profile: collaborationProfile || null,
+    collaboration_execution_status: collaborationExecutionStatus,
+    collaboration_assertion_failures: collaborationAssertions.filter((row) => !row.passed).map((row) => row.id),
     provider_count: providers.length,
     providers,
     models,
@@ -708,6 +816,16 @@ export function evaluatePortfolioPromotion({ baseline = null, challenger = null,
       cost_ratio: null,
       latency_ratio: null,
       reasons: invalidReasons,
+    };
+  }
+  if (clean(challenger.collaboration_execution_status) === 'invalid_collaboration_execution') {
+    return {
+      status: 'invalid_collaboration_execution',
+      promote: false,
+      quality_uplift: null,
+      cost_ratio: null,
+      latency_ratio: null,
+      reasons: ['challenger_collaboration_graph_not_materialized', ...asArray(challenger.collaboration_assertion_failures)],
     };
   }
   const minUplift = Number(gate.min_quality_uplift ?? 0.05);
@@ -741,6 +859,7 @@ function buildCliCallRows(runtimeEvents = []) {
         agent_id: clean(payload.agent_id),
         role_id: clean(payload.role_id),
         model_role: clean(payload.model_role),
+        lane_id: clean(payload.lane_id || payload.laneId || payload?.collaboration_lane?.lane_id),
         provider: clean(payload.provider),
         model: clean(payload.model),
         model_node: modelNodeKey(payload),
@@ -758,6 +877,7 @@ function buildCliCallRows(runtimeEvents = []) {
       agent_id: clean(payload.agent_id),
       role_id: clean(payload.role_id),
       model_role: clean(payload.model_role),
+      lane_id: clean(payload.lane_id || payload.laneId || payload?.collaboration_lane?.lane_id),
       provider: clean(payload.provider),
       model: clean(payload.model),
       model_node: modelNodeKey(payload),
@@ -882,7 +1002,7 @@ export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot 
     });
   }
   const finishedAt = nowIso();
-  const metrics = summarizeMetrics({ assertions, runtimeEvents, startedAt, finishedAt: executionFinishedAt, semanticJudgment });
+  const metrics = summarizeMetrics({ assertions, runtimeEvents, startedAt, finishedAt: executionFinishedAt, semanticJudgment, arm: selectedArm });
   metrics.evaluation_duration_ms = Math.max(0, (Date.parse(finishedAt) || Date.now()) - (Date.parse(executionFinishedAt) || Date.now()));
   const summary = {
     schema_version: 'ddalggak.room_journey_run/v1',

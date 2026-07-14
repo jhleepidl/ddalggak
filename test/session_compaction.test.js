@@ -187,3 +187,44 @@ test('chat session store preserves governed Room profile, memory lifecycle, and 
     fs.rmSync(baseDir, { recursive: true, force: true });
   }
 });
+
+test('pending team-task messages preserve execution metadata across session normalization', () => {
+  const root = makeTestTempDir('session-pending-team-config-');
+  try {
+    const store = new ChatSessionStore({ baseDir: root });
+    store.upsert('pending-team-room', {
+      pending_user_messages: [{
+        ts: new Date().toISOString(),
+        user_id: 'benchmark-user',
+        text: 'Run the configured collaboration graph',
+        kind: 'team_task',
+        user_reply_to_message_id: 42,
+        team_config: {
+          team_name: 'portfolio_team',
+          agents: [{
+            agent_id: 'reviewer',
+            name: 'Independent Reviewer',
+            role: 'reviewer',
+            provider: 'claude',
+            model_role: 'verifier_critic',
+            collaboration_lane: { lane_id: 'review_lane' },
+          }],
+          interaction_spec: {
+            execution_pattern: 'builder_reviewer_loop',
+            final_answer_owner: 'Independent Reviewer',
+            handoffs: [],
+          },
+        },
+      }],
+    });
+    const reloaded = new ChatSessionStore({ baseDir: root }).get('pending-team-room');
+    const pending = reloaded.pending_user_messages[0];
+    assert.equal(pending.kind, 'team_task');
+    assert.equal(pending.user_reply_to_message_id, 42);
+    assert.equal(pending.team_config.team_name, 'portfolio_team');
+    assert.equal(pending.team_config.agents[0].model_role, 'verifier_critic');
+    assert.equal(pending.team_config.agents[0].collaboration_lane.lane_id, 'review_lane');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

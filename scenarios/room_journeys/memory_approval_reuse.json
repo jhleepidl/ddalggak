@@ -2,7 +2,7 @@
   "schema_version": "ddalggak.room_journey_scenario/v1",
   "id": "memory_approval_reuse",
   "title": "승인된 사용자 선호의 다음 호출 재사용",
-  "description": "자연스러운 대화에서 memory 후보를 만들고 사용자가 승인한 뒤, 다음 요청의 context projection과 답변에 재사용되는지 검증한다.",
+  "description": "자연스러운 대화에서 memory 후보를 만들고 사용자가 승인한 뒤, 최근 대화 fallback을 제거한 새 호출에서도 canonical memory가 context projection과 답변에 재사용되는지 검증한다.",
   "steps": [
     {
       "id": "state_preference",
@@ -21,6 +21,11 @@
     {
       "id": "approve_candidate",
       "action": "approve_memory"
+    },
+    {
+      "id": "clear_transient_context",
+      "action": "clear_transient_conversation_context",
+      "description": "승인된 canonical memory만 남기고 최근 대화/ledger fallback을 제거한다."
     },
     {
       "id": "reuse_preference",

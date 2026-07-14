@@ -56,6 +56,9 @@ function collectTeamAgents(runtime = {}) {
       provider: cleanId(row.provider),
       model: String(row.model || '').trim() || undefined,
       model_role: cleanId(row.model_role || row.modelRole),
+      collaboration_lane: row.collaboration_lane && typeof row.collaboration_lane === 'object'
+        ? row.collaboration_lane
+        : (row.collaborationLane && typeof row.collaborationLane === 'object' ? row.collaborationLane : {}),
       attached_skill_ids: asArray(row.attached_skill_ids || row.attachedSkillIds || row.skills),
     });
   };
@@ -171,6 +174,10 @@ function buildRunAction(agent = {}, message = '', { finalSynthesis = false } = {
       provider: cleanId(agent.provider) || undefined,
       model: String(agent.model || '').trim() || undefined,
       model_role: cleanId(agent.model_role || agent.modelRole) || undefined,
+      collaboration_lane: agent.collaboration_lane && typeof agent.collaboration_lane === 'object'
+        ? agent.collaboration_lane
+        : undefined,
+      lane_id: cleanId(agent?.collaboration_lane?.lane_id || agent?.collaborationLane?.laneId || '') || undefined,
       attached_skill_ids: asArray(agent.attached_skill_ids || agent.attachedSkillIds).filter(Boolean),
       final_synthesis: finalSynthesis === true || roleId === 'synthesizer' ? true : undefined,
     },
@@ -204,10 +211,64 @@ function repairExistingGoals(actions = [], teamAgents = [], message = '', { fina
         provider: String(action?.inputs?.provider || finalOwnerOverride?.provider || matched.provider || '').trim() || undefined,
         model: String(action?.inputs?.model || finalOwnerOverride?.model || matched.model || '').trim() || undefined,
         model_role: cleanId(action?.inputs?.model_role || action?.inputs?.modelRole || finalOwnerOverride?.model_role || matched.model_role) || undefined,
+        collaboration_lane: action?.inputs?.collaboration_lane && typeof action.inputs.collaboration_lane === 'object'
+          ? action.inputs.collaboration_lane
+          : (finalOwnerOverride?.collaboration_lane || matched.collaboration_lane || undefined),
+        lane_id: cleanId(
+          action?.inputs?.lane_id
+          || action?.inputs?.laneId
+          || finalOwnerOverride?.collaboration_lane?.lane_id
+          || matched?.collaboration_lane?.lane_id
+          || ''
+        ) || undefined,
       },
       scope: action?.scope && typeof action.scope === 'object' ? action.scope : { mode: 'shared_only' },
     };
   });
+}
+
+function normalizedActionFingerprint(action = {}) {
+  const inputs = action?.inputs && typeof action.inputs === 'object' ? action.inputs : {};
+  const scope = action?.scope && typeof action.scope === 'object' ? action.scope : {};
+  const laneId = cleanId(inputs.lane_id || inputs.laneId || inputs?.collaboration_lane?.lane_id || inputs?.collaborationLane?.laneId || '');
+  return [
+    cleanId(action.type),
+    cleanId(action.agent_id || action.agent),
+    cleanId(inputs.model_role || inputs.modelRole),
+    String(action.goal || action.prompt || action.task || '').replace(/\s+/g, ' ').trim().toLowerCase(),
+    cleanId(scope.mode || scope.scope || ''),
+    laneId,
+  ].join('|');
+}
+
+function dedupeSpawnChildren(action = {}) {
+  if (!['spawn_agents', 'spawn_parallel'].includes(cleanId(action?.type))) return action;
+  const seen = new Set();
+  const agents = asArray(action.agents).filter((child) => {
+    const key = normalizedActionFingerprint({ ...child, type: 'run_agent' });
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return { ...action, agents };
+}
+
+export function dedupeRoutePlanActions(routePlan = {}) {
+  const row = routePlan && typeof routePlan === 'object' ? routePlan : {};
+  const seen = new Set();
+  const actions = asArray(row.actions)
+    .map(dedupeSpawnChildren)
+    .filter((action) => {
+      const key = normalizedActionFingerprint(action);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  return {
+    ...row,
+    actions,
+    deduplicated_action_count: Math.max(0, asArray(row.actions).length - actions.length),
+  };
 }
 
 export function repairRoutePlanForTeamExecution(routePlan = {}, {

@@ -231,6 +231,7 @@ async function main() {
         runtimeRoot: options.runtimeRoot,
         traceRoot: options.traceRoot,
         responseTimeoutMs: options.responseTimeoutMs,
+        modelRoleMap: options.modelRoleMap,
       });
     }
     return new GocRoomJourneyTransport({

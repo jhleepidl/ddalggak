@@ -251,6 +251,36 @@ test('portfolio comparison refuses to score faster failures as quality or latenc
   assert.ok(result.reasons.includes('challenger_invalid_execution'));
 });
 
+
+
+test('portfolio comparison is invalid when the collaboration graph did not materialize', () => {
+  const result = evaluatePortfolioPromotion({
+    baseline: {
+      quality_score: 0.7,
+      required_fail: 0,
+      duration_ms: 1000,
+      semantic_judge_present: true,
+      execution_status: 'valid_execution',
+      collaboration_execution_status: 'not_applicable',
+    },
+    challenger: {
+      quality_score: 0.8,
+      required_fail: 2,
+      duration_ms: 1100,
+      semantic_judge_present: true,
+      execution_status: 'valid_execution',
+      collaboration_execution_status: 'invalid_collaboration_execution',
+      collaboration_assertion_failures: ['roles', 'lanes'],
+    },
+    gate: { min_quality_uplift: 0.05 },
+  });
+  assert.equal(result.status, 'invalid_collaboration_execution');
+  assert.equal(result.promote, false);
+  assert.equal(result.quality_uplift, null);
+  assert.equal(result.latency_ratio, null);
+  assert.deepEqual(result.reasons, ['challenger_collaboration_graph_not_materialized', 'roles', 'lanes']);
+});
+
 test('negative response assertions fail when the requested turn failed or returned an empty response', async () => {
   const root = makeTestTempDir('room-journey-empty-response-');
   try {
@@ -303,6 +333,77 @@ test('suite compares isolated solo and multi-model arms without counting archite
     assert.equal(summary.results.find((row) => row.arm.id === 'builder_reviewer').metrics.quality_assertion_count, 1);
     assert.equal(summary.portfolio_comparisons[0].promote, false);
     assert.ok(summary.portfolio_comparisons[0].reasons.includes('quality_uplift_below_gate'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('headless transient context clear removes recency fallbacks but preserves governed Room memory', async () => {
+  const root = makeTestTempDir('room-journey-clear-transient-');
+  try {
+    const sessions = new Map();
+    const jobDir = path.join(root, 'job');
+    fs.mkdirSync(path.join(jobDir, 'local_memory', 'role_summaries'), { recursive: true });
+    fs.mkdirSync(path.join(jobDir, 'shared'), { recursive: true });
+    for (const relative of [
+      'local_memory/turns.jsonl',
+      'local_memory/room_turn_ledger.jsonl',
+      'local_memory/summary.md',
+      'local_memory/iteration_delta.md',
+      'local_memory/role_summaries/researcher.md',
+      'shared/room_turn_ledger.jsonl',
+      'conversation.jsonl',
+      'user_facts.jsonl',
+    ]) {
+      const target = path.join(jobDir, relative);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, 'transient\n', 'utf8');
+    }
+    sessions.set('synthetic-room', {
+      state: 'idle',
+      recent_room_turns: [{ role: 'user', text: 'recent preference' }],
+      last_room_turn: { role: 'assistant', text: 'recent reply' },
+      recent_agent_turns: [{ agent_id: 'researcher', text: 'recent agent' }],
+      room_memory_items: [{ memory_id: 'mem-approved', status: 'active', summary: 'durable preference' }],
+    });
+    const runtimeCore = {
+      chatSessionStore: {
+        get(chatId) { return sessions.get(String(chatId)) || {}; },
+        upsert(chatId, patchOrUpdater) {
+          const current = this.get(chatId);
+          const patch = typeof patchOrUpdater === 'function' ? patchOrUpdater(current) : patchOrUpdater;
+          sessions.set(String(chatId), { ...current, ...patch });
+          return sessions.get(String(chatId));
+        },
+      },
+      resolveCurrentJobIdForChat() { return 'job-1'; },
+      jobs: { jobDir() { return jobDir; } },
+    };
+    const transport = new HeadlessRoomJourneyTransport({
+      threadId: 'thread',
+      chatId: 'synthetic-room',
+      userId: 'user',
+      runtimeRoot: root,
+      traceRoot: path.join(root, 'trace'),
+      runtimeFactory: async () => ({
+        bot: { mark() { return 0; }, messagesSince() { return []; } },
+        runtimeCore,
+        chatRunManager: { isRunning() { return false; } },
+        async handleRoomCommand() { return true; },
+      }),
+    });
+
+    await transport.initialize();
+    const result = await transport.clearTransientConversationContext();
+    const session = runtimeCore.chatSessionStore.get('synthetic-room');
+    assert.equal(result.ok, true);
+    assert.deepEqual(session.recent_room_turns, []);
+    assert.equal(session.last_room_turn, null);
+    assert.deepEqual(session.recent_agent_turns, []);
+    assert.equal(session.room_memory_items?.[0]?.memory_id, 'mem-approved');
+    assert.equal(fs.existsSync(path.join(jobDir, 'local_memory', 'turns.jsonl')), false);
+    assert.equal(fs.existsSync(path.join(jobDir, 'local_memory', 'role_summaries')), false);
+    assert.equal(fs.existsSync(path.join(jobDir, 'shared', 'room_turn_ledger.jsonl')), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

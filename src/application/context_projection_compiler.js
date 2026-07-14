@@ -10,6 +10,20 @@ function asObject(value) { return value && typeof value === 'object' && !Array.i
 function stableHash(value = '') { return crypto.createHash('sha1').update(String(value || '')).digest('hex').slice(0, 12); }
 function clip(value = '', max = 4000) { const s = String(value || ''); return s.length > max ? `${s.slice(0, max)}\n…[truncated]` : s; }
 function nowMs() { return Date.now(); }
+function normalizeSupplementalAtom(atom = {}) {
+  const row = asObject(atom);
+  const id = clean(row.id || row.atom_id || row.memory_id);
+  if (!id) return null;
+  return {
+    ...row,
+    id,
+    atom_type: clean(row.atom_type || row.type || 'supplemental_memory') || 'supplemental_memory',
+    status: clean(row.status || 'active') || 'active',
+    title: clean(row.title || id),
+    text_original: clean(row.text_original || row.text || row.summary || row.content || ''),
+    canonical_text_en: clean(row.canonical_text_en || row.canonical_text || ''),
+  };
+}
 
 function looksLikeCasualRecommendation(goal = '') {
   const text = clean(goal).toLowerCase();
@@ -36,7 +50,8 @@ function compactAtomLine(atom = {}) {
   const title = clean(atom.title || atom.id || type);
   const text = clean(atom.canonical_text_en || atom.text_original || '');
   const tags = asArray(atom.tags).map(clean).filter(Boolean).slice(0, 4).join(',');
-  return `- [${type}] ${title}${text ? `: ${clip(text, 260)}` : ''}${tags ? ` (${tags})` : ''}`;
+  const id = clean(atom.id || atom.atom_id || '');
+  return `- [${type}] ${title}${id && id !== title ? ` {id=${id}}` : ''}${text ? `: ${clip(text, 260)}` : ''}${tags ? ` (${tags})` : ''}`;
 }
 
 function compactLinkLine(link = {}) {
@@ -92,6 +107,7 @@ export function compileAgentContextProjection({
   runDir = '',
   cache = true,
   includeHandoffs = true,
+  supplementalAtoms = [],
 } = {}) {
   const started = nowMs();
   const role = clean(roleId || agentId || 'agent').toLowerCase();
@@ -109,10 +125,18 @@ export function compileAgentContextProjection({
     cache,
   };
   const rawProjection = getContextProjection(substrateOptions, query);
-  const projectionId = `proj_${stableHash(JSON.stringify({ snapshot: rawProjection.snapshot_id, role, inferredTaskType, goal: clean(goal).slice(0, 500), modelNode, budget }))}`;
+  const supplemental = asArray(supplementalAtoms).map(normalizeSupplementalAtom).filter(Boolean);
+  const supplementalIds = new Set(supplemental.map((atom) => atom.id));
+  const mergedAtoms = [
+    ...supplemental,
+    ...asArray(rawProjection.atoms).filter((atom) => !supplementalIds.has(clean(atom?.id || atom?.atom_id))),
+  ].slice(0, Math.max(Number(query.limit || 24), supplemental.length));
+  const projectionId = `proj_${stableHash(JSON.stringify({ snapshot: rawProjection.snapshot_id, role, inferredTaskType, goal: clean(goal).slice(0, 500), modelNode, budget, supplemental: supplemental.map((atom) => atom.id) }))}`;
   const handoffs = includeHandoffs ? getRecentRunContextHandoffs({ agentId: role, limit: 6 }, { rootDir, jobId, runDir }) : [];
   const projection = {
     ...rawProjection,
+    atoms: mergedAtoms,
+    atom_count: mergedAtoms.length,
     projection_id: projectionId,
     role,
     task_type: inferredTaskType,

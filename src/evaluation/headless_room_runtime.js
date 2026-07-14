@@ -15,6 +15,10 @@ import {
   deriveRoomMemoryView,
   updateRoomMemoryCandidateDecision,
 } from '../application/room_memory_view.js';
+import {
+  appendRoomConversationExchange,
+  appendRoomConversationTurn,
+} from '../application/room_conversation_ledger.js';
 
 function clean(value = '') { return String(value ?? '').trim(); }
 function asArray(value) { return Array.isArray(value) ? value : []; }
@@ -168,6 +172,47 @@ function appendCompanionEvent(runtimeCore, roomId, userId, event) {
   });
 }
 
+export function recordHeadlessRoomUserTurn({ runtimeCore, roomId = '', userId = '', text = '' } = {}) {
+  const { jobId, jobDir } = currentJobContext(runtimeCore, roomId);
+  return appendRoomConversationTurn({
+    jobDir,
+    chatSessionStore: runtimeCore?.chatSessionStore,
+    chatId: roomId,
+    userId,
+    role: 'user',
+    text,
+    source: 'headless_room_journey_user_turn',
+    route: 'headless_room_runtime',
+    jobId,
+  });
+}
+
+export function recordHeadlessRoomAssistantTurn({
+  runtimeCore,
+  roomId = '',
+  userId = '',
+  userText = '',
+  assistantText = '',
+  provider = '',
+  model = '',
+} = {}) {
+  const { jobId, jobDir } = currentJobContext(runtimeCore, roomId);
+  return appendRoomConversationExchange({
+    jobDir,
+    chatSessionStore: runtimeCore?.chatSessionStore,
+    chatId: roomId,
+    userId,
+    userText,
+    assistantText,
+    source: 'headless_room_journey_assistant_turn',
+    route: 'headless_room_runtime',
+    provider,
+    model,
+    jobId,
+    skipUserTurn: true,
+  });
+}
+
 export async function executeHeadlessRoomCommand({ runtimeCore, sink, roomId = '', userId = '', commandText = '' } = {}) {
   const command = clean(commandText);
   if (!command.startsWith('/')) throw new Error(`Headless Room command must start with /: ${command}`);
@@ -311,7 +356,13 @@ export async function createHeadlessRoomRuntime({ runtimeRoot = '', traceRoot = 
       await sink.sendMessage(chatId, `Headless Room run failed: ${clean(error?.message || error)}`);
     },
     runChat: async ({ chatId, userId, message, inputKind, pendingCount, forceMode, chatInfo, teamConfig }) => {
-      await runtimeCore.runSupervisorChat(
+      recordHeadlessRoomUserTurn({
+        runtimeCore,
+        roomId: chatId,
+        userId,
+        text: message,
+      });
+      const result = await runtimeCore.runSupervisorChat(
         sink,
         chatId,
         userId,
@@ -324,6 +375,20 @@ export async function createHeadlessRoomRuntime({ runtimeRoot = '', traceRoot = 
           teamConfig: teamConfig && typeof teamConfig === 'object' ? teamConfig : null,
         },
       );
+      const assistantText = clean(result?.replyText || result?.reply_text || result?.finalAssistantText || result?.final_assistant_text || '');
+      if (assistantText) {
+        const selectedModel = asObject(result?.routePlan?.selected_model || result?.routePlan?.selectedModel);
+        recordHeadlessRoomAssistantTurn({
+          runtimeCore,
+          roomId: chatId,
+          userId,
+          userText: message,
+          assistantText,
+          provider: clean(selectedModel.provider),
+          model: clean(selectedModel.model),
+        });
+      }
+      return result;
     },
   });
 

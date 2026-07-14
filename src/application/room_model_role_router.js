@@ -58,9 +58,10 @@ export function modelRoleForAgentRole(agentRole = '') {
 export function normalizeRoomModelRolePolicy({ roomPackage = null, profile = null } = {}) {
   const pkg = asObject(roomPackage);
   const prof = asObject(profile);
-  const policy = asObject(pkg.model_policy || prof.model_policy || prof.modelPolicy);
-  const base = asArray(policy.default_assignment).length ? policy : buildRoomModelPolicy(pkg, { intent: prof.room_package_composition?.intent_card || null });
-  const assignments = asArray(base.default_assignment).map((row) => {
+  const packagePolicy = asObject(pkg.model_policy || pkg.modelPolicy);
+  const profilePolicy = asObject(prof.model_policy || prof.modelPolicy);
+  const generatedPolicy = buildRoomModelPolicy(pkg, { intent: prof.room_package_composition?.intent_card || null });
+  const normalizeAssignments = (policy = {}) => asArray(asObject(policy).default_assignment).map((row) => {
     const item = asObject(row);
     const role = cleanText(item.role || item.model_role || '', { lower: true, maxLen: 120 });
     if (!role) return null;
@@ -72,26 +73,33 @@ export function normalizeRoomModelRolePolicy({ roomPackage = null, profile = nul
       fallback_tier: cleanText(item.fallback_tier || fallback.fallback_tier || 'general_reasoning', { lower: true, maxLen: 120 }),
       provider: cleanText(item.provider || '', { lower: true, maxLen: 80 }),
       model: cleanText(item.model || '', { maxLen: 160 }),
+      node_id: cleanText(item.node_id || item.nodeId || '', { maxLen: 160 }),
     };
   }).filter(Boolean);
-  const byRole = new Map(assignments.map((row) => [row.role, row]));
+
+  const basePolicy = asArray(packagePolicy.default_assignment).length ? packagePolicy : generatedPolicy;
+  const byRole = new Map(normalizeAssignments(basePolicy).map((row) => [row.role, row]));
+  for (const row of normalizeAssignments(profilePolicy)) {
+    byRole.set(row.role, { ...(byRole.get(row.role) || {}), ...row });
+  }
   for (const [role, fallback] of Object.entries(DEFAULT_MODEL_ROLE_FALLBACKS)) {
-    if (!byRole.has(role)) {
-      byRole.set(role, { role, purpose: 'Default fallback model role', provider: '', model: '', ...fallback });
-    }
+    if (!byRole.has(role)) byRole.set(role, { role, purpose: 'Default fallback model role', provider: '', model: '', node_id: '', ...fallback });
   }
   return {
     schema_version: 'ddalggak.room_model_role_policy/v1',
-    strategy: cleanText(base.strategy || 'room_scoped_model_portfolio', { lower: true, maxLen: 120 }),
+    strategy: cleanText(profilePolicy.strategy || basePolicy.strategy || 'room_scoped_model_portfolio', { lower: true, maxLen: 120 }),
     default_assignment: [...byRole.values()],
-    routing_signals: asArray(base.routing_signals).length ? base.routing_signals : ['room_intent_card', 'active_loop_phase', 'artifact_type', 'risk_profile', 'latency_budget', 'cost_budget'],
+    routing_signals: asArray(profilePolicy.routing_signals).length
+      ? profilePolicy.routing_signals
+      : (asArray(basePolicy.routing_signals).length ? basePolicy.routing_signals : ['room_intent_card', 'active_loop_phase', 'artifact_type', 'risk_profile', 'latency_budget', 'cost_budget']),
     governance: {
       footer_required: true,
       log_provider_and_model_per_response: true,
       single_model_fallback_allowed: true,
       provider_secret_export: 'never',
       durable_model_policy_change: 'trial_then_user_or_goc_approval',
-      ...asObject(base.governance),
+      ...asObject(basePolicy.governance),
+      ...asObject(profilePolicy.governance),
     },
   };
 }
@@ -117,7 +125,7 @@ export function resolveRoomModelRole({ phase = '', modelRole = '', roomPackage =
     role,
     provider,
     model,
-    node_id: envAssignment?.node_id || '',
+    node_id: envAssignment?.node_id || assignment.node_id || '',
     preferred_tier: assignment.preferred_tier || DEFAULT_MODEL_ROLE_FALLBACKS[role]?.preferred_tier || 'general_reasoning',
     fallback_tier: assignment.fallback_tier || DEFAULT_MODEL_ROLE_FALLBACKS[role]?.fallback_tier || 'general_reasoning',
     purpose: assignment.purpose || 'Room model role',

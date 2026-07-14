@@ -109,3 +109,28 @@ test('context projection keeps casual recommendation goals out of code_change ev
   assert.equal(compiled.task_type, 'general_task');
   assert.doesNotMatch(compiled.prompt_block, /task_type: code_change/);
 });
+
+test('compiled projection includes approved Room memories as first-class supplemental atoms', () => {
+  const base = path.join(os.homedir(), 'tmp', 'ddalggak-tests');
+  fs.mkdirSync(base, { recursive: true });
+  const root = fs.mkdtempSync(path.join(base, 'context-projection-approved-memory-'));
+  try {
+    const compiled = compileAgentContextProjection({
+      jobId: 'job-approved-memory',
+      agentId: 'researcher',
+      roleId: 'researcher',
+      goal: '조용한 장소 추천 기준을 알려줘',
+      rootDir: root,
+      supplementalAtoms: [{
+        id: 'mem_quiet_places',
+        atom_type: 'approved_room_memory',
+        title: 'user_boundary_or_exclusion',
+        text_original: '사용자는 시끄러운 장소를 피하고 이미 방문한 곳을 재추천하지 않기를 원한다.',
+      }],
+    });
+    assert.ok(compiled.projection.atoms.some((atom) => atom.id === 'mem_quiet_places' && atom.atom_type === 'approved_room_memory'));
+    assert.match(compiled.prompt_block, /mem_quiet_places/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

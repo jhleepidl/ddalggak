@@ -130,7 +130,8 @@ function makeAgentFromCard({ card = null, role = '', index = 0, taskText = '', w
     profile: roomProfile,
   });
   const provider = modelResolution.provider || clean(row.provider, { lower: true, maxLen: 80 }) || defaultProviderForRole(roleId, { taskText, workMode });
-  const model = modelResolution.model || clean(row.model, { maxLen: 160 });
+  const configuredCardModel = clean(row.model, { maxLen: 160 });
+  const model = modelResolution.model || (modelResolution.provider ? '' : configuredCardModel);
   return {
     agent_id: roleId,
     id: roleId,
@@ -169,14 +170,32 @@ function expandAgentsForCollaboration({ agents = [], profile = null } = {}) {
   const pattern = cleanId(collaboration.execution_pattern || '');
   if (!['parallel_research_then_review_then_synthesize', 'multi_research_adjudication'].includes(pattern)) return rows;
 
-  const existingResearchers = rows.filter((agent) => cleanId(agent.role) === 'researcher');
-  const source = existingResearchers[0] || rows.find((agent) => !/review|critic|synthesizer|operator/.test(cleanId(agent.role)));
-  if (!source) return rows;
   const dimensions = asArray(asObject(collaboration.diversity_contract).dimensions)
     .map((item) => cleanId(item))
     .filter(Boolean);
-  const participantCap = Math.max(rows.length, Number(collaboration.max_participants || rows.length || 4));
-  const availableSlots = Math.max(0, participantCap - rows.length);
+  let researcherIndex = 0;
+  const laneRows = rows.map((agent) => {
+    if (cleanId(agent.role) !== 'researcher') return agent;
+    researcherIndex += 1;
+    const dimensionIndex = researcherIndex - 1;
+    const dimension = dimensions[dimensionIndex]
+      || dimensions[dimensionIndex % Math.max(1, dimensions.length)]
+      || `independent_angle_${researcherIndex}`;
+    return {
+      ...agent,
+      collaboration_lane: {
+        ...asObject(agent.collaboration_lane),
+        lane_id: cleanId(asObject(agent.collaboration_lane).lane_id || `lane_${researcherIndex}`),
+        diversity_dimension: cleanId(asObject(agent.collaboration_lane).diversity_dimension || dimension),
+        initial_visibility: clean(asObject(agent.collaboration_lane).initial_visibility || collaboration.initial_visibility || 'isolated_until_submission', { maxLen: 120 }),
+      },
+    };
+  });
+  const existingResearchers = laneRows.filter((agent) => cleanId(agent.role) === 'researcher');
+  const source = existingResearchers[0] || laneRows.find((agent) => !/review|critic|synthesizer|operator/.test(cleanId(agent.role)));
+  if (!source) return laneRows;
+  const participantCap = Math.max(laneRows.length, Number(collaboration.max_participants || laneRows.length || 4));
+  const availableSlots = Math.max(0, participantCap - laneRows.length);
   const desiredResearchers = Math.max(2, Math.min(3, existingResearchers.length + availableSlots));
   const additions = [];
   for (let index = existingResearchers.length; index < desiredResearchers; index += 1) {
@@ -188,7 +207,7 @@ function expandAgentsForCollaboration({ agents = [], profile = null } = {}) {
       name: `Independent Research Lane ${index + 1}`,
       role: 'researcher',
       purpose: `Explore an independent contribution lane focused on ${dimension}; do not duplicate other lanes.`,
-      order: rows.length + additions.length,
+      order: laneRows.length + additions.length,
       collaboration_lane: {
         lane_id: `lane_${index + 1}`,
         diversity_dimension: dimension,
@@ -196,7 +215,7 @@ function expandAgentsForCollaboration({ agents = [], profile = null } = {}) {
       },
     });
   }
-  return [...rows, ...additions].map((agent, index) => ({ ...agent, order: index }));
+  return [...laneRows, ...additions].map((agent, index) => ({ ...agent, order: index }));
 }
 
 function buildInteractionSpec({ workMode = 'ask', roles = [], agents = [], roomProfile = null } = {}) {
@@ -205,12 +224,28 @@ function buildInteractionSpec({ workMode = 'ask', roles = [], agents = [], roomP
   const collaborationPatch = collaborationProfile?.runtime_support === 'native'
     ? buildCollaborationInteractionPatch(collaborationProfile)
     : {};
-  const ownerName = clean(roster[roster.length - 1]?.name || roles[roles.length - 1] || 'Agent', { maxLen: 160 });
+  const nameOf = (agent) => clean(agent?.name || agent?.display_name || agent?.agent_id || agent?.id || agent?.role || '', { maxLen: 160 });
+  const agentsByRole = (role) => roster.filter((agent) => cleanId(agent?.role) === cleanId(role));
+  const firstByRole = (role) => agentsByRole(role)[0] || null;
+  const uniqueHandoffs = (rows = []) => {
+    const seen = new Set();
+    return rows.filter((row) => {
+      const from = clean(row?.from, { maxLen: 160 });
+      const to = clean(row?.to, { maxLen: 160 });
+      const payload = clean(row?.payload || 'summary_plus_key_evidence', { maxLen: 160 });
+      if (!from || !to || from === to) return false;
+      const key = `${from}=>${to}:${payload}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      row.from = from; row.to = to; row.payload = payload;
+      return true;
+    });
+  };
   if (workMode === 'ask') {
     return {
       execution_pattern: 'single_specialist',
       collaboration_profile_id: collaborationProfile?.id || 'auto',
-      final_answer_owner: clean(roster[0]?.name || roles[0] || 'Room Answerer', { maxLen: 160 }),
+      final_answer_owner: nameOf(roster[0]) || clean(roles[0] || 'Room Answerer', { maxLen: 160 }),
       handoffs: [],
       policies: {
         reviewer_visibility: 'summary_only',
@@ -222,13 +257,41 @@ function buildInteractionSpec({ workMode = 'ask', roles = [], agents = [], roomP
       selection_reason: 'Room Router kept this turn lightweight and used a single reusable component',
     };
   }
-  const basePattern = workMode === 'team_loop_task' && roles.includes('operator') ? 'operator_gated_workflow' : 'sequential_pipeline';
+
+  const profileId = cleanId(collaborationProfile?.id || 'auto');
+  const builders = agentsByRole('builder');
+  const researchers = agentsByRole('researcher');
+  const reviewers = agentsByRole('reviewer');
+  const synthesizers = agentsByRole('synthesizer');
+  const operators = agentsByRole('operator');
+  const reviewer = reviewers[0] || null;
+  const synthesizer = synthesizers[0] || reviewer || builders[0] || researchers[0] || operators[0] || roster[roster.length - 1] || null;
+  let handoffs = [];
+  let finalOwner = nameOf(synthesizer) || clean(roster[roster.length - 1]?.name || roles[roles.length - 1] || 'Agent', { maxLen: 160 });
+
+  if (profileId === 'builder_reviewer') {
+    const builder = builders[0] || roster[0];
+    if (builder && reviewer) handoffs.push({ from: nameOf(builder), to: nameOf(reviewer), payload: 'draft_plus_change_summary' });
+    if (reviewer && synthesizer && reviewer !== synthesizer) handoffs.push({ from: nameOf(reviewer), to: nameOf(synthesizer), payload: 'approved_summary_only' });
+    finalOwner = nameOf(synthesizer || reviewer || builder);
+  } else if (['parallel_ideation', 'evidence_panel'].includes(profileId)) {
+    for (const researcher of researchers) {
+      if (reviewer) handoffs.push({ from: nameOf(researcher), to: nameOf(reviewer), payload: profileId === 'evidence_panel' ? 'evidence_summary_plus_uncertainty' : 'distinct_proposal_plus_tradeoffs' });
+    }
+    if (reviewer && synthesizer && reviewer !== synthesizer) handoffs.push({ from: nameOf(reviewer), to: nameOf(synthesizer), payload: profileId === 'evidence_panel' ? 'adjudicated_evidence_summary' : 'reviewed_distinct_options' });
+    finalOwner = nameOf(synthesizer || reviewer || researchers[0]);
+  } else {
+    for (let index = 0; index < roster.length - 1; index += 1) {
+      handoffs.push({ from: nameOf(roster[index]), to: nameOf(roster[index + 1]), payload: 'summary_plus_key_evidence' });
+    }
+  }
+
   return {
-    execution_pattern: collaborationPatch.execution_pattern || basePattern,
+    execution_pattern: collaborationPatch.execution_pattern || (workMode === 'team_loop_task' && roles.includes('operator') ? 'operator_gated_workflow' : 'sequential_pipeline'),
     collaboration_profile_id: collaborationProfile?.id || 'auto',
     collaboration_contract: collaborationPatch.collaboration_contract,
-    final_answer_owner: ownerName,
-    handoffs: [],
+    final_answer_owner: finalOwner,
+    handoffs: uniqueHandoffs(handoffs),
     policies: {
       reviewer_visibility: 'summaries_plus_selected_evidence',
       synthesizer_visibility: 'upstream_outputs_only',

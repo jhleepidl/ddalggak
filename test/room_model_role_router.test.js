@@ -44,3 +44,32 @@ test('model role plan formats all phase-specific assignments', () => {
   assert.equal(plan.guardrail.credentials_exported, false);
   assert.match(formatRoomModelRolePlanForTelegram(plan), /Room model-role router/);
 });
+
+test('explicit Room profile model policy overrides package defaults role by role', () => {
+  const roomPackage = {
+    kind: 'room_package_v1',
+    model_policy: {
+      strategy: 'package_defaults',
+      default_assignment: [
+        { role: 'source_grounder', provider: 'codex', model: 'package-source' },
+        { role: 'verifier_critic', provider: 'codex', model: 'package-review' },
+      ],
+    },
+  };
+  const profile = {
+    model_policy: {
+      strategy: 'benchmark_override',
+      default_assignment: [
+        { role: 'source_grounder', provider: 'claude', model: '' },
+      ],
+    },
+  };
+  const policy = normalizeRoomModelRolePolicy({ roomPackage, profile });
+  const source = policy.default_assignment.find((row) => row.role === 'source_grounder');
+  const reviewer = policy.default_assignment.find((row) => row.role === 'verifier_critic');
+  assert.equal(policy.strategy, 'benchmark_override');
+  assert.equal(source.provider, 'claude');
+  assert.equal(source.model, '');
+  assert.equal(reviewer.provider, 'codex');
+  assert.equal(reviewer.model, 'package-review');
+});

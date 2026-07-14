@@ -70,7 +70,7 @@ import {
 import { summarizeRuntimeTeamSnapshotLines } from "./runtime_snapshot_display.js";
 import { createRuntimeTeamSnapshot } from "./runtime_metadata.js";
 import { interpretTask } from "../control_plane/task_interpreter.js";
-import { repairRoutePlanForTeamExecution } from "./team_route_repair.js";
+import { dedupeRoutePlanActions, repairRoutePlanForTeamExecution } from "./team_route_repair.js";
 import { buildExecutionInsightSnapshot } from "./team_execution_insights.js";
 import { recordExecutionFeedback } from "./execution_feedback.js";
 import { recordTeamMotifFeedback } from "./team_motif_feedback.js";
@@ -89,6 +89,7 @@ import { formatActiveArtifactContext, recordArtifactObservationFromAgentOutput }
 import { recordVisualArtifactCapsuleFromAgentOutput } from "./visual_artifact_memory_capsule.js";
 import { seedRoomConversationLedgerIntoJob } from "./room_conversation_ledger.js";
 import { createRoomContextSnapshot, formatRoomContextProjectionBlock, selectApprovedRoomMemories } from "./room_context_projection.js";
+import { modelRoleForAgentRole } from "./room_model_role_router.js";
 import { hasProviderFileToolLimitation, materializeArtifactsFromLlmOutput } from "./llm_output_artifact_materializer.js";
 import { formatActiveUserFactContext, recordUserFactEvents } from "./user_fact_context.js";
 import { buildScopedPromptAssembly, hydrateRuntimeScopesViaGoC, resolveScopeExecutionState } from "./goc_scope_runtime.js";
@@ -683,6 +684,7 @@ function buildRuntimeAgentMetadataIndex(runtime = null) {
       name: String(agent.name || current.name || agentId).trim(),
       role: String(agent.role_id || agent.roleId || agent.role || current.role || "").trim().toLowerCase(),
       model_role: String(agent.model_role || agent.modelRole || current.model_role || "").trim().toLowerCase(),
+      collaboration_lane: agent.collaboration_lane || agent.collaborationLane || current.collaboration_lane || undefined,
       provider: String(agent.provider || current.provider || "").trim().toLowerCase(),
       model: String(agent.model || current.model || "").trim(),
       skills: Array.isArray(agent.skills) ? agent.skills : (Array.isArray(agent.attached_skill_ids) ? agent.attached_skill_ids : (Array.isArray(agent.attachedSkillIds) ? agent.attachedSkillIds : (Array.isArray(agent.skill_ids) ? agent.skill_ids : (Array.isArray(current.skills) ? current.skills : [])))),
@@ -877,6 +879,27 @@ async function runToolProxyStep({ action = {}, jobId = "", signal = null, runtim
   });
 }
 
+function decoratePlanActionsWithRuntimeRules(actions = [], runtimeRulesBlock = '') {
+  const block = String(runtimeRulesBlock || '').trim();
+  if (!block) return Array.isArray(actions) ? actions : [];
+  const decorateOne = (action = {}) => {
+    if (!action || typeof action !== 'object') return action;
+    const type = String(action.type || '').trim().toLowerCase();
+    const next = {
+      ...action,
+      inputs: {
+        ...(action.inputs && typeof action.inputs === 'object' ? action.inputs : {}),
+        _runtime_rules_text: block,
+      },
+    };
+    if (type === 'spawn_agents' || type === 'spawn_parallel') {
+      next.agents = (Array.isArray(action.agents) ? action.agents : []).map((child) => decorateOne(child));
+    }
+    return next;
+  };
+  return (Array.isArray(actions) ? actions : []).map((action) => decorateOne(action));
+}
+
 function decoratePlanActionsWithAgentMetadata(actions = [], runtime = null) {
   const metadataIndex = buildRuntimeAgentMetadataIndex(runtime);
   const decorateOne = (action = {}) => {
@@ -898,6 +921,8 @@ function decoratePlanActionsWithAgentMetadata(actions = [], runtime = null) {
       agent_name: String(inputs.agent_name || inputs.agentName || meta?.name || '').trim() || undefined,
       role_id: String(inputs.role_id || inputs.roleId || meta?.role || '').trim().toLowerCase() || undefined,
       model_role: String(inputs.model_role || inputs.modelRole || meta?.model_role || '').trim().toLowerCase() || undefined,
+      collaboration_lane: inputs.collaboration_lane || inputs.collaborationLane || meta?.collaboration_lane || undefined,
+      lane_id: String(inputs.lane_id || inputs.laneId || inputs?.collaboration_lane?.lane_id || inputs?.collaborationLane?.laneId || meta?.collaboration_lane?.lane_id || '').trim().toLowerCase() || undefined,
       provider: String(inputs.provider || meta?.provider || '').trim().toLowerCase() || undefined,
       model: String(inputs.model || meta?.model || '').trim() || undefined,
       attached_skill_ids: (Array.isArray(inputs.attached_skill_ids) ? inputs.attached_skill_ids : (Array.isArray(inputs.attachedSkillIds) ? inputs.attachedSkillIds : (Array.isArray(meta?.skills) ? meta.skills : []))),
@@ -1143,8 +1168,8 @@ function formatChatRuntimeRulesBlock(session = null, { maxRules = 6, maxChars = 
     .map((row, index) => `${index + 1}. ${clip(String(row.text || '').trim(), 170)}`);
   if (enabled.length === 0) return '';
   return clip([
-    '[CHAT RUNTIME GUIDANCE]',
-    'Use these as chat-level operating preferences unless the latest user request clearly overrides them.',
+    '[USER ROOM RULES — HIGH PRIORITY]',
+    'These are user-visible response and operating requirements. Follow them in the agent output and final answer unless the latest user request explicitly overrides them or they conflict with safety/policy.',
     ...enabled,
   ].join('\n'), Math.max(240, Math.floor(Number(maxChars) || 700)));
 }
@@ -1743,7 +1768,7 @@ function buildChatSynthesisFallback(message, execution = {}, runtime = null) {
   return buildChatSynthesisFallbackShared(message, { ...execution, runtime });
 }
 
-async function synthesizeChatReply(message, routePlan, execution = {}) {
+async function synthesizeChatReply(message, routePlan, execution = {}, { runtimeRulesBlock = '' } = {}) {
   const surfaceLocale = resolveUserSurfaceLocale({ message, runtime: execution?.runtime || routePlan?.runtime || null, fallback: 'ko' });
   const surfaceLabels = buildLocalizedSurfaceLabels(surfaceLocale);
   if (execution && typeof execution === 'object' && !execution.runtime && routePlan?.runtime) execution.runtime = routePlan.runtime;
@@ -1801,6 +1826,7 @@ async function synthesizeChatReply(message, routePlan, execution = {}) {
     internalLanguagePolicyBlock({ surfaceLocale }),
     "You are the final response writer for Telegram /chat.",
     "Write exactly one user-facing final response from the internal execution results below.",
+    runtimeRulesBlock ? String(runtimeRulesBlock).trim() : "",
     "Rules:",
     `- ${userSurfaceLanguageDirective(surfaceLocale)}`,
     "- Hide internal routing, job IDs, run_dir, provider names, agent names, and raw logs unless the user explicitly asks for diagnostics.",
@@ -2486,6 +2512,15 @@ function buildSupervisorExecutionCallbacks({
       : null;
     const activeProvider = String(activeAgentConfig?.provider || '').trim().toLowerCase();
     const activeModel = String(activeAgentConfig?.model || '').trim();
+    const rawModelRole = String(
+      actionInputs?.model_role
+      || actionInputs?.modelRole
+      || activeAgentConfig?.model_role
+      || activeAgentConfig?.modelRole
+      || roleKey
+      || cleanAgentId,
+    ).trim().toLowerCase();
+    const activeModelRole = modelRoleForAgentRole(rawModelRole || roleKey || cleanAgentId);
     const activeExecutionChannel = String(activeAgentConfig?.provider_spec?.execution_channel || activeAgentConfig?.execution_channel || activeAgentConfig?.executionChannel || 'local_cli').trim().toLowerCase() || 'local_cli';
     const activeInteractionCapabilities = summarizeProviderInteractionCapabilities({
       provider: activeProvider,
@@ -2515,7 +2550,9 @@ function buildSupervisorExecutionCallbacks({
         await runEventSink.recordAgentEvent("run.agent_start", {
           agent_id: cleanAgentId,
           role_id: roleKey || undefined,
-          model_role: actionInputs?.model_role || actionInputs?.modelRole || activeAgentConfig?.model_role || activeAgentConfig?.modelRole || roleKey || undefined,
+          model_role: activeModelRole || undefined,
+          lane_id: actionInputs?.lane_id || actionInputs?.laneId || actionInputs?.collaboration_lane?.lane_id || activeAgentConfig?.collaboration_lane?.lane_id || undefined,
+          collaboration_lane: actionInputs?.collaboration_lane || activeAgentConfig?.collaboration_lane || undefined,
           provider: activeProvider || undefined,
           model: activeModel || undefined,
           execution_channel: activeExecutionChannel || undefined,
@@ -2549,6 +2586,25 @@ function buildSupervisorExecutionCallbacks({
         String(agentConfigForProjection?.provider || '').trim(),
         String(agentConfigForProjection?.model || '').trim(),
       ].filter(Boolean).join(':');
+      const roomSessionForProjection = chatSessionStore.get(chatId) || {};
+      const eligibleApprovedMemories = selectApprovedRoomMemories({
+        session: roomSessionForProjection,
+        latestUserText: cleanGoal,
+        limit: 12,
+      });
+      const approvedMemoryAtoms = eligibleApprovedMemories.map((item) => ({
+        id: String(item?.memory_id || '').trim(),
+        atom_type: 'approved_room_memory',
+        status: 'active',
+        title: String(item?.title || item?.type || item?.memory_id || 'Approved Room memory').trim(),
+        text_original: String(item?.summary || item?.content || '').trim(),
+        tags: ['approved', 'user_governed', String(item?.type || '').trim()].filter(Boolean),
+        structured: {
+          memory_id: String(item?.memory_id || '').trim(),
+          memory_type: String(item?.type || '').trim(),
+          source_candidate_id: String(item?.source_candidate_id || item?.sourceCandidateId || '').trim(),
+        },
+      })).filter((atom) => atom.id && atom.text_original);
       const compiledProjection = compileAgentContextProjection({
         jobId,
         chatId: String(chatId || ''),
@@ -2563,20 +2619,16 @@ function buildSupervisorExecutionCallbacks({
         budgetTokens: Number(prepared?.context_info?.budgetTokens || prepared?.context_info?.lens_budget_tokens || 1800),
         rootDir: process.cwd(),
         runDir: safeRunDir(jobId),
+        supplementalAtoms: approvedMemoryAtoms,
       });
       activePreparedContext = attachCompiledProjectionToPreparedContext(prepared, compiledProjection);
-      const roomSessionForProjection = chatSessionStore.get(chatId) || {};
-      const eligibleApprovedMemories = selectApprovedRoomMemories({
-        session: roomSessionForProjection,
-        latestUserText: cleanGoal,
-        limit: 12,
-      });
-      const approvedBlock = String(prepared?.final_prompt || '').match(/\[APPROVED ROOM MEMORY[^\]]*\]([\s\S]*?)(?=\n\[[A-Z]|$)/)?.[1] || '';
-      const approvedMemoryIdsInPrompt = [...approvedBlock.matchAll(/^[-*]\s+([^·:\s]+)\s*(?:·|:)/gm)]
-        .map((match) => String(match?.[1] || '').trim())
-        .filter(Boolean);
       const eligibleApprovedMemoryIds = eligibleApprovedMemories.map((item) => String(item?.memory_id || '').trim()).filter(Boolean);
-      const approvedMemoryIdsForProjection = approvedMemoryIdsInPrompt;
+      const approvedMemoryIdsForProjection = Array.isArray(compiledProjection.projection?.atoms)
+        ? compiledProjection.projection.atoms
+          .filter((atom) => String(atom?.atom_type || atom?.type || '').trim() === 'approved_room_memory')
+          .map((atom) => String(atom?.id || atom?.atom_id || '').trim())
+          .filter(Boolean)
+        : [];
       const selectedMemoryIdSet = new Set(approvedMemoryIdsForProjection);
       const pendingMemoryCandidateRows = Array.isArray(roomSessionForProjection.room_idle_memory_candidates)
         ? roomSessionForProjection.room_idle_memory_candidates
@@ -2667,6 +2719,7 @@ function buildSupervisorExecutionCallbacks({
     });
     const finalPrompt = [
       String(activePreparedContext?.final_prompt || "").trim() || cleanGoal,
+      actionInputs?._runtime_rules_text || actionInputs?.runtime_rules_text || "",
       promptRoleSummary ? `[ROLE SUMMARY]\n${clip(promptRoleSummary, 900)}` : "",
       promptIterationDelta ? `[ITERATION DELTA]\n${clip(promptIterationDelta, 700)}` : "",
       deliveryRequirementsBlock ? `[DELIVERY REQUIREMENTS]\n${deliveryRequirementsBlock}` : "",
@@ -2828,7 +2881,9 @@ function buildSupervisorExecutionCallbacks({
           await runEventSink.recordAgentEvent("run.agent_finish", {
             agent_id: cleanAgentId,
             role_id: roleKey || undefined,
-            model_role: actionInputs?.model_role || actionInputs?.modelRole || activeAgentConfig?.model_role || activeAgentConfig?.modelRole || roleKey || undefined,
+            model_role: activeModelRole || undefined,
+            lane_id: actionInputs?.lane_id || actionInputs?.laneId || actionInputs?.collaboration_lane?.lane_id || activeAgentConfig?.collaboration_lane?.lane_id || undefined,
+            collaboration_lane: actionInputs?.collaboration_lane || activeAgentConfig?.collaboration_lane || undefined,
             goal: cleanGoal,
             provider: String(result?.provider || activeProvider || "").trim().toLowerCase() || undefined,
             model: String(result?.model || activeModel || "").trim() || undefined,
@@ -2894,7 +2949,9 @@ function buildSupervisorExecutionCallbacks({
           await runEventSink.recordAgentEvent("run.agent_error", {
             agent_id: cleanAgentId,
             role_id: roleKey || undefined,
-            model_role: actionInputs?.model_role || actionInputs?.modelRole || activeAgentConfig?.model_role || activeAgentConfig?.modelRole || roleKey || undefined,
+            model_role: activeModelRole || undefined,
+            lane_id: actionInputs?.lane_id || actionInputs?.laneId || actionInputs?.collaboration_lane?.lane_id || activeAgentConfig?.collaboration_lane?.lane_id || undefined,
+            collaboration_lane: actionInputs?.collaboration_lane || activeAgentConfig?.collaboration_lane || undefined,
             provider: activeProvider || undefined,
             model: activeModel || undefined,
             execution_channel: activeExecutionChannel || undefined,
@@ -4641,6 +4698,7 @@ async function runSupervisorChat(
         runtime,
         runtimeTeamSnapshot,
       });
+      routePlan = dedupeRoutePlanActions(routePlan);
       const routeActionSource = (
         usedSuggestedActionsFallback
         || String(routePlan?.reason || "").trim().toLowerCase().includes("fallback")
@@ -4678,17 +4736,10 @@ async function runSupervisorChat(
         return deliverables.some((item) => item.toLowerCase() === String(entry || "").trim().toLowerCase());
       });
 
-      const planActions = decoratePlanActionsWithAgentMetadata(Array.isArray(routePlan?.actions) ? routePlan.actions : [], runtime)
-        .map((action) => {
-          if (!chatRuntimeRulesBlock || !action || typeof action !== 'object') return action;
-          return {
-            ...action,
-            inputs: {
-              ...(action.inputs && typeof action.inputs === 'object' ? action.inputs : {}),
-              _runtime_rules_text: chatRuntimeRulesBlock,
-            },
-          };
-        });
+      const planActions = decoratePlanActionsWithRuntimeRules(
+        decoratePlanActionsWithAgentMetadata(Array.isArray(routePlan?.actions) ? routePlan.actions : [], runtime),
+        chatRuntimeRulesBlock,
+      );
       routePlan = {
         ...routePlan,
         actions: planActions,
@@ -5382,7 +5433,9 @@ async function runSupervisorChat(
         ? String(routePlan.followup_hint || forcedAwaitReason || "다음 진행을 위해 추가 입력이 필요합니다.")
         : ((!hasAgentOutput && contextOutputs.length > 0)
           ? contextOutputs.join("\n\n")
-          : await synthesizeChatReply(message, routePlan, mergedExecution)));
+          : await synthesizeChatReply(message, routePlan, mergedExecution, {
+            runtimeRulesBlock: chatRuntimeRulesBlock,
+          })));
     let replyText = mergedExecution.pendingApproval
       ? (isMutatingConfirm
         ? finalReply
@@ -5509,7 +5562,13 @@ ${pendingTeamApprovalNotice}`.trim();
       replyToMessageId: getCurrentTurnReplyMessageId(chatId),
       sinceMs: currentTurnStartedAtMs,
     }).catch(() => null);
-    return { routePlan, execution: mergedExecution, jobId: currentJobId };
+    return {
+      routePlan,
+      execution: mergedExecution,
+      jobId: currentJobId,
+      replyText,
+      finalAssistantText,
+    };
   } catch (e) {
     if (runEventSink && typeof runEventSink.finishRun === "function") {
       try {
@@ -6785,6 +6844,8 @@ token=${rec.token}`,
 
 export {
   buildSupervisorExecutionCallbacks,
+  decoratePlanActionsWithRuntimeRules,
+  formatChatRuntimeRulesBlock,
   formatChatSummary,
   summarizeSpecialChatOutputs,
   buildChatSynthesisFallback,
