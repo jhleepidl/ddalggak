@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { ChatRunManager } from '../chat/run_manager.js';
@@ -340,11 +342,18 @@ export async function createHeadlessRoomRuntime({ runtimeRoot = '', traceRoot = 
   }
 
   process.env.RUNS_DIR = resolvedRuntimeRoot;
+  process.env.DDALGGAK_HEADLESS_PROVIDER_ISOLATION = '1';
+  process.env.DDALGGAK_HEADLESS_USER_SURFACE_FINAL_ONLY = '1';
+  if (!String(process.env.DDALGGAK_HEADLESS_PROVIDER_WORKSPACE_ROOT || '').trim()) {
+    process.env.DDALGGAK_HEADLESS_PROVIDER_WORKSPACE_ROOT = path.join(os.homedir(), 'tmp', 'ddalggak_headless_provider_workspaces');
+  }
+  fs.mkdirSync(path.resolve(process.env.DDALGGAK_HEADLESS_PROVIDER_WORKSPACE_ROOT), { recursive: true });
   process.env.MEMORY_MODE = 'local';
   if (traceRoot) process.env.DDALGGAK_ROOM_JOURNEY_TRACE_DIR = path.resolve(traceRoot);
 
   const runtimeCore = await import('../application/telegram_runtime_ops.js');
   const sink = createHeadlessResponseSink();
+  const lastRunResultByChat = new Map();
   const chatRunManager = new ChatRunManager({
     sessionStore: runtimeCore.chatSessionStore,
     interruptDebounceMs: 0,
@@ -375,6 +384,7 @@ export async function createHeadlessRoomRuntime({ runtimeRoot = '', traceRoot = 
           teamConfig: teamConfig && typeof teamConfig === 'object' ? teamConfig : null,
         },
       );
+      lastRunResultByChat.set(String(chatId || ''), result || null);
       const assistantText = clean(result?.replyText || result?.reply_text || result?.finalAssistantText || result?.final_assistant_text || '');
       if (assistantText) {
         const selectedModel = asObject(result?.routePlan?.selected_model || result?.routePlan?.selectedModel);
@@ -410,6 +420,7 @@ export async function createHeadlessRoomRuntime({ runtimeRoot = '', traceRoot = 
     runtimeRoot: resolvedRuntimeRoot,
     transport: 'headless',
     telegramConnected: false,
+    getLastRunResult: (chatId) => lastRunResultByChat.get(String(chatId || '')) || null,
   };
   return defaultRuntime;
 }

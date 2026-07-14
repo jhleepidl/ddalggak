@@ -134,3 +134,77 @@ test('compiled projection includes approved Room memories as first-class supplem
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('isolated collaboration lanes exclude context atoms emitted by sibling lanes until review', () => {
+  const base = path.join(os.homedir(), 'tmp', 'ddalggak-tests');
+  fs.mkdirSync(base, { recursive: true });
+  const rootDir = fs.mkdtempSync(path.join(base, 'context-projection-lane-isolation-'));
+  const jobId = 'job_lane_isolation';
+  try {
+    for (const [id, laneId, text] of [
+      ['atom.shared', '', 'Shared room fact'],
+      ['atom.lane1', 'lane_1', 'Lane one private finding'],
+      ['atom.lane2', 'lane_2', 'Lane two private finding'],
+    ]) {
+      commitContextWriteIntent({
+        intent_type: 'assert_atom',
+        payload: {
+          id,
+          atom_type: 'review_finding',
+          canonical_text_en: text,
+          structured: laneId ? { lane_id: laneId, collaboration_lane: { lane_id: laneId, initial_visibility: 'isolated_until_submission' } } : {},
+        },
+      }, { rootDir, jobId });
+    }
+
+    const lane2 = compileAgentContextProjection({
+      rootDir,
+      jobId,
+      agentId: 'researcher_lane_2',
+      roleId: 'researcher',
+      goal: 'Produce an independent option',
+      visibilityContext: { lane_id: 'lane_2', initial_visibility: 'isolated_until_submission' },
+    });
+    const lane2Ids = lane2.projection.atoms.map((atom) => atom.id);
+    assert.ok(lane2Ids.includes('atom.shared'));
+    assert.ok(lane2Ids.includes('atom.lane2'));
+    assert.equal(lane2Ids.includes('atom.lane1'), false);
+    assert.deepEqual(lane2.projection.visibility_excluded_atom_ids, ['atom.lane1']);
+    assert.equal(lane2.metrics.visibility_excluded_atom_count, 1);
+
+    const reviewer = compileAgentContextProjection({
+      rootDir,
+      jobId,
+      agentId: 'reviewer',
+      roleId: 'reviewer',
+      goal: 'Compare all submitted lanes',
+    });
+    const reviewerIds = reviewer.projection.atoms.map((atom) => atom.id);
+    assert.ok(reviewerIds.includes('atom.lane1'));
+    assert.ok(reviewerIds.includes('atom.lane2'));
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('context write intents preserve collaboration lane provenance for later isolation', () => {
+  const intents = extractContextWriteIntentsFromAgentResult({
+    agentId: 'researcher_lane_2',
+    roleId: 'researcher',
+    goal: 'Independent risk analysis',
+    collaborationLane: {
+      lane_id: 'lane_2',
+      initial_visibility: 'isolated_until_submission',
+      diversity_dimension: 'risk',
+    },
+    result: {
+      provider: 'claude',
+      model: 'claude-test',
+      output: 'Risk: vendor lock-in\nVerification: assumptions checked',
+    },
+  });
+  const structured = intents.map((intent) => intent?.payload?.structured).filter(Boolean);
+  assert.ok(structured.length >= 2);
+  assert.equal(structured.every((row) => row.lane_id === 'lane_2'), true);
+  assert.equal(structured.every((row) => row.collaboration_lane?.lane_id === 'lane_2'), true);
+});

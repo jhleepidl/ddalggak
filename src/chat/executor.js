@@ -332,6 +332,84 @@ export async function executeSupervisorActions({
     ? "work"
     : "normal";
 
+  const runFinalSynthesisAction = async (action, { contractRecovery = false } = {}) => {
+    if (typeof callbacks.runAgent !== 'function') throw new Error('runAgent callback is missing');
+    const label = actionLabel(action, { agentIndex: agentDisplayIndex });
+    const synthAgentId = String(action?.agent || action?.agent_id || '').trim().toLowerCase();
+    const synthProvider = getProviderByAgent(agents, synthAgentId) || 'unknown';
+    const synthesizedAction = {
+      type: 'run_agent',
+      agent_id: synthAgentId,
+      goal: String(action?.prompt || action?.goal || '').trim(),
+      inputs: {
+        ...(action?.inputs && typeof action.inputs === 'object' ? action.inputs : {}),
+        final_synthesis: true,
+        completion_contract_recovery: contractRecovery === true || undefined,
+      },
+    };
+    const executionOutcome = await executeRunAgentWithRecovery({
+      action: synthesizedAction,
+      callbacks,
+      jobId,
+      detailContext,
+      label,
+      provider: synthProvider,
+      agents,
+      runtimeExecutionPolicy,
+      outputs,
+      results,
+      activeRouteSignals,
+      sessionStore,
+      chatId,
+    });
+    let runResult = executionOutcome?.runResult;
+    if (executionOutcome?.awaitUserRequest) {
+      const delegatedRecovery = await tryResolveAwaitUserRequestByDelegate({
+        awaitUserRequest: executionOutcome.awaitUserRequest,
+        action: synthesizedAction,
+        callbacks,
+        jobId,
+        detailContext,
+        agents,
+        outputs,
+        results,
+        activeRouteSignals,
+      });
+      if (!delegatedRecovery?.resolved) {
+        return {
+          ok: false,
+          awaitUserRequest: delegatedRecovery?.awaitUserRequest || executionOutcome.awaitUserRequest,
+          detailContext: String(executionOutcome?.detailContext || detailContext || ''),
+        };
+      }
+      detailContext = String(delegatedRecovery?.detailContext || executionOutcome?.detailContext || detailContext || '');
+      runResult = delegatedRecovery?.runResult || runResult;
+    } else {
+      detailContext = String(executionOutcome?.detailContext || detailContext || '');
+    }
+    const routeSignals = resolveActionRouteSignals({ action, result: runResult });
+    outputs.push(attachRouteSignals({
+      agentId: synthAgentId || 'synthesizer',
+      provider: String(runResult?.provider || synthProvider || 'unknown').trim().toLowerCase(),
+      mode: 'synthesize_final',
+      output: String(runResult?.output || ''),
+      jobId: String(jobId || ''),
+      slot_id: String(action?.inputs?.slot_id || '').trim() || undefined,
+      runtime_instance_id: String(action?.inputs?.runtime_instance_id || '').trim() || undefined,
+      recovered: executionOutcome?.recovered === true || undefined,
+      completion_contract_recovery: contractRecovery === true || undefined,
+    }, routeSignals, { activeSignals: activeRouteSignals }));
+    results.push({
+      label,
+      status: 'ok',
+      note: contractRecovery === true
+        ? 'final synthesis · completion contract recovery'
+        : (executionOutcome?.recovered === true ? 'final synthesis · recovered' : 'final synthesis'),
+    });
+    usedActions += 1;
+    return { ok: true };
+  };
+
   for (const note of executionContractNotes) {
     results.push({
       label: "route_contract",
@@ -754,68 +832,14 @@ export async function executeSupervisorActions({
       }
 
       if (action.type === "synthesize_final") {
-        if (typeof callbacks.runAgent !== "function") {
-          throw new Error("runAgent callback is missing");
+        const synthesisOutcome = await runFinalSynthesisAction(action);
+        if (synthesisOutcome?.awaitUserRequest) {
+          awaitUserRequest = synthesisOutcome.awaitUserRequest;
+          blockedActions += 1;
+          blockedIndex = i;
+          remainingActions = executableActions.slice(i + 1);
+          break;
         }
-        const synthesizedAction = {
-          type: "run_agent",
-          agent_id: String(action?.agent || action?.agent_id || "").trim().toLowerCase(),
-          goal: String(action?.prompt || action?.goal || "").trim(),
-          inputs: action?.inputs && typeof action.inputs === "object" ? action.inputs : {},
-        };
-        const executionOutcome = await executeRunAgentWithRecovery({
-          action: synthesizedAction,
-          callbacks,
-          jobId,
-          detailContext,
-          label,
-          provider: String(provider || 'unknown').trim().toLowerCase(),
-          agents,
-          runtimeExecutionPolicy,
-          outputs,
-          results,
-          activeRouteSignals,
-          sessionStore,
-          chatId,
-        });
-        let runResult = executionOutcome?.runResult;
-        if (executionOutcome?.awaitUserRequest) {
-          const delegatedRecovery = await tryResolveAwaitUserRequestByDelegate({
-            awaitUserRequest: executionOutcome.awaitUserRequest,
-            action: synthesizedAction,
-            callbacks,
-            jobId,
-            detailContext,
-            agents,
-            outputs,
-            results,
-            activeRouteSignals,
-          });
-          if (!delegatedRecovery?.resolved) {
-            awaitUserRequest = delegatedRecovery?.awaitUserRequest || executionOutcome.awaitUserRequest;
-            blockedActions += 1;
-            blockedIndex = i;
-            remainingActions = executableActions.slice(i + 1);
-            break;
-          }
-          detailContext = String(delegatedRecovery?.detailContext || executionOutcome?.detailContext || detailContext || '');
-          runResult = delegatedRecovery?.runResult || runResult;
-        } else {
-          detailContext = String(executionOutcome?.detailContext || detailContext || '');
-        }
-        const routeSignals = resolveActionRouteSignals({ action, result: runResult });
-        outputs.push(attachRouteSignals({
-          agentId: String(action?.agent || "").trim().toLowerCase() || "synthesizer",
-          provider: String(runResult?.provider || "unknown").trim().toLowerCase(),
-          mode: "synthesize_final",
-          output: String(runResult?.output || ""),
-          jobId: String(jobId || ""),
-          slot_id: String(action?.inputs?.slot_id || '').trim() || undefined,
-          runtime_instance_id: String(action?.inputs?.runtime_instance_id || '').trim() || undefined,
-          recovered: executionOutcome?.recovered === true || undefined,
-        }, routeSignals, { activeSignals: activeRouteSignals }));
-        results.push({ label, status: "ok", note: executionOutcome?.recovered === true ? "final synthesis · recovered" : "final synthesis" });
-        usedActions += 1;
         continue;
       }
 
@@ -1784,6 +1808,37 @@ export async function executeSupervisorActions({
           : `replan requested after ${label}`,
       });
       break;
+    }
+  }
+
+  const requiredFinalSynthesis = [...executableActions].reverse().find((action) => String(action?.type || '').trim().toLowerCase() === 'synthesize_final');
+  const finalSynthesisCompleted = outputs.some((row) => String(row?.mode || '').trim().toLowerCase() === 'synthesize_final' && String(row?.output || '').trim());
+  if (requiredFinalSynthesis && !finalSynthesisCompleted && !pendingApproval && !awaitUserRequest && !interruptedByReplan) {
+    try {
+      const recoveredFinal = await runFinalSynthesisAction(requiredFinalSynthesis, { contractRecovery: true });
+      if (recoveredFinal?.awaitUserRequest) {
+        awaitUserRequest = recoveredFinal.awaitUserRequest;
+        blockedActions += 1;
+        remainingActions = [requiredFinalSynthesis];
+      } else {
+        remainingActions = [];
+      }
+    } catch (error) {
+      const message = String(error?.message || error || 'required final synthesis failed');
+      results.push({
+        label: actionLabel(requiredFinalSynthesis, { agentIndex: agentDisplayIndex }),
+        status: 'error',
+        note: `required final synthesis missing: ${message}`,
+      });
+      outputs.push({
+        agentId: 'system',
+        provider: 'system',
+        mode: 'completion_contract_failure',
+        output: '필수 최종 합성 단계가 완료되지 않았습니다.',
+        error: message,
+        jobId: String(jobId || ''),
+      });
+      remainingActions = [requiredFinalSynthesis];
     }
   }
 

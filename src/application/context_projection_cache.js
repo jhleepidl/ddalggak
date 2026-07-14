@@ -54,6 +54,7 @@ function compactAtom(atom = {}) {
     text_original: atom.text_original || structured.text_original || '',
     canonical_text_en: atom.canonical_text_en || structured.canonical_text_en || atom.canonical_en || '',
     confidence: atom.confidence,
+    structured,
     tags: asArray(atom.tags),
     evidence_refs: asArray(atom.evidence_refs || atom.evidence),
   };

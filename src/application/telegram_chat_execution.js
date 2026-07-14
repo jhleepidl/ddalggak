@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
@@ -489,16 +490,42 @@ function withAgentOutputContract(action = {}, { runtimeExecutionPolicy = null } 
   return normalizedAction;
 }
 
+export function resolveProviderExecutionWorkspace(jobId = '', provider = '') {
+  const normalWorkspace = safeRunWorkspaceDir(jobId);
+  if (String(process.env.DDALGGAK_HEADLESS_PROVIDER_ISOLATION || '').trim() !== '1') return normalWorkspace;
+  const normalizedProvider = String(provider || '').trim().toLowerCase();
+  if (normalizedProvider === 'codex') return normalWorkspace;
+  const root = path.resolve(String(process.env.DDALGGAK_HEADLESS_PROVIDER_WORKSPACE_ROOT || path.join(os.homedir(), 'tmp', 'ddalggak_headless_provider_workspaces')).trim());
+  const target = path.join(root, String(jobId || 'unscoped').replace(/[^a-zA-Z0-9._-]+/g, '_'));
+  fs.mkdirSync(target, { recursive: true });
+  return target;
+}
+
+function isIsolatedCollaborationLane(actionInputs = {}) {
+  const lane = actionInputs?.collaboration_lane && typeof actionInputs.collaboration_lane === 'object'
+    ? actionInputs.collaboration_lane
+    : (actionInputs?.collaborationLane && typeof actionInputs.collaborationLane === 'object' ? actionInputs.collaborationLane : {});
+  const laneId = String(actionInputs?.lane_id || actionInputs?.laneId || lane?.lane_id || lane?.laneId || '').trim().toLowerCase();
+  const visibility = String(lane?.initial_visibility || lane?.initialVisibility || '').trim().toLowerCase();
+  return Boolean(laneId) && ['isolated_until_submission', 'isolated_until_evidence_submission', 'private'].includes(visibility);
+}
+
 function resolveProviderRuntimeOptionsForJob({ runtime = null, provider = '', action = null, agent = null, jobId = '' } = {}) {
   const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
   const actionInputs = action?.inputs && typeof action.inputs === 'object' ? action.inputs : {};
-  return resolveProviderRuntimeOptions({
-    runtimeExecutionPolicy,
-    provider,
-    workspaceRoot: safeRunWorkspaceDir(jobId),
-    agent,
-    action,
-  });
+  const workspaceRoot = resolveProviderExecutionWorkspace(jobId, provider);
+  return {
+    ...resolveProviderRuntimeOptions({
+      runtimeExecutionPolicy,
+      provider,
+      workspaceRoot,
+      agent,
+      action,
+    }),
+    workspaceRoot,
+    workspace_root: workspaceRoot,
+    cwd: workspaceRoot,
+  };
 }
 
 function normalizeActionShape(raw = {}) {
@@ -841,7 +868,7 @@ const {
 function ensureCliWorkspaceSupportFiles(jobId, { provider = "", roleMemo = "", kbContract = "", goal = "", instruction = "", runtimeExecutionPolicy = {}, providerOptions = {}, allowDirectExecution = false } = {}) {
   let workspacePath = "";
   try {
-    workspacePath = runWorkspaceDir(jobId);
+    workspacePath = path.resolve(String(providerOptions?.workspaceRoot || providerOptions?.workspace_root || runWorkspaceDir(jobId)).trim());
   } catch {
     return {};
   }
@@ -2564,6 +2591,7 @@ function buildSupervisorExecutionCallbacks({
           collaboration_lane: actionInputs?.collaboration_lane || activeAgentConfig?.collaboration_lane || undefined,
           provider: activeProvider || undefined,
           model: activeModel || undefined,
+          requested_model: activeModel || undefined,
           execution_channel: activeExecutionChannel || undefined,
           goal: cleanGoal,
           runtime_instance_id: runtimeInstanceId || undefined,
@@ -2614,6 +2642,8 @@ function buildSupervisorExecutionCallbacks({
           source_candidate_id: String(item?.source_candidate_id || item?.sourceCandidateId || '').trim(),
         },
       })).filter((atom) => atom.id && atom.text_original);
+      const isolatedCollaborationLane = isIsolatedCollaborationLane(actionInputs || {});
+      const collaborationLaneForProjection = actionInputs?.collaboration_lane || actionInputs?.collaborationLane || activeAgentConfig?.collaboration_lane || activeAgentConfig?.collaborationLane || {};
       const compiledProjection = compileAgentContextProjection({
         jobId,
         chatId: String(chatId || ''),
@@ -2623,12 +2653,14 @@ function buildSupervisorExecutionCallbacks({
         taskType: actionInputs?.task_type || actionInputs?.taskType || '',
         modelNode: modelNodeForProjection,
         goal: cleanGoal,
-        baseContextText: String(prepared?.final_prompt || '').trim(),
+        baseContextText: isolatedCollaborationLane ? '' : String(prepared?.final_prompt || '').trim(),
         baseContextInfo: prepared?.context_info && typeof prepared.context_info === 'object' ? prepared.context_info : {},
         budgetTokens: Number(prepared?.context_info?.budgetTokens || prepared?.context_info?.lens_budget_tokens || 1800),
         rootDir: process.cwd(),
         runDir: safeRunDir(jobId),
         supplementalAtoms: approvedMemoryAtoms,
+        includeHandoffs: !isolatedCollaborationLane,
+        visibilityContext: collaborationLaneForProjection,
       });
       activePreparedContext = attachCompiledProjectionToPreparedContext(prepared, compiledProjection);
       const eligibleApprovedMemoryIds = eligibleApprovedMemories.map((item) => String(item?.memory_id || '').trim()).filter(Boolean);
@@ -2680,6 +2712,8 @@ function buildSupervisorExecutionCallbacks({
         selected_atom_count: compiledProjection.metrics?.selected_atom_count || 0,
         context_tokens: compiledProjection.metrics?.context_tokens || 0,
         cache_hit: compiledProjection.metrics?.cache_hit === true,
+        collaboration_lane: collaborationLaneForProjection,
+        lane_isolation_enforced: isolatedCollaborationLane,
       };
       if (isRoomJourneyTraceEnabled({ session: roomSessionForProjection })) {
         try { appendRoomJourneyTrace({ chatId, eventType: 'context.projection_compiled', payload: projectionTracePayload }); } catch {}
@@ -2837,6 +2871,7 @@ function buildSupervisorExecutionCallbacks({
           result,
           preparedContext: activePreparedContext,
           deliveryRequirements: executionRequirements,
+          collaborationLane: actionInputs?.collaboration_lane || actionInputs?.collaborationLane || activeAgentConfig?.collaboration_lane || activeAgentConfig?.collaborationLane || null,
         });
         if (extractedIntents.length > 0) {
           commitContextWriteIntentsBatch(extractedIntents, {
@@ -2862,7 +2897,9 @@ function buildSupervisorExecutionCallbacks({
       } catch {
         // Context-substrate writeback is best-effort; agent execution must remain on the hot path.
       }
-      if (String(result?.output || "").trim()) {
+      const suppressIntermediateAgentOutput = String(process.env.DDALGGAK_HEADLESS_USER_SURFACE_FINAL_ONLY || '').trim() === '1'
+        && actionInputs?.final_synthesis !== true;
+      if (String(result?.output || "").trim() && !suppressIntermediateAgentOutput) {
         await sendLong(
           bot,
           chatId,
@@ -2896,6 +2933,8 @@ function buildSupervisorExecutionCallbacks({
             goal: cleanGoal,
             provider: String(result?.provider || activeProvider || "").trim().toLowerCase() || undefined,
             model: String(result?.model || activeModel || "").trim() || undefined,
+            requested_model: activeModel || undefined,
+            resolved_model: String(result?.model || "").trim() || undefined,
             execution_channel: activeExecutionChannel || undefined,
             output_chars: String(result?.output || "").length || 0,
             runtime_instance_id: runtimeInstanceId || undefined,
@@ -5436,15 +5475,20 @@ async function runSupervisorChat(
       ? buildPendingApprovalPrompt(mergedExecution.pendingApproval)
       : null;
     const isMutatingConfirm = String(mergedExecution.pendingApproval?.gate_type || "").trim().toLowerCase() === "mutating_confirm";
+    const finalSynthesisOutput = [...(Array.isArray(mergedExecution.outputs) ? mergedExecution.outputs : [])]
+      .reverse()
+      .find((row) => String(row?.mode || '').trim().toLowerCase() === 'synthesize_final' && String(row?.output || '').trim());
     const finalReply = isMutatingConfirm
       ? String(pendingPrompt?.text || "변경 적용 전 확인이 필요합니다.")
       : (routePlan.await_user === true && mergedOutputs.length === 0
         ? userSafeOrchestrationHint(routePlan.followup_hint || forcedAwaitReason || "다음 진행을 위해 추가 입력이 필요합니다.")
-        : ((!hasAgentOutput && contextOutputs.length > 0)
-          ? contextOutputs.join("\n\n")
-          : await synthesizeChatReply(message, routePlan, mergedExecution, {
-            runtimeRulesBlock: chatRuntimeRulesBlock,
-          })));
+        : (finalSynthesisOutput
+          ? String(finalSynthesisOutput.output || '').trim()
+          : ((!hasAgentOutput && contextOutputs.length > 0)
+            ? contextOutputs.join("\n\n")
+            : await synthesizeChatReply(message, routePlan, mergedExecution, {
+              runtimeRulesBlock: chatRuntimeRulesBlock,
+            }))));
     let replyText = mergedExecution.pendingApproval
       ? (isMutatingConfirm
         ? finalReply

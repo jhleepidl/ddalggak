@@ -27,6 +27,7 @@ export function extractContextWriteIntentsFromAgentResult({
   result = {},
   preparedContext = null,
   deliveryRequirements = null,
+  collaborationLane = null,
 } = {}) {
   const output = clean(result?.output || result?.text || '');
   const provider = clean(result?.provider || '');
@@ -35,6 +36,8 @@ export function extractContextWriteIntentsFromAgentResult({
   const snapshotId = clean(preparedContext?.context_info?.snapshot_id || preparedContext?.context_info?.context_projection?.snapshot_id || '');
   const projectionId = clean(preparedContext?.context_info?.projection_id || preparedContext?.context_info?.context_projection?.projection_id || '');
   const actor = `agent:${clean(agentId || role || 'agent')}`;
+  const lane = asObject(collaborationLane);
+  const laneId = clean(lane.lane_id || lane.laneId);
   const intents = [];
 
   intents.push({
@@ -53,6 +56,8 @@ export function extractContextWriteIntentsFromAgentResult({
         output_chars: output.length,
         projection_id: projectionId || undefined,
         delivery_requirements: asObject(deliveryRequirements),
+        lane_id: laneId || undefined,
+        collaboration_lane: laneId ? lane : undefined,
       },
     },
     preconditions: snapshotId ? { base_snapshot_id: snapshotId } : {},
@@ -93,8 +98,10 @@ export function extractContextWriteIntentsFromAgentResult({
           provider,
           model,
           projection_id: projectionId || undefined,
+          lane_id: laneId || undefined,
+          collaboration_lane: laneId ? lane : undefined,
         },
-        tags: ['review', role].filter(Boolean),
+        tags: ['review', role, laneId].filter(Boolean),
         evidence_refs: projectionId ? [`projection:${projectionId}`] : [],
         confidence: 0.7,
       },
@@ -113,8 +120,8 @@ export function extractContextWriteIntentsFromAgentResult({
         atom_type: 'verification_result',
         title: `${clean(agentId || role || 'agent')} verification notes`,
         canonical_text_en: verificationLines.join('\n'),
-        structured: { role_id: role, provider, model, projection_id: projectionId || undefined },
-        tags: ['verification', role].filter(Boolean),
+        structured: { role_id: role, provider, model, projection_id: projectionId || undefined, lane_id: laneId || undefined, collaboration_lane: laneId ? lane : undefined },
+        tags: ['verification', role, laneId].filter(Boolean),
         evidence_refs: projectionId ? [`projection:${projectionId}`] : [],
         confidence: 0.75,
       },

@@ -318,13 +318,16 @@ export class HeadlessRoomJourneyTransport {
     const status = clean(eventPayload(terminal).status || '').toLowerCase();
     const capturedOutput = this._capturedOutput(mark);
     const runSummary = eventOutput(terminal);
-    const output = capturedOutput || runSummary;
+    const lastRunResult = this.runtime?.getLastRunResult?.(this.chatId) || {};
+    const finalUserResponse = clean(lastRunResult?.replyText || lastRunResult?.reply_text || lastRunResult?.finalAssistantText || lastRunResult?.final_assistant_text || '');
+    const output = finalUserResponse || capturedOutput || runSummary;
     return {
       ok: Boolean(terminal) ? status !== 'error' : Boolean(output),
       accepted,
       output,
       run_summary: runSummary,
-      full_user_response: capturedOutput || '',
+      full_user_response: finalUserResponse || capturedOutput || '',
+      orchestration_transcript: capturedOutput || '',
       run_id: clean(terminal?.run_id),
       job_id: this._currentJobId(),
       events: freshEvents,
@@ -542,10 +545,18 @@ function isLocalCliEvent(event = {}) {
   return channel === 'local_cli' || channel.endsWith('_cli') || channel === 'cli';
 }
 
+function normalizedResolvedModel(payload = {}) {
+  const explicit = clean(payload.resolved_model || payload.resolvedModel);
+  if (explicit) return explicit;
+  const model = clean(payload.model);
+  if (!model || ['default', '@provider_default', 'provider_default', 'provider-default', 'auto'].includes(model.toLowerCase())) return '';
+  return model;
+}
+
 function modelNodeKey(payload = {}) {
   const provider = clean(payload.provider).toLowerCase();
-  const model = clean(payload.model) || '@provider_default';
-  return provider ? `${provider}:${model}` : '';
+  const model = normalizedResolvedModel(payload);
+  return provider ? `${provider}:${model || '@provider_default_unresolved'}` : '';
 }
 
 function assertionResult(assertion = {}, context = {}) {
@@ -597,7 +608,7 @@ function assertionResult(assertion = {}, context = {}) {
     const providers = new Set(context.runtimeEvents.filter((event) => ['run.agent_start', 'run.agent_finish'].includes(eventType(event))).map((event) => clean(eventPayload(event).provider)).filter(Boolean));
     observed = [...providers]; passed = providers.size >= Number(assertion.min ?? 1) && providers.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'distinct_model_count') {
-    const models = new Set(context.runtimeEvents.filter((event) => ['run.agent_start', 'run.agent_finish'].includes(eventType(event))).map((event) => clean(eventPayload(event).model)).filter(Boolean));
+    const models = new Set(context.runtimeEvents.filter((event) => eventType(event) === 'run.agent_finish' && isLocalCliEvent(event)).map((event) => normalizedResolvedModel(eventPayload(event))).filter(Boolean));
     observed = [...models]; passed = models.size >= Number(assertion.min ?? 1) && models.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'distinct_model_node_count') {
     const nodes = new Set(context.runtimeEvents

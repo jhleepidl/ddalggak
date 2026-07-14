@@ -25,6 +25,30 @@ function normalizeSupplementalAtom(atom = {}) {
   };
 }
 
+
+function laneVisibilityMode(value = '') {
+  return clean(value).toLowerCase();
+}
+
+function atomLaneId(atom = {}) {
+  const row = asObject(atom);
+  const structured = asObject(row.structured);
+  const lane = asObject(structured.collaboration_lane || structured.collaborationLane || row.collaboration_lane || row.collaborationLane);
+  return clean(structured.lane_id || structured.laneId || lane.lane_id || lane.laneId).toLowerCase();
+}
+
+export function filterContextAtomsForCollaborationVisibility(atoms = [], visibilityContext = {}) {
+  const context = asObject(visibilityContext);
+  const currentLaneId = clean(context.lane_id || context.laneId).toLowerCase();
+  const mode = laneVisibilityMode(context.initial_visibility || context.initialVisibility);
+  const isolated = Boolean(currentLaneId) && ['isolated_until_submission', 'isolated_until_evidence_submission', 'private'].includes(mode);
+  if (!isolated) return asArray(atoms);
+  return asArray(atoms).filter((atom) => {
+    const sourceLaneId = atomLaneId(atom);
+    return !sourceLaneId || sourceLaneId === currentLaneId;
+  });
+}
+
 function looksLikeCasualRecommendation(goal = '') {
   const text = clean(goal).toLowerCase();
   if (!text) return false;
@@ -108,6 +132,7 @@ export function compileAgentContextProjection({
   cache = true,
   includeHandoffs = true,
   supplementalAtoms = [],
+  visibilityContext = {},
 } = {}) {
   const started = nowMs();
   const role = clean(roleId || agentId || 'agent').toLowerCase();
@@ -125,13 +150,19 @@ export function compileAgentContextProjection({
     cache,
   };
   const rawProjection = getContextProjection(substrateOptions, query);
+  const rawAtoms = asArray(rawProjection.atoms);
+  const visibleRawAtoms = filterContextAtomsForCollaborationVisibility(rawAtoms, visibilityContext);
+  const visibleAtomIds = new Set(visibleRawAtoms.map((atom) => clean(atom?.id || atom?.atom_id)).filter(Boolean));
+  const visibilityExcludedAtomIds = rawAtoms
+    .map((atom) => clean(atom?.id || atom?.atom_id))
+    .filter((id) => id && !visibleAtomIds.has(id));
   const supplemental = asArray(supplementalAtoms).map(normalizeSupplementalAtom).filter(Boolean);
   const supplementalIds = new Set(supplemental.map((atom) => atom.id));
   const mergedAtoms = [
     ...supplemental,
-    ...asArray(rawProjection.atoms).filter((atom) => !supplementalIds.has(clean(atom?.id || atom?.atom_id))),
+    ...visibleRawAtoms.filter((atom) => !supplementalIds.has(clean(atom?.id || atom?.atom_id))),
   ].slice(0, Math.max(Number(query.limit || 24), supplemental.length));
-  const projectionId = `proj_${stableHash(JSON.stringify({ snapshot: rawProjection.snapshot_id, role, inferredTaskType, goal: clean(goal).slice(0, 500), modelNode, budget, supplemental: supplemental.map((atom) => atom.id) }))}`;
+  const projectionId = `proj_${stableHash(JSON.stringify({ snapshot: rawProjection.snapshot_id, role, inferredTaskType, goal: clean(goal).slice(0, 500), modelNode, budget, supplemental: supplemental.map((atom) => atom.id), visibility: visibilityContext }))}`;
   const handoffs = includeHandoffs ? getRecentRunContextHandoffs({ agentId: role, limit: 6 }, { rootDir, jobId, runDir }) : [];
   const projection = {
     ...rawProjection,
@@ -141,6 +172,8 @@ export function compileAgentContextProjection({
     role,
     task_type: inferredTaskType,
     model_node: clean(modelNode),
+    visibility_context: asObject(visibilityContext),
+    visibility_excluded_atom_ids: visibilityExcludedAtomIds,
   };
   const promptBlock = formatProjectionBlock({
     projection,
@@ -159,6 +192,7 @@ export function compileAgentContextProjection({
     context_tokens: estimateContextTokens(promptBlock),
     selected_atom_count: projection.atom_count || 0,
     selected_link_count: projection.link_count || 0,
+    visibility_excluded_atom_count: visibilityExcludedAtomIds.length,
     handoff_count: handoffs.length,
     substrate_atom_count: substrateSummary.atom_count || 0,
     substrate_link_count: substrateSummary.link_count || 0,

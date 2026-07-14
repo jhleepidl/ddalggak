@@ -479,11 +479,13 @@ test('headless transport prefers the full captured user-facing response over the
     const runtimeFactory = async () => ({
       bot,
       runtimeCore,
+      getLastRunResult() { return { replyText: fullText }; },
       chatRunManager: {
         isRunning() { return false; },
         async handleIncoming({ chatId }) {
           const events = [runtimeEvent('run.finish', { status: 'done', summary: 'CLIPPED_SUMMARY' })];
           fs.writeFileSync(eventFile, events.map((row, index) => JSON.stringify({ ...row, event_sequence: index + 1, job_id: 'job-full-output' })).join('\n') + '\n');
+          await bot.sendMessage(chatId, 'INTERNAL_PROGRESS');
           await bot.sendMessage(chatId, fullText);
           return { status: 'started' };
         },
@@ -495,6 +497,7 @@ test('headless transport prefers the full captured user-facing response over the
     assert.equal(result.output, fullText);
     assert.equal(result.full_user_response, fullText);
     assert.equal(result.run_summary, 'CLIPPED_SUMMARY');
+    assert.match(result.orchestration_transcript, /INTERNAL_PROGRESS/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -537,4 +540,42 @@ test('portfolio promotion scores degraded execution but does not promote it by d
   assert.equal(result.status, 'not_promoted');
   assert.ok(Math.abs(result.quality_uplift - 0.2) < 1e-9);
   assert.ok(result.reasons.includes('challenger_degraded_execution'));
+});
+
+test('portfolio model identity uses successful resolved models instead of requested default aliases', async () => {
+  const root = makeTestTempDir('room-journey-resolved-model-');
+  try {
+    const scenario = {
+      id: 'resolved_model_identity_case',
+      steps: [{ id: 'request', action: 'send_message', text: 'analyze this' }],
+      assertions: [{ id: 'one_model', type: 'distinct_model_node_count', max: 1, quality_metric: false }],
+    };
+    const events = [
+      runtimeEvent('run.agent_start', { agent_id: 'researcher', provider: 'codex', model: 'default', requested_model: 'default', model_role: 'source_grounder', execution_channel: 'local_cli' }),
+      runtimeEvent('run.agent_finish', { agent_id: 'researcher', provider: 'codex', model: 'gpt-5.4', requested_model: 'default', resolved_model: 'gpt-5.4', model_role: 'source_grounder', execution_channel: 'local_cli' }),
+      runtimeEvent('run.agent_start', { agent_id: 'reviewer', provider: 'codex', model: '@provider_default', requested_model: '@provider_default', model_role: 'verifier_critic', execution_channel: 'local_cli' }),
+      runtimeEvent('run.agent_finish', { agent_id: 'reviewer', provider: 'codex', model: 'gpt-5.4', requested_model: '@provider_default', resolved_model: 'gpt-5.4', model_role: 'verifier_critic', execution_channel: 'local_cli' }),
+    ];
+    const transport = {
+      chatId: 'resolved-model-room',
+      events,
+      async initialize() {},
+      async sendMessage() { return { ok: true, output: 'done', events }; },
+    };
+    const result = await runRoomJourneyScenario({ scenario, outputRoot: root, execute: true, transport });
+    assert.equal(result.summary.metrics.model_node_count, 1);
+    assert.equal(result.summary.assertions.find((row) => row.id === 'one_model')?.passed, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('evidence panel treats source intake as a normal turn and reserves the full panel for the decision turn', () => {
+  const scenario = loadRoomJourneyScenario(path.resolve('scenarios/room_journeys/portfolio_evidence_panel.json'));
+  const provideEvidence = scenario.steps.find((step) => step.id === 'provide_evidence');
+  const decision = scenario.steps.find((step) => step.id === 'request_decision');
+  const challenger = scenarioArms(scenario).find((arm) => arm.id === 'evidence_panel');
+  assert.equal(provideEvidence.input_kind, 'normal');
+  assert.equal(decision.input_kind, undefined);
+  assert.equal(challenger.input_kind, 'team_task');
 });

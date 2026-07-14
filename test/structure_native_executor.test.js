@@ -370,3 +370,39 @@ test("run_agent with unmet execution requirements is surfaced as blocked instead
   assert.equal(Array.isArray(builderOutput.unmet_requirements), true);
   assert.equal(builderOutput.unmet_requirements.some((row) => row.code === "missing_exe_artifact"), true);
 });
+
+test('required final synthesis is recovered before completion when the normal action budget omits it', async () => {
+  const calledAgents = [];
+  const result = await executeSupervisorActions({
+    chatId: 'chat-final-contract',
+    userId: 'user-final-contract',
+    jobId: 'job-final-contract',
+    jobConfig: { budget: { max_actions: 1 } },
+    agents: [
+      { id: 'reviewer', provider: 'claude' },
+      { id: 'synthesizer', provider: 'codex' },
+    ],
+    plan: {
+      actions: [
+        { type: 'run_agent', agent_id: 'reviewer', goal: 'Review all lane submissions' },
+        { type: 'synthesize_final', agent: 'synthesizer', prompt: 'Produce the final answer' },
+      ],
+    },
+    callbacks: {
+      async runAgent({ action }) {
+        const agentId = String(action?.agent_id || action?.agent || '');
+        calledAgents.push(agentId);
+        return {
+          output: agentId === 'synthesizer' ? 'FINAL SYNTHESIS' : 'review complete',
+          provider: agentId === 'synthesizer' ? 'codex' : 'claude',
+          mode: 'chat',
+        };
+      },
+    },
+  });
+
+  assert.deepEqual(calledAgents, ['reviewer', 'synthesizer']);
+  assert.ok(result.outputs.some((row) => row.mode === 'synthesize_final' && row.output === 'FINAL SYNTHESIS'));
+  assert.ok(result.results.some((row) => String(row.note || '').includes('completion contract recovery')));
+  assert.equal(result.remaining_actions.length, 0);
+});
