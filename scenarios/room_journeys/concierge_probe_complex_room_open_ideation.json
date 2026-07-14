@@ -21,7 +21,10 @@
       "parallel_ideation",
       "evidence_panel",
       "bounded_loop_team"
-    ]
+    ],
+    "measurement_policy": {
+      "require_context_parity": true
+    }
   },
   "experiment": {
     "baseline": {

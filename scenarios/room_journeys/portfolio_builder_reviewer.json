@@ -24,7 +24,9 @@
       "min_quality_uplift": 0.05,
       "max_cost_ratio": 3.0,
       "max_latency_ratio": 3.0,
-      "require_semantic_evidence": true
+      "require_semantic_evidence": true,
+      "require_cost_evidence": true,
+      "require_exact_model_identity": true
     }
   },
   "steps": [
@@ -141,12 +143,18 @@
       "description": "실제 운영자가 바로 체크할 수 있을 만큼 구체적이다."
     },
     {
-      "id": "independent_review_value",
-      "description": "검토가 단순 반복이 아니라 누락·모호성·위험을 실질적으로 줄인다."
+      "id": "risk_detection",
+      "description": "배포 실패·데이터 손상·승인 누락·관찰 부족 같은 핵심 위험을 실질적으로 드러내고 대응 기준을 제시한다."
     },
     {
       "id": "conciseness",
-      "description": "협업으로 인해 불필요하게 장황해지지 않는다."
+      "description": "필요한 내용을 유지하면서 불필요하게 장황하지 않다."
+    }
+  ],
+  "process_evidence_rubric": [
+    {
+      "id": "review_correction_effectiveness",
+      "description": "reviewer가 builder의 실제 누락·모호성·위험을 찾아 최종 산출물 개선에 기여했는지 별도 process evidence로 평가한다."
     }
   ]
 }

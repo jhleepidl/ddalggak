@@ -24,7 +24,9 @@
       "min_quality_uplift": 0.08,
       "max_cost_ratio": 4.0,
       "max_latency_ratio": 3.5,
-      "require_semantic_evidence": true
+      "require_semantic_evidence": true,
+      "require_cost_evidence": true,
+      "require_exact_model_identity": true
     }
   },
   "steps": [
@@ -143,8 +145,14 @@
       "description": "추천이 앞선 비교에서 논리적으로 도출된다."
     },
     {
-      "id": "collaboration_value",
-      "description": "추가 모델이 단일 모델보다 실제 선택지를 확장하거나 맹점을 줄인다."
+      "id": "actionability",
+      "description": "추천안의 다음 단계와 검증 조건이 실제로 실행 가능하다."
+    }
+  ],
+  "process_evidence_rubric": [
+    {
+      "id": "independent_hypothesis_expansion",
+      "description": "독립 lane이 단일 답변 대비 새로운 가설·선택지·맹점을 추가했는지 별도 process evidence로 평가한다."
     }
   ]
 }

@@ -15,6 +15,7 @@ function makeTestTempDir(prefix) {
 import {
   buildConciergeRoutingObservation,
   deriveConciergeRoutingLabel,
+  finalizeConciergeRoutingObservations,
   evaluatePortfolioPromotion,
   HeadlessRoomJourneyTransport,
   loadRoomJourneyScenario,
@@ -82,6 +83,25 @@ test('room journey scenario loader and suite expose natural user and portfolio s
   assert.equal(conciergeRouting.scenario_files.length, 4);
   const scenario = loadRoomJourneyScenario(portfolio.scenario_files[0]);
   assert.deepEqual(scenarioArms(scenario).map((arm) => arm.id), ['solo', 'builder_reviewer']);
+});
+
+test('latest routing and portfolio scenarios encode measurement-validity and topology-neutral promotion contracts', () => {
+  const base = path.resolve('scenarios/room_journeys');
+  const highImpact = loadRoomJourneyScenario(path.join(base, 'concierge_probe_complex_room_high_impact_decision.json'));
+  assert.equal(highImpact.routing_experiment.measurement_policy.label_status, 'quarantine');
+  assert.equal(highImpact.routing_experiment.measurement_policy.require_frozen_pre_target_snapshot, true);
+  assert.deepEqual(highImpact.routing_experiment.required_context_step_ids, ['fact_cost', 'fact_recovery', 'fact_constraints']);
+
+  for (const name of ['portfolio_builder_reviewer.json', 'portfolio_parallel_ideation.json', 'portfolio_evidence_panel.json']) {
+    const scenario = loadRoomJourneyScenario(path.join(base, name));
+    const ids = scenario.semantic_rubric.map((row) => row.id);
+    assert.equal(ids.includes('collaboration_value'), false);
+    assert.equal(ids.includes('independent_panel_value'), false);
+    assert.equal(ids.includes('independent_review_value'), false);
+    assert.ok(Array.isArray(scenario.process_evidence_rubric) && scenario.process_evidence_rubric.length > 0);
+    assert.equal(scenario.experiment.promotion_gate.require_cost_evidence, true);
+    assert.equal(scenario.experiment.promotion_gate.require_exact_model_identity, true);
+  }
 });
 
 test('headless transport uses synthetic Room identity and captures local CLI runtime events without Telegram', async () => {
@@ -330,7 +350,7 @@ test('concierge routing label selects the least complex valid shape within seman
   });
   assert.equal(label.target_execution_shape, 'single_agent_with_retrieval');
   assert.equal(label.target_arm_id, 'solo');
-  assert.equal(label.label_basis, 'minimal_sufficient_execution_shape_within_quality_tolerance');
+  assert.equal(label.label_basis, 'minimal_sufficient_execution_shape_within_quality_tolerance_after_measurement_validity_gate');
 });
 
 test('concierge routing label is withheld when semantic evidence is insufficient', () => {
@@ -343,6 +363,65 @@ test('concierge routing label is withheld when semantic evidence is insufficient
     ],
   });
   assert.equal(label, null);
+});
+
+test('concierge routing observation separates candidate-specific collaboration state from label-safe pre-route input', () => {
+  const scenario = {
+    id: 'routing_leakage_probe',
+    routing_experiment: { target_step_id: 'probe', candidate_shapes: { panel: 'evidence_panel' } },
+    steps: [
+      { id: 'setup', action: 'send_message', text: '기준 사실을 누적해줘.' },
+      { id: 'probe', action: 'send_message', text: '결정해줘.' },
+    ],
+  };
+  const finish = runtimeEvent('run.agent_finish', { provider: 'codex', model: 'gpt-5.4', model_role: 'delivery_synthesizer', execution_channel: 'local_cli', role_output_valid: true }, 'run-probe');
+  const result = {
+    summary: { arm: { id: 'panel' }, metrics: { semantic_score: 0.9, semantic_judge_present: true } },
+    steps: [
+      { step: scenario.steps[0], started_at: '2026-07-14T00:00:00.000Z', completed_at: '2026-07-14T00:00:01.000Z', result: { ok: true, room_state: { recent_room_turn_count: 2, collaboration_profile_id: 'evidence_panel' } } },
+      { step: scenario.steps[1], started_at: '2026-07-14T00:00:02.000Z', completed_at: '2026-07-14T00:00:03.000Z', result: { ok: true, room_state: { recent_room_turn_count: 4, collaboration_profile_id: 'evidence_panel' } } },
+    ],
+    runtimeEvents: [finish],
+    trace: [],
+  };
+  const observation = buildConciergeRoutingObservation({ scenario, result });
+  assert.equal(observation.candidate_specific_pre_route_state.collaboration_profile_id, 'evidence_panel');
+  assert.equal('collaboration_profile_id' in observation.pre_route_room_snapshot, false);
+  assert.equal(observation.pre_route_input_snapshot.snapshot_mode, 'independent_arm_replay');
+});
+
+test('concierge routing measurement gate quarantines comparisons that require a frozen snapshot and verified context coverage', () => {
+  const scenario = {
+    id: 'routing_quarantine_probe',
+    routing_experiment: {
+      target_step_id: 'probe',
+      required_context_step_ids: ['fact_1'],
+      measurement_policy: {
+        label_status: 'quarantine',
+        require_context_parity: true,
+        require_context_coverage_evidence: true,
+        require_frozen_pre_target_snapshot: true,
+      },
+    },
+  };
+  const base = {
+    target_execution_valid: true,
+    semantic_judge_present: true,
+    semantic_score: 0.95,
+    pre_route_input_snapshot: { sha256: 'same', snapshot_mode: 'independent_arm_replay' },
+    pre_route_room_snapshot_sha256: 'room-same',
+    measurement_validity: { invalid_reasons: ['context_coverage_evidence_unverified', 'frozen_pre_target_snapshot_unavailable', 'label_quarantined_by_experiment_policy'] },
+  };
+  const observations = finalizeConciergeRoutingObservations({
+    scenario,
+    observations: [
+      { ...base, arm_id: 'solo', execution_shape: 'single_agent_with_retrieval', execution_shape_rank: 3 },
+      { ...base, arm_id: 'panel', execution_shape: 'evidence_panel', execution_shape_rank: 7 },
+    ],
+  });
+  assert.equal(observations.every((row) => row.context_parity.valid), true);
+  assert.equal(observations.every((row) => row.training_label_eligible === false), true);
+  assert.equal(deriveConciergeRoutingLabel({ scenario, observations }), null);
 });
 
 
@@ -448,6 +527,16 @@ test('portfolio promotion requires measured uplift and optional semantic evidenc
   const noJudge = evaluatePortfolioPromotion({ baseline: { ...baseline, semantic_judge_present: false }, challenger, gate: { min_quality_uplift: 0.08, require_semantic_evidence: true } });
   assert.equal(noJudge.promote, false);
   assert.ok(noJudge.reasons.includes('semantic_evidence_missing'));
+});
+
+test('portfolio promotion can require cost and exact resolved model identity evidence', () => {
+  const baseline = { quality_score: 0.8, required_fail: 0, duration_ms: 1000, cost_usd: null, semantic_judge_present: true, execution_status: 'valid_execution', exact_model_identity_complete: true };
+  const challenger = { quality_score: 0.95, required_fail: 0, duration_ms: 1500, cost_usd: null, semantic_judge_present: true, execution_status: 'valid_execution', exact_model_identity_complete: false };
+  const result = evaluatePortfolioPromotion({ baseline, challenger, gate: { min_quality_uplift: 0.05, require_cost_evidence: true, require_exact_model_identity: true } });
+  assert.equal(result.status, 'insufficient_evidence');
+  assert.equal(result.promote, false);
+  assert.ok(result.reasons.includes('cost_evidence_missing'));
+  assert.ok(result.reasons.includes('exact_model_identity_missing'));
 });
 
 test('portfolio comparison refuses to score faster failures as quality or latency wins', () => {
@@ -759,6 +848,8 @@ test('portfolio model identity uses successful resolved models instead of reques
     };
     const result = await runRoomJourneyScenario({ scenario, outputRoot: root, execute: true, transport });
     assert.equal(result.summary.metrics.model_node_count, 1);
+    assert.equal(result.summary.metrics.exact_model_identity_complete, true);
+    assert.deepEqual(result.summary.metrics.resolved_models, ['gpt-5.4']);
     assert.equal(result.summary.assertions.find((row) => row.id === 'one_model')?.passed, true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

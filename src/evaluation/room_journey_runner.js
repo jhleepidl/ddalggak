@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 
 import { GocClient } from '../goc_client.js';
@@ -24,6 +25,12 @@ function appendJsonl(file, value) { ensureDir(path.dirname(file)); fs.appendFile
 function readJson(file) { return JSON.parse(fs.readFileSync(file, 'utf8')); }
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function clamp(value, fallback, min, max) { const n = Number(value); return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.floor(n))) : fallback; }
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map((item) => stableValue(item));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
+  return value;
+}
+function stableSha256(value) { return createHash('sha256').update(JSON.stringify(stableValue(value))).digest('hex'); }
 
 export function loadRoomJourneyScenario(filePath) {
   const row = readJson(filePath);
@@ -886,6 +893,9 @@ function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '',
   const attempts = starts.filter(isLocalCliEvent);
   const providers = [...new Set(finishes.map((event) => clean(eventPayload(event).provider)).filter(Boolean))];
   const models = [...new Set(finishes.map((event) => clean(eventPayload(event).model)).filter(Boolean))];
+  const requestedModels = [...new Set(finishes.map((event) => clean(eventPayload(event).requested_model || eventPayload(event).requestedModel)).filter(Boolean))];
+  const resolvedModels = [...new Set(finishes.map((event) => normalizedResolvedModel(eventPayload(event))).filter(Boolean))];
+  const exactModelIdentityComplete = finishes.length > 0 && finishes.every((event) => Boolean(normalizedResolvedModel(eventPayload(event))));
   const modelNodes = [...new Set(finishes.map((event) => modelNodeKey(eventPayload(event))).filter(Boolean))];
   const roles = [...new Set(finishes.map((event) => clean(eventPayload(event).model_role || eventPayload(event).role_id)).filter(Boolean))];
   const collaborationProfile = clean(arm?.collaboration_profile || arm?.collaborationProfile || '');
@@ -934,6 +944,9 @@ function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '',
     provider_count: providers.length,
     providers,
     models,
+    requested_models: requestedModels,
+    resolved_models: resolvedModels,
+    exact_model_identity_complete: exactModelIdentityComplete,
     model_nodes: modelNodes,
     model_node_count: modelNodes.length,
     model_roles: roles,
@@ -982,9 +995,11 @@ export function evaluatePortfolioPromotion({ baseline = null, challenger = null,
   if (latencyRatio !== null && latencyRatio > maxLatencyRatio) reasons.push('latency_ratio_above_gate');
   if (gate.require_cost_evidence === true && costRatio === null) reasons.push('cost_evidence_missing');
   if (gate.require_semantic_evidence === true && (!baseline.semantic_judge_present || !challenger.semantic_judge_present)) reasons.push('semantic_evidence_missing');
+  if (gate.require_exact_model_identity === true && (baseline.exact_model_identity_complete !== true || challenger.exact_model_identity_complete !== true)) reasons.push('exact_model_identity_missing');
   if (challengerStatus === 'valid_degraded_execution' && gate.allow_degraded_execution !== true) reasons.push('challenger_degraded_execution');
   const promote = reasons.length === 0;
-  return { status: promote ? 'promotion_candidate' : (reasons.some((reason) => ['cost_evidence_missing', 'semantic_evidence_missing'].includes(reason)) ? 'insufficient_evidence' : 'not_promoted'), promote, quality_uplift: qualityUplift, cost_ratio: costRatio, latency_ratio: latencyRatio, reasons };
+  const insufficientEvidenceReasons = new Set(['cost_evidence_missing', 'semantic_evidence_missing', 'exact_model_identity_missing']);
+  return { status: promote ? 'promotion_candidate' : (reasons.some((reason) => insufficientEvidenceReasons.has(reason)) ? 'insufficient_evidence' : 'not_promoted'), promote, quality_uplift: qualityUplift, cost_ratio: costRatio, latency_ratio: latencyRatio, reasons };
 }
 
 function buildCliCallRows(runtimeEvents = []) {
@@ -1255,8 +1270,119 @@ function roomComplexitySnapshot(roomState = {}) {
   };
 }
 
+function labelSafeRoomSnapshot(roomState = {}) {
+  const snapshot = roomComplexitySnapshot(roomState);
+  const { collaboration_profile_id: _candidateSpecificProfile, ...labelSafe } = snapshot;
+  return labelSafe;
+}
+
+function routingMeasurementPolicy(scenario = {}) {
+  const config = routingExperimentConfig(scenario);
+  const raw = asObject(config.measurement_policy || config.measurementPolicy);
+  return {
+    label_status: clean(raw.label_status || raw.labelStatus || raw.status || 'active').toLowerCase() || 'active',
+    quarantine_reason: clean(raw.quarantine_reason || raw.quarantineReason),
+    require_context_parity: raw.require_context_parity === true || raw.requireContextParity === true,
+    require_context_coverage_evidence: raw.require_context_coverage_evidence === true || raw.requireContextCoverageEvidence === true,
+    require_frozen_pre_target_snapshot: raw.require_frozen_pre_target_snapshot === true || raw.requireFrozenPreTargetSnapshot === true,
+    require_runtime_shape_evidence: raw.require_runtime_shape_evidence === true || raw.requireRuntimeShapeEvidence === true,
+  };
+}
+
+function routingRequiredContextStepIds(scenario = {}) {
+  const config = routingExperimentConfig(scenario);
+  return [...new Set(asArray(config.required_context_step_ids || config.requiredContextStepIds).map(clean).filter(Boolean))];
+}
+
+function preRouteExperimentInputSnapshot(scenario = {}, targetStepId = '') {
+  const steps = asArray(scenario.steps);
+  const targetIndex = steps.findIndex((step) => clean(step?.id) === clean(targetStepId));
+  if (targetIndex < 0) return null;
+  const inputs = steps.slice(0, targetIndex).map((step) => ({
+    id: clean(step?.id),
+    action: clean(step?.action),
+    input_kind: clean(step?.input_kind || step?.inputKind),
+    text: clean(step?.text),
+    command: clean(step?.command),
+    profile: clean(step?.profile),
+  }));
+  const canonical = { scenario_id: clean(scenario.id), target_step_id: clean(targetStepId), steps: inputs };
+  return {
+    snapshot_mode: 'independent_arm_replay',
+    source: 'scenario_steps_before_target',
+    step_ids: inputs.map((step) => step.id).filter(Boolean),
+    step_count: inputs.length,
+    sha256: stableSha256(canonical),
+  };
+}
+
+function traceEventsWithinStep(trace = [], stepRow = {}) {
+  const start = Date.parse(stepRow?.started_at || '');
+  const end = Date.parse(stepRow?.completed_at || '');
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return [];
+  return asArray(trace).filter((event) => {
+    const at = Date.parse(event?.ts || event?.occurred_at || event?.ingested_at || '');
+    return Number.isFinite(at) && at >= start && at <= end;
+  });
+}
+
+function contextProjectionEvidence({ trace = [], targetRow = {}, requiredContextStepIds = [] } = {}) {
+  const projections = traceEventsWithinStep(trace, targetRow).filter((event) => eventType(event) === 'context.projection_compiled');
+  const payloads = projections.map((event) => eventPayload(event));
+  const sourceStepIds = [...new Set(payloads.flatMap((payload) => [
+    ...asArray(payload.selected_source_step_ids || payload.selectedSourceStepIds),
+    ...asArray(payload.source_step_ids || payload.sourceStepIds),
+    ...asArray(payload.selected_atoms).map((atom) => clean(atom?.source_step_id || atom?.sourceStepId)),
+  ]).map(clean).filter(Boolean))];
+  const required = [...new Set(asArray(requiredContextStepIds).map(clean).filter(Boolean))];
+  const missing = required.filter((id) => !sourceStepIds.includes(id));
+  let coverageStatus = 'not_declared';
+  if (required.length && !projections.length) coverageStatus = 'missing_projection';
+  else if (required.length && !sourceStepIds.length) coverageStatus = 'unverified_provenance';
+  else if (required.length && missing.length) coverageStatus = 'incomplete';
+  else if (required.length) coverageStatus = 'verified';
+  return {
+    projection_count: projections.length,
+    projection_ids: [...new Set(payloads.map((payload) => clean(payload.projection_id)).filter(Boolean))],
+    substrate_snapshot_ids: [...new Set(payloads.map((payload) => clean(payload.snapshot_id)).filter(Boolean))],
+    role_ids: [...new Set(payloads.map((payload) => clean(payload.role_id)).filter(Boolean))],
+    model_nodes: [...new Set(payloads.map((payload) => clean(payload.model_node)).filter(Boolean))],
+    selected_atom_ids: [...new Set(payloads.flatMap((payload) => asArray(payload.selected_atom_ids)).map(clean).filter(Boolean))],
+    selected_atom_types: [...new Set(payloads.flatMap((payload) => asArray(payload.selected_atom_types)).map(clean).filter(Boolean))],
+    approved_memory_ids: [...new Set(payloads.flatMap((payload) => asArray(payload.approved_memory_ids)).map(clean).filter(Boolean))],
+    required_context_step_ids: required,
+    source_step_provenance_ids: sourceStepIds,
+    missing_required_context_step_ids: missing,
+    coverage_status: coverageStatus,
+    provenance_complete: coverageStatus === 'verified',
+  };
+}
+
+function targetExecutionEvidence(successfulFinishes = []) {
+  const payloads = asArray(successfulFinishes).map((event) => eventPayload(event));
+  const providers = [...new Set(payloads.map((payload) => clean(payload.provider).toLowerCase()).filter(Boolean))];
+  const modelRoles = [...new Set(payloads.map((payload) => clean(payload.model_role || payload.role_id).toLowerCase()).filter(Boolean))];
+  const modelNodes = [...new Set(payloads.map((payload) => modelNodeKey(payload)).filter(Boolean))];
+  const requestedModels = [...new Set(payloads.map((payload) => clean(payload.requested_model || payload.requestedModel)).filter(Boolean))];
+  const resolvedModels = [...new Set(payloads.map((payload) => normalizedResolvedModel(payload)).filter(Boolean))];
+  const lanes = [...new Set(payloads.map((payload) => clean(payload.lane_id || payload.laneId || payload?.collaboration_lane?.lane_id || payload?.collaborationLane?.laneId)).filter(Boolean))];
+  return {
+    successful_role_count: modelRoles.length,
+    model_roles: modelRoles,
+    providers,
+    requested_models: requestedModels,
+    resolved_models: resolvedModels,
+    exact_model_identity_complete: payloads.length > 0 && payloads.every((payload) => Boolean(normalizedResolvedModel(payload))),
+    model_nodes: modelNodes,
+    lane_ids: lanes,
+    lane_count: lanes.length,
+    agent_finish_count: successfulFinishes.length,
+  };
+}
+
 export function buildConciergeRoutingObservation({ scenario = {}, result = {} } = {}) {
   const config = routingExperimentConfig(scenario);
+  const measurementPolicy = routingMeasurementPolicy(scenario);
   const targetStepId = routingTargetStepId(scenario);
   if (!targetStepId) return null;
   const steps = asArray(result.steps);
@@ -1272,9 +1398,6 @@ export function buildConciergeRoutingObservation({ scenario = {}, result = {} } 
   }, { step_id: targetStepId });
   const outcomes = classifyCliExecutionOutcomes(targetEvents);
   const successfulFinishes = outcomes.finishes.filter((event) => isValidRoleFinish(event));
-  const providers = [...new Set(successfulFinishes.map((event) => clean(eventPayload(event).provider).toLowerCase()).filter(Boolean))];
-  const modelRoles = [...new Set(successfulFinishes.map((event) => clean(eventPayload(event).model_role || eventPayload(event).role_id).toLowerCase()).filter(Boolean))];
-  const modelNodes = [...new Set(successfulFinishes.map((event) => modelNodeKey(eventPayload(event))).filter(Boolean))];
   const semanticScore = Number(result?.summary?.metrics?.semantic_score);
   const semanticJudgePresent = result?.summary?.metrics?.semantic_judge_present === true && Number.isFinite(semanticScore);
   const targetDurationMs = Math.max(0, (Date.parse(targetRow?.completed_at || '') || 0) - (Date.parse(targetRow?.started_at || '') || 0));
@@ -1293,16 +1416,31 @@ export function buildConciergeRoutingObservation({ scenario = {}, result = {} } 
     source: 'room_journey_concierge_shadow_probe',
   });
   const executionShape = routingExecutionShape(scenario, result?.summary?.arm || {});
+  const runtimeDeclaredExecutionShape = clean(targetRoomState?.last_route?.execution_shape || targetRoomState?.lastRoute?.executionShape);
   const targetExecutionValid = targetRow?.result?.ok === true && outcomes.terminalErrors.length === 0;
+  const inputSnapshot = preRouteExperimentInputSnapshot(scenario, targetStepId);
+  const roomSnapshot = labelSafeRoomSnapshot(previousRoomState);
+  const projectionEvidence = contextProjectionEvidence({
+    trace: asArray(result.trace),
+    targetRow,
+    requiredContextStepIds: routingRequiredContextStepIds(scenario),
+  });
+  const invalidReasons = [];
+  if (!targetExecutionValid) invalidReasons.push('provider_execution_failed');
+  if (config.label_requires_semantic_judge !== false && !semanticJudgePresent) invalidReasons.push('semantic_evidence_missing');
+  if (measurementPolicy.require_context_coverage_evidence && projectionEvidence.coverage_status !== 'verified') invalidReasons.push('context_coverage_evidence_unverified');
+  if (measurementPolicy.require_frozen_pre_target_snapshot && inputSnapshot?.snapshot_mode !== 'frozen_pre_target_room_fork') invalidReasons.push('frozen_pre_target_snapshot_unavailable');
+  if (measurementPolicy.require_runtime_shape_evidence && !runtimeDeclaredExecutionShape) invalidReasons.push('runtime_shape_unverified');
+  if (measurementPolicy.label_status === 'quarantine') invalidReasons.push('label_quarantined_by_experiment_policy');
   return {
-    schema_version: 'ddalggak.concierge_routing_observation/v1',
+    schema_version: 'ddalggak.concierge_routing_observation/v2',
     scenario_id: clean(scenario.id),
     target_step_id: targetStepId,
     arm_id: clean(result?.summary?.arm?.id),
     execution_shape: executionShape,
     execution_shape_source: 'experiment_candidate_label',
     execution_shape_rank: routingShapeRank(executionShape, scenario),
-    runtime_declared_execution_shape: clean(targetRoomState?.last_route?.execution_shape || targetRoomState?.lastRoute?.executionShape),
+    runtime_declared_execution_shape: runtimeDeclaredExecutionShape,
     target_text: targetText,
     target_step_duration_ms: targetDurationMs,
     target_step_ok: targetRow?.result?.ok === true,
@@ -1311,15 +1449,16 @@ export function buildConciergeRoutingObservation({ scenario = {}, result = {} } 
     target_recovered_failure_count: outcomes.recoveredErrors.length,
     semantic_judge_present: semanticJudgePresent,
     semantic_score: semanticJudgePresent ? semanticScore : null,
+    pre_route_input_snapshot: inputSnapshot,
+    pre_route_room_snapshot: roomSnapshot,
+    pre_route_room_snapshot_sha256: stableSha256(roomSnapshot),
+    candidate_specific_pre_route_state: {
+      collaboration_profile_id: clean(previousRoomState.collaboration_profile_id || 'auto') || 'auto',
+    },
     room_complexity_before_target: roomComplexitySnapshot(previousRoomState),
     room_complexity_after_target: roomComplexitySnapshot(targetRoomState),
-    actual_execution: {
-      successful_role_count: modelRoles.length,
-      model_roles: modelRoles,
-      providers,
-      model_nodes: modelNodes,
-      agent_finish_count: successfulFinishes.length,
-    },
+    context_projection_evidence: projectionEvidence,
+    actual_execution: targetExecutionEvidence(successfulFinishes),
     shadow_predictions: {
       room_concierge: {
         route: clean(conciergeShadow?.route),
@@ -1334,6 +1473,17 @@ export function buildConciergeRoutingObservation({ scenario = {}, result = {} } 
         reason_codes: asArray(turnRouterShadow?.reason_codes),
       },
     },
+    measurement_policy: measurementPolicy,
+    measurement_validity: {
+      execution_evidence_valid: targetExecutionValid,
+      semantic_evidence_valid: semanticJudgePresent,
+      context_coverage_status: projectionEvidence.coverage_status,
+      context_parity_status: 'pending_peer_comparison',
+      snapshot_mode: inputSnapshot?.snapshot_mode || 'unavailable',
+      routing_comparison_valid: invalidReasons.length === 0,
+      invalid_reasons: invalidReasons,
+    },
+    training_label_eligible: invalidReasons.length === 0,
     evidence_policy: {
       minimum_semantic_score: Number(config.minimum_semantic_score ?? config.minimumSemanticScore ?? 0.75),
       quality_tolerance: Number(config.quality_tolerance ?? config.qualityTolerance ?? 0.05),
@@ -1342,13 +1492,54 @@ export function buildConciergeRoutingObservation({ scenario = {}, result = {} } 
   };
 }
 
+export function finalizeConciergeRoutingObservations({ scenario = {}, observations = [] } = {}) {
+  const policy = routingMeasurementPolicy(scenario);
+  const rows = asArray(observations);
+  const inputHashes = [...new Set(rows.map((row) => clean(row?.pre_route_input_snapshot?.sha256)).filter(Boolean))];
+  const roomHashes = [...new Set(rows.map((row) => clean(row?.pre_route_room_snapshot_sha256)).filter(Boolean))];
+  const inputParity = rows.length > 0 && inputHashes.length === 1;
+  const roomParity = rows.length > 0 && roomHashes.length === 1;
+  const contextParityValid = inputParity && roomParity;
+  const equivalenceGroupId = inputParity ? `ctxeq_${inputHashes[0].slice(0, 16)}` : '';
+  return rows.map((row) => {
+    const existing = asArray(row?.measurement_validity?.invalid_reasons).map(clean).filter(Boolean);
+    const reasons = [...existing];
+    if (policy.require_context_parity && !contextParityValid) reasons.push('context_parity_mismatch');
+    const uniqueReasons = [...new Set(reasons)];
+    return {
+      ...row,
+      context_equivalence_group_id: equivalenceGroupId || null,
+      context_parity: {
+        required: policy.require_context_parity,
+        experiment_input_parity: inputParity,
+        label_safe_room_snapshot_parity: roomParity,
+        valid: contextParityValid,
+        input_snapshot_hashes: inputHashes,
+        room_snapshot_hashes: roomHashes,
+        note: 'Arms are independently replayed. This parity check does not claim a frozen pre-target Room fork.',
+      },
+      measurement_validity: {
+        ...asObject(row.measurement_validity),
+        context_parity_status: contextParityValid ? 'matched' : 'mismatch',
+        routing_comparison_valid: uniqueReasons.length === 0,
+        invalid_reasons: uniqueReasons,
+      },
+      training_label_eligible: uniqueReasons.length === 0,
+    };
+  });
+}
+
 export function deriveConciergeRoutingLabel({ scenario = {}, observations = [] } = {}) {
   const config = routingExperimentConfig(scenario);
   const targetStepId = routingTargetStepId(scenario);
   if (!targetStepId) return null;
   const minimumSemanticScore = Number(config.minimum_semantic_score ?? config.minimumSemanticScore ?? 0.75);
   const qualityTolerance = Number(config.quality_tolerance ?? config.qualityTolerance ?? 0.05);
-  const valid = asArray(observations).filter((row) => row?.target_execution_valid === true && row?.semantic_judge_present === true && Number.isFinite(Number(row?.semantic_score)));
+  const valid = asArray(observations).filter((row) => row?.training_label_eligible !== false
+    && row?.measurement_validity?.routing_comparison_valid !== false
+    && row?.target_execution_valid === true
+    && row?.semantic_judge_present === true
+    && Number.isFinite(Number(row?.semantic_score)));
   if (valid.length < 2) return null;
   const bestScore = Math.max(...valid.map((row) => Number(row.semantic_score)));
   const scoreFloor = Math.max(minimumSemanticScore, bestScore - qualityTolerance);
@@ -1360,14 +1551,14 @@ export function deriveConciergeRoutingLabel({ scenario = {}, observations = [] }
   const winner = sufficient[0];
   const targetRoute = coarseConciergeRouteForExecutionShape(winner.execution_shape);
   return {
-    schema_version: 'ddalggak.concierge_routing_label/v1',
+    schema_version: 'ddalggak.concierge_routing_label/v2',
     scenario_id: clean(scenario.id),
     target_step_id: targetStepId,
     target_arm_id: clean(winner.arm_id),
     target_execution_shape: clean(winner.execution_shape),
     target_route: targetRoute,
     training_eligible_for_current_coarse_model: Boolean(targetRoute),
-    label_basis: 'minimal_sufficient_execution_shape_within_quality_tolerance',
+    label_basis: 'minimal_sufficient_execution_shape_within_quality_tolerance_after_measurement_validity_gate',
     evidence: {
       best_semantic_score: bestScore,
       minimum_semantic_score: minimumSemanticScore,
@@ -1376,12 +1567,14 @@ export function deriveConciergeRoutingLabel({ scenario = {}, observations = [] }
       selected_semantic_score: Number(winner.semantic_score),
       selected_target_step_duration_ms: Number(winner.target_step_duration_ms),
       candidate_count: observations.length,
-      valid_semantic_candidate_count: valid.length,
+      measurement_valid_candidate_count: valid.length,
       sufficient_candidate_count: sufficient.length,
+      context_equivalence_group_id: clean(winner.context_equivalence_group_id) || null,
     },
     input: {
       text: clean(winner.target_text),
-      room_complexity_before_target: asObject(winner.room_complexity_before_target),
+      pre_route_room_snapshot: asObject(winner.pre_route_room_snapshot),
+      pre_route_input_snapshot: asObject(winner.pre_route_input_snapshot),
       shadow_predictions: asObject(winner.shadow_predictions),
     },
     candidates: asArray(observations).map((row) => ({
@@ -1392,6 +1585,9 @@ export function deriveConciergeRoutingLabel({ scenario = {}, observations = [] }
       semantic_judge_present: row.semantic_judge_present === true,
       semantic_score: row.semantic_score,
       target_step_duration_ms: Number(row.target_step_duration_ms || 0),
+      training_label_eligible: row.training_label_eligible !== false,
+      measurement_invalid_reasons: asArray(row?.measurement_validity?.invalid_reasons),
+      exact_model_identity_complete: row?.actual_execution?.exact_model_identity_complete === true,
     })),
   };
 }
@@ -1439,9 +1635,12 @@ export async function runRoomJourneySuite({ suiteFile = '', scenarioFiles = [], 
   for (const [scenarioId, scenario] of scenarioById.entries()) {
     if (!routingTargetStepId(scenario)) continue;
     const scenarioResults = results.filter((row) => clean(row?.summary?.scenario_id) === scenarioId);
-    const observations = scenarioResults
-      .map((row) => buildConciergeRoutingObservation({ scenario, result: row }))
-      .filter(Boolean);
+    const observations = finalizeConciergeRoutingObservations({
+      scenario,
+      observations: scenarioResults
+        .map((row) => buildConciergeRoutingObservation({ scenario, result: row }))
+        .filter(Boolean),
+    });
     routingObservations.push(...observations);
     const label = deriveConciergeRoutingLabel({ scenario, observations });
     if (label) routingLabels.push(label);
@@ -1453,6 +1652,10 @@ export async function runRoomJourneySuite({ suiteFile = '', scenarioFiles = [], 
       selected_execution_shape: label?.target_execution_shape || null,
       selected_arm_id: label?.target_arm_id || null,
       best_semantic_score: label?.evidence?.best_semantic_score ?? null,
+      measurement_valid_observation_count: observations.filter((row) => row.training_label_eligible === true).length,
+      measurement_invalid_reasons: [...new Set(observations.flatMap((row) => asArray(row?.measurement_validity?.invalid_reasons)).map(clean).filter(Boolean))],
+      context_parity_valid: observations.length > 0 && observations.every((row) => row?.context_parity?.valid === true),
+      snapshot_mode: observations[0]?.pre_route_input_snapshot?.snapshot_mode || null,
     });
   }
 
@@ -1500,7 +1703,9 @@ export async function runRoomJourneySuite({ suiteFile = '', scenarioFiles = [], 
       experiments: routingExperimentSummaries,
       label_policy: {
         principle: 'keep_the_room_persistent_choose_the_minimum_sufficient_execution_shape_per_turn',
-        labels_are_emitted_only_with_valid_execution_and_semantic_evidence: true,
+        labels_are_emitted_only_after_measurement_validity_gate: true,
+        candidate_specific_room_state_is_excluded_from_label_input: true,
+        independent_arm_replay_is_not_treated_as_a_frozen_room_fork: true,
       },
     });
   }

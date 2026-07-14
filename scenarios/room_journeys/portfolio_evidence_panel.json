@@ -24,7 +24,9 @@
       "min_quality_uplift": 0.08,
       "max_cost_ratio": 5.0,
       "max_latency_ratio": 4.0,
-      "require_semantic_evidence": true
+      "require_semantic_evidence": true,
+      "require_cost_evidence": true,
+      "require_exact_model_identity": true
     }
   },
   "steps": [
@@ -158,8 +160,14 @@
       "description": "권고와 전환 조건이 인력·일정·복구 시간 제약에 연결된다."
     },
     {
-      "id": "independent_panel_value",
-      "description": "독립 해석과 adjudication이 단일 답변보다 오류나 과신을 줄인다."
+      "id": "uncertainty_calibration",
+      "description": "근거가 부족한 부분을 과신하지 않고 추가 확인이 필요한 조건을 명확히 한다."
+    }
+  ],
+  "process_evidence_rubric": [
+    {
+      "id": "independent_verification_coverage",
+      "description": "독립 evidence lane과 adjudication이 불일치·과신·근거 경계를 실제로 드러냈는지 별도 process evidence로 평가한다."
     }
   ]
 }
