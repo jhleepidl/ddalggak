@@ -19,7 +19,7 @@ Suites:
 - `core_suite.json`: Room settings, multi-turn CLI calls, approved-memory reuse, unapproved-memory suppression, and correction uptake.
 - `model_portfolio_suite.json`: solo baseline versus builder/reviewer, parallel ideation, and evidence panel.
 - `operational_continuity_suite.json`: restart and model-swap journeys requiring explicit operator adapters.
-- `model_role_map.example.json`: role-fit provider defaults for repeatable portfolio execution.
+- `../../config/model_roles/portfolio_benchmark.json`: version-controlled default role policy for repeatable portfolio execution.
 - `staging_room_map.example.json`: optional deployed GoC command-path integration only. Identity requirements depend on that deployment; the default headless suites need no room map or Telegram identity.
 
 Plan mode makes no provider, Telegram, or GoC calls:
@@ -40,27 +40,25 @@ npm run room:journey-bench -- \
   --out experiments/room_journeys
 ```
 
-Prepare an explicit role-to-model map for portfolio runs:
-
-```bash
-cp scenarios/room_journeys/model_role_map.example.json \
-  /home/jhlee/tmp/model-role-map.json
-```
-
-Provider-only entries use each authenticated CLI's configured default model. Add exact discovered model selectors when a fixed reproducible matrix is required.
+The portfolio suite automatically loads `config/model_roles/portfolio_benchmark.json`. Provider-only entries use each authenticated CLI's configured default model. Use `--model-role-policy <path>` only for an intentional fixed or experimental override.
 
 ```bash
 npm run room:journey-bench -- \
   --suite scenarios/room_journeys/model_portfolio_suite.json \
   --execute \
-  --model-role-map /home/jhlee/tmp/model-role-map.json \
   --judge-provider claude \
   --judge-reasoning-effort high \
   --out experiments/room_journeys
 ```
 
-A multi-model arm is not promotable merely because it called more models. It must beat the strongest suitable solo baseline under the configured semantic quality, required assertion, cost, and latency gates. Only successful local CLI finishes count as evidence. Runtime events must prove that claimed model roles and distinct `provider:model` nodes actually completed and match the supplied model-role map. If either arm has a CLI failure or no successful completion, the comparison is `invalid_execution` and no quality/cost/latency ratio is calculated.
+A multi-model arm is not promotable merely because it called more models. It must beat the strongest suitable solo baseline under the configured semantic quality, required assertion, cost, and latency gates. Only successful local CLI finishes count as evidence. Runtime events must prove that claimed model roles and distinct `provider:model` nodes actually completed and match the active audited model-role policy. If either arm has a CLI failure or no successful completion, the comparison is `invalid_execution` and no quality/cost/latency ratio is calculated.
 
 `--sync-goc` in headless mode uploads the completed evaluation summary to GoC; it does not require a GoC Room and does not route the test through Telegram. Use `--transport goc` plus a room map only when explicitly testing the GoC runtime-command boundary.
 
 Journey tracing is disabled globally and leased only for synthetic benchmark Rooms. During benchmark stabilization, raw provider prompts are intentionally retained under `_runtime/<job-id>/llm_traces/<trace-id>/prompt.txt` for local debugging. These files may contain user text, Room rules, projected memory, and orchestration instructions. Treat the output directory as sensitive and review/redact it before external sharing.
+
+## Model-role policy
+
+`model_portfolio_suite.json` automatically loads `config/model_roles/portfolio_benchmark.json`. No external `/home/jhlee/tmp/model-role-map.json` is required. Use `--model-role-policy <path>` only for an intentional experiment override. The legacy `--model-role-map` spelling remains accepted as an alias.
+
+The repository policy is copied into each synthetic benchmark Room as an ephemeral Room policy. In real Rooms, `agent_room_profile.model_policy` is the role-by-role override layer; future learned changes should be proposed, trialed, and approved before becoming durable.

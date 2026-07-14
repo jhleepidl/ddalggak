@@ -322,3 +322,42 @@ test('explicit builder reviewer contract is rebuilt even when task is classified
   assert.deepEqual(repaired.actions.map((row) => row.type), ['run_agent', 'run_agent', 'synthesize_final']);
   assert.equal(repaired.actions[1].inputs.final_synthesis, undefined);
 });
+
+test('named parallel execution pattern remains authoritative even when task interpretation is code-like and profile id is missing', () => {
+  const runtime = {
+    teamLocked: true,
+    activeTeamConfig: {
+      task_archetype: 'implementation',
+      interaction_spec: {
+        execution_pattern: 'multi_research_adjudication',
+        final_answer_owner: 'Synthesizer',
+      },
+      planner_metadata: { collaboration_profile_id: 'evidence_panel' },
+      agents: [
+        { agent_id: 'researcher_lane_1', role: 'researcher', name: 'Lane 1', provider: 'claude', model_role: 'source_grounder', collaboration_lane: { lane_id: 'lane_1' } },
+        { agent_id: 'researcher_lane_2', role: 'researcher', name: 'Lane 2', provider: 'claude', model_role: 'source_grounder', collaboration_lane: { lane_id: 'lane_2' } },
+        { agent_id: 'reviewer', role: 'reviewer', name: 'Reviewer', provider: 'claude', model_role: 'verifier_critic' },
+        { agent_id: 'synthesizer', role: 'synthesizer', name: 'Synthesizer', provider: 'codex', model_role: 'delivery_synthesizer' },
+      ],
+    },
+  };
+  const repaired = repairRoutePlanForTeamExecution({
+    reason: 'classifier incorrectly preferred implementation pipeline',
+    actions: [
+      { type: 'run_agent', agent_id: 'researcher_lane_1', goal: 'lane 1', inputs: { role_id: 'researcher' } },
+      { type: 'synthesize_final', agent_id: 'reviewer', agent: 'reviewer', goal: 'wrong final', inputs: { role_id: 'reviewer', final_synthesis: true } },
+    ],
+    team_locked: true,
+  }, {
+    message: 'A안은 초기 개발 2주, B안은 초기 개발 5주야. 사실을 비교해서 결정 메모를 작성해줘.',
+    runtime,
+    runtimeTeamSnapshot: { task_interpretation: { task_type: 'code_change', deliverable_type: 'code_patch' } },
+  });
+  assert.match(repaired.reason, /repaired_parallel_collaboration/);
+  assert.equal(repaired.actions[0].type, 'spawn_agents');
+  assert.deepEqual(repaired.actions[0].agents.map((row) => row.inputs.lane_id), ['lane_1', 'lane_2']);
+  assert.equal(repaired.actions[1].type, 'run_agent');
+  assert.equal(repaired.actions[1].agent_id, 'reviewer');
+  assert.equal(repaired.actions[2].type, 'synthesize_final');
+  assert.equal(repaired.actions[2].agent_id, 'synthesizer');
+});

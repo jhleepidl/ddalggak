@@ -141,8 +141,26 @@ test('headless transport uses synthetic Room identity and captures local CLI run
       runtimeRoot: root,
       traceRoot: path.join(root, 'trace'),
       runtimeFactory,
+      modelRoleMap: {
+        policy_id: 'portfolio_benchmark_default',
+        revision: 2,
+        assignments: { source_grounder: { provider: 'claude', model: '' } },
+        model_policy: {
+          schema_version: 'ddalggak.room_model_role_policy/v1',
+          policy_id: 'portfolio_benchmark_default',
+          policy_scope: 'benchmark',
+          policy_revision: 2,
+          default_assignment: [{ role: 'source_grounder', provider: 'claude', model: '' }],
+          governance: { room_override_mode: 'role_by_role_merge' },
+        },
+      },
     });
     await transport.initialize();
+    const installedProfile = runtimeCore.chatSessionStore.get('synthetic-room').agent_room_profile;
+    assert.equal(installedProfile.model_policy.policy_scope, 'room_experiment');
+    assert.equal(installedProfile.model_policy.inherited_policy_id, 'portfolio_benchmark_default');
+    assert.equal(installedProfile.model_policy.inherited_policy_revision, 2);
+    assert.equal(installedProfile.model_policy.governance.room_policy_learning, 'proposal_then_trial_then_approval');
     const command = await transport.sendCommand('/rule structured output');
     const result = await transport.sendMessage('hello');
     assert.equal(command.ok, true);
@@ -439,4 +457,84 @@ test('solo portfolio baseline is not failed by challenger model-role-map alignme
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('headless transport prefers the full captured user-facing response over the clipped run summary', async () => {
+  const root = makeTestTempDir('room-journey-full-output-');
+  try {
+    const eventFile = path.join(root, 'runtime_events.jsonl');
+    const botMessages = [];
+    let sequence = 0;
+    const fullText = `FULL_RESPONSE:${'x'.repeat(1400)}`;
+    const bot = {
+      mark() { return sequence; },
+      messagesSince(mark, chatId) { return botMessages.filter((row) => row.sequence > mark && row.chat_id === chatId); },
+      async sendMessage(chatId, text) { sequence += 1; botMessages.push({ sequence, method: 'sendMessage', chat_id: chatId, text }); return { message_id: sequence, text }; },
+    };
+    const runtimeCore = {
+      chatSessionStore: { clear() {}, get() { return { state: 'idle' }; }, upsert(_id, patch) { return typeof patch === 'function' ? patch({ state: 'idle' }) : patch; } },
+      resolveCurrentJobIdForChat() { return 'job-full-output'; },
+      jobs: { jobDir() { return root; } },
+    };
+    const runtimeFactory = async () => ({
+      bot,
+      runtimeCore,
+      chatRunManager: {
+        isRunning() { return false; },
+        async handleIncoming({ chatId }) {
+          const events = [runtimeEvent('run.finish', { status: 'done', summary: 'CLIPPED_SUMMARY' })];
+          fs.writeFileSync(eventFile, events.map((row, index) => JSON.stringify({ ...row, event_sequence: index + 1, job_id: 'job-full-output' })).join('\n') + '\n');
+          await bot.sendMessage(chatId, fullText);
+          return { status: 'started' };
+        },
+      },
+      async handleRoomCommand() { return true; },
+    });
+    const transport = new HeadlessRoomJourneyTransport({ threadId: 't', chatId: 'c', userId: 'u', runtimeRoot: root, traceRoot: path.join(root, 'trace'), runtimeFactory });
+    const result = await transport.sendMessage('hello');
+    assert.equal(result.output, fullText);
+    assert.equal(result.full_user_response, fullText);
+    assert.equal(result.run_summary, 'CLIPPED_SUMMARY');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('portfolio execution distinguishes recovered CLI failures from terminal failures', async () => {
+  const root = makeTestTempDir('room-journey-recovered-cli-');
+  try {
+    const scenario = {
+      id: 'recovered_cli_case',
+      steps: [{ id: 'request', action: 'send_message', text: 'review this' }],
+      assertions: [
+        { id: 'no_terminal_failure', type: 'cli_failure_count', max: 0, quality_metric: false },
+        { id: 'one_recovered_failure', type: 'cli_recovered_failure_count', min: 1, max: 1, quality_metric: false },
+      ],
+    };
+    const events = [
+      runtimeEvent('run.agent_start', { agent_id: 'reviewer', provider: 'claude', model_role: 'verifier_critic', execution_channel: 'local_cli' }),
+      runtimeEvent('run.agent_error', { agent_id: 'reviewer', provider: 'claude', model_role: 'verifier_critic', execution_channel: 'local_cli', error: '[timeout] killed after 300000ms' }),
+      runtimeEvent('run.agent_start', { agent_id: 'reviewer', provider: 'claude', model_role: 'verifier_critic', execution_channel: 'local_cli' }),
+      runtimeEvent('run.agent_finish', { agent_id: 'reviewer', provider: 'claude', model: 'claude-haiku', model_role: 'verifier_critic', execution_channel: 'local_cli' }),
+    ];
+    const transport = { chatId: 'recovered-room', events, async initialize() {}, async sendMessage() { return { ok: true, output: 'review complete', events }; } };
+    const result = await runRoomJourneyScenario({ scenario, outputRoot: root, execute: true, transport });
+    assert.equal(result.summary.metrics.execution_status, 'valid_degraded_execution');
+    assert.equal(result.summary.metrics.cli_failure_count, 0);
+    assert.equal(result.summary.metrics.cli_recovered_failure_count, 1);
+    assert.equal(result.summary.status, 'passed');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('portfolio promotion scores degraded execution but does not promote it by default', () => {
+  const result = evaluatePortfolioPromotion({
+    baseline: { quality_score: 0.7, required_fail: 0, duration_ms: 1000, semantic_judge_present: true, execution_status: 'valid_execution' },
+    challenger: { quality_score: 0.9, required_fail: 0, duration_ms: 1200, semantic_judge_present: true, execution_status: 'valid_degraded_execution', collaboration_execution_status: 'valid_collaboration_execution' },
+    gate: { min_quality_uplift: 0.05, max_latency_ratio: 3 },
+  });
+  assert.equal(result.status, 'not_promoted');
+  assert.ok(Math.abs(result.quality_uplift - 0.2) < 1e-9);
+  assert.ok(result.reasons.includes('challenger_degraded_execution'));
 });

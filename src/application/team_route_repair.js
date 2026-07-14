@@ -287,12 +287,19 @@ export function repairRoutePlanForTeamExecution(routePlan = {}, {
   const collaborationProfileId = cleanId(
     runtime?.teamInteractionSpec?.collaboration_profile_id
     || runtime?.activeTeamConfig?.interaction_spec?.collaboration_profile_id
+    || runtime?.activeTeamConfig?.planner_metadata?.collaboration_profile_id
+    || runtime?.activeTeamConfig?.room_runtime_selection?.collaboration_profile?.id
+    || runtime?.activeTeamConfig?.ai_room_selection?.collaboration_profile?.id
     || row?.interaction_spec?.collaboration_profile_id
+    || row?.planner_metadata?.collaboration_profile_id
+    || runtimeTeamSnapshot?.interaction_spec?.collaboration_profile_id
     || runtimeTeamSnapshot?.team_plan?.interaction_spec?.collaboration_profile_id
+    || runtimeTeamSnapshot?.team_plan?.planner_metadata?.collaboration_profile_id
     || ''
   );
   const explicitBuilderReviewer = collaborationProfileId === 'builder_reviewer';
-  const explicitParallelCollaboration = ['parallel_ideation', 'evidence_panel'].includes(collaborationProfileId);
+  const explicitParallelCollaboration = ['parallel_ideation', 'evidence_panel'].includes(collaborationProfileId)
+    || ['parallel_research_then_review_then_synthesize', 'multi_research_adjudication'].includes(preferredPattern);
   const implementationLike = isImplementationLikeRequest(message, { taskInterpretation, taskArchetype });
   const builder = findRoleAgent(teamAgents, 'builder');
   const finalOwnerAgent = resolveFinalOwnerAgent(runtime, runtimeTeamSnapshot, teamAgents);
@@ -321,7 +328,7 @@ export function repairRoutePlanForTeamExecution(routePlan = {}, {
     }
   }
 
-  if ((explicitParallelCollaboration || !implementationLike) && ['parallel_research_then_review_then_synthesize', 'multi_research_adjudication'].includes(preferredPattern)) {
+  if (explicitParallelCollaboration && ['parallel_research_then_review_then_synthesize', 'multi_research_adjudication'].includes(preferredPattern)) {
     const researchers = teamAgents.filter((agent) => cleanId(agent.role_id) === 'researcher').slice(0, 3);
     const reviewer = findRoleAgent(teamAgents, 'reviewer');
     const finalAgent = finalOwnerAgent || findRoleAgent(teamAgents, 'synthesizer') || reviewer;

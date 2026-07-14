@@ -27,4 +27,4 @@ npm run continuity:test -- --suite scenarios/continuity/core_suite.json --plan-o
 npm run continuity:test -- --resume runs/continuity/<run-id>
 ```
 
-See `ddalggak/docs/CONTINUITY_TEST_AND_HANDOFF.md`.
+See [`../../docs/CONTINUITY_EVALUATION_AND_HANDOFF.md`](../../docs/CONTINUITY_EVALUATION_AND_HANDOFF.md).

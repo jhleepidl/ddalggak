@@ -1,0 +1,35 @@
+{
+  "schema_version": "ddalggak.model_role_policy/v1",
+  "policy_id": "portfolio_benchmark_default",
+  "title": "Cross-vendor portfolio benchmark policy",
+  "scope": "benchmark",
+  "revision": 1,
+  "parent_policy_id": "repository_default",
+  "strategy": "cross_vendor_role_portfolio",
+  "roles": {
+    "concierge_router": {
+      "provider": "codex"
+    },
+    "source_grounder": {
+      "provider": "claude"
+    },
+    "code_executor": {
+      "provider": "codex"
+    },
+    "verifier_critic": {
+      "provider": "claude"
+    },
+    "idle_structurer": {
+      "provider": "claude"
+    },
+    "delivery_synthesizer": {
+      "provider": "codex"
+    }
+  },
+  "governance": {
+    "room_override_mode": "role_by_role_merge",
+    "room_policy_learning": "proposal_then_trial_then_approval",
+    "durable_model_policy_change": "benchmark_ephemeral_only",
+    "provider_secret_export": "never"
+  }
+}

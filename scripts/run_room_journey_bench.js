@@ -12,6 +12,7 @@ import {
   scenarioArms,
 } from '../src/evaluation/room_journey_runner.js';
 import { GocClient } from '../src/goc_client.js';
+import { applyModelRolePolicyToEnv, loadModelRolePolicyFile } from '../src/application/model_role_policy_config.js';
 
 
 async function loadOptionalDotenv() {
@@ -63,7 +64,8 @@ function parseArgs(argv = []) {
     else if (arg === '--trace-root') options.traceRoot = take(i++, arg);
     else if (arg === '--runtime-root') options.runtimeRoot = take(i++, arg);
     else if (arg === '--session-id') options.sessionId = safe(take(i++, arg));
-    else if (arg === '--model-role-map') options.modelRoleMapPath = take(i++, arg);
+    else if (arg === '--model-role-policy') options.modelRolePolicyPath = take(i++, arg);
+    else if (arg === '--model-role-map') options.modelRolePolicyPath = take(i++, arg); // legacy alias
     else if (arg === '--room-map') options.roomMapPath = take(i++, arg);
     else if (arg === '--thread-id') options.threadId = take(i++, arg);
     else if (arg === '--chat-id') options.chatId = take(i++, arg);
@@ -91,47 +93,17 @@ function usage() {
   return `AI Rooms user-journey and model-portfolio benchmark\n\n` +
     `Plan only:\n  npm run room:journey-bench -- --suite scenarios/room_journeys/core_suite.json\n\n` +
     `Execute headless Room journeys (default, no Telegram or GoC Room required):\n  npm run room:journey-bench -- --suite scenarios/room_journeys/core_suite.json --execute --out experiments/room_journeys/core\n\n` +
-    `Execute model portfolio arms with an explicit role-to-model map:\n  npm run room:journey-bench -- --suite scenarios/room_journeys/model_portfolio_suite.json --execute --model-role-map /home/jhlee/tmp/model-role-map.json --judge-provider claude --out experiments/room_journeys/portfolio\n\n` +
+    `Execute model portfolio arms with the suite's repository policy (no external role map required):\n  npm run room:journey-bench -- --suite scenarios/room_journeys/model_portfolio_suite.json --execute --judge-provider claude --out experiments/room_journeys/portfolio\n\n` +
+    `Optional policy override:\n  --model-role-policy config/model_roles/my_experiment.json\n\n` +
     `Optional GoC command-path integration:\n  npm run room:journey-bench -- --transport goc --suite scenarios/room_journeys/core_suite.json --execute --room-map /home/jhlee/tmp/staging-room-map.json\n\n` +
     `Headless mode creates isolated synthetic Room/user identities, invokes the real Room runtime and provider CLIs, and preserves runtime/memory traces below the output directory.`;
 }
 
-const SUPPORTED_MODEL_ROLES = new Set([
-  'concierge_router',
-  'source_grounder',
-  'code_executor',
-  'verifier_critic',
-  'idle_structurer',
-  'delivery_synthesizer',
-]);
-
-function loadAndApplyModelRoleMap(filePath = '') {
-  const resolvedPath = path.resolve(filePath);
-  const bytes = fs.readFileSync(resolvedPath);
-  const raw = JSON.parse(bytes.toString('utf8'));
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('--model-role-map must contain a JSON object');
-  const normalized = {};
-  for (const [rawRole, rawAssignment] of Object.entries(raw)) {
-    if (rawRole.startsWith('_')) continue;
-    const role = clean(rawRole).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-    if (!SUPPORTED_MODEL_ROLES.has(role)) throw new Error(`Unsupported model role in --model-role-map: ${rawRole}`);
-    const assignment = rawAssignment && typeof rawAssignment === 'object' && !Array.isArray(rawAssignment) ? rawAssignment : {};
-    const provider = clean(assignment.provider).toLowerCase();
-    const model = clean(assignment.model);
-    const nodeId = clean(assignment.node_id || assignment.nodeId);
-    if (!provider && !model && !nodeId) throw new Error(`Model role ${role} requires provider, model, or node_id`);
-    normalized[role] = { provider, model, node_id: nodeId };
-    const prefix = `DDALGGAK_MODEL_ROLE_${role.toUpperCase()}_`;
-    if (provider) process.env[`${prefix}PROVIDER`] = provider;
-    if (model) process.env[`${prefix}MODEL`] = model;
-    if (nodeId) process.env[`${prefix}NODE_ID`] = nodeId;
-  }
-  if (!Object.keys(normalized).length) throw new Error('--model-role-map contains no model-role assignments');
-  return {
-    path: resolvedPath,
-    sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
-    assignments: normalized,
-  };
+function resolveSuiteModelRolePolicyPath(suite = null, suiteFile = '') {
+  const configured = clean(suite?.model_role_policy || suite?.modelRolePolicy || suite?.model_role_policy_file || suite?.modelRolePolicyFile);
+  if (!configured) return '';
+  const base = path.dirname(path.resolve(suiteFile || suite?.__file || '.'));
+  return path.resolve(base, configured);
 }
 
 function renderTemplate(template = '', scenario = {}, arm = {}) {
@@ -200,9 +172,14 @@ async function main() {
   if (options.roomMapPath) {
     options.roomMap = JSON.parse(fs.readFileSync(path.resolve(options.roomMapPath), 'utf8'));
   }
-  if (options.modelRoleMapPath) options.modelRoleMap = loadAndApplyModelRoleMap(options.modelRoleMapPath);
-  if (options.execute && options.suite?.requires_model_role_map === true && !options.modelRoleMap) {
-    throw new Error('This suite requires --model-role-map so planned model roles can be verified against actual CLI calls');
+  const suitePolicyPath = resolveSuiteModelRolePolicyPath(options.suite, options.suiteFile);
+  const selectedPolicyPath = options.modelRolePolicyPath ? path.resolve(options.modelRolePolicyPath) : suitePolicyPath;
+  if (selectedPolicyPath) {
+    options.modelRoleMap = applyModelRolePolicyToEnv(loadModelRolePolicyFile(selectedPolicyPath));
+    options.modelRolePolicySource = options.modelRolePolicyPath ? 'cli_override' : 'suite_default';
+  }
+  if (options.execute && (options.suite?.requires_model_role_policy === true || options.suite?.requires_model_role_map === true) && !options.modelRoleMap) {
+    throw new Error('This suite requires a model-role policy; configure model_role_policy in the suite or pass --model-role-policy');
   }
   if (options.execute && options.transport === 'headless') {
     process.env.DDALGGAK_CODEX_SKIP_GIT_REPO_CHECK = '1';
@@ -261,6 +238,8 @@ async function main() {
     trace_root: options.traceRoot,
     telegram_required: false,
     goc_room_required: options.transport === 'goc',
+    model_role_policy: options.modelRoleMap || null,
+    model_role_policy_source: options.modelRolePolicySource || null,
     model_role_map: options.modelRoleMap || null,
     codex_skip_git_repo_check: options.execute && options.transport === 'headless'
       ? {
@@ -272,7 +251,7 @@ async function main() {
   };
   if (options.modelRoleMap) {
     fs.mkdirSync(options.outputRoot, { recursive: true });
-    fs.writeFileSync(path.join(options.outputRoot, 'model_role_map.json'), `${JSON.stringify(options.modelRoleMap, null, 2)}\n`, 'utf8');
+    fs.writeFileSync(path.join(options.outputRoot, 'model_role_policy.json'), `${JSON.stringify(options.modelRoleMap, null, 2)}\n`, 'utf8');
   }
   console.log(JSON.stringify(summary, null, 2));
   if (summary.status === 'completed_with_failures') process.exitCode = 1;

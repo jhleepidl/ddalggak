@@ -42,15 +42,15 @@ export function runMaintenanceDoctor({ cwd = process.cwd() } = {}) {
   const checks = [
     checkExistsAny({
       root,
-      name: 'docs/guides/AGENCY_FIRST_GUIDE.md',
-      files: ['docs/guides/AGENCY_FIRST_GUIDE.md', 'AGENCY_FIRST_GUIDE.md'],
-      message: 'Agency-first 운영 초점 문서가 docs/guides 아래에 있어야 합니다.',
+      name: '../docs/components/ddalggak/guides/AGENCY_FIRST_GUIDE.md',
+      files: ['../docs/components/ddalggak/guides/AGENCY_FIRST_GUIDE.md', 'docs/guides/AGENCY_FIRST_GUIDE.md', 'AGENCY_FIRST_GUIDE.md'],
+      message: 'Agency-first 운영 초점 문서가 중앙 docs/components/ddalggak/guides 아래에 있어야 합니다.',
     }),
     checkExistsAny({
       root,
-      name: 'docs/guides/TRACE_HANDOFF_GUIDE.md',
-      files: ['docs/guides/TRACE_HANDOFF_GUIDE.md', 'TRACE_HANDOFF_GUIDE.md'],
-      message: 'trace handoff 문서가 docs/guides 아래에 있어야 수동 디버깅 루프가 안정적입니다.',
+      name: '../docs/components/ddalggak/guides/TRACE_HANDOFF_GUIDE.md',
+      files: ['../docs/components/ddalggak/guides/TRACE_HANDOFF_GUIDE.md', 'docs/guides/TRACE_HANDOFF_GUIDE.md', 'TRACE_HANDOFF_GUIDE.md'],
+      message: 'trace handoff 문서가 중앙 docs/components/ddalggak/guides 아래에 있어야 수동 디버깅 루프가 안정적입니다.',
     }),
     checkScript({ root, script: 'trace:doctor', message: 'trace 설정 점검 스크립트가 package.json에 연결되어야 합니다.' }),
     checkScript({ root, script: 'trace:bundle', message: 'trace handoff bundle 생성 스크립트가 package.json에 연결되어야 합니다.' }),

@@ -506,6 +506,10 @@ function detectCapabilityGapLines(executionLike = {}, { maxLines = 4, runtime = 
   ].slice(0, Math.max(2, Number(maxLines) || 4) + 3);
 }
 
+function isInternalOrchestrationDiagnostic(text = '') {
+  return /publish contract blocked|final_answer surface|runtime[_ -]?agent|execution graph|agent[_ -]?id/i.test(String(text || ''));
+}
+
 export function buildChatSynthesisFallback(outputs = [], options = {}) {
   const opts = options && typeof options === 'object' ? options : {};
   const executionLike = (!Array.isArray(outputs) && outputs && typeof outputs === 'object' && Array.isArray(outputs.outputs))
@@ -542,6 +546,7 @@ export function buildChatSynthesisFallback(outputs = [], options = {}) {
         const label = String(row.label || row.agent || row.agentId || 'step').trim();
         const note = String(row.note || row.error || row.reason || '').trim();
         if (!note) return '';
+        if (isInternalOrchestrationDiagnostic(note)) return `- ${label}: 내부 협업 단계가 완료되지 않아 성공한 결과만 사용했습니다.`;
         return `- ${label}: ${clip(note, 220)}`;
       })
       .filter(Boolean)

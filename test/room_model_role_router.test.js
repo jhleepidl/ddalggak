@@ -73,3 +73,38 @@ test('explicit Room profile model policy overrides package defaults role by role
   assert.equal(reviewer.provider, 'codex');
   assert.equal(reviewer.model, 'package-review');
 });
+
+
+test('effective Room model policy preserves repository inheritance and Room revision metadata', () => {
+  const policy = normalizeRoomModelRolePolicy({
+    roomPackage: {
+      model_policy: {
+        policy_id: 'repository_default',
+        policy_scope: 'repository_default',
+        policy_revision: 1,
+        default_assignment: [{ role: 'source_grounder', provider: 'codex', model: '' }],
+      },
+    },
+    profile: {
+      model_policy: {
+        policy_id: 'room_policy_room_42',
+        policy_scope: 'room',
+        policy_revision: 4,
+        parent_policy_id: 'repository_default',
+        inherited_policy_id: 'portfolio_benchmark_default',
+        inherited_policy_revision: 2,
+        default_assignment: [{ role: 'source_grounder', provider: 'claude', model: '' }],
+        governance: { room_policy_learning: 'proposal_then_trial_then_approval' },
+      },
+    },
+  });
+  assert.equal(policy.policy_id, 'room_policy_room_42');
+  assert.equal(policy.policy_scope, 'room');
+  assert.equal(policy.policy_revision, 4);
+  assert.equal(policy.parent_policy_id, 'repository_default');
+  assert.equal(policy.inherited_policy_id, 'portfolio_benchmark_default');
+  assert.equal(policy.inherited_policy_revision, 2);
+  assert.equal(policy.governance.room_override_mode, 'role_by_role_merge');
+  assert.equal(policy.governance.room_policy_learning, 'proposal_then_trial_then_approval');
+  assert.equal(policy.default_assignment.find((row) => row.role === 'source_grounder').provider, 'claude');
+});

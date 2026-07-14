@@ -12,9 +12,10 @@ function write(filePath, content = '') {
 }
 
 test('maintenance doctor catches stale Telegram artifact legacy branches', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'maintenance-doctor-'));
-  write(path.join(root, 'AGENCY_FIRST_GUIDE.md'), 'guide');
-  write(path.join(root, 'TRACE_HANDOFF_GUIDE.md'), 'guide');
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'maintenance-doctor-'));
+  const root = path.join(projectRoot, 'ddalggak');
+  write(path.join(projectRoot, 'docs/components/ddalggak/guides/AGENCY_FIRST_GUIDE.md'), 'guide');
+  write(path.join(projectRoot, 'docs/components/ddalggak/guides/TRACE_HANDOFF_GUIDE.md'), 'guide');
   write(path.join(root, 'package.json'), JSON.stringify({ scripts: { 'trace:doctor': 'x', 'trace:bundle': 'x', 'agency:doctor': 'x' } }));
   write(path.join(root, 'src/adapters/telegram/commands.js'), "const legacyMode = false; if (cmd === '/sendfile') {}\n");
   write(path.join(root, 'README.md'), '- `/outputs [limit]`, `/sendfile <relative_path>` : legacy alias\n');

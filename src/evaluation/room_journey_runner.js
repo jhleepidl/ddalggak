@@ -164,23 +164,44 @@ export class HeadlessRoomJourneyTransport {
     const assignments = asObject(this.modelRoleMap.assignments || this.modelRoleMap);
     if (Object.keys(assignments).length > 0) {
       const currentProfile = getAgentRoomProfile(chatSessionStore, this.chatId) || {};
+      const descriptorPolicy = asObject(this.modelRoleMap.model_policy || this.modelRoleMap.modelPolicy);
+      const roomPolicy = Object.keys(descriptorPolicy).length > 0
+        ? {
+            ...descriptorPolicy,
+            policy_scope: 'room_experiment',
+            inherited_policy_id: clean(this.modelRoleMap.policy_id || descriptorPolicy.policy_id),
+            inherited_policy_revision: Number(this.modelRoleMap.revision || descriptorPolicy.policy_revision || 1),
+            governance: {
+              ...asObject(descriptorPolicy.governance),
+              source: 'headless_room_journey_repository_policy',
+              room_override_mode: 'role_by_role_merge',
+              room_policy_learning: 'proposal_then_trial_then_approval',
+              durable_model_policy_change: 'benchmark_ephemeral_only',
+            },
+          }
+        : {
+            schema_version: 'ddalggak.room_model_role_policy/v1',
+            policy_id: 'legacy_headless_role_map',
+            policy_scope: 'room_experiment',
+            policy_revision: 1,
+            strategy: 'headless_room_journey_explicit_model_role_map',
+            default_assignment: Object.entries(assignments).map(([role, assignment]) => ({
+              role,
+              provider: clean(assignment?.provider).toLowerCase(),
+              model: clean(assignment?.model),
+              node_id: clean(assignment?.node_id || assignment?.nodeId),
+              purpose: 'Explicit headless Room journey model-role assignment',
+            })),
+            governance: {
+              source: 'headless_room_journey_legacy_model_role_map',
+              room_override_mode: 'role_by_role_merge',
+              room_policy_learning: 'proposal_then_trial_then_approval',
+              durable_model_policy_change: 'benchmark_ephemeral_only',
+            },
+          };
       upsertAgentRoomProfile(chatSessionStore, this.chatId, {
         ...currentProfile,
-        model_policy: {
-          schema_version: 'ddalggak.room_model_role_policy/v1',
-          strategy: 'headless_room_journey_explicit_model_role_map',
-          default_assignment: Object.entries(assignments).map(([role, assignment]) => ({
-            role,
-            provider: clean(assignment?.provider).toLowerCase(),
-            model: clean(assignment?.model),
-            node_id: clean(assignment?.node_id || assignment?.nodeId),
-            purpose: 'Explicit headless Room journey model-role assignment',
-          })),
-          governance: {
-            source: 'headless_room_journey_model_role_map',
-            durable_model_policy_change: 'benchmark_ephemeral_only',
-          },
-        },
+        model_policy: roomPolicy,
       });
     }
     return { transport: 'headless', thread_id: this.threadId, chat_id: this.chatId, runtime_root: this.runtimeRoot };
@@ -246,6 +267,7 @@ export class HeadlessRoomJourneyTransport {
       active_job_id: this._currentJobId() || null,
       collaboration_profile_id: clean(roomProfile.collaboration_profile_id || 'auto') || 'auto',
       agent_room_profile: roomProfile,
+      model_role_policy: this.modelRoleMap,
       model_role_map: this.modelRoleMap,
       effective_model_policy: asObject(roomProfile.model_policy || roomProfile.modelPolicy),
       last_room_selection: asObject(session.last_room_selection || session.lastRoomSelection),
@@ -294,11 +316,15 @@ export class HeadlessRoomJourneyTransport {
     const runEvents = this.events.slice(beforeCount);
     const terminal = [...runEvents].reverse().find((event) => eventType(event) === 'run.finish');
     const status = clean(eventPayload(terminal).status || '').toLowerCase();
-    const output = eventOutput(terminal) || this._capturedOutput(mark);
+    const capturedOutput = this._capturedOutput(mark);
+    const runSummary = eventOutput(terminal);
+    const output = capturedOutput || runSummary;
     return {
       ok: Boolean(terminal) ? status !== 'error' : Boolean(output),
       accepted,
       output,
+      run_summary: runSummary,
+      full_user_response: capturedOutput || '',
       run_id: clean(terminal?.run_id),
       job_id: this._currentJobId(),
       events: freshEvents,
@@ -602,14 +628,16 @@ function assertionResult(assertion = {}, context = {}) {
       role: clean(eventPayload(event).model_role || eventPayload(event).role_id),
     }));
     passed = rows.length >= Number(assertion.min ?? 1) && rows.length <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
-  } else if (type === 'cli_success_count' || type === 'cli_failure_count') {
-    const terminalType = type === 'cli_success_count' ? 'run.agent_finish' : 'run.agent_error';
-    const rows = context.runtimeEvents.filter((event) => eventType(event) === terminalType && isLocalCliEvent(event));
+  } else if (type === 'cli_success_count' || type === 'cli_failure_count' || type === 'cli_recovered_failure_count') {
+    const outcomes = classifyCliExecutionOutcomes(context.runtimeEvents);
+    const rows = type === 'cli_success_count'
+      ? outcomes.finishes
+      : (type === 'cli_recovered_failure_count' ? outcomes.recoveredErrors : outcomes.terminalErrors);
     observed = rows.map((event) => ({
       provider: clean(eventPayload(event).provider),
       model: clean(eventPayload(event).model),
       role: clean(eventPayload(event).model_role || eventPayload(event).role_id),
-      error: type === 'cli_failure_count' ? clean(eventPayload(event).error).slice(0, 240) : undefined,
+      error: type !== 'cli_success_count' ? clean(eventPayload(event).error).slice(0, 240) : undefined,
     }));
     passed = rows.length >= Number(assertion.min ?? (type === 'cli_failure_count' ? 0 : 1))
       && rows.length <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
@@ -756,6 +784,31 @@ export async function judgeRoomJourneyRun({ scenario = {}, arm = {}, stepRows = 
   };
 }
 
+function cliExecutionKey(event = {}) {
+  const payload = eventPayload(event);
+  return [
+    clean(payload.agent_id || payload.agentId),
+    clean(payload.model_role || payload.modelRole || payload.role_id || payload.roleId),
+    clean(payload.provider).toLowerCase(),
+  ].join('|');
+}
+
+function classifyCliExecutionOutcomes(runtimeEvents = []) {
+  const rows = runtimeEvents.filter((event) => ['run.agent_start', 'run.agent_finish', 'run.agent_error'].includes(eventType(event)) && isLocalCliEvent(event));
+  const finishes = rows.filter((event) => eventType(event) === 'run.agent_finish');
+  const errors = rows.filter((event) => eventType(event) === 'run.agent_error');
+  const recoveredErrors = [];
+  const terminalErrors = [];
+  for (let index = 0; index < rows.length; index += 1) {
+    const event = rows[index];
+    if (eventType(event) !== 'run.agent_error') continue;
+    const key = cliExecutionKey(event);
+    const recovered = rows.slice(index + 1).some((later) => eventType(later) === 'run.agent_finish' && cliExecutionKey(later) === key);
+    (recovered ? recoveredErrors : terminalErrors).push(event);
+  }
+  return { finishes, errors, recoveredErrors, terminalErrors };
+}
+
 function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '', finishedAt = '', semanticJudgment = null, arm = null } = {}) {
   const required = assertions.filter((row) => row.required !== false);
   const qualityAssertions = required.filter((row) => row.quality_metric !== false);
@@ -763,8 +816,7 @@ function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '',
   const semanticScore = Number(semanticJudgment?.result?.score);
   const quality = Number.isFinite(semanticScore) ? Math.max(0, Math.min(1, semanticScore)) : deterministicQuality;
   const starts = runtimeEvents.filter((event) => eventType(event) === 'run.agent_start');
-  const finishes = runtimeEvents.filter((event) => eventType(event) === 'run.agent_finish' && isLocalCliEvent(event));
-  const errors = runtimeEvents.filter((event) => eventType(event) === 'run.agent_error' && isLocalCliEvent(event));
+  const { finishes, errors, recoveredErrors, terminalErrors } = classifyCliExecutionOutcomes(runtimeEvents);
   const attempts = starts.filter(isLocalCliEvent);
   const providers = [...new Set(finishes.map((event) => clean(eventPayload(event).provider)).filter(Boolean))];
   const models = [...new Set(finishes.map((event) => clean(eventPayload(event).model)).filter(Boolean))];
@@ -803,9 +855,13 @@ function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '',
     agent_call_count: starts.length,
     cli_attempt_count: attempts.length,
     cli_success_count: finishes.length,
-    cli_failure_count: errors.length,
-    execution_status: errors.length > 0 || finishes.length === 0 ? 'invalid_execution' : 'valid_execution',
-    execution_eligible: errors.length === 0 && finishes.length > 0,
+    cli_failure_count: terminalErrors.length,
+    cli_recovered_failure_count: recoveredErrors.length,
+    cli_raw_error_count: errors.length,
+    execution_status: finishes.length === 0 || terminalErrors.length > 0
+      ? 'invalid_execution'
+      : (recoveredErrors.length > 0 ? 'valid_degraded_execution' : 'valid_execution'),
+    execution_eligible: finishes.length > 0 && terminalErrors.length === 0,
     collaboration_profile: collaborationProfile || null,
     collaboration_execution_status: collaborationExecutionStatus,
     collaboration_assertion_failures: collaborationAssertions.filter((row) => !row.passed).map((row) => row.id),
@@ -823,8 +879,10 @@ function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '',
 export function evaluatePortfolioPromotion({ baseline = null, challenger = null, gate = {} } = {}) {
   if (!baseline || !challenger) return { status: 'insufficient_evidence', promote: false, reasons: ['baseline_or_challenger_missing'] };
   const invalidReasons = [];
-  if (clean(baseline.execution_status) !== 'valid_execution') invalidReasons.push('baseline_invalid_execution');
-  if (clean(challenger.execution_status) !== 'valid_execution') invalidReasons.push('challenger_invalid_execution');
+  const baselineStatus = clean(baseline.execution_status);
+  const challengerStatus = clean(challenger.execution_status);
+  if (!['valid_execution', 'valid_degraded_execution'].includes(baselineStatus)) invalidReasons.push('baseline_invalid_execution');
+  if (!['valid_execution', 'valid_degraded_execution'].includes(challengerStatus)) invalidReasons.push('challenger_invalid_execution');
   if (invalidReasons.length) {
     return {
       status: 'invalid_execution',
@@ -858,6 +916,7 @@ export function evaluatePortfolioPromotion({ baseline = null, challenger = null,
   if (latencyRatio !== null && latencyRatio > maxLatencyRatio) reasons.push('latency_ratio_above_gate');
   if (gate.require_cost_evidence === true && costRatio === null) reasons.push('cost_evidence_missing');
   if (gate.require_semantic_evidence === true && (!baseline.semantic_judge_present || !challenger.semantic_judge_present)) reasons.push('semantic_evidence_missing');
+  if (challengerStatus === 'valid_degraded_execution' && gate.allow_degraded_execution !== true) reasons.push('challenger_degraded_execution');
   const promote = reasons.length === 0;
   return { status: promote ? 'promotion_candidate' : (reasons.some((reason) => ['cost_evidence_missing', 'semantic_evidence_missing'].includes(reason)) ? 'insufficient_evidence' : 'not_promoted'), promote, quality_uplift: qualityUplift, cost_ratio: costRatio, latency_ratio: latencyRatio, reasons };
 }
@@ -1108,6 +1167,7 @@ export async function runRoomJourneySuite({ suiteFile = '', scenarioFiles = [], 
       trace_root: clean(traceRoot) ? path.resolve(traceRoot) : null,
       telegram_required: false,
       goc_room_required: clean(options.transport).toLowerCase() === 'goc',
+      model_role_policy: options.modelRoleMap || null,
       model_role_map: options.modelRoleMap || null,
       codex_skip_git_repo_check: execute && clean(options.transport).toLowerCase() === 'headless'
         ? { enabled: true, allowed_root: path.resolve(outputRoot), scope: 'headless_benchmark_only' }

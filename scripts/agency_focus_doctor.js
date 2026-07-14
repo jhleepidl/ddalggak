@@ -31,10 +31,11 @@ function checkEnv({ env = process.env, cwd = process.cwd() } = {}) {
   add('telegram bot', clean(env.TELEGRAM_BOT_TOKEN) && clean(env.TELEGRAM_ALLOWED_USER_IDS), 'Telegram bot token과 allowed user가 있어야 runtime을 사용자 제어 plane으로 쓸 수 있습니다.', 'required');
 
   const guidePaths = [
+    path.resolve(cwd, '../docs/components/ddalggak/guides/AGENCY_FIRST_GUIDE.md'),
     path.join(cwd, 'docs/guides/AGENCY_FIRST_GUIDE.md'),
     path.join(cwd, 'AGENCY_FIRST_GUIDE.md'),
   ];
-  add('agency guide', existsAny(guidePaths), 'docs/guides/AGENCY_FIRST_GUIDE.md가 있으면 운영자가 제품 초점을 확인할 수 있습니다.', 'info');
+  add('agency guide', existsAny(guidePaths), 'docs/components/ddalggak/guides/AGENCY_FIRST_GUIDE.md가 있으면 운영자가 제품 초점을 확인할 수 있습니다.', 'info');
 
   const failedRequired = checks.filter((row) => row.level === 'required' && !row.ok).length;
   const failedRecommended = checks.filter((row) => row.level === 'recommended' && !row.ok).length;

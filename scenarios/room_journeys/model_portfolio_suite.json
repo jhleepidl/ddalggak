@@ -7,5 +7,6 @@
     "portfolio_parallel_ideation.json",
     "portfolio_evidence_panel.json"
   ],
-  "requires_model_role_map": true
+  "requires_model_role_policy": true,
+  "model_role_policy": "../../config/model_roles/portfolio_benchmark.json"
 }

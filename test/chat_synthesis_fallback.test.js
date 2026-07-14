@@ -62,3 +62,14 @@ test('buildChatSynthesisFallback prefers final-like synthesizer output over per-
   assert.match(text, /최종 전달/);
   assert.doesNotMatch(text, /현재까지 결과 요약/);
 });
+
+test('buildChatSynthesisFallback hides internal publish-contract diagnostics from user-facing fallback text', () => {
+  const text = buildChatSynthesisFallback('ignored message', {
+    outputs: [],
+    results: [
+      { label: 'Reviewer', status: 'error', note: 'publish contract blocked: final synthesis는 final_answer surface가 선언된 agent만 수행할 수 있습니다' },
+    ],
+  });
+  assert.match(text, /내부 협업 단계가 완료되지 않아 성공한 결과만 사용했습니다/);
+  assert.doesNotMatch(text, /publish contract blocked|final_answer surface/);
+});

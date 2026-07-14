@@ -508,6 +508,15 @@ function normalizeActionShape(raw = {}) {
   return raw && typeof raw === 'object' ? raw : null;
 }
 
+function userSafeOrchestrationHint(value = '') {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (/publish contract blocked|final_answer surface|runtime[_ -]?agent|execution graph|agent[_ -]?id/i.test(text)) {
+    return '일부 내부 협업 단계가 완료되지 않아 성공한 결과만 바탕으로 답변했습니다.';
+  }
+  return text;
+}
+
 function enforceAgentPublishContract(jobId, { runtime = null, agentId = '', agent = null, provider = '', roleId = '', displayLabel = '', finalSynthesis = false, requestedSurface = '' } = {}) {
   const profile = safeLoadTrackingProfile(jobId);
   const runtimeAgent = findAgentConfigInRuntime(agentId, runtime) || agent || {};
@@ -5430,7 +5439,7 @@ async function runSupervisorChat(
     const finalReply = isMutatingConfirm
       ? String(pendingPrompt?.text || "변경 적용 전 확인이 필요합니다.")
       : (routePlan.await_user === true && mergedOutputs.length === 0
-        ? String(routePlan.followup_hint || forcedAwaitReason || "다음 진행을 위해 추가 입력이 필요합니다.")
+        ? userSafeOrchestrationHint(routePlan.followup_hint || forcedAwaitReason || "다음 진행을 위해 추가 입력이 필요합니다.")
         : ((!hasAgentOutput && contextOutputs.length > 0)
           ? contextOutputs.join("\n\n")
           : await synthesizeChatReply(message, routePlan, mergedExecution, {
@@ -5449,7 +5458,7 @@ ${pendingTeamApprovalNotice}`.trim();
     }
 
     if (!mergedExecution.pendingApproval && routePlan.await_user === true) {
-      const hint = String(routePlan.followup_hint || forcedAwaitReason || "").trim();
+      const hint = userSafeOrchestrationHint(routePlan.followup_hint || forcedAwaitReason || "");
       if (hint) {
         replyText = `${replyText}\n\n🧩 추가 입력 필요: ${hint}`;
       }

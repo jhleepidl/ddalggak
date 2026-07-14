@@ -1,0 +1,34 @@
+{
+  "schema_version": "ddalggak.model_role_policy/v1",
+  "policy_id": "repository_default",
+  "title": "Repository default model-role policy",
+  "scope": "repository_default",
+  "revision": 1,
+  "strategy": "room_scoped_model_portfolio",
+  "roles": {
+    "concierge_router": {
+      "selection": "strongest_suitable"
+    },
+    "source_grounder": {
+      "selection": "strongest_suitable"
+    },
+    "code_executor": {
+      "selection": "strongest_suitable"
+    },
+    "verifier_critic": {
+      "selection": "strongest_suitable"
+    },
+    "idle_structurer": {
+      "selection": "strongest_suitable"
+    },
+    "delivery_synthesizer": {
+      "selection": "strongest_suitable"
+    }
+  },
+  "governance": {
+    "room_override_mode": "role_by_role_merge",
+    "room_policy_learning": "proposal_then_trial_then_approval",
+    "durable_model_policy_change": "trial_then_user_or_goc_approval",
+    "provider_secret_export": "never"
+  }
+}

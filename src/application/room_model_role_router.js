@@ -74,6 +74,7 @@ export function normalizeRoomModelRolePolicy({ roomPackage = null, profile = nul
       provider: cleanText(item.provider || '', { lower: true, maxLen: 80 }),
       model: cleanText(item.model || '', { maxLen: 160 }),
       node_id: cleanText(item.node_id || item.nodeId || '', { maxLen: 160 }),
+      selection: cleanText(item.selection || '', { lower: true, maxLen: 120 }),
     };
   }).filter(Boolean);
 
@@ -87,6 +88,12 @@ export function normalizeRoomModelRolePolicy({ roomPackage = null, profile = nul
   }
   return {
     schema_version: 'ddalggak.room_model_role_policy/v1',
+    policy_id: cleanText(profilePolicy.policy_id || profilePolicy.policyId || basePolicy.policy_id || basePolicy.policyId || 'effective_room_model_policy', { maxLen: 160 }),
+    policy_scope: cleanText(profilePolicy.policy_scope || profilePolicy.policyScope || basePolicy.policy_scope || basePolicy.policyScope || 'room', { lower: true, maxLen: 120 }),
+    policy_revision: Math.max(1, Number(profilePolicy.policy_revision || profilePolicy.policyRevision || basePolicy.policy_revision || basePolicy.policyRevision || 1) || 1),
+    parent_policy_id: cleanText(profilePolicy.parent_policy_id || profilePolicy.parentPolicyId || basePolicy.parent_policy_id || basePolicy.parentPolicyId || '', { maxLen: 160 }) || null,
+    inherited_policy_id: cleanText(profilePolicy.inherited_policy_id || profilePolicy.inheritedPolicyId || '', { maxLen: 160 }) || null,
+    inherited_policy_revision: Number(profilePolicy.inherited_policy_revision || profilePolicy.inheritedPolicyRevision || 0) || null,
     strategy: cleanText(profilePolicy.strategy || basePolicy.strategy || 'room_scoped_model_portfolio', { lower: true, maxLen: 120 }),
     default_assignment: [...byRole.values()],
     routing_signals: asArray(profilePolicy.routing_signals).length
@@ -97,6 +104,8 @@ export function normalizeRoomModelRolePolicy({ roomPackage = null, profile = nul
       log_provider_and_model_per_response: true,
       single_model_fallback_allowed: true,
       provider_secret_export: 'never',
+      room_override_mode: 'role_by_role_merge',
+      room_policy_learning: 'proposal_then_trial_then_approval',
       durable_model_policy_change: 'trial_then_user_or_goc_approval',
       ...asObject(basePolicy.governance),
       ...asObject(profilePolicy.governance),

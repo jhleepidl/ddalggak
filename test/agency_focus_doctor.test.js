@@ -7,8 +7,12 @@ import path from 'node:path';
 import { runAgencyFocusDoctor } from '../scripts/agency_focus_doctor.js';
 
 test('agency doctor treats trace-first stable operation as healthy', () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'agency-doctor-'));
-  fs.writeFileSync(path.join(cwd, 'AGENCY_FIRST_GUIDE.md'), 'guide', 'utf8');
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agency-doctor-'));
+  const cwd = path.join(projectRoot, 'ddalggak');
+  const guidePath = path.join(projectRoot, 'docs/components/ddalggak/guides/AGENCY_FIRST_GUIDE.md');
+  fs.mkdirSync(path.dirname(guidePath), { recursive: true });
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(guidePath, 'guide', 'utf8');
   const result = runAgencyFocusDoctor({
     cwd,
     env: {

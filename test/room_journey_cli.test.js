@@ -77,20 +77,28 @@ test('room journey CLI accepts a unique map far enough to reach GoC configuratio
 });
 
 
-test('room journey CLI accepts a model-role map in headless plan mode and records the normalized assignment', () => {
+test('room journey CLI accepts an explicit model-role policy override in headless plan mode', () => {
   const dir = makeTestTempDir('room-journey-role-map-');
   const mapPath = path.join(dir, 'model-role-map.json');
   const out = path.join(dir, 'out');
   try {
     writeFileSync(mapPath, JSON.stringify({
-      source_grounder: { provider: 'claude', model: 'claude-source-test' },
-      verifier_critic: { provider: 'codex', model: 'codex-review-test' },
+      schema_version: 'ddalggak.model_role_policy/v1',
+      policy_id: 'test_override',
+      scope: 'test',
+      revision: 3,
+      roles: {
+        source_grounder: { provider: 'claude', model: 'claude-source-test' },
+        verifier_critic: { provider: 'codex', model: 'codex-review-test' },
+      },
     }));
-    const result = run(['--suite', coreSuite, '--model-role-map', mapPath, '--out', out]);
+    const result = run(['--suite', coreSuite, '--model-role-policy', mapPath, '--out', out]);
     assert.equal(result.status, 0, result.stderr);
     const summary = JSON.parse(result.stdout);
-    assert.equal(summary.execution_environment.model_role_map.assignments.source_grounder.provider, 'claude');
-    assert.equal(summary.execution_environment.model_role_map.assignments.verifier_critic.model, 'codex-review-test');
+    assert.equal(summary.execution_environment.model_role_policy.policy_id, 'test_override');
+    assert.equal(summary.execution_environment.model_role_policy.revision, 3);
+    assert.equal(summary.execution_environment.model_role_policy.assignments.source_grounder.provider, 'claude');
+    assert.equal(summary.execution_environment.model_role_policy.assignments.verifier_critic.model, 'codex-review-test');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -110,13 +118,16 @@ test('room journey CLI rejects unsupported model roles before provider execution
   }
 });
 
-test('portfolio execution requires an explicit model-role map before provider execution', () => {
-  const dir = makeTestTempDir('room-journey-required-role-map-');
+test('portfolio suite automatically loads its repository model-role policy in plan mode', () => {
+  const dir = makeTestTempDir('room-journey-default-role-policy-');
   try {
-    const result = run(['--suite', portfolioSuite, '--execute', '--out', path.join(dir, 'out')]);
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /requires --model-role-map/i);
-    assert.doesNotMatch(result.stderr, /run\.agent_start|provider CLI/i);
+    const result = run(['--suite', portfolioSuite, '--out', path.join(dir, 'out')]);
+    assert.equal(result.status, 0, result.stderr);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.execution_environment.model_role_policy_source, 'suite_default');
+    assert.equal(summary.execution_environment.model_role_policy.policy_id, 'portfolio_benchmark_default');
+    assert.equal(summary.execution_environment.model_role_policy.assignments.source_grounder.provider, 'claude');
+    assert.equal(summary.execution_environment.model_role_policy.assignments.delivery_synthesizer.provider, 'codex');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

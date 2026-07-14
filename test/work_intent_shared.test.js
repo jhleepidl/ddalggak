@@ -23,3 +23,9 @@ test('shared work intent exports stable code request term lists', () => {
   assert.ok(CODE_ARTIFACT_TERMS.includes('ipynb'));
   assert.ok(CODE_ARTIFACT_TERMS.includes('주피터'));
 });
+
+test('shared work intent does not treat a development-duration fact as a software implementation request', () => {
+  assert.equal(hasImplementationLikeIntent('A안은 초기 개발 2주이고 B안은 초기 개발 5주야. 비용과 복구 시간을 비교해줘.'), false);
+  assert.equal(hasImplementationLikeIntent('이 기능을 실제로 개발해줘'), true);
+  assert.equal(hasImplementationLikeIntent('이 API를 구현해줘'), true);
+});
