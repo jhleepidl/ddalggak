@@ -10,22 +10,48 @@ function isInsideRoot(rootAbs, fullAbs) {
 
 export class Jobs {
   constructor({ eagerInit = false } = {}) {
-    const base = process.env.RUNS_DIR
-      ? path.resolve(process.env.RUNS_DIR)
-      : path.resolve("runs");
-    this.baseDir = base;
-    this.runsDir = base;
+    // Resolve the runs dir lazily so a singleton instantiated at import time
+    // (before RUNS_DIR is set, e.g. the headless benchmark that sets RUNS_DIR
+    // just before use) still lands under the intended root. Until an explicit
+    // dir is assigned or the first job op locks it, `runsDir`/`baseDir` read
+    // process.env.RUNS_DIR on each access.
+    this._runsDir = null;
     this._runsDirReady = false;
     if (eagerInit || /^(1|true|yes|on)$/i.test(String(process.env.JOBS_EAGER_INIT || ""))) {
       this._ensureRunsDir();
     }
   }
 
-  _ensureRunsDir() {
-    if (this._runsDirReady) return this.runsDir;
-    fs.mkdirSync(this.runsDir, { recursive: true });
-    this._runsDirReady = true;
+  _computeRunsDir() {
+    return process.env.RUNS_DIR
+      ? path.resolve(process.env.RUNS_DIR)
+      : path.resolve("runs");
+  }
+
+  get runsDir() {
+    return this._runsDir || this._computeRunsDir();
+  }
+
+  set runsDir(value) {
+    this._runsDir = value ? path.resolve(value) : null;
+    this._runsDirReady = false;
+  }
+
+  get baseDir() {
     return this.runsDir;
+  }
+
+  set baseDir(value) {
+    this.runsDir = value;
+  }
+
+  _ensureRunsDir() {
+    if (this._runsDirReady && this._runsDir) return this._runsDir;
+    const dir = this._runsDir || this._computeRunsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    this._runsDir = dir;
+    this._runsDirReady = true;
+    return this._runsDir;
   }
 
   _workspaceDirByJobDir(jobDir) {
