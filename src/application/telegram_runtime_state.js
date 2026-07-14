@@ -350,9 +350,11 @@ function findAgentConfigInRuntime(agentId, runtime = null) {
   const targets = new Set([key, resolved].filter(Boolean));
   if (!targets.size) return null;
   const rows = [
-    ...(Array.isArray(runtime?.agentsCatalog) ? runtime.agentsCatalog : []),
-    ...(Array.isArray(runtime?.agents) ? runtime.agents : []),
+    // Prefer the configured runtime/team view over the static catalog. Catalog rows are
+    // templates and may carry stale provider/model defaults that must not shadow an
+    // explicit Room model-role assignment.
     ...(Array.isArray(runtime?.activeTeamConfig?.agents) ? runtime.activeTeamConfig.agents : []),
+    ...(Array.isArray(runtime?.agents) ? runtime.agents : []),
     ...(Array.isArray(runtime?.conversationAgents) ? runtime.conversationAgents.map((row) => ({
       id: row?.agent_id || row?.agentId || row?.id,
       ...(row?.overrides_json && typeof row.overrides_json === "object" ? row.overrides_json : (row?.overridesJson && typeof row.overridesJson === "object" ? row.overridesJson : {})),
@@ -372,6 +374,7 @@ function findAgentConfigInRuntime(agentId, runtime = null) {
           context_policy: row?.context_policy || row?.contextPolicy,
         }))
       : []),
+    ...(Array.isArray(runtime?.agentsCatalog) ? runtime.agentsCatalog : []),
   ];
   for (const row of rows) {
     const rowId = String(row?.id || row?.agent_id || row?.agentId || "").trim().toLowerCase();

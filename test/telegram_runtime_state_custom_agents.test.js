@@ -36,3 +36,22 @@ test('findAgentConfigInRuntime resolves custom team agents from conversation/run
   assert.equal(agent.name, 'Notebook Builder');
   assert.equal(agent.provider, 'codex');
 });
+
+test('findAgentConfigInRuntime prefers explicit Room team assignments over static catalog defaults', () => {
+  const runtime = {
+    agentsCatalog: [
+      { id: 'researcher', role: 'researcher', provider: 'codex', model: 'gpt-catalog-default' },
+    ],
+    activeTeamConfig: {
+      agents: [
+        { agent_id: 'researcher', role: 'researcher', provider: 'claude', model: '', model_role: 'source_grounder' },
+      ],
+    },
+  };
+
+  const agent = findAgentConfigInRuntime('researcher', runtime);
+  assert.ok(agent);
+  assert.equal(agent.provider, 'claude');
+  assert.equal(agent.model_role, 'source_grounder');
+  assert.notEqual(agent.model, 'gpt-catalog-default');
+});

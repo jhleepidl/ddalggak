@@ -612,6 +612,21 @@ function assertionResult(assertion = {}, context = {}) {
     passed = rows.length >= Number(assertion.min ?? (type === 'cli_failure_count' ? 0 : 1))
       && rows.length <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'model_role_map_alignment') {
+    const modelPolicy = clean(context.arm?.model_policy || context.arm?.modelPolicy).toLowerCase();
+    const armId = clean(context.arm?.id).toLowerCase();
+    if (modelPolicy === 'strongest_suitable_single' || armId === 'solo') {
+      observed = { skipped: true, reason: 'solo_baseline_uses_single_model_policy' };
+      passed = true;
+      return {
+        id: clean(assertion.id || type),
+        type,
+        required: assertion.required !== false,
+        quality_metric: false,
+        passed,
+        observed,
+        description: clean(assertion.description || assertion.label),
+      };
+    }
     const assignments = asObject(context.modelRoleMap?.assignments || context.modelRoleMap);
     const finishes = context.runtimeEvents.filter((event) => eventType(event) === 'run.agent_finish' && isLocalCliEvent(event));
     const rows = finishes.map((event) => {
@@ -928,7 +943,7 @@ function writeTraceViews(runDir, trace, runtimeEvents, steps) {
   });
 }
 
-export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot = 'runs/room_journeys', transport, execute = false, traceRoot = '', options = {} } = {}) {
+export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot = 'experiments/room_journeys', transport, execute = false, traceRoot = '', options = {} } = {}) {
   const selectedArm = arm || scenarioArms(scenario)[0];
   const runId = `${safe(scenario.id)}__${safe(selectedArm.id)}__${Date.now().toString(36)}`;
   const runDir = ensureDir(path.resolve(outputRoot, runId));
@@ -970,6 +985,7 @@ export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot 
       stepsById,
       latestRoomState,
       modelRoleMap: options.modelRoleMap || null,
+      arm: selectedArm,
     }));
   const executionFinishedAt = nowIso();
   let semanticJudgment = null;
@@ -1041,7 +1057,7 @@ export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot 
   return { runDir, summary, steps: stepRows, trace, runtimeEvents };
 }
 
-export async function runRoomJourneySuite({ suiteFile = '', scenarioFiles = [], outputRoot = 'runs/room_journeys', transportFactory, execute = false, traceRoot = '', options = {}, syncGoc = false, gocClient = null } = {}) {
+export async function runRoomJourneySuite({ suiteFile = '', scenarioFiles = [], outputRoot = 'experiments/room_journeys', transportFactory, execute = false, traceRoot = '', options = {}, syncGoc = false, gocClient = null } = {}) {
   const files = suiteFile ? loadRoomJourneySuite(suiteFile).scenario_files : scenarioFiles.map((file) => path.resolve(file));
   if (!files.length) throw new Error('No Room journey scenarios supplied');
   const results = [];

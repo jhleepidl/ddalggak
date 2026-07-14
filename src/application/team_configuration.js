@@ -1807,28 +1807,36 @@ function normalizeTeamConfig(raw = {}, { runtime = null, autoRenameGenericNames 
       : uniqueIds(rawSkills.filter((skillId) => !String(skillId || '').trim().toLowerCase().startsWith('skill.')));
     const purpose = autoPurposeForAgent({ role, purpose: rawPurpose, taskText: taskBrief, name, skills: capabilityLabels });
     const resolvedCapabilities = capabilityLabels.length > 0 ? capabilityLabels : skillsForRole(role, { taskText: taskBrief, agentName: name, purpose });
+    const resolvedProvider = cleanId(explicitProvider || runtimeProvider || inferProviderForModel(model) || '');
+    const resolvedModel = model || '';
+    const executionSchema = sanitizeAgentToolExpectations({
+      roleId: role,
+      taskText: taskBrief,
+      purpose,
+      runtimeCapabilitiesRequired: normalizeParticipantExecutionSchema(entry).runtime_capabilities_required,
+      runtimeCapabilitiesOptional: normalizeParticipantExecutionSchema(entry).runtime_capabilities_optional,
+      externalToolRequirements: normalizeParticipantExecutionSchema(entry).external_tool_requirements,
+      externalToolPreferences: normalizeParticipantExecutionSchema(entry).external_tool_preferences,
+    });
     return {
       agent_id: agentId,
       name,
       role,
-      model: model || '',
+      model: resolvedModel,
       purpose,
       capabilities: resolvedCapabilities,
       skills: resolvedCapabilities,
       attached_skill_ids: rawAttachedSkillIds,
       generated_skill_briefs: normalizeGeneratedSkillBriefs(entry.generated_skill_briefs || entry.generatedSkillBriefs || []),
-      ...sanitizeAgentToolExpectations({
-        roleId: role,
-        taskText: taskBrief,
-        purpose,
-        runtimeCapabilitiesRequired: normalizeParticipantExecutionSchema(entry).runtime_capabilities_required,
-        runtimeCapabilitiesOptional: normalizeParticipantExecutionSchema(entry).runtime_capabilities_optional,
-        externalToolRequirements: normalizeParticipantExecutionSchema(entry).external_tool_requirements,
-        externalToolPreferences: normalizeParticipantExecutionSchema(entry).external_tool_preferences,
-      }),
+      ...executionSchema,
+      provider_spec: {
+        ...asObject(executionSchema.provider_spec),
+        provider: resolvedProvider,
+        model: resolvedModel,
+      },
       matched_preset_id: cleanId(entry.matched_preset_id || entry.matchedPresetId || '' ) || undefined,
       matched_preset_name: clean(entry.matched_preset_name || entry.matchedPresetName || '' ) || undefined,
-      provider: cleanId(explicitProvider || runtimeProvider || inferProviderForModel(model) || ''),
+      provider: resolvedProvider,
       model_role: cleanId(entry.model_role || entry.modelRole || ''),
       model_role_resolution: asObject(entry.model_role_resolution || entry.modelRoleResolution),
       collaboration_lane: asObject(entry.collaboration_lane || entry.collaborationLane),

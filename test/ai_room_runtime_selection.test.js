@@ -175,12 +175,15 @@ test('provider-only model role assignments keep the selected provider default an
     const synthesizer = team.agents.find((agent) => agent.model_role === 'delivery_synthesizer');
     assert.ok(researchers.length >= 2);
     assert.ok(researchers.every((agent) => agent.provider === 'claude' && agent.model === ''));
+    assert.ok(researchers.every((agent) => agent.provider_spec?.provider === 'claude' && agent.provider_spec?.model === ''));
     assert.ok(researchers.every((agent) => agent.collaboration_lane?.lane_id));
     assert.equal(new Set(researchers.map((agent) => agent.collaboration_lane.lane_id)).size, researchers.length);
     assert.equal(reviewer?.provider, 'claude');
     assert.equal(reviewer?.model, '');
+    assert.equal(reviewer?.provider_spec?.provider, 'claude');
     assert.equal(synthesizer?.provider, 'codex');
     assert.equal(synthesizer?.model, '');
+    assert.equal(synthesizer?.provider_spec?.provider, 'codex');
   } finally {
     for (const [key, value] of Object.entries(keys)) {
       if (value === undefined) delete process.env[key];

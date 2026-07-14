@@ -32,12 +32,12 @@ npm run room:journey-bench -- \
 Execute the core suite headlessly:
 
 ```bash
-mkdir -p /home/jhlee/tmp/ai_rooms_room_journeys
+mkdir -p experiments/room_journeys
 
 npm run room:journey-bench -- \
   --suite scenarios/room_journeys/core_suite.json \
   --execute \
-  --out /home/jhlee/tmp/ai_rooms_room_journeys
+  --out experiments/room_journeys
 ```
 
 Prepare an explicit role-to-model map for portfolio runs:
@@ -56,7 +56,7 @@ npm run room:journey-bench -- \
   --model-role-map /home/jhlee/tmp/model-role-map.json \
   --judge-provider claude \
   --judge-reasoning-effort high \
-  --out /home/jhlee/tmp/ai_rooms_room_journeys
+  --out experiments/room_journeys
 ```
 
 A multi-model arm is not promotable merely because it called more models. It must beat the strongest suitable solo baseline under the configured semantic quality, required assertion, cost, and latency gates. Only successful local CLI finishes count as evidence. Runtime events must prove that claimed model roles and distinct `provider:model` nodes actually completed and match the supplied model-role map. If either arm has a CLI failure or no successful completion, the comparison is `invalid_execution` and no quality/cost/latency ratio is calculated.

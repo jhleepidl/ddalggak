@@ -230,8 +230,11 @@ function findAgentConfigInRuntime(agentId, runtime = null) {
   const targets = new Set([key, resolved].filter(Boolean));
   if (!targets.size) return null;
   const rows = [
-    ...(Array.isArray(runtime?.agentsCatalog) ? runtime.agentsCatalog : []),
+    // Runtime/team assignments must win over static catalog defaults.
+    ...(Array.isArray(runtime?.activeTeamConfig?.agents) ? runtime.activeTeamConfig.agents : []),
     ...(Array.isArray(runtime?.agents) ? runtime.agents : []),
+    ...(Array.isArray(runtime?.runtimeTeamSnapshot?.runtime_agents) ? runtime.runtimeTeamSnapshot.runtime_agents : []),
+    ...(Array.isArray(runtime?.agentsCatalog) ? runtime.agentsCatalog : []),
   ];
   for (const row of rows) {
     const rowId = String(row?.id || row?.agent_id || row?.agentId || "").trim().toLowerCase();

@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 
 import {
@@ -31,14 +30,14 @@ function looksPlaceholder(value = '') {
 }
 
 function parseArgs(argv = []) {
-  const homeTmp = path.join(os.homedir(), 'tmp', 'ai_rooms_room_journeys');
+  const defaultExperimentRoot = path.resolve('experiments', 'room_journeys');
   const options = {
     scenarioFiles: [],
     execute: false,
     syncGoc: false,
     allowSharedRoom: false,
     transport: 'headless',
-    outputRoot: homeTmp,
+    outputRoot: defaultExperimentRoot,
     traceRoot: process.env.DDALGGAK_ROOM_JOURNEY_TRACE_DIR || '',
     runtimeRoot: '',
     pollIntervalMs: 1000,
@@ -91,8 +90,8 @@ function parseArgs(argv = []) {
 function usage() {
   return `AI Rooms user-journey and model-portfolio benchmark\n\n` +
     `Plan only:\n  npm run room:journey-bench -- --suite scenarios/room_journeys/core_suite.json\n\n` +
-    `Execute headless Room journeys (default, no Telegram or GoC Room required):\n  npm run room:journey-bench -- --suite scenarios/room_journeys/core_suite.json --execute --out /home/jhlee/tmp/ai_rooms_room_journeys\n\n` +
-    `Execute model portfolio arms with an explicit role-to-model map:\n  npm run room:journey-bench -- --suite scenarios/room_journeys/model_portfolio_suite.json --execute --model-role-map /home/jhlee/tmp/model-role-map.json --judge-provider claude --out /home/jhlee/tmp/ai_rooms_room_journeys\n\n` +
+    `Execute headless Room journeys (default, no Telegram or GoC Room required):\n  npm run room:journey-bench -- --suite scenarios/room_journeys/core_suite.json --execute --out experiments/room_journeys/core\n\n` +
+    `Execute model portfolio arms with an explicit role-to-model map:\n  npm run room:journey-bench -- --suite scenarios/room_journeys/model_portfolio_suite.json --execute --model-role-map /home/jhlee/tmp/model-role-map.json --judge-provider claude --out experiments/room_journeys/portfolio\n\n` +
     `Optional GoC command-path integration:\n  npm run room:journey-bench -- --transport goc --suite scenarios/room_journeys/core_suite.json --execute --room-map /home/jhlee/tmp/staging-room-map.json\n\n` +
     `Headless mode creates isolated synthetic Room/user identities, invokes the real Room runtime and provider CLIs, and preserves runtime/memory traces below the output directory.`;
 }

@@ -222,3 +222,40 @@ test('route action dedupe removes accidental duplicates while preserving indepen
   assert.equal(result.actions[1].agents.length, 2);
   assert.deepEqual(result.actions[1].agents.map((row) => row.inputs.lane_id), ['lane-1', 'lane-2']);
 });
+
+test('locked parallel profile rebuilds an out-of-order multi-agent plan into lanes then reviewer then synthesizer', () => {
+  const runtime = {
+    teamLocked: true,
+    activeTeamConfig: {
+      task_archetype: 'general',
+      interaction_spec: {
+        execution_pattern: 'parallel_research_then_review_then_synthesize',
+        final_answer_owner: 'Synthesizer',
+      },
+      agents: [
+        { agent_id: 'researcher_lane_1', role: 'researcher', name: 'Lane 1', provider: 'claude', model_role: 'source_grounder', collaboration_lane: { lane_id: 'lane_1' } },
+        { agent_id: 'researcher_lane_2', role: 'researcher', name: 'Lane 2', provider: 'claude', model_role: 'source_grounder', collaboration_lane: { lane_id: 'lane_2' } },
+        { agent_id: 'reviewer', role: 'reviewer', name: 'Reviewer', provider: 'claude', model_role: 'verifier_critic' },
+        { agent_id: 'synthesizer', role: 'synthesizer', name: 'Synthesizer', provider: 'codex', model_role: 'delivery_synthesizer' },
+      ],
+    },
+  };
+  const repaired = repairRoutePlanForTeamExecution({
+    reason: 'supervisor returned wrong order',
+    actions: [
+      { type: 'run_agent', agent_id: 'researcher_lane_1', goal: 'lane 1', inputs: { role_id: 'researcher' } },
+      { type: 'synthesize_final', agent_id: 'reviewer', agent: 'reviewer', goal: 'wrong final owner', inputs: { role_id: 'reviewer', final_synthesis: true } },
+      { type: 'run_agent', agent_id: 'researcher_lane_2', goal: 'lane 2', inputs: { role_id: 'researcher' } },
+    ],
+    team_locked: true,
+  }, {
+    message: '독립 대안을 비교하고 검토 후 합성해줘',
+    runtime,
+  });
+
+  assert.deepEqual(repaired.actions.map((row) => row.type), ['spawn_agents', 'run_agent', 'synthesize_final']);
+  assert.deepEqual(repaired.actions[0].agents.map((row) => row.agent_id), ['researcher_lane_1', 'researcher_lane_2']);
+  assert.equal(repaired.actions[1].agent_id, 'reviewer');
+  assert.equal(repaired.actions[2].agent_id, 'synthesizer');
+  assert.equal(repaired.actions[2].agent, 'synthesizer');
+});

@@ -17,12 +17,12 @@ function makeTestTempDir(prefix) {
   return mkdtempSync(path.join(testTmpRoot, prefix));
 }
 
-function run(args = []) {
+function run(args = [], { cwd = root } = {}) {
   const env = { ...process.env };
   delete env.GOC_BASE_URL;
   delete env.GOC_RUNTIME_TOKEN;
   return spawnSync(process.execPath, [script, ...args], {
-    cwd: root,
+    cwd,
     env,
     encoding: 'utf8',
     timeout: 30000,
@@ -117,6 +117,20 @@ test('portfolio execution requires an explicit model-role map before provider ex
     assert.equal(result.status, 1);
     assert.match(result.stderr, /requires --model-role-map/i);
     assert.doesNotMatch(result.stderr, /run\.agent_start|provider CLI/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('room journey CLI defaults experiment output below the current ddalggak experiments directory', () => {
+  const dir = makeTestTempDir('room-journey-default-experiments-');
+  try {
+    const result = run(['--suite', coreSuite], { cwd: dir });
+    assert.equal(result.status, 0, result.stderr);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.status, 'planned');
+    const experimentRoot = path.join(dir, 'experiments', 'room_journeys');
+    assert.ok(summary.results.every((row) => path.resolve(row.run_dir).startsWith(path.resolve(experimentRoot) + path.sep)));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

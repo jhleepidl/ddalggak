@@ -163,3 +163,6 @@ config/shared_team_packages.json
 .antigravitycli/
 
 CLAUDE.md
+
+# Local Room journey experiment outputs (may contain raw LLM prompts/transcripts)
+/experiments/room_journeys/

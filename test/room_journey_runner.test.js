@@ -408,3 +408,35 @@ test('headless transient context clear removes recency fallbacks but preserves g
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('solo portfolio baseline is not failed by challenger model-role-map alignment', async () => {
+  const root = makeTestTempDir('room-journey-solo-role-map-');
+  try {
+    const scenario = {
+      id: 'solo_role_map_case',
+      steps: [{ id: 'request', action: 'send_message', text: 'artifact' }],
+      assertions: [
+        { id: 'done', type: 'step_ok', step_id: 'request' },
+        { id: 'role_map', type: 'model_role_map_alignment', min: 1, quality_metric: false },
+      ],
+    };
+    const arm = { id: 'solo', model_policy: 'strongest_suitable_single', setup_commands: [], metadata: {} };
+    const transport = new FakeJourneyTransport({ chatId: 'solo-role-map', traceRoot: path.join(root, 'trace'), models: ['gpt-5.5'] });
+    const result = await runRoomJourneyScenario({
+      scenario,
+      arm,
+      outputRoot: root,
+      execute: true,
+      transport,
+      options: {
+        modelRoleMap: { assignments: { code_executor: { provider: 'claude', model: 'claude-review' } } },
+      },
+    });
+    const alignment = result.summary.assertions.find((row) => row.id === 'role_map');
+    assert.equal(alignment.passed, true);
+    assert.equal(alignment.quality_metric, false);
+    assert.deepEqual(alignment.observed, { skipped: true, reason: 'solo_baseline_uses_single_model_policy' });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

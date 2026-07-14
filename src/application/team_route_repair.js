@@ -317,9 +317,10 @@ export function repairRoutePlanForTeamExecution(routePlan = {}, {
     const researchers = teamAgents.filter((agent) => cleanId(agent.role_id) === 'researcher').slice(0, 3);
     const reviewer = findRoleAgent(teamAgents, 'reviewer');
     const finalAgent = finalOwnerAgent || findRoleAgent(teamAgents, 'synthesizer') || reviewer;
-    const currentAgentIds = extractActionAgentIds(row.actions);
-    const representedResearchers = researchers.filter((agent) => currentAgentIds.includes(cleanId(agent.agent_id)));
-    if (researchers.length >= 2 && representedResearchers.length < 2) {
+    // These named collaboration patterns are explicit execution contracts, not hints.
+    // Rebuild them deterministically even when the supervisor produced a superficially
+    // plausible single-agent or out-of-order plan.
+    if (researchers.length >= 2) {
       const spawn = {
         type: 'spawn_agents',
         summary: `Independent lanes for ${preferredPattern}`,
