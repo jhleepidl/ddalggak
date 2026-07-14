@@ -1,26 +1,26 @@
 {
   "schema_version": "ddalggak.model_role_policy/v1",
   "policy_id": "portfolio_benchmark_default",
-  "title": "Cross-vendor portfolio benchmark policy",
+  "title": "Latency-aware cross-vendor portfolio benchmark policy",
   "scope": "benchmark",
-  "revision": 1,
+  "revision": 2,
   "parent_policy_id": "repository_default",
-  "strategy": "cross_vendor_role_portfolio",
+  "strategy": "codex_antigravity_role_portfolio_with_scarce_claude_escalation",
   "roles": {
     "concierge_router": {
       "provider": "codex"
     },
     "source_grounder": {
-      "provider": "claude"
+      "provider": "antigravity"
     },
     "code_executor": {
       "provider": "codex"
     },
     "verifier_critic": {
-      "provider": "claude"
+      "provider": "antigravity"
     },
     "idle_structurer": {
-      "provider": "claude"
+      "provider": "antigravity"
     },
     "delivery_synthesizer": {
       "provider": "codex"
@@ -30,6 +30,8 @@
     "room_override_mode": "role_by_role_merge",
     "room_policy_learning": "proposal_then_trial_then_approval",
     "durable_model_policy_change": "benchmark_ephemeral_only",
-    "provider_secret_export": "never"
+    "provider_secret_export": "never",
+    "claude_usage_policy": "scarce_high_value_escalation_only",
+    "benchmark_primary_research_provider": "antigravity"
   }
 }

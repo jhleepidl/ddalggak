@@ -126,7 +126,9 @@ test('portfolio suite automatically loads its repository model-role policy in pl
     const summary = JSON.parse(result.stdout);
     assert.equal(summary.execution_environment.model_role_policy_source, 'suite_default');
     assert.equal(summary.execution_environment.model_role_policy.policy_id, 'portfolio_benchmark_default');
-    assert.equal(summary.execution_environment.model_role_policy.assignments.source_grounder.provider, 'claude');
+    assert.equal(summary.execution_environment.model_role_policy.revision, 2);
+    assert.equal(summary.execution_environment.model_role_policy.assignments.source_grounder.provider, 'antigravity');
+    assert.equal(summary.execution_environment.model_role_policy.assignments.verifier_critic.provider, 'antigravity');
     assert.equal(summary.execution_environment.model_role_policy.assignments.delivery_synthesizer.provider, 'codex');
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -552,9 +552,9 @@ test('portfolio model identity uses successful resolved models instead of reques
     };
     const events = [
       runtimeEvent('run.agent_start', { agent_id: 'researcher', provider: 'codex', model: 'default', requested_model: 'default', model_role: 'source_grounder', execution_channel: 'local_cli' }),
-      runtimeEvent('run.agent_finish', { agent_id: 'researcher', provider: 'codex', model: 'gpt-5.4', requested_model: 'default', resolved_model: 'gpt-5.4', model_role: 'source_grounder', execution_channel: 'local_cli' }),
-      runtimeEvent('run.agent_start', { agent_id: 'reviewer', provider: 'codex', model: '@provider_default', requested_model: '@provider_default', model_role: 'verifier_critic', execution_channel: 'local_cli' }),
-      runtimeEvent('run.agent_finish', { agent_id: 'reviewer', provider: 'codex', model: 'gpt-5.4', requested_model: '@provider_default', resolved_model: 'gpt-5.4', model_role: 'verifier_critic', execution_channel: 'local_cli' }),
+      runtimeEvent('run.agent_finish', { agent_id: 'researcher', provider: 'codex', model: 'default', requested_model: 'gpt-5.4', resolved_model: 'default', model_role: 'source_grounder', execution_channel: 'local_cli', role_output_valid: true }),
+      runtimeEvent('run.agent_start', { agent_id: 'reviewer', provider: 'codex', model: '@provider_default', requested_model: 'gpt-5.4', model_role: 'verifier_critic', execution_channel: 'local_cli' }),
+      runtimeEvent('run.agent_finish', { agent_id: 'reviewer', provider: 'codex', model: 'gpt-5.4', requested_model: 'gpt-5.4', resolved_model: 'gpt-5.4', model_role: 'verifier_critic', execution_channel: 'local_cli', role_output_valid: true }),
     ];
     const transport = {
       chatId: 'resolved-model-room',
@@ -578,4 +578,33 @@ test('evidence panel treats source intake as a normal turn and reserves the full
   assert.equal(provideEvidence.input_kind, 'normal');
   assert.equal(decision.input_kind, undefined);
   assert.equal(challenger.input_kind, 'team_task');
+});
+
+
+test('portfolio metrics do not count provider-success outputs that failed the role task contract', async () => {
+  const root = makeTestTempDir('room-journey-invalid-role-output-');
+  try {
+    const scenario = {
+      id: 'invalid_role_output_case',
+      steps: [{ id: 'request', action: 'send_message', text: 'compare options' }],
+      assertions: [
+        { id: 'valid_roles', type: 'successful_provider_role_count', min: 1, quality_metric: false },
+      ],
+    };
+    const events = [
+      runtimeEvent('run.agent_start', { agent_id: 'researcher', provider: 'antigravity', model_role: 'source_grounder', execution_channel: 'local_cli' }),
+      runtimeEvent('run.agent_error', { agent_id: 'researcher', provider: 'antigravity', model_role: 'source_grounder', execution_channel: 'local_cli', provider_execution_success: true, role_output_valid: false, role_output_validation_reason: 'missing_assigned_task_refusal', error: 'role output invalid: missing_assigned_task_refusal' }),
+      runtimeEvent('run.agent_start', { agent_id: 'synthesizer', provider: 'codex', model: 'gpt-5.4', requested_model: 'gpt-5.4', resolved_model: 'gpt-5.4', model_role: 'delivery_synthesizer', execution_channel: 'local_cli' }),
+      runtimeEvent('run.agent_finish', { agent_id: 'synthesizer', provider: 'codex', model: 'gpt-5.4', requested_model: 'gpt-5.4', resolved_model: 'gpt-5.4', model_role: 'delivery_synthesizer', execution_channel: 'local_cli', role_output_valid: true }),
+    ];
+    const transport = { chatId: 'invalid-role-room', events, async initialize() {}, async sendMessage() { return { ok: true, output: 'final', events }; } };
+    const result = await runRoomJourneyScenario({ scenario, outputRoot: root, execute: true, transport });
+    assert.deepEqual(result.summary.assertions.find((row) => row.id === 'valid_roles')?.observed, ['delivery_synthesizer']);
+    assert.equal(result.summary.metrics.cli_success_count, 1);
+    assert.equal(result.summary.metrics.cli_failure_count, 1);
+    const cliRows = fs.readFileSync(path.join(result.runDir, 'cli_calls.jsonl'), 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+    assert.ok(cliRows.some((row) => row.role_output_valid === false && row.provider_execution_success === true));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

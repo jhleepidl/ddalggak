@@ -545,12 +545,23 @@ function isLocalCliEvent(event = {}) {
   return channel === 'local_cli' || channel.endsWith('_cli') || channel === 'cli';
 }
 
+function isProviderDefaultModelAlias(value = '') {
+  return ['default', '@provider_default', 'provider_default', 'provider-default', 'auto'].includes(clean(value).toLowerCase());
+}
+
 function normalizedResolvedModel(payload = {}) {
   const explicit = clean(payload.resolved_model || payload.resolvedModel);
-  if (explicit) return explicit;
+  if (explicit && !isProviderDefaultModelAlias(explicit)) return explicit;
   const model = clean(payload.model);
-  if (!model || ['default', '@provider_default', 'provider_default', 'provider-default', 'auto'].includes(model.toLowerCase())) return '';
-  return model;
+  if (model && !isProviderDefaultModelAlias(model)) return model;
+  const requested = clean(payload.requested_model || payload.requestedModel);
+  if (requested && !isProviderDefaultModelAlias(requested)) return requested;
+  return '';
+}
+
+function isValidRoleFinish(event = {}) {
+  if (eventType(event) !== 'run.agent_finish' || !isLocalCliEvent(event)) return false;
+  return eventPayload(event).role_output_valid !== false;
 }
 
 function modelNodeKey(payload = {}) {
@@ -586,18 +597,18 @@ function assertionResult(assertion = {}, context = {}) {
     const roles = new Set(starts.map((event) => clean(eventPayload(event).model_role || eventPayload(event).role_id)).filter(Boolean));
     observed = [...roles]; passed = roles.size >= Number(assertion.min ?? 1) && roles.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'successful_provider_role_count') {
-    const finishes = context.runtimeEvents.filter((event) => eventType(event) === 'run.agent_finish' && isLocalCliEvent(event));
+    const finishes = context.runtimeEvents.filter((event) => isValidRoleFinish(event));
     const roles = new Set(finishes.map((event) => clean(eventPayload(event).model_role || eventPayload(event).role_id)).filter(Boolean));
     observed = [...roles]; passed = roles.size >= Number(assertion.min ?? 1) && roles.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'successful_model_roles_include') {
-    const finishes = context.runtimeEvents.filter((event) => eventType(event) === 'run.agent_finish' && isLocalCliEvent(event));
+    const finishes = context.runtimeEvents.filter((event) => isValidRoleFinish(event));
     const roles = new Set(finishes.map((event) => clean(eventPayload(event).model_role).toLowerCase()).filter(Boolean));
     const expected = asArray(assertion.values || assertion.roles || assertion.expected).map((row) => clean(row).toLowerCase()).filter(Boolean);
     const missing = expected.filter((role) => !roles.has(role));
     observed = { expected, actual: [...roles], missing };
     passed = expected.length > 0 && missing.length === 0;
   } else if (type === 'distinct_lane_count') {
-    const finishes = context.runtimeEvents.filter((event) => eventType(event) === 'run.agent_finish' && isLocalCliEvent(event));
+    const finishes = context.runtimeEvents.filter((event) => isValidRoleFinish(event));
     const lanes = new Set(finishes.map((event) => {
       const payload = eventPayload(event);
       return clean(payload.lane_id || payload.laneId || payload?.collaboration_lane?.lane_id || payload?.collaborationLane?.laneId);
@@ -608,11 +619,11 @@ function assertionResult(assertion = {}, context = {}) {
     const providers = new Set(context.runtimeEvents.filter((event) => ['run.agent_start', 'run.agent_finish'].includes(eventType(event))).map((event) => clean(eventPayload(event).provider)).filter(Boolean));
     observed = [...providers]; passed = providers.size >= Number(assertion.min ?? 1) && providers.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'distinct_model_count') {
-    const models = new Set(context.runtimeEvents.filter((event) => eventType(event) === 'run.agent_finish' && isLocalCliEvent(event)).map((event) => normalizedResolvedModel(eventPayload(event))).filter(Boolean));
+    const models = new Set(context.runtimeEvents.filter((event) => isValidRoleFinish(event)).map((event) => normalizedResolvedModel(eventPayload(event))).filter(Boolean));
     observed = [...models]; passed = models.size >= Number(assertion.min ?? 1) && models.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'distinct_model_node_count') {
     const nodes = new Set(context.runtimeEvents
-      .filter((event) => eventType(event) === 'run.agent_finish' && isLocalCliEvent(event))
+      .filter((event) => isValidRoleFinish(event))
       .map((event) => modelNodeKey(eventPayload(event)))
       .filter(Boolean));
     observed = [...nodes]; passed = nodes.size >= Number(assertion.min ?? 1) && nodes.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
@@ -669,7 +680,7 @@ function assertionResult(assertion = {}, context = {}) {
       };
     }
     const assignments = asObject(context.modelRoleMap?.assignments || context.modelRoleMap);
-    const finishes = context.runtimeEvents.filter((event) => eventType(event) === 'run.agent_finish' && isLocalCliEvent(event));
+    const finishes = context.runtimeEvents.filter((event) => isValidRoleFinish(event));
     const rows = finishes.map((event) => {
       const payload = eventPayload(event);
       const role = clean(payload.model_role).toLowerCase();
@@ -806,7 +817,7 @@ function cliExecutionKey(event = {}) {
 
 function classifyCliExecutionOutcomes(runtimeEvents = []) {
   const rows = runtimeEvents.filter((event) => ['run.agent_start', 'run.agent_finish', 'run.agent_error'].includes(eventType(event)) && isLocalCliEvent(event));
-  const finishes = rows.filter((event) => eventType(event) === 'run.agent_finish');
+  const finishes = rows.filter((event) => eventType(event) === 'run.agent_finish' && eventPayload(event).role_output_valid !== false);
   const errors = rows.filter((event) => eventType(event) === 'run.agent_error');
   const recoveredErrors = [];
   const terminalErrors = [];
@@ -972,13 +983,20 @@ function buildCliCallRows(runtimeEvents = []) {
       started_at: '',
     };
     if (!calls.includes(row)) calls.push(row);
-    row.status = type === 'run.agent_finish' ? 'succeeded' : 'failed';
+    row.status = type === 'run.agent_finish'
+      ? (payload.role_output_valid === false ? 'invalid_role_output' : 'succeeded')
+      : 'failed';
     row.finished_at = clean(event.occurred_at || event.ts);
     row.output_chars = Number(payload.output_chars || 0);
     row.error = type === 'run.agent_error' ? clean(payload.error) : '';
+    row.provider_execution_success = payload.provider_execution_success === true;
+    row.role_output_valid = payload.role_output_valid === false ? false : (type === 'run.agent_finish' ? true : null);
+    row.role_output_validation_reason = clean(payload.role_output_validation_reason);
     row.provider = clean(payload.provider || row.provider);
     row.model = clean(payload.model || row.model);
-    row.model_node = modelNodeKey({ provider: row.provider, model: row.model });
+    row.requested_model = clean(payload.requested_model || row.requested_model);
+    row.resolved_model = normalizedResolvedModel(payload) || normalizedResolvedModel(row);
+    row.model_node = modelNodeKey({ provider: row.provider, model: row.model, requested_model: row.requested_model, resolved_model: row.resolved_model });
     const startMs = Date.parse(row.started_at || '');
     const endMs = Date.parse(row.finished_at || '');
     row.duration_ms = Number.isFinite(startMs) && Number.isFinite(endMs) ? Math.max(0, endMs - startMs) : null;

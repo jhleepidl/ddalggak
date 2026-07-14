@@ -202,6 +202,8 @@ export function mergeExecutionRequirements(...rows) {
     artifact_delivery_requested: false,
     artifact_delivery_forbidden: false,
     memory_only_requested: false,
+    workspace_write_requested: false,
+    task_loop_workspace_write_allowed: false,
     expected_artifact_kinds: [],
     raw_text: '',
     summary: '',
@@ -215,6 +217,8 @@ export function mergeExecutionRequirements(...rows) {
     merged.artifact_build_requested = merged.artifact_build_requested || item.artifact_build_requested === true;
     merged.artifact_delivery_forbidden = merged.artifact_delivery_forbidden || item.artifact_delivery_forbidden === true;
     merged.memory_only_requested = merged.memory_only_requested || item.memory_only_requested === true;
+    merged.workspace_write_requested = merged.workspace_write_requested || item.workspace_write_requested === true;
+    merged.task_loop_workspace_write_allowed = merged.task_loop_workspace_write_allowed || item.task_loop_workspace_write_allowed === true;
     merged.artifact_delivery_requested = merged.artifact_delivery_requested || item.artifact_delivery_requested === true;
     merged.expected_artifact_kinds = uniq([...merged.expected_artifact_kinds, ...(Array.isArray(item.expected_artifact_kinds) ? item.expected_artifact_kinds : [])]);
     if (clean(item.raw_text)) texts.push(clean(item.raw_text));
@@ -224,6 +228,8 @@ export function mergeExecutionRequirements(...rows) {
     merged.artifact_build_requested = false;
     merged.direct_execution_requested = merged.shell_execution_requested && merged.direct_execution_requested;
     merged.expected_artifact_kinds = [];
+    merged.workspace_write_requested = false;
+    merged.task_loop_workspace_write_allowed = false;
   }
   merged.raw_text = uniq(texts).join('\n');
   merged.summary = [
@@ -233,6 +239,8 @@ export function mergeExecutionRequirements(...rows) {
     merged.artifact_delivery_requested ? '파일 전달 필요' : '',
     merged.artifact_delivery_forbidden ? '파일/산출물 생성 금지' : '',
     merged.memory_only_requested ? 'memory-only' : '',
+    merged.workspace_write_requested ? 'workspace write 요청' : '',
+    merged.task_loop_workspace_write_allowed ? 'task loop workspace write 허용' : '',
     merged.expected_artifact_kinds.length > 0 ? `기대 산출물=${merged.expected_artifact_kinds.join(',')}` : '',
   ].filter(Boolean).join(' · ');
   return merged;

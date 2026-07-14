@@ -144,3 +144,17 @@ test('task loop runtime rule default does not block implementation workspace wri
   assert.equal(resolved.artifact_delivery_forbidden, false);
   assert.equal(resolved.task_loop_workspace_write_allowed, true);
 });
+
+test('mergeExecutionRequirements preserves trusted structured workspace-write flags', () => {
+  const merged = mergeExecutionRequirements(
+    extractExecutionRequirements('채팅으로 배포 체크리스트를 작성해줘.'),
+    {
+      workspace_write_requested: true,
+      task_loop_workspace_write_allowed: true,
+      expected_artifact_kinds: [],
+    },
+  );
+  assert.equal(merged.workspace_write_requested, true);
+  assert.equal(merged.task_loop_workspace_write_allowed, true);
+  assert.equal(merged.artifact_delivery_forbidden, false);
+});

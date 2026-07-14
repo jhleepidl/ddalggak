@@ -490,15 +490,188 @@ function withAgentOutputContract(action = {}, { runtimeExecutionPolicy = null } 
   return normalizedAction;
 }
 
-export function resolveProviderExecutionWorkspace(jobId = '', provider = '') {
+export function resolveProviderExecutionWorkspace(jobId = '', provider = '', scopeKey = '') {
   const normalWorkspace = safeRunWorkspaceDir(jobId);
   if (String(process.env.DDALGGAK_HEADLESS_PROVIDER_ISOLATION || '').trim() !== '1') return normalWorkspace;
   const normalizedProvider = String(provider || '').trim().toLowerCase();
   if (normalizedProvider === 'codex') return normalWorkspace;
   const root = path.resolve(String(process.env.DDALGGAK_HEADLESS_PROVIDER_WORKSPACE_ROOT || path.join(os.homedir(), 'tmp', 'ddalggak_headless_provider_workspaces')).trim());
-  const target = path.join(root, String(jobId || 'unscoped').replace(/[^a-zA-Z0-9._-]+/g, '_'));
+  const jobSegment = String(jobId || 'unscoped').replace(/[^a-zA-Z0-9._-]+/g, '_');
+  const scopeSegment = String(scopeKey || 'provider').replace(/[^a-zA-Z0-9._-]+/g, '_');
+  const target = path.join(root, jobSegment, scopeSegment);
   fs.mkdirSync(target, { recursive: true });
   return target;
+}
+
+function latestRoomUserRequest(chatId = '', fallback = '') {
+  try {
+    const session = chatSessionStore.get(chatId) || {};
+    const turns = Array.isArray(session.recent_room_turns)
+      ? session.recent_room_turns
+      : (Array.isArray(session.recentRoomTurns) ? session.recentRoomTurns : []);
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const row = turns[index] || {};
+      if (String(row.role || '').trim().toLowerCase() !== 'user') continue;
+      const text = String(row.text || row.content || '').trim();
+      if (text) return text;
+    }
+  } catch {}
+  return String(fallback || '').trim();
+}
+
+function isProviderDefaultAlias(value = '') {
+  return ['default', '@provider_default', 'provider_default', 'provider-default', 'auto']
+    .includes(String(value || '').trim().toLowerCase());
+}
+
+function resolveExactModelIdentity({ resolvedModel = '', requestedModel = '', fallbackModel = '' } = {}) {
+  for (const value of [resolvedModel, requestedModel, fallbackModel]) {
+    const text = String(value || '').trim();
+    if (text && !isProviderDefaultAlias(text)) return text;
+  }
+  return '';
+}
+
+function structuredExecutionRequirementsFromInputs(inputs = {}) {
+  const row = inputs && typeof inputs === 'object' ? inputs : {};
+  const bool = (...keys) => keys.some((key) => row?.[key] === true);
+  const expected = row.expected_artifact_kinds || row.expectedArtifactKinds;
+  return {
+    direct_execution_requested: bool('direct_execution_requested', 'directExecutionRequested'),
+    shell_execution_requested: bool('shell_execution_requested', 'shellExecutionRequested'),
+    artifact_build_requested: bool('artifact_build_requested', 'artifactBuildRequested'),
+    artifact_delivery_requested: bool('artifact_delivery_requested', 'artifactDeliveryRequested'),
+    artifact_delivery_forbidden: bool('artifact_delivery_forbidden', 'artifactDeliveryForbidden'),
+    memory_only_requested: bool('memory_only_requested', 'memoryOnlyRequested'),
+    workspace_write_requested: bool('workspace_write_requested', 'workspaceWriteRequested'),
+    task_loop_workspace_write_allowed: bool('task_loop_workspace_write_allowed', 'taskLoopWorkspaceWriteAllowed'),
+    expected_artifact_kinds: Array.isArray(expected) ? expected : [],
+    raw_text: '',
+    summary: '',
+  };
+}
+
+export function inferDeliverableMode(userRequest = '', requirements = {}) {
+  const text = String(userRequest || '').trim();
+  const req = requirements && typeof requirements === 'object' ? requirements : {};
+  if (req.artifact_delivery_requested || req.artifact_build_requested) return 'file_artifact';
+  if (req.direct_execution_requested || req.shell_execution_requested || /(소스\s*코드|코드\s*(수정|구현|패치)|repo|repository|pull request|PR\b|API를?\s*구현|기능을?\s*개발해|implement|patch the code)/i.test(text)) return 'code_or_workspace_change';
+  if (/(결정\s*메모|의사결정|최종\s*권고|전환\s*조건)/i.test(text)) return 'decision_memo';
+  if (/(점검표|체크리스트|checklist)/i.test(text)) return 'operational_checklist';
+  return 'chat_text';
+}
+
+export function buildAssignedTaskPromptBlock({ userRequest = '', agentGoal = '', roleId = '', laneId = '', deliverableMode = 'chat_text', outputContract = '' } = {}) {
+  const request = String(userRequest || '').trim();
+  const goal = String(agentGoal || '').trim();
+  const role = String(roleId || '').trim().toLowerCase();
+  const lane = String(laneId || '').trim();
+  const mode = String(deliverableMode || 'chat_text').trim().toLowerCase() || 'chat_text';
+  return [
+    '[ASSIGNED TASK]',
+    `Latest user request:\n${request || '(missing — do not execute; report task contract error)'}`,
+    goal ? `\nAgent goal:\n${goal}` : '',
+    role ? `\nRole: ${role}` : '',
+    lane ? `Lane: ${lane}` : '',
+    `Deliverable mode: ${mode}`,
+    '- The collaboration topology does not change the requested deliverable type.',
+    ['chat_text', 'operational_checklist', 'decision_memo'].includes(mode)
+      ? '- Produce the requested content directly in the answer. Do not treat the absence of a file artifact as a blocker.'
+      : '',
+    outputContract ? `\nExpected output contract:\n${String(outputContract || '').trim()}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+export function assessAgentRoleOutputValidity({ output = '', userRequest = '', agentGoal = '', roleId = '' } = {}) {
+  const text = String(output || '').trim();
+  if (!text) return { valid: false, reason: 'empty_output' };
+  const request = String(userRequest || '').trim();
+  const missingTaskRefusal = /(?:\[ASSIGNED TASK\].{0,120}(?:empty|missing|비어|없)|assigned task.{0,80}(?:empty|missing|not provided)|(?:과제|작업|요청|task).{0,50}(?:없|누락|비어)|what (?:task|topic)|please (?:provide|send).{0,50}(?:task|topic)|무엇을 .{0,30}(?:원하는지|해야 하는지).{0,40}(?:알려|제공))/is.test(text);
+  if (request && missingTaskRefusal) return { valid: false, reason: 'missing_assigned_task_refusal' };
+  const onlyQuotaFailure = /(?:session limit|usage limit|rate limit|token limit|quota).{0,120}(?:reset|exceeded|hit|reached|초과|한도)/i.test(text) && text.length < 800;
+  if (onlyQuotaFailure) return { valid: false, reason: 'provider_limit_message_returned_as_output' };
+  const contextAccessRefusal = /(?:outside|beyond).{0,50}(?:permitted|allowed).{0,40}(?:working directory|workspace)|cannot\s+access.{0,80}(?:shared|context|path).{0,60}(?:outside|workspace)|(?:허용된|현재).{0,40}(?:작업\s*디렉터리|workspace).{0,50}(?:밖|외부).{0,40}(?:접근|읽)/i.test(text) && text.length < 1600;
+  if (request && contextAccessRefusal) return { valid: false, reason: 'required_context_access_refusal' };
+  return {
+    valid: true,
+    reason: 'role_output_nonempty_and_task_addressable',
+    role_id: String(roleId || '').trim().toLowerCase() || undefined,
+    agent_goal_present: Boolean(String(agentGoal || '').trim()),
+  };
+}
+
+export function materializeProviderContextCapsule({ workspaceRoot = '', provider = '', jobId = '', userRequest = '', agentGoal = '', roleId = '', laneId = '', deliverableMode = 'chat_text', contextText = '', outputContract = '' } = {}) {
+  const root = path.resolve(String(workspaceRoot || '').trim() || process.cwd());
+  fs.mkdirSync(root, { recursive: true });
+  const taskBlock = buildAssignedTaskPromptBlock({ userRequest, agentGoal, roleId, laneId, deliverableMode, outputContract });
+  const context = String(contextText || '').trim();
+  fs.writeFileSync(path.join(root, 'task.md'), `${taskBlock}\n`, 'utf8');
+  fs.writeFileSync(path.join(root, 'context.md'), context ? `${context}\n` : '# Room-selected context\n\nNo additional context atoms were selected for this role.\n', 'utf8');
+  const metadata = {
+    schema_version: 'ddalggak.provider_context_capsule/v1',
+    job_id: String(jobId || '').trim() || null,
+    provider: String(provider || '').trim().toLowerCase() || null,
+    role_id: String(roleId || '').trim().toLowerCase() || null,
+    lane_id: String(laneId || '').trim() || null,
+    deliverable_mode: String(deliverableMode || '').trim().toLowerCase() || 'chat_text',
+    task_present: Boolean(String(userRequest || '').trim()),
+    context_present: Boolean(context),
+    files: ['task.md', 'context.md'],
+  };
+  fs.writeFileSync(path.join(root, 'metadata.json'), `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
+  return { root, task_file: 'task.md', context_file: 'context.md', metadata_file: 'metadata.json', metadata };
+}
+
+function reviewerCorrectionContractPath(jobId = '') {
+  return path.join(safeRunDir(jobId), 'shared', 'reviewer_correction_contract.json');
+}
+
+export function deriveReviewerCorrectionContract(output = '', { reviewerAgentId = '', userRequest = '' } = {}) {
+  const text = String(output || '').trim();
+  if (!text) return null;
+  const falseConstraint = /(?:환각된|잘못된|존재하지 않는|fabricated|false|hallucinated).{0,50}(?:제약|constraint|blocker)|파일\s*쓰기\s*금지.{0,80}(?:응답|본문|chat)|(?:제약|blocker).{0,40}(?:거짓|잘못|없다)/is.test(text);
+  const findings = [];
+  if (falseConstraint) {
+    findings.push({
+      finding_type: 'false_constraint',
+      severity: 'blocker',
+      invalidate_upstream_claim: true,
+      required_correction: 'Do not preserve a fabricated restriction from an upstream agent. Follow the latest user request and the authoritative deliverable mode.',
+    });
+  }
+  findings.push({
+    finding_type: 'independent_review',
+    severity: falseConstraint ? 'high' : 'normal',
+    invalidate_upstream_claim: false,
+    required_correction: 'Address concrete reviewer findings before producing the final answer; do not merely repeat upstream claims.',
+  });
+  return {
+    schema_version: 'ddalggak.reviewer_correction_contract/v1',
+    reviewer_agent_id: String(reviewerAgentId || '').trim() || null,
+    latest_user_request: String(userRequest || '').trim() || null,
+    findings,
+    reviewer_output_excerpt: clip(text, 2200),
+    created_at: new Date().toISOString(),
+  };
+}
+
+function persistReviewerCorrectionContract(jobId = '', contract = null) {
+  if (!contract || typeof contract !== 'object') return null;
+  const file = reviewerCorrectionContractPath(jobId);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify(contract, null, 2)}\n`, 'utf8');
+  return file;
+}
+
+function readReviewerCorrectionContract(jobId = '') {
+  try {
+    const file = reviewerCorrectionContractPath(jobId);
+    if (!fs.existsSync(file)) return null;
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function isIsolatedCollaborationLane(actionInputs = {}) {
@@ -513,7 +686,12 @@ function isIsolatedCollaborationLane(actionInputs = {}) {
 function resolveProviderRuntimeOptionsForJob({ runtime = null, provider = '', action = null, agent = null, jobId = '' } = {}) {
   const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
   const actionInputs = action?.inputs && typeof action.inputs === 'object' ? action.inputs : {};
-  const workspaceRoot = resolveProviderExecutionWorkspace(jobId, provider);
+  const workspaceScopeKey = [
+    String(action?.agent || action?.agent_id || agent?.id || agent?.agent_id || 'agent').trim().toLowerCase(),
+    String(actionInputs?.lane_id || actionInputs?.laneId || actionInputs?.collaboration_lane?.lane_id || '').trim().toLowerCase(),
+    String(actionInputs?.role_id || actionInputs?.roleId || agent?.role || agent?.role_id || '').trim().toLowerCase(),
+  ].filter(Boolean).join('__') || 'agent';
+  const workspaceRoot = resolveProviderExecutionWorkspace(jobId, provider, workspaceScopeKey);
   return {
     ...resolveProviderRuntimeOptions({
       runtimeExecutionPolicy,
@@ -2741,16 +2919,41 @@ function buildSupervisorExecutionCallbacks({
       roleId: roleKey,
       runtimeExecutionPolicy,
     });
+    const latestUserRequest = String(
+      actionInputs?.user_request
+      || actionInputs?.userRequest
+      || latestRoomUserRequest(chatId, extractLatestUserRequestFromTaskText(cleanGoal) || cleanGoal)
+      || cleanGoal,
+    ).trim();
     const executionRequirements = resolveExecutionRequirementsForRuntime(
-      applyRuntimeRulePolicy(mergeExecutionRequirements(
-        extractExecutionRequirements(cleanGoal),
-        extractExecutionRequirements(detailContext),
-        extractExecutionRequirements(actionInputs?.user_request || actionInputs?.userRequest || ''),
-      ), actionInputs?._runtime_rules_text || actionInputs?.runtime_rules_text || '', { runtimeExecutionPolicy }),
-      { runtimeExecutionPolicy, roleId: roleKey, taskText: `${cleanGoal}\n${detailContext}\n${actionInputs?.user_request || actionInputs?.userRequest || ''}` },
+      applyRuntimeRulePolicy(
+        mergeExecutionRequirements(
+          extractExecutionRequirements(latestUserRequest),
+          structuredExecutionRequirementsFromInputs(actionInputs),
+        ),
+        actionInputs?._runtime_rules_text || actionInputs?.runtime_rules_text || '',
+        { runtimeExecutionPolicy },
+      ),
+      { runtimeExecutionPolicy, roleId: roleKey, taskText: latestUserRequest },
     );
+    const deliverableMode = inferDeliverableMode(latestUserRequest, executionRequirements);
     const deliveryRequirementsBlock = formatExecutionRequirementsBlock(executionRequirements);
     const artifactPolicyBlock = buildArtifactTurnPolicyBlock(executionRequirements, { hasArtifactContract: executionRequirements.artifact_delivery_requested === true, runtimeExecutionPolicy, roleId: roleKey });
+    const laneId = String(actionInputs?.lane_id || actionInputs?.laneId || actionInputs?.collaboration_lane?.lane_id || activeAgentConfig?.collaboration_lane?.lane_id || '').trim();
+    const assignedTaskBlock = buildAssignedTaskPromptBlock({
+      userRequest: latestUserRequest,
+      agentGoal: cleanGoal,
+      roleId: roleKey,
+      laneId,
+      deliverableMode,
+      outputContract: outputContractBlock,
+    });
+    const reviewerCorrectionContract = actionInputs?.final_synthesis === true || roleKey === 'synthesizer'
+      ? readReviewerCorrectionContract(jobId)
+      : null;
+    const reviewerCorrectionBlock = reviewerCorrectionContract
+      ? `[REVIEW CORRECTION CONTRACT — MUST ADDRESS BEFORE FINAL ANSWER]\n${JSON.stringify(reviewerCorrectionContract, null, 2)}`
+      : '';
     appendExecutionPolicyResolution({
       jobDir: safeRunDir(jobId),
       source: 'runSingleAgent',
@@ -2761,12 +2964,14 @@ function buildSupervisorExecutionCallbacks({
       decision: executionRequirements.task_loop_workspace_write_allowed ? 'task_loop_workspace_write_allowed' : (executionRequirements.artifact_delivery_forbidden ? 'artifact_forbidden' : 'chat_default'),
     });
     const finalPrompt = [
-      String(activePreparedContext?.final_prompt || "").trim() || cleanGoal,
+      assignedTaskBlock,
+      String(activePreparedContext?.final_prompt || "").trim(),
       actionInputs?._runtime_rules_text || actionInputs?.runtime_rules_text || "",
       promptRoleSummary ? `[ROLE SUMMARY]\n${clip(promptRoleSummary, 900)}` : "",
       promptIterationDelta ? `[ITERATION DELTA]\n${clip(promptIterationDelta, 700)}` : "",
-      deliveryRequirementsBlock ? `[DELIVERY REQUIREMENTS]\n${deliveryRequirementsBlock}` : "",
+      deliveryRequirementsBlock ? `[DELIVERY REQUIREMENTS — AUTHORITATIVE USER-DERIVED]\n${deliveryRequirementsBlock}` : "",
       artifactPolicyBlock,
+      reviewerCorrectionBlock,
       outputContractBlock,
     ].filter(Boolean).join("\n\n");
     try {
@@ -2781,6 +2986,10 @@ function buildSupervisorExecutionCallbacks({
             prompt: finalPrompt,
             inputs: {
               ...(actionInputs && typeof actionInputs === "object" ? actionInputs : {}),
+              user_request: latestUserRequest,
+              agent_goal: cleanGoal,
+              deliverable_mode: deliverableMode,
+              context_capsule_text: String(activePreparedContext?.final_prompt || '').trim(),
               _prompt_context_info: activePreparedContext?.context_info && typeof activePreparedContext.context_info === "object"
                 ? activePreparedContext.context_info
                 : undefined,
@@ -2853,6 +3062,23 @@ function buildSupervisorExecutionCallbacks({
           },
         },
       });
+      const roleOutputValidity = result?.role_output_valid === true
+        ? { valid: true, reason: String(result?.role_output_validation_reason || 'validated_by_execute_agent_run') }
+        : assessAgentRoleOutputValidity({
+          output: String(result?.output || ''),
+          userRequest: latestUserRequest,
+          agentGoal: cleanGoal,
+          roleId: roleKey,
+        });
+      if (!roleOutputValidity.valid) {
+        const invalidOutputError = new Error(`role output invalid: ${roleOutputValidity.reason}`);
+        invalidOutputError.code = 'EROLEOUTPUTINVALID';
+        invalidOutputError.provider_execution_success = result?.provider_execution_success === true;
+        invalidOutputError.role_output_valid = false;
+        invalidOutputError.role_output_validation_reason = roleOutputValidity.reason;
+        invalidOutputError.role_output_preview = clip(String(result?.output || ''), 500);
+        throw invalidOutputError;
+      }
       rememberRecentAgentTurn({
         agentId: cleanAgentId,
         goal: cleanGoal,
@@ -2897,6 +3123,13 @@ function buildSupervisorExecutionCallbacks({
       } catch {
         // Context-substrate writeback is best-effort; agent execution must remain on the hot path.
       }
+      if (['reviewer', 'critic', 'verifier'].includes(roleKey)) {
+        const correctionContract = deriveReviewerCorrectionContract(String(result?.output || ''), {
+          reviewerAgentId: cleanAgentId,
+          userRequest: latestUserRequest,
+        });
+        persistReviewerCorrectionContract(jobId, correctionContract);
+      }
       const suppressIntermediateAgentOutput = String(process.env.DDALGGAK_HEADLESS_USER_SURFACE_FINAL_ONLY || '').trim() === '1'
         && actionInputs?.final_synthesis !== true;
       if (String(result?.output || "").trim() && !suppressIntermediateAgentOutput) {
@@ -2934,8 +3167,11 @@ function buildSupervisorExecutionCallbacks({
             provider: String(result?.provider || activeProvider || "").trim().toLowerCase() || undefined,
             model: String(result?.model || activeModel || "").trim() || undefined,
             requested_model: activeModel || undefined,
-            resolved_model: String(result?.model || "").trim() || undefined,
+            resolved_model: resolveExactModelIdentity({ resolvedModel: result?.model, requestedModel: activeModel, fallbackModel: activeModel }) || undefined,
             execution_channel: activeExecutionChannel || undefined,
+            provider_execution_success: true,
+            role_output_valid: true,
+            role_output_validation_reason: roleOutputValidity.reason,
             output_chars: String(result?.output || "").length || 0,
             runtime_instance_id: runtimeInstanceId || undefined,
             slot_id: slotId || undefined,
@@ -3005,6 +3241,9 @@ function buildSupervisorExecutionCallbacks({
             execution_channel: activeExecutionChannel || undefined,
             goal: cleanGoal,
             error: String(e?.message ?? e),
+            provider_execution_success: e?.provider_execution_success === true || undefined,
+            role_output_valid: e?.role_output_valid === false ? false : undefined,
+            role_output_validation_reason: String(e?.role_output_validation_reason || '').trim() || undefined,
             runtime_instance_id: runtimeInstanceId || undefined,
             slot_id: slotId || undefined,
             scope_id: scopeId || undefined,
@@ -6025,13 +6264,40 @@ async function executeAgentRun(
     const runtimeExecutionPolicy = resolveRuntimeExecutionPolicyForRuntime(runtime);
     const providerOptions = resolveProviderRuntimeOptionsForJob({ runtime, provider, action: act, agent, jobId });
     const kbContract = buildAgentKnowledgeBaseBlock(jobId, { provider, roleId, agentId });
-    ensureCliWorkspaceSupportFiles(jobId, { provider, roleMemo: combinedRoleMemo, kbContract, goal: taskPrompt, instruction: taskPrompt, runtimeExecutionPolicy, providerOptions });
-    const taskBody = kbContract
-      ? `${kbContract}
-
-[ASSIGNED TASK]
-${taskPrompt}`
-      : taskPrompt;
+    const authoritativeUserRequest = String(act?.inputs?.user_request || act?.inputs?.userRequest || extractLatestUserRequestFromTaskText(taskPrompt) || taskPrompt).trim();
+    const agentGoal = String(act?.inputs?.agent_goal || act?.inputs?.agentGoal || taskPrompt).trim();
+    const laneId = String(act?.inputs?.lane_id || act?.inputs?.laneId || act?.inputs?.collaboration_lane?.lane_id || '').trim();
+    const deliverableMode = String(act?.inputs?.deliverable_mode || act?.inputs?.deliverableMode || 'chat_text').trim().toLowerCase() || 'chat_text';
+    const outputContract = String(act?.inputs?.output_contract || act?.inputs?.outputContract || '').trim();
+    const assignedTaskBlock = buildAssignedTaskPromptBlock({
+      userRequest: authoritativeUserRequest,
+      agentGoal,
+      roleId,
+      laneId,
+      deliverableMode,
+      outputContract,
+    });
+    const isolatedProvider = String(process.env.DDALGGAK_HEADLESS_PROVIDER_ISOLATION || '').trim() === '1' && provider !== 'codex';
+    const contextCapsule = isolatedProvider
+      ? materializeProviderContextCapsule({
+        workspaceRoot: providerOptions.workspaceRoot || providerOptions.workspace_root,
+        provider,
+        jobId,
+        userRequest: authoritativeUserRequest,
+        agentGoal,
+        roleId,
+        laneId,
+        deliverableMode,
+        contextText: String(act?.inputs?.context_capsule_text || act?.inputs?.contextCapsuleText || '').trim(),
+        outputContract,
+      })
+      : null;
+    ensureCliWorkspaceSupportFiles(jobId, { provider, roleMemo: combinedRoleMemo, kbContract, goal: assignedTaskBlock, instruction: assignedTaskBlock, runtimeExecutionPolicy, providerOptions });
+    const taskBody = [
+      kbContract,
+      assignedTaskBlock,
+      contextCapsule ? '[PROVIDER CONTEXT CAPSULE]\n- task.md contains the authoritative current task.\n- context.md contains only Room-selected context allowed for this role.\n- Do not infer task state from files outside this workspace.' : '',
+    ].filter(Boolean).join('\n\n');
     const combinedInstruction = combinedRoleMemo
       ? `[ROLE]
 ${combinedRoleMemo}
@@ -6051,21 +6317,28 @@ ${combinedRoleMemo}
 ${taskBody}`
       : taskBody;
 
+    const pendingProviderLogs = [];
     const appendLocalLogs = (output, mode) => {
-      const section = `## Agent ${agentId} output (${mode})`;
-      const rolePurpose = provider === 'codex'
-        ? (act?.inputs?.final_synthesis === true ? 'final' : 'implementation')
-        : (['reviewer', 'critic'].includes(roleId) ? 'review' : 'research');
-      appendRoleAwareTracking(jobId, `${section}
+      pendingProviderLogs.push({ output: String(output || ''), mode: String(mode || '') });
+    };
+    const flushValidatedProviderLogs = () => {
+      for (const row of pendingProviderLogs) {
+        const section = `## Agent ${agentId} output (${row.mode || 'default'})`;
+        const rolePurpose = provider === 'codex'
+          ? (act?.inputs?.final_synthesis === true ? 'final' : 'implementation')
+          : (['reviewer', 'critic', 'verifier'].includes(roleId) ? 'review' : 'research');
+        appendRoleAwareTracking(jobId, `${section}
 
-${output}
+${row.output}
 `, {
-        provider,
-        roleId,
-        purpose: rolePurpose,
-        fallbackDoc: provider === 'codex' ? 'progress' : 'research',
-      });
-      jobs.appendConversation(jobId, agentId, output, { kind: "agent_run", provider, model, mode });
+          provider,
+          roleId,
+          purpose: rolePurpose,
+          fallbackDoc: provider === 'codex' ? 'progress' : 'research',
+        });
+        jobs.appendConversation(jobId, agentId, row.output, { kind: "agent_run", provider, model, mode: row.mode || 'default' });
+      }
+      pendingProviderLogs.length = 0;
     };
 
     const providerResult = await runAgentProviderExecution({
@@ -6099,6 +6372,9 @@ ${output}
           instruction: combinedInstruction,
           goal: combinedGoal,
           chatQuestion: combinedChatQuestion,
+          userRequest: authoritativeUserRequest,
+          contextText: String(act?.inputs?.context_capsule_text || act?.inputs?.contextCapsuleText || '').trim(),
+          outputGuide: outputContract,
         },
       callbacks: {
         codexImplement,
@@ -6116,6 +6392,25 @@ ${output}
         summarizeUserSafeGocFallbackReason: runtimeUiHelpers.summarizeUserSafeGocFallbackReason,
       },
     });
+    const providerRoleOutputValidity = assessAgentRoleOutputValidity({
+      output: String(providerResult?.output || ''),
+      userRequest: authoritativeUserRequest,
+      agentGoal,
+      roleId,
+    });
+    if (!providerRoleOutputValidity.valid) {
+      const invalidOutputError = new Error(`role output invalid: ${providerRoleOutputValidity.reason}`);
+      invalidOutputError.code = 'EROLEOUTPUTINVALID';
+      invalidOutputError.provider_execution_success = true;
+      invalidOutputError.role_output_valid = false;
+      invalidOutputError.role_output_validation_reason = providerRoleOutputValidity.reason;
+      invalidOutputError.role_output_preview = clip(String(providerResult?.output || ''), 500);
+      throw invalidOutputError;
+    }
+    flushValidatedProviderLogs();
+    providerResult.provider_execution_success = true;
+    providerResult.role_output_valid = true;
+    providerResult.role_output_validation_reason = providerRoleOutputValidity.reason;
     appendAgentActivityEvent({
       jobDir: safeRunDir(jobId),
       event: 'agent_complete',

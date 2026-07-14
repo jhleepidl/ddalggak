@@ -25,10 +25,12 @@ test('portfolio policy is versioned and provider-only assignments preserve provi
   const policy = loadModelRolePolicyFile(portfolioPolicy);
   assert.equal(policy.policy_id, 'portfolio_benchmark_default');
   assert.equal(policy.scope, 'benchmark');
-  assert.equal(policy.revision, 1);
-  assert.equal(policy.assignments.source_grounder.provider, 'claude');
+  assert.equal(policy.revision, 2);
+  assert.equal(policy.assignments.source_grounder.provider, 'antigravity');
   assert.equal(policy.assignments.source_grounder.model, '');
+  assert.equal(policy.assignments.verifier_critic.provider, 'antigravity');
   assert.equal(policy.assignments.delivery_synthesizer.provider, 'codex');
+  assert.equal(policy.governance.claude_usage_policy, 'scarce_high_value_escalation_only');
 });
 
 test('legacy flat role maps remain accepted as explicit overrides', () => {
@@ -53,6 +55,6 @@ test('saved policy descriptors can be loaded again as explicit experiment overri
   const original = loadModelRolePolicyFile(portfolioPolicy);
   const reloaded = normalizeModelRolePolicyDocument(original);
   assert.equal(reloaded.policy_id, 'portfolio_benchmark_default');
-  assert.equal(reloaded.assignments.source_grounder.provider, 'claude');
+  assert.equal(reloaded.assignments.source_grounder.provider, 'antigravity');
   assert.equal(reloaded.assignments.delivery_synthesizer.provider, 'codex');
 });
