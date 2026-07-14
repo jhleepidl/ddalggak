@@ -1,0 +1,153 @@
+{
+  "schema_version": "ddalggak.room_journey_scenario/v1",
+  "id": "concierge_probe_complex_room_open_ideation",
+  "title": "복잡한 Room에서 열린 아이디어 탐색 turn",
+  "description": "축적된 Room 제약이 있는 열린 설계 문제에서 single과 independent parallel ideation의 실제 uplift를 비교한다.",
+  "routing_experiment": {
+    "target_step_id": "probe_ideation",
+    "minimum_semantic_score": 0.75,
+    "quality_tolerance": 0.05,
+    "candidate_shapes": {
+      "solo": "single_agent_with_retrieval",
+      "parallel_ideation": "parallel_ideation"
+    },
+    "shape_complexity_order": [
+      "state_update",
+      "direct_answer",
+      "single_agent",
+      "single_agent_with_retrieval",
+      "single_agent_search",
+      "builder_reviewer",
+      "parallel_ideation",
+      "evidence_panel",
+      "bounded_loop_team"
+    ]
+  },
+  "experiment": {
+    "baseline": {
+      "id": "solo",
+      "title": "Single-agent ideation candidate",
+      "collaboration_profile": "solo",
+      "model_policy": "strongest_suitable_single",
+      "input_kind": "normal"
+    },
+    "challengers": [
+      {
+        "id": "parallel_ideation",
+        "title": "Independent parallel ideation candidate",
+        "collaboration_profile": "parallel_ideation",
+        "model_policy": "diverse_models_isolated_then_synthesize",
+        "input_kind": "team_task"
+      }
+    ],
+    "promotion_gate": {
+      "min_quality_uplift": 0.08,
+      "max_cost_ratio": 4,
+      "max_latency_ratio": 3.5,
+      "require_semantic_evidence": true
+    }
+  },
+  "steps": [
+    {
+      "id": "establish_goal",
+      "action": "send_message",
+      "input_kind": "normal",
+      "text": "이 Room은 신입 엔지니어 온보딩 개선 프로젝트야. 첫 2주 안에 실제 업무 흐름을 이해하게 하는 것이 목표고, 강의식 교육만 늘리는 건 피하고 싶어."
+    },
+    {
+      "id": "add_constraints",
+      "action": "send_message",
+      "input_kind": "normal",
+      "text": "멘토는 신입 한 명당 주 2시간만 쓸 수 있고, 실제 운영 시스템에는 첫 주에 쓰기 권한을 줄 수 없어. 대신 샌드박스와 과거 장애 기록은 사용할 수 있어."
+    },
+    {
+      "id": "add_history",
+      "action": "send_message",
+      "input_kind": "normal",
+      "text": "기존 방식은 문서 읽기와 섀도잉 위주였는데 실제 업무 전환이 늦다는 피드백이 있었어. 새 방식은 서로 메커니즘이 다른 대안이 필요해."
+    },
+    {
+      "id": "probe_ideation",
+      "action": "send_message",
+      "text": "이 제약을 바탕으로 서로 접근 메커니즘이 겹치지 않는 온보딩 방식 세 가지를 설계해줘. 각 안의 핵심 가정, 사용자 가치, 위험, 선택 조건을 비교하고 하나를 추천해줘."
+    }
+  ],
+  "assertions": [
+    {
+      "id": "probe_completed",
+      "type": "step_ok",
+      "step_id": "probe_ideation"
+    },
+    {
+      "id": "solo_one_model",
+      "type": "distinct_model_node_count",
+      "arms": [
+        "solo"
+      ],
+      "step_id": "probe_ideation",
+      "min": 1,
+      "max": 1,
+      "quality_metric": false
+    },
+    {
+      "id": "parallel_roles",
+      "type": "successful_model_roles_include",
+      "arms": [
+        "parallel_ideation"
+      ],
+      "step_id": "probe_ideation",
+      "values": [
+        "source_grounder",
+        "verifier_critic",
+        "delivery_synthesizer"
+      ],
+      "quality_metric": false
+    },
+    {
+      "id": "parallel_lanes",
+      "type": "distinct_lane_count",
+      "arms": [
+        "parallel_ideation"
+      ],
+      "step_id": "probe_ideation",
+      "min": 2,
+      "quality_metric": false
+    },
+    {
+      "id": "target_cli_has_no_failures",
+      "type": "cli_failure_count",
+      "step_id": "probe_ideation",
+      "min": 0,
+      "max": 0,
+      "quality_metric": false
+    },
+    {
+      "id": "target_calls_match_role_policy",
+      "type": "model_role_map_alignment",
+      "arms": [
+        "parallel_ideation"
+      ],
+      "step_id": "probe_ideation",
+      "min": 1,
+      "quality_metric": false
+    }
+  ],
+  "semantic_rubric": [
+    {
+      "id": "diversity",
+      "description": "probe_ideation turn의 세 안이 이름만 다르지 않고 실제 메커니즘과 가정이 다르다."
+    },
+    {
+      "id": "room_constraint_use",
+      "description": "멘토 시간, 쓰기 권한 제한, 샌드박스·장애 기록을 실질적으로 반영한다."
+    },
+    {
+      "id": "tradeoff_quality",
+      "description": "각 안의 가치·위험·선택 조건이 비교 가능하다."
+    },
+    {
+      "id": "recommendation_quality",
+      "description": "추천이 비교 결과에서 논리적으로 도출된다."
+    }
+  ]
+}

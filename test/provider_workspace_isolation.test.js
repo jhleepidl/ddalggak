@@ -107,6 +107,32 @@ test('role output validity rejects provider-success responses that only report a
   assert.equal(valid.valid, true);
 });
 
+test('role output validity does not confuse substantive Korean analysis with a missing-task refusal', () => {
+  const validOutputs = [
+    '과제가 너무 넓어지지 않도록 첫 2주 범위를 제한하고, 세 가지 온보딩 안을 비교했습니다.',
+    '누락된 관점은 운영 리스크와 멘토 시간의 상충입니다. 이를 보완하면 두 번째 안이 더 강합니다.',
+    '팀 상황에 관한 추가 정보가 없다면 현재 제약을 기준으로 B안을 추천합니다.',
+  ];
+  for (const output of validOutputs) {
+    const result = assessAgentRoleOutputValidity({
+      output,
+      userRequest: '현재 Room 제약을 바탕으로 분석해줘.',
+      roleId: 'verifier_critic',
+    });
+    assert.equal(result.valid, true, output);
+  }
+});
+
+test('role output validity still rejects explicit short Korean missing-task refusals', () => {
+  const result = assessAgentRoleOutputValidity({
+    output: '할당된 작업이 없습니다. 어떤 작업을 해야 하는지 알려주세요.',
+    userRequest: '세 가지 안을 비교해줘.',
+    roleId: 'researcher',
+  });
+  assert.equal(result.valid, false);
+  assert.equal(result.reason, 'missing_assigned_task_refusal');
+});
+
 test('reviewer correction contract marks fabricated constraints as blocker corrections for synthesis', () => {
   const contract = deriveReviewerCorrectionContract(
     '상위 답변의 “산출물 생성 금지”는 환각된 제약입니다. 파일 쓰기 금지와 채팅 본문 전달 금지는 다릅니다.',

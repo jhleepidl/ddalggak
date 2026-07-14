@@ -1,0 +1,145 @@
+{
+  "schema_version": "ddalggak.room_journey_scenario/v1",
+  "id": "concierge_probe_complex_room_simple_recall",
+  "title": "복잡한 Room에서 단순 회상 turn",
+  "description": "Room history가 길어져도 현재 turn이 단순한 사실 회상이면 작은 실행 형태가 충분한지 비교한다.",
+  "routing_experiment": {
+    "target_step_id": "probe_recall",
+    "minimum_semantic_score": 0.9,
+    "quality_tolerance": 0.03,
+    "candidate_shapes": {
+      "solo": "single_agent_with_retrieval",
+      "builder_reviewer": "builder_reviewer"
+    },
+    "shape_complexity_order": [
+      "state_update",
+      "direct_answer",
+      "single_agent",
+      "single_agent_with_retrieval",
+      "single_agent_search",
+      "builder_reviewer",
+      "parallel_ideation",
+      "evidence_panel",
+      "bounded_loop_team"
+    ]
+  },
+  "experiment": {
+    "baseline": {
+      "id": "solo",
+      "title": "Minimal single-agent retrieval candidate",
+      "collaboration_profile": "solo",
+      "model_policy": "strongest_suitable_single",
+      "input_kind": "normal"
+    },
+    "challengers": [
+      {
+        "id": "builder_reviewer",
+        "title": "Builder-reviewer overkill candidate",
+        "collaboration_profile": "builder_reviewer",
+        "model_policy": "role_fit_distinct_models",
+        "input_kind": "team_task"
+      }
+    ],
+    "promotion_gate": {
+      "min_quality_uplift": 0.05,
+      "max_cost_ratio": 3,
+      "max_latency_ratio": 3,
+      "require_semantic_evidence": true
+    }
+  },
+  "steps": [
+    {
+      "id": "establish_goal",
+      "action": "send_message",
+      "input_kind": "normal",
+      "text": "이 Room은 Atlas 출시 준비용이야. 정식 출시 목표일은 9월 18일이고, 베타 종료는 9월 10일이야. 이 일정은 이후 대화의 기준으로 기억해줘."
+    },
+    {
+      "id": "add_constraints",
+      "action": "send_message",
+      "input_kind": "normal",
+      "text": "추가 제약은 출시 전날 신규 기능 병합 금지, 장애 대응 담당자는 지민, 고객 공지는 서연이 맡는다는 점이야."
+    },
+    {
+      "id": "add_status",
+      "action": "send_message",
+      "input_kind": "normal",
+      "text": "현재 결제 리그레션 테스트는 완료됐고, 데이터 마이그레이션 리허설만 남아 있어. 아직 출시일 변경 결정은 없었어."
+    },
+    {
+      "id": "probe_recall",
+      "action": "send_message",
+      "text": "지금까지 내가 정한 정식 출시 목표일만 한 줄로 답해줘."
+    }
+  ],
+  "assertions": [
+    {
+      "id": "probe_completed",
+      "type": "step_ok",
+      "step_id": "probe_recall"
+    },
+    {
+      "id": "recalls_exact_date",
+      "type": "response_regex",
+      "step_id": "probe_recall",
+      "pattern": "9월\\s*18일"
+    },
+    {
+      "id": "solo_one_model",
+      "type": "distinct_model_node_count",
+      "arms": [
+        "solo"
+      ],
+      "step_id": "probe_recall",
+      "min": 1,
+      "max": 1,
+      "quality_metric": false
+    },
+    {
+      "id": "challenger_roles",
+      "type": "successful_model_roles_include",
+      "arms": [
+        "builder_reviewer"
+      ],
+      "step_id": "probe_recall",
+      "values": [
+        "code_executor",
+        "verifier_critic",
+        "delivery_synthesizer"
+      ],
+      "quality_metric": false
+    },
+    {
+      "id": "target_cli_has_no_failures",
+      "type": "cli_failure_count",
+      "step_id": "probe_recall",
+      "min": 0,
+      "max": 0,
+      "quality_metric": false
+    },
+    {
+      "id": "target_calls_match_role_policy",
+      "type": "model_role_map_alignment",
+      "arms": [
+        "builder_reviewer"
+      ],
+      "step_id": "probe_recall",
+      "min": 1,
+      "quality_metric": false
+    }
+  ],
+  "semantic_rubric": [
+    {
+      "id": "target_correctness",
+      "description": "probe_recall turn의 답변이 정식 출시 목표일 9월 18일을 정확히 회상한다."
+    },
+    {
+      "id": "minimality",
+      "description": "사용자가 한 줄만 요청했으므로 불필요한 분석·검토·프로젝트 요약 없이 짧게 답한다."
+    },
+    {
+      "id": "continuity",
+      "description": "복잡한 이전 Room 맥락 속에서도 베타 종료일이나 다른 날짜와 혼동하지 않는다."
+    }
+  ]
+}

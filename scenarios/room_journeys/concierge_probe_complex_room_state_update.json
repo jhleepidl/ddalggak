@@ -1,0 +1,139 @@
+{
+  "schema_version": "ddalggak.room_journey_scenario/v1",
+  "id": "concierge_probe_complex_room_state_update",
+  "title": "복잡한 Room에서 사실 입력/state-update turn",
+  "description": "새 사실을 Room에 반영하는 turn에서 불필요한 의사결정·패널 실행보다 acknowledgement/state-update 형태가 충분한지 비교한다.",
+  "routing_experiment": {
+    "target_step_id": "probe_state_update",
+    "minimum_semantic_score": 0.85,
+    "quality_tolerance": 0.05,
+    "candidate_shapes": {
+      "solo": "state_update",
+      "evidence_panel": "evidence_panel"
+    },
+    "shape_complexity_order": [
+      "state_update",
+      "direct_answer",
+      "single_agent",
+      "single_agent_with_retrieval",
+      "single_agent_search",
+      "builder_reviewer",
+      "parallel_ideation",
+      "evidence_panel",
+      "bounded_loop_team"
+    ]
+  },
+  "experiment": {
+    "baseline": {
+      "id": "solo",
+      "title": "State-update / acknowledgement candidate",
+      "collaboration_profile": "solo",
+      "model_policy": "strongest_suitable_single",
+      "input_kind": "normal"
+    },
+    "challengers": [
+      {
+        "id": "evidence_panel",
+        "title": "Premature evidence-panel candidate",
+        "collaboration_profile": "evidence_panel",
+        "model_policy": "independent_evidence_models_then_adjudicate",
+        "input_kind": "team_task"
+      }
+    ],
+    "promotion_gate": {
+      "min_quality_uplift": 0.08,
+      "max_cost_ratio": 5,
+      "max_latency_ratio": 4,
+      "require_semantic_evidence": true
+    }
+  },
+  "steps": [
+    {
+      "id": "establish_room",
+      "action": "send_message",
+      "input_kind": "normal",
+      "text": "이 Room에서는 신규 알림 시스템 도입안을 검토 중이야. 아직 최종 선택은 하지 않았고, 사실과 해석을 분리해서 다루기로 했어."
+    },
+    {
+      "id": "prior_context",
+      "action": "send_message",
+      "input_kind": "normal",
+      "text": "현재 알고 있는 건 운영 인력이 적고 장애 복구 시간이 중요한 의사결정 기준이라는 점뿐이야. 새 사실이 들어오면 먼저 source of truth로 반영하고, 내가 결정 요청을 할 때만 비교해줘."
+    },
+    {
+      "id": "probe_state_update",
+      "action": "send_message",
+      "text": "새 사실을 추가할게. A안은 월 180만원이고 수동 복구 40분, B안은 월 90만원이고 자동 복구 8분이야. 이 내용은 이번 Room의 source of truth로 반영해줘. 아직 어떤 안도 추천하거나 결정하지 말고, 반영했다는 점과 핵심 사실만 짧게 확인해줘."
+    }
+  ],
+  "assertions": [
+    {
+      "id": "probe_completed",
+      "type": "step_ok",
+      "step_id": "probe_state_update"
+    },
+    {
+      "id": "acknowledges_facts",
+      "type": "response_regex",
+      "step_id": "probe_state_update",
+      "pattern": "A안.*180|B안.*90"
+    },
+    {
+      "id": "solo_one_model",
+      "type": "distinct_model_node_count",
+      "arms": [
+        "solo"
+      ],
+      "step_id": "probe_state_update",
+      "min": 1,
+      "max": 1,
+      "quality_metric": false
+    },
+    {
+      "id": "panel_roles",
+      "type": "successful_model_roles_include",
+      "arms": [
+        "evidence_panel"
+      ],
+      "step_id": "probe_state_update",
+      "values": [
+        "source_grounder",
+        "verifier_critic",
+        "delivery_synthesizer"
+      ],
+      "quality_metric": false
+    },
+    {
+      "id": "target_cli_has_no_failures",
+      "type": "cli_failure_count",
+      "step_id": "probe_state_update",
+      "min": 0,
+      "max": 0,
+      "quality_metric": false
+    },
+    {
+      "id": "target_calls_match_role_policy",
+      "type": "model_role_map_alignment",
+      "arms": [
+        "evidence_panel"
+      ],
+      "step_id": "probe_state_update",
+      "min": 1,
+      "quality_metric": false
+    }
+  ],
+  "semantic_rubric": [
+    {
+      "id": "state_update_fidelity",
+      "description": "probe_state_update turn에서 네 수치 사실을 정확히 반영·확인한다."
+    },
+    {
+      "id": "no_premature_decision",
+      "description": "사용자가 명시적으로 금지한 추천·최종 선택·의사결정으로 넘어가지 않는다."
+    },
+    {
+      "id": "acknowledgement_efficiency",
+      "description": "사실 입력 turn에 맞게 짧고 명확하게 확인하며 불필요한 다중 관점 분석을 하지 않는다."
+    }
+  ]
+}

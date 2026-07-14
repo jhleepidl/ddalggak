@@ -13,12 +13,15 @@ function makeTestTempDir(prefix) {
 }
 
 import {
+  buildConciergeRoutingObservation,
+  deriveConciergeRoutingLabel,
   evaluatePortfolioPromotion,
   HeadlessRoomJourneyTransport,
   loadRoomJourneyScenario,
   loadRoomJourneySuite,
   runRoomJourneyScenario,
   runRoomJourneySuite,
+  runtimeEventsForAssertion,
   scenarioArms,
 } from '../src/evaluation/room_journey_runner.js';
 
@@ -73,8 +76,10 @@ test('room journey scenario loader and suite expose natural user and portfolio s
   const base = path.resolve('scenarios/room_journeys');
   const core = loadRoomJourneySuite(path.join(base, 'core_suite.json'));
   const portfolio = loadRoomJourneySuite(path.join(base, 'model_portfolio_suite.json'));
+  const conciergeRouting = loadRoomJourneySuite(path.join(base, 'concierge_routing_suite.json'));
   assert.equal(core.scenario_files.length, 4);
   assert.equal(portfolio.scenario_files.length, 3);
+  assert.equal(conciergeRouting.scenario_files.length, 4);
   const scenario = loadRoomJourneyScenario(portfolio.scenario_files[0]);
   assert.deepEqual(scenarioArms(scenario).map((arm) => arm.id), ['solo', 'builder_reviewer']);
 });
@@ -240,6 +245,196 @@ test('executed journey records memory lifecycle, projection, runtime events, and
     assert.ok(cliRows.length >= 2);
     assert.ok(cliRows.every((row) => row.status === 'succeeded'));
     assert.ok(result.summary.assertions.find((row) => row.id === 'role_map')?.passed);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test('step-scoped runtime assertions isolate target-turn events from earlier Room turns', () => {
+  const intakeStart = runtimeEvent('run.agent_start', { agent_id: 'intake', provider: 'codex', model: 'gpt-5.4', model_role: 'source_grounder', execution_channel: 'local_cli' }, 'run-intake');
+  const intakeFinish = runtimeEvent('run.agent_finish', { agent_id: 'intake', provider: 'codex', model: 'gpt-5.4', model_role: 'source_grounder', execution_channel: 'local_cli', role_output_valid: true }, 'run-intake');
+  const targetStart = runtimeEvent('run.agent_start', { agent_id: 'researcher', provider: 'antigravity', model: 'ag-fast', model_role: 'source_grounder', execution_channel: 'local_cli' }, 'run-target');
+  const targetFinish = runtimeEvent('run.agent_finish', { agent_id: 'researcher', provider: 'antigravity', model: 'ag-fast', model_role: 'source_grounder', execution_channel: 'local_cli', role_output_valid: true }, 'run-target');
+  const context = {
+    runtimeEvents: [intakeStart, intakeFinish, targetStart, targetFinish],
+    stepsById: {
+      provide_evidence: { result: { events: [intakeStart, intakeFinish] } },
+      request_decision: { result: { events: [targetStart, targetFinish] } },
+    },
+  };
+  const scoped = runtimeEventsForAssertion(context, { step_id: 'request_decision' });
+  assert.equal(scoped.length, 2);
+  assert.ok(scoped.every((event) => event.run_id === 'run-target'));
+});
+
+test('concierge routing observation records shadow predictions without shrinking persistent Room state', () => {
+  const scenario = {
+    id: 'routing_probe',
+    routing_experiment: {
+      target_step_id: 'probe',
+      candidate_shapes: { solo: 'single_agent_with_retrieval' },
+      minimum_semantic_score: 0.8,
+      quality_tolerance: 0.05,
+    },
+  };
+  const targetStart = runtimeEvent('run.agent_start', { provider: 'codex', model: 'gpt-5.4', model_role: 'concierge_router', execution_channel: 'local_cli' }, 'run-probe');
+  const targetFinish = runtimeEvent('run.agent_finish', { provider: 'codex', model: 'gpt-5.4', model_role: 'concierge_router', execution_channel: 'local_cli', role_output_valid: true }, 'run-probe');
+  const result = {
+    summary: {
+      scenario_id: 'routing_probe',
+      arm: { id: 'solo', collaboration_profile: 'solo' },
+      metrics: { semantic_score: 0.95, semantic_judge_present: true },
+    },
+    steps: [
+      {
+        step: { id: 'setup', action: 'send_message', text: '정식 출시일은 9월 18일이야.' },
+        started_at: '2026-07-14T00:00:00.000Z',
+        completed_at: '2026-07-14T00:00:01.000Z',
+        result: { ok: true, room_state: { recent_room_turn_count: 6, room_memory_items: [{ memory_id: 'm1' }], runtime_rules: [{ id: 'r1' }] } },
+      },
+      {
+        step: { id: 'probe', action: 'send_message', text: '정식 출시 목표일만 한 줄로 답해줘.' },
+        started_at: '2026-07-14T00:00:02.000Z',
+        completed_at: '2026-07-14T00:00:03.500Z',
+        result: { ok: true, events: [targetStart, targetFinish], room_state: { recent_room_turn_count: 8, room_memory_items: [{ memory_id: 'm1' }], runtime_rules: [{ id: 'r1' }] } },
+      },
+    ],
+    runtimeEvents: [targetStart, targetFinish],
+  };
+  const observation = buildConciergeRoutingObservation({ scenario, result });
+  assert.equal(observation.execution_shape, 'single_agent_with_retrieval');
+  assert.equal(observation.target_execution_valid, true);
+  assert.equal(observation.room_complexity_before_target.recent_room_turn_count, 6);
+  assert.equal(observation.room_complexity_before_target.room_memory_item_count, 1);
+  assert.ok(observation.shadow_predictions.room_concierge.route);
+  assert.ok(observation.shadow_predictions.room_turn_router.execution_shape);
+});
+
+test('concierge routing label selects the least complex valid shape within semantic tolerance', () => {
+  const scenario = {
+    id: 'routing_label_probe',
+    routing_experiment: {
+      target_step_id: 'probe',
+      minimum_semantic_score: 0.8,
+      quality_tolerance: 0.05,
+      shape_complexity_order: ['state_update', 'single_agent_with_retrieval', 'builder_reviewer', 'evidence_panel'],
+    },
+  };
+  const label = deriveConciergeRoutingLabel({
+    scenario,
+    observations: [
+      { arm_id: 'solo', execution_shape: 'single_agent_with_retrieval', execution_shape_rank: 1, target_execution_valid: true, semantic_judge_present: true, semantic_score: 0.92, target_step_duration_ms: 1200, target_text: '목표일은?', room_complexity_before_target: {}, shadow_predictions: {} },
+      { arm_id: 'builder', execution_shape: 'builder_reviewer', execution_shape_rank: 2, target_execution_valid: true, semantic_judge_present: true, semantic_score: 0.95, target_step_duration_ms: 5000, target_text: '목표일은?', room_complexity_before_target: {}, shadow_predictions: {} },
+    ],
+  });
+  assert.equal(label.target_execution_shape, 'single_agent_with_retrieval');
+  assert.equal(label.target_arm_id, 'solo');
+  assert.equal(label.label_basis, 'minimal_sufficient_execution_shape_within_quality_tolerance');
+});
+
+test('concierge routing label is withheld when semantic evidence is insufficient', () => {
+  const scenario = { id: 'routing_no_label', routing_experiment: { target_step_id: 'probe' } };
+  const label = deriveConciergeRoutingLabel({
+    scenario,
+    observations: [
+      { arm_id: 'solo', execution_shape: 'single_agent', execution_shape_rank: 2, target_execution_valid: true, semantic_judge_present: false, semantic_score: null },
+      { arm_id: 'team', execution_shape: 'evidence_panel', execution_shape_rank: 7, target_execution_valid: false, semantic_judge_present: true, semantic_score: 0.9 },
+    ],
+  });
+  assert.equal(label, null);
+});
+
+
+test('step-scoped model-role alignment ignores earlier normal-turn provider assignments', async () => {
+  const root = makeTestTempDir('room-journey-step-scoped-role-map-');
+  try {
+    let turn = 0;
+    const transport = {
+      chatId: 'step-scoped-room',
+      events: [],
+      async initialize() {},
+      async sendCommand() { return { ok: true }; },
+      async sendMessage(text) {
+        turn += 1;
+        const runId = `run-${turn}`;
+        const provider = turn === 1 ? 'codex' : 'antigravity';
+        const model = turn === 1 ? 'gpt-5.4' : 'ag-fast';
+        const start = runtimeEvent('run.agent_start', { agent_id: 'researcher', provider, model, model_role: 'source_grounder', execution_channel: 'local_cli' }, runId);
+        const finish = runtimeEvent('run.agent_finish', { agent_id: 'researcher', provider, model, model_role: 'source_grounder', execution_channel: 'local_cli', role_output_valid: true }, runId);
+        this.events.push(start, finish);
+        return { ok: true, output: `완료: ${text}`, run_id: runId, events: [start, finish], room_state: { recent_room_turn_count: turn * 2 } };
+      },
+    };
+    const scenario = {
+      id: 'step_scoped_role_map',
+      experiment: {
+        baseline: { id: 'evidence_panel', collaboration_profile: 'evidence_panel', model_policy: 'role_fit_distinct_models', input_kind: 'team_task' },
+      },
+      steps: [
+        { id: 'intake', action: 'send_message', input_kind: 'normal', text: '사실을 반영해줘.' },
+        { id: 'decision', action: 'send_message', text: '결정해줘.' },
+      ],
+      assertions: [
+        { id: 'role_map', type: 'model_role_map_alignment', step_id: 'decision', min: 1 },
+      ],
+    };
+    const result = await runRoomJourneyScenario({
+      scenario,
+      outputRoot: root,
+      execute: true,
+      transport,
+      options: { modelRoleMap: { assignments: { source_grounder: { provider: 'antigravity', model: '' } } } },
+    });
+    assert.equal(result.summary.assertions.find((row) => row.id === 'role_map')?.passed, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('routing suite writes observations and a conservative minimal-sufficient label', async () => {
+  const root = makeTestTempDir('room-journey-routing-suite-');
+  try {
+    const scenarioFile = path.join(root, 'routing.json');
+    fs.writeFileSync(scenarioFile, JSON.stringify({
+      id: 'routing_case',
+      routing_experiment: {
+        target_step_id: 'probe',
+        minimum_semantic_score: 0.8,
+        quality_tolerance: 0.05,
+        candidate_shapes: { solo: 'single_agent_with_retrieval', builder_reviewer: 'builder_reviewer' },
+        shape_complexity_order: ['single_agent_with_retrieval', 'builder_reviewer'],
+      },
+      experiment: {
+        baseline: { id: 'solo', collaboration_profile: 'solo', input_kind: 'normal' },
+        challengers: [{ id: 'builder_reviewer', collaboration_profile: 'builder_reviewer', input_kind: 'team_task' }],
+        promotion_gate: { min_quality_uplift: 0.05, require_semantic_evidence: true },
+      },
+      steps: [
+        { id: 'setup', action: 'send_message', input_kind: 'normal', text: '출시일은 9월 18일이야.' },
+        { id: 'probe', action: 'send_message', text: '출시일만 답해줘.' },
+      ],
+      assertions: [{ id: 'probe_ok', type: 'step_ok', step_id: 'probe' }],
+      semantic_rubric: [{ id: 'correct', description: '출시일을 정확히 답한다.' }],
+    }), 'utf8');
+    const judgeExecutor = async () => ({ ok: true, stdout: JSON.stringify({ passed: true, score: 0.92, summary: 'good', rubric: [], findings: [] }) });
+    const summary = await runRoomJourneySuite({
+      scenarioFiles: [scenarioFile],
+      outputRoot: path.join(root, 'runs'),
+      execute: true,
+      transportFactory: async ({ arm }) => new FakeJourneyTransport({
+        chatId: `routing-${arm.id}`,
+        traceRoot: path.join(root, 'trace'),
+        models: arm.id === 'solo' ? ['gpt-5.5'] : ['gpt-5.5', 'ag-fast'],
+      }),
+      traceRoot: path.join(root, 'trace'),
+      options: { judgeProvider: 'antigravity', judgeExecutor },
+    });
+    assert.equal(summary.concierge_routing_observation_count, 2);
+    assert.equal(summary.concierge_routing_label_count, 1);
+    assert.equal(summary.concierge_routing_experiments[0].selected_execution_shape, 'single_agent_with_retrieval');
+    const labelRows = fs.readFileSync(path.join(root, 'runs', 'concierge_routing_labels.jsonl'), 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+    assert.equal(labelRows[0].target_execution_shape, 'single_agent_with_retrieval');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

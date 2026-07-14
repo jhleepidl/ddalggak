@@ -1,0 +1,14 @@
+{
+  "schema_version": "ddalggak.room_journey_suite/v1",
+  "id": "room_concierge_shadow_routing",
+  "title": "Persistent Room Concierge shadow routing experiments",
+  "description": "Room state는 유지한 채 target turn의 최소 충분 execution shape를 solo와 bounded collaboration 후보로 비교해 shadow routing labels를 수집한다.",
+  "scenarios": [
+    "concierge_probe_complex_room_simple_recall.json",
+    "concierge_probe_complex_room_state_update.json",
+    "concierge_probe_complex_room_open_ideation.json",
+    "concierge_probe_complex_room_high_impact_decision.json"
+  ],
+  "requires_model_role_policy": true,
+  "model_role_policy": "../../config/model_roles/portfolio_benchmark.json"
+}

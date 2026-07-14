@@ -48,7 +48,8 @@
       ],
       "min": 1,
       "max": 1,
-      "quality_metric": false
+      "quality_metric": false,
+      "step_id": "request_options"
     },
     {
       "id": "parallel_multiple_roles",
@@ -57,7 +58,8 @@
         "parallel_ideation"
       ],
       "min": 3,
-      "quality_metric": false
+      "quality_metric": false,
+      "step_id": "request_options"
     },
     {
       "id": "parallel_distinct_models",
@@ -66,7 +68,8 @@
         "parallel_ideation"
       ],
       "min": 2,
-      "quality_metric": false
+      "quality_metric": false,
+      "step_id": "request_options"
     },
     {
       "id": "parallel_required_model_roles",
@@ -79,7 +82,8 @@
         "verifier_critic",
         "delivery_synthesizer"
       ],
-      "quality_metric": false
+      "quality_metric": false,
+      "step_id": "request_options"
     },
     {
       "id": "parallel_independent_lanes",
@@ -88,7 +92,8 @@
         "parallel_ideation"
       ],
       "min": 2,
-      "quality_metric": false
+      "quality_metric": false,
+      "step_id": "request_options"
     },
     {
       "id": "solo_profile_applied",
@@ -113,13 +118,15 @@
       "type": "cli_failure_count",
       "min": 0,
       "max": 0,
-      "quality_metric": false
+      "quality_metric": false,
+      "step_id": "request_options"
     },
     {
       "id": "actual_cli_calls_match_model_role_map",
       "type": "model_role_map_alignment",
       "min": 1,
-      "quality_metric": false
+      "quality_metric": false,
+      "step_id": "request_options"
     }
   ],
   "semantic_rubric": [

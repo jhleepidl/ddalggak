@@ -60,7 +60,8 @@
       ],
       "min": 1,
       "max": 1,
-      "quality_metric": false
+      "quality_metric": false,
+      "step_id": "request_artifact"
     },
     {
       "id": "challenger_multiple_roles",
@@ -69,7 +70,8 @@
         "builder_reviewer"
       ],
       "min": 2,
-      "quality_metric": false
+      "quality_metric": false,
+      "step_id": "request_artifact"
     },
     {
       "id": "challenger_distinct_models",
@@ -78,7 +80,8 @@
         "builder_reviewer"
       ],
       "min": 2,
-      "quality_metric": false
+      "quality_metric": false,
+      "step_id": "request_artifact"
     },
     {
       "id": "challenger_required_model_roles",
@@ -91,7 +94,8 @@
         "verifier_critic",
         "delivery_synthesizer"
       ],
-      "quality_metric": false
+      "quality_metric": false,
+      "step_id": "request_artifact"
     },
     {
       "id": "solo_profile_applied",
@@ -116,13 +120,15 @@
       "type": "cli_failure_count",
       "min": 0,
       "max": 0,
-      "quality_metric": false
+      "quality_metric": false,
+      "step_id": "request_artifact"
     },
     {
       "id": "actual_cli_calls_match_model_role_map",
       "type": "model_role_map_alignment",
       "min": 1,
-      "quality_metric": false
+      "quality_metric": false,
+      "step_id": "request_artifact"
     }
   ],
   "semantic_rubric": [

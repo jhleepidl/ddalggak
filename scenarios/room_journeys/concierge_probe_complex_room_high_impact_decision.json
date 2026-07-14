@@ -1,0 +1,159 @@
+{
+  "schema_version": "ddalggak.room_journey_scenario/v1",
+  "id": "concierge_probe_complex_room_high_impact_decision",
+  "title": "복잡한 Room에서 근거 기반 고영향 결정 turn",
+  "description": "사실이 누적된 Room에서 최종 결정 요청에 evidence panel이 single보다 실제 uplift를 주는지 비교한다.",
+  "routing_experiment": {
+    "target_step_id": "probe_decision",
+    "minimum_semantic_score": 0.8,
+    "quality_tolerance": 0.05,
+    "candidate_shapes": {
+      "solo": "single_agent_with_retrieval",
+      "evidence_panel": "evidence_panel"
+    },
+    "shape_complexity_order": [
+      "state_update",
+      "direct_answer",
+      "single_agent",
+      "single_agent_with_retrieval",
+      "single_agent_search",
+      "builder_reviewer",
+      "parallel_ideation",
+      "evidence_panel",
+      "bounded_loop_team"
+    ]
+  },
+  "experiment": {
+    "baseline": {
+      "id": "solo",
+      "title": "Single-agent decision candidate",
+      "collaboration_profile": "solo",
+      "model_policy": "strongest_suitable_single",
+      "input_kind": "normal"
+    },
+    "challengers": [
+      {
+        "id": "evidence_panel",
+        "title": "Independent evidence-panel candidate",
+        "collaboration_profile": "evidence_panel",
+        "model_policy": "independent_evidence_models_then_adjudicate",
+        "input_kind": "team_task"
+      }
+    ],
+    "promotion_gate": {
+      "min_quality_uplift": 0.08,
+      "max_cost_ratio": 5,
+      "max_latency_ratio": 4,
+      "require_semantic_evidence": true
+    }
+  },
+  "steps": [
+    {
+      "id": "establish_decision",
+      "action": "send_message",
+      "input_kind": "normal",
+      "text": "이 Room에서는 복구 구조 A안과 B안 중 하나를 선택해야 해. 아직 결론은 내리지 말고 이후 사실을 source of truth로 누적해줘."
+    },
+    {
+      "id": "fact_cost",
+      "action": "send_message",
+      "input_kind": "normal",
+      "text": "사실 1: A안은 초기 개발 2주, 월 운영비 180만원이야. B안은 초기 개발 5주, 월 운영비 90만원이야."
+    },
+    {
+      "id": "fact_recovery",
+      "action": "send_message",
+      "input_kind": "normal",
+      "text": "사실 2: A안은 장애 시 수동 복구 40분, B안은 자동 복구 8분이야."
+    },
+    {
+      "id": "fact_constraints",
+      "action": "send_message",
+      "input_kind": "normal",
+      "text": "사실 3: 우리는 6주 안에 출시해야 하고 첫해 장애 대응 인력은 한 명뿐이야. 아직 추천하지 말고 이 제약도 기준 사실로만 반영해줘."
+    },
+    {
+      "id": "probe_decision",
+      "action": "send_message",
+      "text": "이제 A안과 B안 중 무엇을 선택할지 결정 메모를 작성해줘. 사실, 해석, 불확실성을 분리하고 가장 강한 반대 의견도 다룬 뒤 최종 권고와 전환 조건을 제시해줘."
+    }
+  ],
+  "assertions": [
+    {
+      "id": "probe_completed",
+      "type": "step_ok",
+      "step_id": "probe_decision"
+    },
+    {
+      "id": "solo_one_model",
+      "type": "distinct_model_node_count",
+      "arms": [
+        "solo"
+      ],
+      "step_id": "probe_decision",
+      "min": 1,
+      "max": 1,
+      "quality_metric": false
+    },
+    {
+      "id": "panel_roles",
+      "type": "successful_model_roles_include",
+      "arms": [
+        "evidence_panel"
+      ],
+      "step_id": "probe_decision",
+      "values": [
+        "source_grounder",
+        "verifier_critic",
+        "delivery_synthesizer"
+      ],
+      "quality_metric": false
+    },
+    {
+      "id": "panel_lanes",
+      "type": "distinct_lane_count",
+      "arms": [
+        "evidence_panel"
+      ],
+      "step_id": "probe_decision",
+      "min": 2,
+      "quality_metric": false
+    },
+    {
+      "id": "target_cli_has_no_failures",
+      "type": "cli_failure_count",
+      "step_id": "probe_decision",
+      "min": 0,
+      "max": 0,
+      "quality_metric": false
+    },
+    {
+      "id": "target_calls_match_role_policy",
+      "type": "model_role_map_alignment",
+      "arms": [
+        "evidence_panel"
+      ],
+      "step_id": "probe_decision",
+      "min": 1,
+      "quality_metric": false
+    }
+  ],
+  "semantic_rubric": [
+    {
+      "id": "fact_fidelity",
+      "description": "probe_decision turn의 답변이 누적된 비용·개발기간·복구시간·인력·출시 제약을 정확히 사용한다."
+    },
+    {
+      "id": "epistemic_separation",
+      "description": "사실, 해석, 불확실성을 구분한다."
+    },
+    {
+      "id": "counterargument",
+      "description": "선택하지 않은 안의 가장 강한 반대 논거를 공정하게 다룬다."
+    },
+    {
+      "id": "decision_quality",
+      "description": "최종 권고와 전환 조건이 Room의 누적 사실에서 논리적으로 도출된다."
+    }
+  ]
+}

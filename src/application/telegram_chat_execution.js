@@ -586,8 +586,21 @@ export function assessAgentRoleOutputValidity({ output = '', userRequest = '', a
   const text = String(output || '').trim();
   if (!text) return { valid: false, reason: 'empty_output' };
   const request = String(userRequest || '').trim();
-  const missingTaskRefusal = /(?:\[ASSIGNED TASK\].{0,120}(?:empty|missing|비어|없)|assigned task.{0,80}(?:empty|missing|not provided)|(?:과제|작업|요청|task).{0,50}(?:없|누락|비어)|what (?:task|topic)|please (?:provide|send).{0,50}(?:task|topic)|무엇을 .{0,30}(?:원하는지|해야 하는지).{0,40}(?:알려|제공))/is.test(text);
-  if (request && missingTaskRefusal) return { valid: false, reason: 'missing_assigned_task_refusal' };
+  const refusalWindow = text.slice(0, 1400);
+  const explicitMissingTaskRefusal = [
+    /\[ASSIGNED TASK\](?:\s|:|-){0,20}(?:section\s+)?(?:is\s+)?(?:empty|missing|not provided)\b/i,
+    /\b(?:no|without an?)\s+assigned\s+(?:task|request)\b/i,
+    /\b(?:i\s+(?:do not|don't)\s+have|there\s+(?:is|was)\s+no)\s+(?:an?\s+)?assigned\s+(?:task|request)\b/i,
+    /할당된\s*(?:과제|작업|요청)(?:\s*내용)?(?:이|가)?\s*(?:없습니다|없어요|비어\s*있습니다|비어\s*있어요|누락되었습니다|주어지지\s*않았습니다)/i,
+    /(?:요청|과제|작업)\s*(?:내용)?(?:이|가)?\s*(?:비어\s*있습니다|누락되었습니다|주어지지\s*않았습니다)/i,
+  ].some((pattern) => pattern.test(refusalWindow));
+  const shortRequestForTask = text.length < 900 && [
+    /^(?:please\s+)?(?:provide|send|share)\s+(?:me\s+)?(?:the\s+)?(?:task|topic|request)\b/i,
+    /^what\s+(?:task|topic)\b/i,
+    /^(?:무엇을|어떤\s*(?:과제|작업|요청을))\s*.{0,50}(?:해야\s*하는지|원하는지)\s*.{0,40}(?:알려|제공)/i,
+    /^(?:과제|작업|요청)\s*(?:내용을)?\s*.{0,40}(?:알려|제공)\s*해\s*(?:주세요|줘)/i,
+  ].some((pattern) => pattern.test(refusalWindow));
+  if (request && (explicitMissingTaskRefusal || shortRequestForTask)) return { valid: false, reason: 'missing_assigned_task_refusal' };
   const onlyQuotaFailure = /(?:session limit|usage limit|rate limit|token limit|quota).{0,120}(?:reset|exceeded|hit|reached|초과|한도)/i.test(text) && text.length < 800;
   if (onlyQuotaFailure) return { valid: false, reason: 'provider_limit_message_returned_as_output' };
   const contextAccessRefusal = /(?:outside|beyond).{0,50}(?:permitted|allowed).{0,40}(?:working directory|workspace)|cannot\s+access.{0,80}(?:shared|context|path).{0,60}(?:outside|workspace)|(?:허용된|현재).{0,40}(?:작업\s*디렉터리|workspace).{0,50}(?:밖|외부).{0,40}(?:접근|읽)/i.test(text) && text.length < 1600;

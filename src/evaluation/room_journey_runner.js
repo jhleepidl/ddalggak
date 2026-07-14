@@ -10,6 +10,8 @@ import { runAntigravityPrompt } from '../antigravity.js';
 import { createHeadlessRoomRuntime } from './headless_room_runtime.js';
 import { getAgentRoomProfile, upsertAgentRoomProfile } from '../application/agent_room_profile.js';
 import { buildRoomFirstTeamConfiguration } from '../application/ai_room_runtime_selection.js';
+import { classifyRoomConciergeRoute } from '../application/room_concierge.js';
+import { buildRoomTurnRoute } from '../application/room_turn_router.js';
 
 function clean(value = '') { return String(value ?? '').trim(); }
 function asArray(value) { return Array.isArray(value) ? value : []; }
@@ -570,9 +572,51 @@ function modelNodeKey(payload = {}) {
   return provider ? `${provider}:${model || '@provider_default_unresolved'}` : '';
 }
 
+function assertionStepIds(assertion = {}) {
+  return [...new Set([
+    clean(assertion.step_id || assertion.stepId),
+    ...asArray(assertion.step_ids || assertion.stepIds).map(clean),
+  ].filter(Boolean))];
+}
+
+export function runtimeEventsForAssertion(context = {}, assertion = {}) {
+  const ids = assertionStepIds(assertion);
+  const runtimeEvents = asArray(context.runtimeEvents);
+  if (!ids.length) return runtimeEvents;
+  const steps = asObject(context.stepsById);
+  const scoped = [];
+  const seen = new Set();
+  for (const id of ids) {
+    const row = steps[id];
+    const direct = asArray(row?.result?.events);
+    if (direct.length) {
+      for (const event of direct) {
+        const key = runtimeEventKey(event, clean(event?.run_id));
+        if (seen.has(key)) continue;
+        seen.add(key);
+        scoped.push(event);
+      }
+      continue;
+    }
+    const startMs = Date.parse(row?.started_at || '') || 0;
+    const endMs = Date.parse(row?.completed_at || '') || 0;
+    if (!startMs || !endMs) continue;
+    for (const event of runtimeEvents) {
+      const at = eventAt(event);
+      if (!at || at < startMs || at > endMs) continue;
+      const key = runtimeEventKey(event, clean(event?.run_id));
+      if (seen.has(key)) continue;
+      seen.add(key);
+      scoped.push(event);
+    }
+  }
+  return scoped;
+}
+
 function assertionResult(assertion = {}, context = {}) {
   const type = clean(assertion.type).toLowerCase();
   const steps = asObject(context.stepsById);
+  const scopedRuntimeEvents = runtimeEventsForAssertion(context, assertion);
   let passed = false; let observed = null;
   if (type === 'step_ok') {
     const row = steps[clean(assertion.step_id)]; observed = row?.result?.ok === true; passed = observed;
@@ -593,22 +637,22 @@ function assertionResult(assertion = {}, context = {}) {
     const count = matchingTraceEvents(context.trace, { event_type: 'memory.committed' }).length;
     observed = count; passed = count >= Number(assertion.min ?? 1) && count <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'provider_role_count') {
-    const starts = context.runtimeEvents.filter((event) => eventType(event) === 'run.agent_start');
+    const starts = scopedRuntimeEvents.filter((event) => eventType(event) === 'run.agent_start');
     const roles = new Set(starts.map((event) => clean(eventPayload(event).model_role || eventPayload(event).role_id)).filter(Boolean));
     observed = [...roles]; passed = roles.size >= Number(assertion.min ?? 1) && roles.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'successful_provider_role_count') {
-    const finishes = context.runtimeEvents.filter((event) => isValidRoleFinish(event));
+    const finishes = scopedRuntimeEvents.filter((event) => isValidRoleFinish(event));
     const roles = new Set(finishes.map((event) => clean(eventPayload(event).model_role || eventPayload(event).role_id)).filter(Boolean));
     observed = [...roles]; passed = roles.size >= Number(assertion.min ?? 1) && roles.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'successful_model_roles_include') {
-    const finishes = context.runtimeEvents.filter((event) => isValidRoleFinish(event));
+    const finishes = scopedRuntimeEvents.filter((event) => isValidRoleFinish(event));
     const roles = new Set(finishes.map((event) => clean(eventPayload(event).model_role).toLowerCase()).filter(Boolean));
     const expected = asArray(assertion.values || assertion.roles || assertion.expected).map((row) => clean(row).toLowerCase()).filter(Boolean);
     const missing = expected.filter((role) => !roles.has(role));
     observed = { expected, actual: [...roles], missing };
     passed = expected.length > 0 && missing.length === 0;
   } else if (type === 'distinct_lane_count') {
-    const finishes = context.runtimeEvents.filter((event) => isValidRoleFinish(event));
+    const finishes = scopedRuntimeEvents.filter((event) => isValidRoleFinish(event));
     const lanes = new Set(finishes.map((event) => {
       const payload = eventPayload(event);
       return clean(payload.lane_id || payload.laneId || payload?.collaboration_lane?.lane_id || payload?.collaborationLane?.laneId);
@@ -616,13 +660,13 @@ function assertionResult(assertion = {}, context = {}) {
     observed = [...lanes];
     passed = lanes.size >= Number(assertion.min ?? 1) && lanes.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'distinct_provider_count') {
-    const providers = new Set(context.runtimeEvents.filter((event) => ['run.agent_start', 'run.agent_finish'].includes(eventType(event))).map((event) => clean(eventPayload(event).provider)).filter(Boolean));
+    const providers = new Set(scopedRuntimeEvents.filter((event) => ['run.agent_start', 'run.agent_finish'].includes(eventType(event))).map((event) => clean(eventPayload(event).provider)).filter(Boolean));
     observed = [...providers]; passed = providers.size >= Number(assertion.min ?? 1) && providers.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'distinct_model_count') {
-    const models = new Set(context.runtimeEvents.filter((event) => isValidRoleFinish(event)).map((event) => normalizedResolvedModel(eventPayload(event))).filter(Boolean));
+    const models = new Set(scopedRuntimeEvents.filter((event) => isValidRoleFinish(event)).map((event) => normalizedResolvedModel(eventPayload(event))).filter(Boolean));
     observed = [...models]; passed = models.size >= Number(assertion.min ?? 1) && models.size <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'distinct_model_node_count') {
-    const nodes = new Set(context.runtimeEvents
+    const nodes = new Set(scopedRuntimeEvents
       .filter((event) => isValidRoleFinish(event))
       .map((event) => modelNodeKey(eventPayload(event)))
       .filter(Boolean));
@@ -636,10 +680,10 @@ function assertionResult(assertion = {}, context = {}) {
     const commits = matchingTraceEvents(context.trace, { event_type: 'memory.committed' }).length;
     observed = commits; passed = commits === 0;
   } else if (type === 'runtime_event_count') {
-    const rows = context.runtimeEvents.filter((event) => !assertion.event_type || eventType(event) === clean(assertion.event_type).toLowerCase());
+    const rows = scopedRuntimeEvents.filter((event) => !assertion.event_type || eventType(event) === clean(assertion.event_type).toLowerCase());
     observed = rows.length; passed = rows.length >= Number(assertion.min ?? 1);
   } else if (type === 'cli_call_count') {
-    const rows = context.runtimeEvents.filter((event) => {
+    const rows = scopedRuntimeEvents.filter((event) => {
       if (eventType(event) !== 'run.agent_start') return false;
       const channel = clean(eventPayload(event).execution_channel).toLowerCase();
       return channel === 'local_cli' || channel.endsWith('_cli') || channel === 'cli';
@@ -651,7 +695,7 @@ function assertionResult(assertion = {}, context = {}) {
     }));
     passed = rows.length >= Number(assertion.min ?? 1) && rows.length <= Number(assertion.max ?? Number.POSITIVE_INFINITY);
   } else if (type === 'cli_success_count' || type === 'cli_failure_count' || type === 'cli_recovered_failure_count') {
-    const outcomes = classifyCliExecutionOutcomes(context.runtimeEvents);
+    const outcomes = classifyCliExecutionOutcomes(scopedRuntimeEvents);
     const rows = type === 'cli_success_count'
       ? outcomes.finishes
       : (type === 'cli_recovered_failure_count' ? outcomes.recoveredErrors : outcomes.terminalErrors);
@@ -680,7 +724,7 @@ function assertionResult(assertion = {}, context = {}) {
       };
     }
     const assignments = asObject(context.modelRoleMap?.assignments || context.modelRoleMap);
-    const finishes = context.runtimeEvents.filter((event) => isValidRoleFinish(event));
+    const finishes = scopedRuntimeEvents.filter((event) => isValidRoleFinish(event));
     const rows = finishes.map((event) => {
       const payload = eventPayload(event);
       const role = clean(payload.model_role).toLowerCase();
@@ -1147,6 +1191,217 @@ export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot 
   return { runDir, summary, steps: stepRows, trace, runtimeEvents };
 }
 
+
+const DEFAULT_CONCIERGE_EXECUTION_SHAPE_ORDER = Object.freeze([
+  'state_update',
+  'direct_answer',
+  'single_agent',
+  'single_agent_with_retrieval',
+  'single_agent_search',
+  'builder_reviewer',
+  'parallel_ideation',
+  'evidence_panel',
+  'bounded_loop_team',
+]);
+
+function routingExperimentConfig(scenario = {}) {
+  return asObject(scenario.routing_experiment || scenario.routingExperiment);
+}
+
+function routingTargetStepId(scenario = {}) {
+  const config = routingExperimentConfig(scenario);
+  return clean(config.target_step_id || config.targetStepId);
+}
+
+function routingExecutionShape(scenario = {}, arm = {}) {
+  const config = routingExperimentConfig(scenario);
+  const candidates = asObject(config.candidate_shapes || config.candidateShapes);
+  return clean(candidates[clean(arm?.id)] || arm?.metadata?.execution_shape || arm?.metadata?.executionShape || (
+    clean(arm?.id) === 'solo' ? 'single_agent' : clean(arm?.collaboration_profile || arm?.id)
+  ));
+}
+
+function routingShapeOrder(scenario = {}) {
+  const configured = asArray(routingExperimentConfig(scenario).shape_complexity_order || routingExperimentConfig(scenario).shapeComplexityOrder)
+    .map((value) => clean(value).toLowerCase())
+    .filter(Boolean);
+  return configured.length ? configured : [...DEFAULT_CONCIERGE_EXECUTION_SHAPE_ORDER];
+}
+
+function routingShapeRank(shape = '', scenario = {}) {
+  const normalized = clean(shape).toLowerCase();
+  const order = routingShapeOrder(scenario);
+  const index = order.indexOf(normalized);
+  return index >= 0 ? index : order.length + 10;
+}
+
+function coarseConciergeRouteForExecutionShape(shape = '') {
+  const value = clean(shape).toLowerCase();
+  if (['direct_answer', 'single_agent', 'single_agent_with_retrieval'].includes(value)) return 'concierge_direct_answer';
+  if (value === 'single_agent_search') return 'concierge_search_answer';
+  if (['builder_reviewer', 'parallel_ideation', 'evidence_panel', 'bounded_loop_team'].includes(value)) return 'team_orchestration';
+  return null;
+}
+
+function roomComplexitySnapshot(roomState = {}) {
+  const state = asObject(roomState);
+  return {
+    recent_room_turn_count: Number(state.recent_room_turn_count || 0),
+    runtime_rule_count: asArray(state.runtime_rules).length,
+    memory_candidate_count: asArray(state.memory_candidates).length,
+    room_memory_item_count: asArray(state.room_memory_items).length,
+    pending_approval: state.pending_approval === true,
+    collaboration_profile_id: clean(state.collaboration_profile_id || 'auto') || 'auto',
+  };
+}
+
+export function buildConciergeRoutingObservation({ scenario = {}, result = {} } = {}) {
+  const config = routingExperimentConfig(scenario);
+  const targetStepId = routingTargetStepId(scenario);
+  if (!targetStepId) return null;
+  const steps = asArray(result.steps);
+  const targetIndex = steps.findIndex((row) => clean(row?.step?.id) === targetStepId);
+  if (targetIndex < 0) return null;
+  const targetRow = steps[targetIndex];
+  const previousRoomState = targetIndex > 0 ? asObject(steps[targetIndex - 1]?.result?.room_state) : {};
+  const targetRoomState = asObject(targetRow?.result?.room_state);
+  const stepsById = Object.fromEntries(steps.map((row) => [clean(row?.step?.id), row]).filter(([id]) => id));
+  const targetEvents = runtimeEventsForAssertion({
+    runtimeEvents: asArray(result.runtimeEvents),
+    stepsById,
+  }, { step_id: targetStepId });
+  const outcomes = classifyCliExecutionOutcomes(targetEvents);
+  const successfulFinishes = outcomes.finishes.filter((event) => isValidRoleFinish(event));
+  const providers = [...new Set(successfulFinishes.map((event) => clean(eventPayload(event).provider).toLowerCase()).filter(Boolean))];
+  const modelRoles = [...new Set(successfulFinishes.map((event) => clean(eventPayload(event).model_role || eventPayload(event).role_id).toLowerCase()).filter(Boolean))];
+  const modelNodes = [...new Set(successfulFinishes.map((event) => modelNodeKey(eventPayload(event))).filter(Boolean))];
+  const semanticScore = Number(result?.summary?.metrics?.semantic_score);
+  const semanticJudgePresent = result?.summary?.metrics?.semantic_judge_present === true && Number.isFinite(semanticScore);
+  const targetDurationMs = Math.max(0, (Date.parse(targetRow?.completed_at || '') || 0) - (Date.parse(targetRow?.started_at || '') || 0));
+  const targetText = clean(targetRow?.step?.text);
+  const conciergeShadow = classifyRoomConciergeRoute({
+    text: targetText,
+    command: '/chat',
+    pendingApproval: previousRoomState.pending_approval === true,
+    roomFootprint: roomComplexitySnapshot(previousRoomState),
+  });
+  const turnRouterShadow = buildRoomTurnRoute({
+    taskText: targetText,
+    inputKind: '',
+    chatId: clean(previousRoomState.chat_id || targetRoomState.chat_id),
+    roomPackage: asObject(previousRoomState.agent_room_profile?.room_package || previousRoomState.agent_room_profile?.roomPackage),
+    source: 'room_journey_concierge_shadow_probe',
+  });
+  const executionShape = routingExecutionShape(scenario, result?.summary?.arm || {});
+  const targetExecutionValid = targetRow?.result?.ok === true && outcomes.terminalErrors.length === 0;
+  return {
+    schema_version: 'ddalggak.concierge_routing_observation/v1',
+    scenario_id: clean(scenario.id),
+    target_step_id: targetStepId,
+    arm_id: clean(result?.summary?.arm?.id),
+    execution_shape: executionShape,
+    execution_shape_source: 'experiment_candidate_label',
+    execution_shape_rank: routingShapeRank(executionShape, scenario),
+    runtime_declared_execution_shape: clean(targetRoomState?.last_route?.execution_shape || targetRoomState?.lastRoute?.executionShape),
+    target_text: targetText,
+    target_step_duration_ms: targetDurationMs,
+    target_step_ok: targetRow?.result?.ok === true,
+    target_execution_valid: targetExecutionValid,
+    target_terminal_failure_count: outcomes.terminalErrors.length,
+    target_recovered_failure_count: outcomes.recoveredErrors.length,
+    semantic_judge_present: semanticJudgePresent,
+    semantic_score: semanticJudgePresent ? semanticScore : null,
+    room_complexity_before_target: roomComplexitySnapshot(previousRoomState),
+    room_complexity_after_target: roomComplexitySnapshot(targetRoomState),
+    actual_execution: {
+      successful_role_count: modelRoles.length,
+      model_roles: modelRoles,
+      providers,
+      model_nodes: modelNodes,
+      agent_finish_count: successfulFinishes.length,
+    },
+    shadow_predictions: {
+      room_concierge: {
+        route: clean(conciergeShadow?.route),
+        depth: clean(conciergeShadow?.depth),
+        signals: asArray(conciergeShadow?.signals),
+        blockers: asArray(conciergeShadow?.blockers),
+        reasons: asArray(conciergeShadow?.reasons),
+      },
+      room_turn_router: {
+        depth: clean(turnRouterShadow?.depth),
+        execution_shape: clean(turnRouterShadow?.execution_shape),
+        reason_codes: asArray(turnRouterShadow?.reason_codes),
+      },
+    },
+    evidence_policy: {
+      minimum_semantic_score: Number(config.minimum_semantic_score ?? config.minimumSemanticScore ?? 0.75),
+      quality_tolerance: Number(config.quality_tolerance ?? config.qualityTolerance ?? 0.05),
+      label_requires_semantic_judge: config.label_requires_semantic_judge !== false,
+    },
+  };
+}
+
+export function deriveConciergeRoutingLabel({ scenario = {}, observations = [] } = {}) {
+  const config = routingExperimentConfig(scenario);
+  const targetStepId = routingTargetStepId(scenario);
+  if (!targetStepId) return null;
+  const minimumSemanticScore = Number(config.minimum_semantic_score ?? config.minimumSemanticScore ?? 0.75);
+  const qualityTolerance = Number(config.quality_tolerance ?? config.qualityTolerance ?? 0.05);
+  const valid = asArray(observations).filter((row) => row?.target_execution_valid === true && row?.semantic_judge_present === true && Number.isFinite(Number(row?.semantic_score)));
+  if (valid.length < 2) return null;
+  const bestScore = Math.max(...valid.map((row) => Number(row.semantic_score)));
+  const scoreFloor = Math.max(minimumSemanticScore, bestScore - qualityTolerance);
+  const sufficient = valid
+    .filter((row) => Number(row.semantic_score) >= scoreFloor)
+    .sort((a, b) => Number(a.execution_shape_rank) - Number(b.execution_shape_rank)
+      || Number(a.target_step_duration_ms) - Number(b.target_step_duration_ms));
+  if (!sufficient.length) return null;
+  const winner = sufficient[0];
+  const targetRoute = coarseConciergeRouteForExecutionShape(winner.execution_shape);
+  return {
+    schema_version: 'ddalggak.concierge_routing_label/v1',
+    scenario_id: clean(scenario.id),
+    target_step_id: targetStepId,
+    target_arm_id: clean(winner.arm_id),
+    target_execution_shape: clean(winner.execution_shape),
+    target_route: targetRoute,
+    training_eligible_for_current_coarse_model: Boolean(targetRoute),
+    label_basis: 'minimal_sufficient_execution_shape_within_quality_tolerance',
+    evidence: {
+      best_semantic_score: bestScore,
+      minimum_semantic_score: minimumSemanticScore,
+      quality_tolerance: qualityTolerance,
+      sufficient_score_floor: scoreFloor,
+      selected_semantic_score: Number(winner.semantic_score),
+      selected_target_step_duration_ms: Number(winner.target_step_duration_ms),
+      candidate_count: observations.length,
+      valid_semantic_candidate_count: valid.length,
+      sufficient_candidate_count: sufficient.length,
+    },
+    input: {
+      text: clean(winner.target_text),
+      room_complexity_before_target: asObject(winner.room_complexity_before_target),
+      shadow_predictions: asObject(winner.shadow_predictions),
+    },
+    candidates: asArray(observations).map((row) => ({
+      arm_id: clean(row.arm_id),
+      execution_shape: clean(row.execution_shape),
+      execution_shape_rank: Number(row.execution_shape_rank),
+      target_execution_valid: row.target_execution_valid === true,
+      semantic_judge_present: row.semantic_judge_present === true,
+      semantic_score: row.semantic_score,
+      target_step_duration_ms: Number(row.target_step_duration_ms || 0),
+    })),
+  };
+}
+
+function writeJsonlRows(file, rows = []) {
+  const values = asArray(rows);
+  fs.writeFileSync(file, values.map((row) => JSON.stringify(row)).join('\n') + (values.length ? '\n' : ''), 'utf8');
+}
+
+
 export async function runRoomJourneySuite({ suiteFile = '', scenarioFiles = [], outputRoot = 'experiments/room_journeys', transportFactory, execute = false, traceRoot = '', options = {}, syncGoc = false, gocClient = null } = {}) {
   const files = suiteFile ? loadRoomJourneySuite(suiteFile).scenario_files : scenarioFiles.map((file) => path.resolve(file));
   if (!files.length) throw new Error('No Room journey scenarios supplied');
@@ -1178,6 +1433,29 @@ export async function runRoomJourneySuite({ suiteFile = '', scenarioFiles = [], 
       comparisons.push({ scenario_id: scenarioId, baseline_arm: baseline?.arm?.id || null, challenger_arm: challenger.arm.id, ...evaluatePortfolioPromotion({ baseline: baseline?.metrics, challenger: challenger.metrics, gate: asObject(experiment.promotion_gate) }) });
     }
   }
+  const routingObservations = [];
+  const routingLabels = [];
+  const routingExperimentSummaries = [];
+  for (const [scenarioId, scenario] of scenarioById.entries()) {
+    if (!routingTargetStepId(scenario)) continue;
+    const scenarioResults = results.filter((row) => clean(row?.summary?.scenario_id) === scenarioId);
+    const observations = scenarioResults
+      .map((row) => buildConciergeRoutingObservation({ scenario, result: row }))
+      .filter(Boolean);
+    routingObservations.push(...observations);
+    const label = deriveConciergeRoutingLabel({ scenario, observations });
+    if (label) routingLabels.push(label);
+    routingExperimentSummaries.push({
+      scenario_id: scenarioId,
+      target_step_id: routingTargetStepId(scenario),
+      observation_count: observations.length,
+      evidence_sufficient_for_label: Boolean(label),
+      selected_execution_shape: label?.target_execution_shape || null,
+      selected_arm_id: label?.target_arm_id || null,
+      best_semantic_score: label?.evidence?.best_semantic_score ?? null,
+    });
+  }
+
   const summary = {
     schema_version: 'ddalggak.room_journey_suite_result/v1',
     suite_file: suiteFile ? path.resolve(suiteFile) : null,
@@ -1188,6 +1466,9 @@ export async function runRoomJourneySuite({ suiteFile = '', scenarioFiles = [], 
     failed: results.filter((row) => row.summary.status === 'failed').length,
     results: results.map((row) => ({ run_dir: row.runDir, ...row.summary })),
     portfolio_comparisons: comparisons,
+    concierge_routing_experiments: routingExperimentSummaries,
+    concierge_routing_observation_count: routingObservations.length,
+    concierge_routing_label_count: routingLabels.length,
     execution_environment: {
       transport: clean(options.transport || (execute ? 'custom' : 'plan')),
       session_id: clean(options.sessionId) || null,
@@ -1210,6 +1491,19 @@ export async function runRoomJourneySuite({ suiteFile = '', scenarioFiles = [], 
     },
   };
   const root = ensureDir(path.resolve(outputRoot));
+  if (routingObservations.length || routingExperimentSummaries.length) {
+    writeJsonlRows(path.join(root, 'concierge_routing_observations.jsonl'), routingObservations);
+    writeJsonlRows(path.join(root, 'concierge_routing_labels.jsonl'), routingLabels);
+    writeJson(path.join(root, 'concierge_routing_experiments.json'), {
+      schema_version: 'ddalggak.concierge_routing_experiment_summary/v1',
+      created_at: nowIso(),
+      experiments: routingExperimentSummaries,
+      label_policy: {
+        principle: 'keep_the_room_persistent_choose_the_minimum_sufficient_execution_shape_per_turn',
+        labels_are_emitted_only_with_valid_execution_and_semantic_evidence: true,
+      },
+    });
+  }
   if (syncGoc && execute) {
     const client = gocClient || new GocClient();
     summary.goc_sync = await client.ingestHarnessEvaluationRun({ ...summary, suite: 'room_user_journey', evaluation_id: `room_journey_${Date.now().toString(36)}` });
