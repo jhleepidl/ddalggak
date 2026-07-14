@@ -322,3 +322,43 @@ test('team_structure_v2 preserves provider and tool metadata through normalizati
   assert.equal(runtimeProfile.runtime_participants[0].provider, 'gemini');
   assert.equal(runtimeProfile.configured_agents[0].provider, 'gemini');
 });
+
+
+test('applyTeamConfigurationToRuntime does not inherit a static catalog model across provider boundaries', () => {
+  const team = validateTeamConfiguration({
+    team_name: 'provider boundary',
+    composition_mode: 'room_components',
+    proposal_mode: 'apply',
+    task_brief: 'independent evidence',
+    agents: [
+      { agent_id: 'researcher', name: 'Researcher', role: 'researcher', provider: 'claude', model: '', model_role: 'source_grounder', collaboration_lane: { lane_id: 'lane_1' } },
+      { agent_id: 'synthesizer', name: 'Synthesizer', role: 'synthesizer', provider: 'codex', model: '', model_role: 'delivery_synthesizer' },
+    ],
+    interaction_spec: {
+      execution_pattern: 'parallel_research_then_review_then_synthesize',
+      final_answer_owner: 'Synthesizer',
+      handoffs: [{ from: 'Researcher', to: 'Synthesizer', payload: 'summary_plus_key_evidence' }],
+      policies: {},
+    },
+  }, {
+    runtime: {
+      agentsCatalog: [
+        { id: 'researcher', role: 'researcher', provider: 'codex', model: 'codex' },
+        { id: 'synthesizer', role: 'synthesizer', provider: 'codex', model: 'codex' },
+      ],
+    },
+  });
+  const runtime = applyTeamConfigurationToRuntime({
+    agentsCatalog: [
+      { id: 'researcher', role: 'researcher', provider: 'codex', model: 'codex' },
+      { id: 'synthesizer', role: 'synthesizer', provider: 'codex', model: 'codex' },
+    ],
+  }, team);
+  const researcher = runtime.agents.find((row) => row.id === 'researcher');
+  assert.equal(researcher.provider, 'claude');
+  assert.equal(researcher.model, '');
+  assert.equal(researcher.provider_spec?.provider, 'claude');
+  assert.equal(researcher.provider_spec?.model, '');
+  assert.equal(researcher.model_role, 'source_grounder');
+  assert.equal(researcher.collaboration_lane?.lane_id, 'lane_1');
+});

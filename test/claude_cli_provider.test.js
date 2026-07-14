@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildClaudeAgentTelemetryRow, parseClaudeCliJsonOutput } from '../src/claude_cli.js';
-import { normalizeRuntimeProvider } from '../src/provider_migration.js';
+import { normalizeRuntimeProvider, sanitizeProviderModelForExecution } from '../src/provider_migration.js';
 import { deriveAgentTelemetry, extractAgentExecutionTelemetry } from '../src/application/room_agent_policy.js';
 
 const SAMPLE_JSON = JSON.stringify({
@@ -80,4 +80,14 @@ test('claude provider aliases normalize to claude', () => {
   }
   assert.equal(normalizeRuntimeProvider('codex'), 'codex');
   assert.equal(normalizeRuntimeProvider('antigravity'), 'antigravity');
+});
+
+
+test('provider-only model assignments do not pass provider names as explicit model selectors', () => {
+  assert.equal(sanitizeProviderModelForExecution('claude', 'claude'), '');
+  assert.equal(sanitizeProviderModelForExecution('default', 'claude'), '');
+  assert.equal(sanitizeProviderModelForExecution('codex', 'codex'), '');
+  assert.equal(sanitizeProviderModelForExecution('provider_default', 'codex'), '');
+  assert.equal(sanitizeProviderModelForExecution('claude-sonnet-5', 'claude'), 'claude-sonnet-5');
+  assert.equal(sanitizeProviderModelForExecution('gpt-5.4', 'codex'), 'gpt-5.4');
 });

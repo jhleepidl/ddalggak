@@ -2772,22 +2772,37 @@ export function applyTeamConfigurationToRuntime(runtime = {}, teamConfig = null)
   const enabledAgentIds = [];
   for (const [index, configAgent] of asArray(executionProfile.configured_agents).entries()) {
     const base = asObject(catalog.get(cleanId(configAgent.agent_id)) || {});
+    const configuredProvider = cleanId(configAgent.provider || configAgent.provider_spec?.provider || '');
+    const baseProvider = cleanId(base.provider || inferProviderForModel(base.model || '') || '');
+    const resolvedProvider = cleanId(configuredProvider || baseProvider || inferProviderForModel(configAgent.model || base.model || '') || '');
+    const mayInheritBaseModel = !configuredProvider || !baseProvider || configuredProvider === baseProvider;
+    const resolvedModel = clean(configAgent.model || (mayInheritBaseModel ? base.model : ''));
+    const executionSchema = normalizeParticipantExecutionSchema({
+      ...configAgent,
+      provider: resolvedProvider,
+      model: resolvedModel,
+      provider_spec: {
+        ...asObject(configAgent.provider_spec || configAgent.providerSpec),
+        provider: resolvedProvider,
+        model: resolvedModel,
+      },
+    });
     const merged = {
       ...base,
       id: cleanId(configAgent.agent_id),
       name: clean(configAgent.name || base.name || configAgent.agent_id),
       role: normalizeTeamRole(configAgent.role || base.role || base.system_key || configAgent.agent_id),
-      model: clean(configAgent.model || base.model),
-      provider: cleanId(configAgent.provider || base.provider || inferProviderForModel(configAgent.model || base.model || '') || ''),
+      model: resolvedModel,
+      provider: resolvedProvider,
       model_role: cleanId(configAgent.model_role || configAgent.modelRole || base.model_role || base.modelRole || ''),
       model_role_resolution: asObject(configAgent.model_role_resolution || configAgent.modelRoleResolution || base.model_role_resolution || base.modelRoleResolution),
       collaboration_lane: asObject(configAgent.collaboration_lane || configAgent.collaborationLane || base.collaboration_lane || base.collaborationLane),
-      configured_model: clean(configAgent.model || base.model),
+      configured_model: resolvedModel,
       capabilities: uniqueIds(configAgent.capabilities || configAgent.skills || []),
       skills: asArray(configAgent.capabilities || configAgent.skills).length > 0 ? uniqueIds(configAgent.capabilities || configAgent.skills) : asArray(base.skills),
       attached_skill_ids: uniqueIds(configAgent.attached_skill_ids || configAgent.attachedSkillIds || []),
       generated_skill_briefs: normalizeGeneratedSkillBriefs(configAgent.generated_skill_briefs || configAgent.generatedSkillBriefs || []),
-      ...normalizeParticipantExecutionSchema(configAgent),
+      ...executionSchema,
       interaction_contract: configAgent.interaction_contract || buildAgentLocalInteractionContract(executionProfile.interaction_spec, clean(configAgent.name || base.name || configAgent.agent_id)),
       prompt: clean(base.prompt || configAgent.prompt || ''),
       context_policy: normalizeContextPolicy(configAgent.context_policy || configAgent.contextPolicy, {

@@ -8,7 +8,7 @@ import { Approvals } from "../approvals.js";
 import { runCommand } from "../proc.js";
 import { runCodexExec } from "../codex.js";
 import { runGeminiPrompt } from "../gemini.js";
-import { migrateProviderAwayFromGemini, sanitizeGeminiModelForProvider } from "../provider_migration.js";
+import { migrateProviderAwayFromGemini, sanitizeGeminiModelForProvider, sanitizeProviderModelForExecution } from "../provider_migration.js";
 import { appendRoomUsageEvent, buildRoomUsageEvent } from "./room_usage_events.js";
 import { OrchestratorMemory } from "../settings.js";
 import { orchestratorNotes, buildChatGPTNextStepPrompt } from "../prompts.js";
@@ -5919,7 +5919,7 @@ async function executeAgentRun(
     }
 
     const provider = migrateProviderAwayFromGemini(agent.provider || "codex", { fallback: "codex" }).provider;
-    const model = sanitizeGeminiModelForProvider(agent.model || provider, provider) || provider;
+    const model = sanitizeProviderModelForExecution(agent.model || '', provider);
     const rolePrompt = String(agent.prompt || "").trim();
     const roleId = String(act?.inputs?.role_id || act?.inputs?.roleId || agent.role || agent.role_id || agent.roleId || "").trim().toLowerCase();
     const displayLabel = String(act?.inputs?.display_label || act?.inputs?.displayLabel || act?.inputs?.agent_name || act?.inputs?.agentName || agent?.name || agentId).trim();

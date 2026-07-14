@@ -259,3 +259,66 @@ test('locked parallel profile rebuilds an out-of-order multi-agent plan into lan
   assert.equal(repaired.actions[2].agent_id, 'synthesizer');
   assert.equal(repaired.actions[2].agent, 'synthesizer');
 });
+
+
+test('explicit parallel collaboration contract outranks accidental code-like task classification', () => {
+  const runtime = {
+    teamLocked: true,
+    activeTeamConfig: {
+      task_archetype: 'code_review',
+      interaction_spec: { execution_pattern: 'parallel_research_then_review_then_synthesize', collaboration_profile_id: 'parallel_ideation', final_answer_owner: 'Synthesizer' },
+      agents: [
+        { agent_id: 'researcher_lane_1', role: 'researcher', name: 'Lane 1', provider: 'claude', model: '', model_role: 'source_grounder', collaboration_lane: { lane_id: 'lane_1' } },
+        { agent_id: 'researcher_lane_2', role: 'researcher', name: 'Lane 2', provider: 'claude', model: '', model_role: 'source_grounder', collaboration_lane: { lane_id: 'lane_2' } },
+        { agent_id: 'reviewer', role: 'reviewer', name: 'Reviewer', provider: 'claude', model: '', model_role: 'verifier_critic' },
+        { agent_id: 'synthesizer', role: 'synthesizer', name: 'Synthesizer', provider: 'codex', model: '', model_role: 'delivery_synthesizer' },
+      ],
+    },
+  };
+  const repaired = repairRoutePlanForTeamExecution({
+    reason: 'misclassified implementation route',
+    actions: [
+      { type: 'run_agent', agent_id: 'researcher_lane_1', goal: 'first lane', inputs: { role_id: 'researcher' } },
+      { type: 'synthesize_final', agent_id: 'reviewer', agent: 'reviewer', goal: 'wrong final', inputs: { role_id: 'reviewer', final_synthesis: true } },
+    ],
+    team_locked: true,
+  }, {
+    message: '신입 온보딩 방식을 세 가지로 비교하고 추천해줘',
+    runtime,
+    runtimeTeamSnapshot: { task_interpretation: { task_type: 'code_change', deliverable_type: 'code_patch' } },
+  });
+  assert.match(repaired.reason, /repaired_parallel_collaboration/);
+  assert.deepEqual(repaired.actions.map((row) => row.type), ['spawn_agents', 'run_agent', 'synthesize_final']);
+  assert.deepEqual(repaired.actions[0].agents.map((row) => row.inputs.lane_id), ['lane_1', 'lane_2']);
+  assert.equal(repaired.actions[1].agent_id, 'reviewer');
+  assert.equal(repaired.actions[1].inputs.final_synthesis, undefined);
+  assert.equal(repaired.actions[2].agent_id, 'synthesizer');
+  assert.equal(repaired.actions[2].inputs.final_synthesis, true);
+});
+
+test('explicit builder reviewer contract is rebuilt even when task is classified as implementation', () => {
+  const runtime = {
+    teamLocked: true,
+    activeTeamConfig: {
+      task_archetype: 'implementation',
+      interaction_spec: { execution_pattern: 'builder_reviewer_loop', collaboration_profile_id: 'builder_reviewer', final_answer_owner: 'Synthesizer' },
+      agents: [
+        { agent_id: 'builder', role: 'builder', name: 'Builder', provider: 'codex', model: '', model_role: 'code_executor' },
+        { agent_id: 'reviewer', role: 'reviewer', name: 'Reviewer', provider: 'claude', model: '', model_role: 'verifier_critic' },
+        { agent_id: 'synthesizer', role: 'synthesizer', name: 'Synthesizer', provider: 'codex', model: '', model_role: 'delivery_synthesizer' },
+      ],
+    },
+  };
+  const repaired = repairRoutePlanForTeamExecution({
+    reason: 'wrong implementation order',
+    actions: [{ type: 'synthesize_final', agent_id: 'reviewer', agent: 'reviewer', goal: 'review first', inputs: { role_id: 'reviewer', final_synthesis: true } }],
+    team_locked: true,
+  }, {
+    message: '배포 점검표를 작성하고 독립 검토해줘',
+    runtime,
+    runtimeTeamSnapshot: { task_interpretation: { task_type: 'code_change', deliverable_type: 'software_delivery' } },
+  });
+  assert.deepEqual(repaired.actions.map((row) => row.agent_id), ['builder', 'reviewer', 'synthesizer']);
+  assert.deepEqual(repaired.actions.map((row) => row.type), ['run_agent', 'run_agent', 'synthesize_final']);
+  assert.equal(repaired.actions[1].inputs.final_synthesis, undefined);
+});

@@ -102,6 +102,20 @@ export function sanitizeGeminiModelForProvider(model = '', provider = '') {
   return cleanModel;
 }
 
+
+export function sanitizeProviderModelForExecution(model = '', provider = '') {
+  const cleanModel = String(model || '').trim();
+  const target = normalizeRuntimeProvider(provider || 'codex', 'codex');
+  if (!cleanModel) return '';
+  const key = cleanModel.toLowerCase().replace(/[\s_-]+/g, '-');
+  const genericAliases = new Set(['default', 'provider-default', 'provider-default-model', 'auto']);
+  if (genericAliases.has(key)) return '';
+  if (target === 'claude' && ['claude', 'claude-code', 'anthropic'].includes(key)) return '';
+  if (target === 'codex' && ['codex', 'codex-cli'].includes(key)) return '';
+  if (target === 'chatgpt' && ['chatgpt', 'openai', 'gpt'].includes(key)) return '';
+  return sanitizeGeminiModelForProvider(cleanModel, target);
+}
+
 export function geminiCliDisabledMessage() {
   return 'Gemini CLI is disabled in ddalggak. Use Antigravity/Codex/OpenAI-compatible providers instead. Set DDALGGAK_ALLOW_GEMINI_CLI=1 only for explicit legacy testing.';
 }

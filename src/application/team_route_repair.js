@@ -284,15 +284,23 @@ export function repairRoutePlanForTeamExecution(routePlan = {}, {
   const taskInterpretation = runtimeTeamSnapshot?.task_interpretation || row?.runtime_team_snapshot?.task_interpretation || null;
   const taskArchetype = runtime?.activeTeamConfig?.task_archetype || runtimeTeamSnapshot?.blueprint_summary?.task_archetype || '';
   const preferredPattern = inferPreferredPattern(runtime, row, runtimeTeamSnapshot);
+  const collaborationProfileId = cleanId(
+    runtime?.teamInteractionSpec?.collaboration_profile_id
+    || runtime?.activeTeamConfig?.interaction_spec?.collaboration_profile_id
+    || row?.interaction_spec?.collaboration_profile_id
+    || runtimeTeamSnapshot?.team_plan?.interaction_spec?.collaboration_profile_id
+    || ''
+  );
+  const explicitBuilderReviewer = collaborationProfileId === 'builder_reviewer';
+  const explicitParallelCollaboration = ['parallel_ideation', 'evidence_panel'].includes(collaborationProfileId);
   const implementationLike = isImplementationLikeRequest(message, { taskInterpretation, taskArchetype });
   const builder = findRoleAgent(teamAgents, 'builder');
   const finalOwnerAgent = resolveFinalOwnerAgent(runtime, runtimeTeamSnapshot, teamAgents);
 
-  if (!implementationLike && preferredPattern === 'builder_reviewer_loop' && builder) {
+  if ((explicitBuilderReviewer || !implementationLike) && preferredPattern === 'builder_reviewer_loop' && builder) {
     const reviewer = findRoleAgent(teamAgents, 'reviewer');
     const synthesizer = finalOwnerAgent || findRoleAgent(teamAgents, 'synthesizer') || reviewer;
-    const currentRoles = new Set(asArray(row.actions).map((action) => roleIdForAction(action, teamAgents)).filter(Boolean));
-    if (reviewer && (!currentRoles.has('builder') || !currentRoles.has('reviewer') || extractActionAgentIds(row.actions).length < 2)) {
+    if (reviewer) {
       const ordered = [builder, reviewer];
       if (synthesizer && !ordered.some((agent) => cleanId(agent.agent_id) === cleanId(synthesizer.agent_id))) ordered.push(synthesizer);
       const actions = ordered.slice(0, 3).map((agent, index, rows) => {
@@ -313,7 +321,7 @@ export function repairRoutePlanForTeamExecution(routePlan = {}, {
     }
   }
 
-  if (!implementationLike && ['parallel_research_then_review_then_synthesize', 'multi_research_adjudication'].includes(preferredPattern)) {
+  if ((explicitParallelCollaboration || !implementationLike) && ['parallel_research_then_review_then_synthesize', 'multi_research_adjudication'].includes(preferredPattern)) {
     const researchers = teamAgents.filter((agent) => cleanId(agent.role_id) === 'researcher').slice(0, 3);
     const reviewer = findRoleAgent(teamAgents, 'reviewer');
     const finalAgent = finalOwnerAgent || findRoleAgent(teamAgents, 'synthesizer') || reviewer;

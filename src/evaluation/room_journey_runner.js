@@ -250,6 +250,8 @@ export class HeadlessRoomJourneyTransport {
       effective_model_policy: asObject(roomProfile.model_policy || roomProfile.modelPolicy),
       last_room_selection: asObject(session.last_room_selection || session.lastRoomSelection),
       last_team_selection: asObject(session.last_team_selection || session.lastTeamSelection),
+      active_team_config: asObject(session.active_team_config || session.activeTeamConfig || session.active_team || session.activeTeam),
+      runtime_team_snapshot: asObject(this.runtime?.runtimeCore?.runtime?.runtimeTeamSnapshot || this.runtime?.runtime?.runtimeTeamSnapshot),
       last_route: asObject(session.last_route || session.lastRoute),
       recent_room_turn_count: asArray(session.recent_room_turns || session.recentRoomTurns).length,
       runtime_rules: rules,

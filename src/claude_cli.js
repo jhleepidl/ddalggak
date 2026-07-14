@@ -2,6 +2,7 @@ import path from 'node:path';
 import { runCommand } from './proc.js';
 import { recordLlmTrace } from './application/llm_trace_recorder.js';
 import { withRuntimeActivity } from './application/runtime_activity_registry.js';
+import { sanitizeProviderModelForExecution } from './provider_migration.js';
 
 function splitArgs(value = '') {
   const text = String(value || '').trim();
@@ -114,7 +115,7 @@ export async function runClaudeCliPrompt({
 } = {}) {
   const command = String(process.env.CLAUDE_CLI_COMMAND || 'claude').trim() || 'claude';
   const baseArgs = splitArgs(process.env.CLAUDE_CLI_ARGS || '');
-  const requestedModel = String(model || process.env.CLAUDE_CLI_MODEL || process.env.CLAUDE_MODEL || '').trim();
+  const requestedModel = sanitizeProviderModelForExecution(model || process.env.CLAUDE_CLI_MODEL || process.env.CLAUDE_MODEL || '', 'claude');
   const modelArgs = requestedModel ? ['--model', requestedModel] : [];
   const requestedEffort = String(effort || process.env.CLAUDE_CLI_EFFORT || process.env.CLAUDE_CODE_EFFORT_LEVEL || '').trim().toLowerCase();
   const effortArgs = requestedEffort && requestedEffort !== 'provider_default' ? ['--effort', requestedEffort] : [];
