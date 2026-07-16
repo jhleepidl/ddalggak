@@ -23,8 +23,16 @@
       "bounded_loop_team"
     ],
     "measurement_policy": {
-      "require_context_parity": true
-    }
+      "require_context_parity": true,
+      "require_context_coverage_evidence": true,
+      "require_frozen_pre_target_snapshot": true,
+      "require_runtime_shape_evidence": true
+    },
+    "required_context_step_ids": [
+      "establish_goal",
+      "add_constraints",
+      "add_history"
+    ]
   },
   "experiment": {
     "baseline": {
@@ -67,7 +75,7 @@
       "id": "add_history",
       "action": "send_message",
       "input_kind": "normal",
-      "text": "기존 방식은 문서 읽기와 섀도잉 위주였는데 실제 업무 전환이 늦다는 피드백이 있었어. 새 방식은 서로 메커니즘이 다른 대안이 필요해."
+      "text": "기존 방식은 문서 읽기와 섀도잉 위주였는데 실제 업무 전환이 늦다는 피드백이 있었어. 새 방식은 서로 메커니즘이 다른 대안이 필요해. 지금은 대안을 만들지 말고 이 문제 상황만 source of truth로 반영했다고 짧게 확인해줘."
     },
     {
       "id": "probe_ideation",

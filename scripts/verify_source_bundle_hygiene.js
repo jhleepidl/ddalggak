@@ -9,6 +9,9 @@ if (!targets.length) targets.push(process.cwd());
 const forbiddenPatterns = [
   /(^|\/)\.git(\/|$)/,
   /(^|\/)runs(\/|$)/,
+  /(^|\/)experiment_runs(\/|$)/,
+  /(^|\/)local_memory(\/|$)/,
+  /(^|\/)ddalggak\/experiments\/room_journeys(\/|$)/,
   /(^|\/)chat_sessions\.jsonl?$/,
   /(^|\/)room_memory_data(\/|$)/,
   /(^|\/)paper4_data(\/|$)/,
@@ -49,6 +52,13 @@ function normalizePath(value) {
 
 function isForbidden(relPath) {
   const clean = normalizePath(relPath);
+  for (const publicRoot of ['route_validity/data/public/', 'purpose_context/data/public/']) {
+    if (
+      clean.startsWith(publicRoot)
+      && clean !== publicRoot
+      && clean !== `${publicRoot}README.md`
+    ) return true;
+  }
   return forbiddenPatterns.some((pattern) => pattern.test(clean));
 }
 
@@ -83,6 +93,13 @@ const requiredBundleFiles = [
   'goc/backend/app/data/collaboration_profiles.json',
   'docs/RECIPE_CATALOG_AND_STARTER_KITS.md',
   'docs/GENERAL_TASK_RECIPES_AND_COLLABORATION_PROFILES.md',
+  'aaai_intervention_fidelity/.env.example',
+  'purpose_context/.env.example',
+  'ddalggak/src/application/loop_execution_kernel.js',
+  'ddalggak/src/application/loop_run_store.js',
+  'ddalggak/src/application/loop_memory_manager.js',
+  'docs/architecture/LOOP_EXECUTION_KERNEL_AND_MEMORY_LIFECYCLE.md',
+  'docs/operations/LOOP_DOGFOOD_RUNBOOK.md',
 ];
 
 let failures = [];

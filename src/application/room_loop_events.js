@@ -70,7 +70,7 @@ export function createRoomLoopId({ chatId = '', objective = '', source = '' } = 
 export function normalizeRoomLoopStatus(status = '') {
   const key = clean(status).toLowerCase();
   if (['running', 'active'].includes(key)) return 'running';
-  if (['paused', 'blocked', 'completed', 'cancelled', 'rejected'].includes(key)) return key;
+  if (['paused', 'blocked', 'completed', 'cancelled', 'rejected', 'failed'].includes(key)) return key;
   if (['approved', 'accepted'].includes(key)) return 'running';
   if (['forked'].includes(key)) return 'forked';
   return 'running';
@@ -93,6 +93,14 @@ export function normalizeRoomLoop(loop = {}) {
     source: clean(loop.source || '') || undefined,
     model_policy: loop.model_policy && typeof loop.model_policy === 'object' ? loop.model_policy : {},
     budget_policy: loop.budget_policy && typeof loop.budget_policy === 'object' ? loop.budget_policy : {},
+    loop_run_ref: clean(loop.loop_run_ref || loop.loopRunRef || '') || undefined,
+    topology_id: clean(loop.topology_id || loop.topologyId || loop.execution_topology || '') || undefined,
+    progress_visibility: ['quiet', 'standard', 'debug'].includes(clean(loop.progress_visibility || loop.progressVisibility || '').toLowerCase())
+      ? clean(loop.progress_visibility || loop.progressVisibility).toLowerCase()
+      : 'quiet',
+    current_stage_id: clean(loop.current_stage_id || loop.currentStageId || '') || undefined,
+    current_round: Math.max(1, Number(loop.current_round || loop.currentRound || 1) || 1),
+    memory_policy: loop.memory_policy && typeof loop.memory_policy === 'object' ? loop.memory_policy : {},
     current_plan: asList(loop.current_plan || loop.currentPlan).map((item) => clip(item, 260)).filter(Boolean).slice(-12),
     active_constraints: asList(loop.active_constraints || loop.activeConstraints).map((item) => clip(item, 220)).filter(Boolean).slice(-12),
     trace_refs: asList(loop.trace_refs || loop.traceRefs).map((item) => clean(item)).filter(Boolean).slice(-24),
@@ -219,9 +227,15 @@ export function applyRoomLoopEvent(loop = null, event = {}) {
   if (event.event_type === 'loop_trace') {
     const ref = clean(payload.trace_ref || payload.traceRef || event.event_id);
     if (ref && !next.trace_refs.includes(ref)) next.trace_refs.push(ref);
+    if (clean(payload.current_stage_id || payload.currentStageId)) next.current_stage_id = clean(payload.current_stage_id || payload.currentStageId);
+    if (Number(payload.current_round || payload.currentRound || 0) > 0) next.current_round = Number(payload.current_round || payload.currentRound);
+    if (['quiet', 'standard', 'debug'].includes(clean(payload.progress_visibility || payload.progressVisibility).toLowerCase())) next.progress_visibility = clean(payload.progress_visibility || payload.progressVisibility).toLowerCase();
     return next;
   }
   if (event.event_type !== 'user_interrupt' && event.event_type !== 'loop_status_changed') return next;
+  if (event.event_type === 'loop_status_changed' && clean(payload.target_status || payload.status)) {
+    next.status = normalizeRoomLoopStatus(payload.target_status || payload.status);
+  }
   const interruption = {
     event_id: clean(event.event_id) || undefined,
     ts: clean(event.ts) || undefined,
@@ -345,7 +359,7 @@ export function deriveActiveRoomLoop({ events = [], session = null } = {}) {
     if (next) byLoop.set(next.loop_id, next);
   }
   const loops = [...byLoop.values()]
-    .filter((loop) => loop && !['completed', 'cancelled', 'rejected'].includes(loop.status))
+    .filter((loop) => loop && !['completed', 'cancelled', 'rejected', 'failed'].includes(loop.status))
     .sort((a, b) => String(a.updated_at || a.created_at || '').localeCompare(String(b.updated_at || b.created_at || '')));
   return loops.length ? loops[loops.length - 1] : null;
 }
@@ -360,6 +374,11 @@ export function formatActiveRoomLoopProjectionBlock({ loop = null, maxChars = 12
     `status: ${activeLoop.status}`,
     `objective: ${clip(activeLoop.objective, 420)}`,
     activeLoop.controller ? `controller: ${activeLoop.controller}` : '',
+    activeLoop.topology_id ? `topology: ${activeLoop.topology_id}` : '',
+    activeLoop.current_stage_id ? `stage: ${activeLoop.current_stage_id}` : '',
+    `round: ${activeLoop.current_round || 1}`,
+    `progress_visibility: ${activeLoop.progress_visibility || 'quiet'}`,
+    activeLoop.loop_run_ref ? `loop_run_ref: ${activeLoop.loop_run_ref}` : '',
     activeLoop.current_plan.length ? '[CURRENT LOOP PLAN]' : '',
     ...activeLoop.current_plan.slice(-5).map((item) => `- ${clip(item, 180)}`),
     activeLoop.active_constraints.length ? '[ACTIVE LOOP CONSTRAINTS]' : '',

@@ -208,6 +208,11 @@ import * as runtimeUi from "./telegram_runtime_ui.js";
 import * as runtimeUiHelpers from "./telegram_status_notifications.js";
 import { runAgentProviderExecution } from "./telegram_provider_execution.js";
 import { appendAgentActivityEvent, appendAgentHandoffEvent, appendExecutionPolicyResolution } from "./agent_activity_stream.js";
+import { createLoopRun, readActiveLoopRun, recordActiveLoopAgentEvent, recordActiveLoopIterationEvent } from './loop_run_store.js';
+import { buildLoopRunSpec } from './loop_execution_kernel.js';
+import { compactLoopRunMemory, finalizeLoopMemory } from './loop_memory_manager.js';
+import { buildLoopDiscussionOutputContract, persistLoopDiscussionRecords } from './loop_discussion_capture.js';
+import { buildLoopProgressProjection, formatLoopProgressForUser } from './loop_progress_projection.js';
 import { compileAgentContextProjection, attachCompiledProjectionToPreparedContext } from "./context_projection_compiler.js";
 import { extractContextWriteIntentsFromAgentResult } from "./context_write_intent_extractor.js";
 import { commitContextWriteIntentsBatch } from "./context_write_batcher.js";
@@ -455,6 +460,7 @@ function maybeSendArtifactSummary(bot, chatId, jobId, options = {}) {
 
 function buildAgentOutputContractBlock({ roleId = '', runtimeExecutionPolicy = null } = {}) {
   const policy = normalizeRuntimeExecutionPolicy(runtimeExecutionPolicy || {});
+  const loopDiscussionContract = buildLoopDiscussionOutputContract({ roleId, workflowContract: policy.workflow_contract || {} });
   const lines = [
     'OUTPUT CONTRACT',
     `- role_id: ${String(roleId || '').trim().toLowerCase() || '(unspecified)'}`,
@@ -463,7 +469,8 @@ function buildAgentOutputContractBlock({ roleId = '', runtimeExecutionPolicy = n
     policy.workflow_contract?.workflow_kind ? `- workflow_contract: ${policy.workflow_contract.workflow_kind}; required_passes=${(policy.workflow_contract.required_passes || []).join('→') || '(unspecified)'}` : '',
     '- respond with concrete artifacts, verification notes, and next-step risks when relevant',
     '- for any user-facing Telegram answer, obey the [LANGUAGE POLICY] surface language exactly; if absent, use Korean unless the latest user explicitly asks for another language',
-  ];
+    loopDiscussionContract,
+  ].filter(Boolean);
   return lines.join('\n');
 }
 
@@ -5076,13 +5083,55 @@ async function runSupervisorChat(
       });
       if (watchInstall?.contract) {
         activeWatchTaskContract = watchInstall.contract;
+        const loopJobDir = runDir(currentJobId);
+        let activeLoopRun = readActiveLoopRun({ jobDir: loopJobDir });
+        if (!activeLoopRun || activeLoopRun.active === false) {
+          const requestedTopology = String(
+            workflowContract?.execution_topology?.topology_id
+            || workflowContract?.execution_topology
+            || routePlan?.execution_topology?.topology_id
+            || routePlan?.execution_topology
+            || ''
+          ).trim();
+          const progressVisibility = String(
+            workflowContract?.progress_visibility
+            || workflowContract?.progressVisibility
+            || routePlan?.progress_visibility
+            || routePlan?.progressVisibility
+            || 'quiet'
+          ).trim();
+          activeLoopRun = createLoopRun({
+            jobDir: loopJobDir,
+            spec: buildLoopRunSpec({
+              roomId: String(chatId),
+              chatId: String(chatId),
+              objective: lastUserText || message,
+              workflowContract,
+              requestedTopology,
+              progressVisibility,
+              budgetPolicy: {
+                max_iterations: activeWatchTaskContract.max_iterations,
+                min_iterations: activeWatchTaskContract.min_iterations,
+              },
+              source: 'telegram_watch_autocreate',
+            }),
+          });
+        }
         activeWatchIteration = startWatchIteration({
-          jobDir: runDir(currentJobId),
+          jobDir: loopJobDir,
           contract: activeWatchTaskContract,
           userText: lastUserText,
           routePlan,
         });
         if (activeWatchIteration) {
+          recordActiveLoopIterationEvent({
+            jobDir: loopJobDir,
+            phase: 'started',
+            iteration: activeWatchIteration.iteration,
+            status: activeWatchIteration.status,
+            summary: `Iteration ${activeWatchIteration.iteration} started`,
+            source: 'telegram_watch_task_bridge',
+          });
           routePlan = {
             ...routePlan,
             watch_task_contract: activeWatchTaskContract,
@@ -5269,6 +5318,29 @@ async function runSupervisorChat(
             current_iteration: watchCompletion.iteration,
             status: watchCompletion.status,
           };
+          const loopIterationResult = recordActiveLoopIterationEvent({
+            jobDir: runDir(currentJobId),
+            phase: 'completed',
+            iteration: watchCompletion.iteration,
+            status: watchCompletion.status,
+            summary: `Iteration ${watchCompletion.iteration} ${watchCompletion.status}`,
+            stopReason: watchCompletion.stop_reason,
+            stopSignals: watchCompletion.stop_signals,
+            pendingApproval: watchCompletion.pending_approval === true,
+            source: 'telegram_watch_task_bridge',
+          });
+          try {
+            const loopId = loopIterationResult?.state?.loop_id || loopIterationResult?.event?.loop_id || '';
+            if (loopId && watchCompletion.status === 'completed') {
+              finalizeLoopMemory({ jobDir: runDir(currentJobId), loopId, archive: true, allowRawPrune: false });
+            } else if (loopId) {
+              compactLoopRunMemory({ jobDir: runDir(currentJobId), loopId, force: false });
+            }
+            if (loopId) {
+              const progress = buildLoopProgressProjection({ jobDir: runDir(currentJobId), loopId });
+              if (progress?.visibility !== 'quiet') await bot.sendMessage(chatId, formatLoopProgressForUser({ projection: progress }));
+            }
+          } catch {}
           if (runThreadId) {
             try {
               const goc = requireGocClient();
@@ -6238,6 +6310,16 @@ async function executeAgentRun(
       summary: displayLabel || agentId,
       metadata: { action_type: act.type || 'agent_run' },
     });
+    recordActiveLoopAgentEvent({
+      jobDir: safeRunDir(jobId),
+      phase: 'started',
+      agentId,
+      roleId,
+      provider,
+      model,
+      summary: displayLabel || agentId,
+      traceRef: 'local_memory/agent_activity.jsonl',
+    });
     const publishContractCheck = enforceAgentPublishContract(jobId, {
       runtime,
       agentId,
@@ -6405,6 +6487,25 @@ ${row.output}
         summarizeUserSafeGocFallbackReason: runtimeUiHelpers.summarizeUserSafeGocFallbackReason,
       },
     });
+    const loopDiscussionCapture = persistLoopDiscussionRecords({
+      jobDir: safeRunDir(jobId),
+      output: String(providerResult?.output || ''),
+      actor: agentId,
+      roleId,
+      source: 'agent_provider_output',
+    });
+    if (loopDiscussionCapture.block_count > 0) {
+      providerResult.output = loopDiscussionCapture.clean_output;
+      providerResult.loop_discussion_records = loopDiscussionCapture.persisted;
+      providerResult.loop_discussion_record_count = loopDiscussionCapture.persisted.length;
+      const blockingCount = loopDiscussionCapture.persisted.filter((row) => row.record_type === 'objection' && row.severity === 'blocking').length;
+      if (blockingCount > 0) {
+        try {
+          const projection = buildLoopProgressProjection({ jobDir: safeRunDir(jobId) });
+          await bot.sendMessage(chatId, [`🔎 독립 검토에서 blocking issue ${blockingCount}개를 발견했습니다.`, '', formatLoopProgressForUser({ projection })].join('\n'));
+        } catch {}
+      }
+    }
     const providerRoleOutputValidity = assessAgentRoleOutputValidity({
       output: String(providerResult?.output || ''),
       userRequest: authoritativeUserRequest,
@@ -6434,6 +6535,36 @@ ${row.output}
       summary: String(providerResult?.output || '').slice(0, 500),
       metadata: { mode: providerResult?.mode || undefined, failover: providerResult?.failover || undefined },
     });
+    const watchSnapshotAtAgentCompletion = summarizeWatchTaskState(safeRunDir(jobId));
+    const watchStatusAtAgentCompletion = String(watchSnapshotAtAgentCompletion?.status || '').trim().toLowerCase();
+    const watchOwnsRunCompletion = Boolean(watchSnapshotAtAgentCompletion?.contract_id)
+      && ['active', 'running', 'next_iteration_ready', 'awaiting_approval', 'paused'].includes(watchStatusAtAgentCompletion);
+    const finalSynthesis = act?.inputs?.final_synthesis === true;
+    const completeLoopFromAgent = finalSynthesis && !watchOwnsRunCompletion;
+    const loopAgentCompletion = recordActiveLoopAgentEvent({
+      jobDir: safeRunDir(jobId),
+      phase: 'completed',
+      agentId,
+      roleId,
+      provider: providerResult?.provider || provider,
+      model: providerResult?.model || model,
+      summary: String(providerResult?.output || '').slice(0, 500),
+      finalSynthesis,
+      completeRun: completeLoopFromAgent,
+      traceRef: 'local_memory/agent_activity.jsonl',
+    });
+    try {
+      const loopId = loopAgentCompletion?.state?.loop_id || loopAgentCompletion?.event?.loop_id || '';
+      if (loopId && completeLoopFromAgent) {
+        finalizeLoopMemory({ jobDir: safeRunDir(jobId), loopId, archive: true, allowRawPrune: false });
+      } else if (loopId) {
+        compactLoopRunMemory({ jobDir: safeRunDir(jobId), loopId, force: false });
+        if (loopAgentCompletion?.stage_transition) {
+          const projection = buildLoopProgressProjection({ jobDir: safeRunDir(jobId), loopId });
+          if (projection?.visibility !== 'quiet') await bot.sendMessage(chatId, formatLoopProgressForUser({ projection }));
+        }
+      }
+    } catch {}
     appendAgentHandoffEvent({
       jobDir: safeRunDir(jobId),
       fromAgent: agentId,
@@ -6453,6 +6584,19 @@ ${row.output}
       } catch {}
     }
     return providerResult;
+  } catch (error) {
+    try {
+      recordActiveLoopAgentEvent({
+        jobDir: safeRunDir(jobId),
+        phase: 'completed',
+        agentId: resolveAgentId(act?.agent || ''),
+        roleId: String(act?.inputs?.role_id || act?.inputs?.roleId || '').trim().toLowerCase(),
+        summary: String(error?.message || error || 'agent execution failed').slice(0, 500),
+        failed: true,
+        traceRef: 'local_memory/agent_activity.jsonl',
+      });
+    } catch {}
+    throw error;
   } finally {
     restoreActor();
   }

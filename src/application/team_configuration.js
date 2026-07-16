@@ -12,6 +12,7 @@ import { planFreeformTeamWithCodex, planTeamRefinementWithCodex } from './freefo
 import { getModelNode, listModelNodes } from './model_node_registry.js';
 import { selectModelNodeForTask } from './model_node_selector.js';
 import { migrateProviderAwayFromGemini, sanitizeGeminiModelForProvider } from '../provider_migration.js';
+import { applyRoomModelRolePolicyToAgent, modelRoleForAgentRole, resolveRoomModelRole } from './room_model_role_router.js';
 import {
   buildDefaultInteractionSpec,
   buildAgentLocalInteractionContract,
@@ -799,7 +800,9 @@ function buildKnowledgeBaseMemoryMapLines(profileOrPlan = null, { maxLines = 7 }
 
 function defaultModelForRole(role = '', provider = '') {
   const roleId = cleanId(role);
-  const providerId = cleanId(provider);
+  const roleResolution = resolveRoomModelRole({ modelRole: modelRoleForAgentRole(roleId), env: process.env });
+  const providerId = cleanId(provider || roleResolution.provider);
+  if (roleResolution.model && (!provider || providerId === cleanId(roleResolution.provider))) return roleResolution.model;
   if (providerId === 'gemini') return 'gemini-3-flash-preview';
   if (providerId === 'antigravity') return process.env.ANTIGRAVITY_MODEL || 'auto';
   if (isLocalModelProvider(providerId)) return listModelNodes()[0]?.model || 'local-model';
@@ -1084,8 +1087,9 @@ function agentDraft({ name = '', role = 'researcher', model = '', purpose = '', 
   const resolvedSkills = asArray(skills).map((skill) => cleanId(skill)).filter(Boolean).length > 0
     ? asArray(skills).map((skill) => cleanId(skill)).filter(Boolean)
     : skillsForRole(cleanRole, { taskText, agentName: displayName, purpose: resolvedPurpose });
-  const requestedProvider = cleanId(provider || inferProviderForModel(model || '') || inferLocalProviderForModel(model || ''));
-  const resolvedModel = sanitizePlannerExecutableModel(model || '', requestedProvider, { taskText, role: cleanRole }) || defaultModelForRole(cleanRole, requestedProvider);
+  const rolePolicyAgent = applyRoomModelRolePolicyToAgent({ role: cleanRole, provider, model }, { env: process.env, source: 'deterministic_team_builder' });
+  const requestedProvider = cleanId(rolePolicyAgent.provider || inferProviderForModel(rolePolicyAgent.model || '') || inferLocalProviderForModel(rolePolicyAgent.model || ''));
+  const resolvedModel = sanitizePlannerExecutableModel(rolePolicyAgent.model || '', requestedProvider, { taskText, role: cleanRole }) || defaultModelForRole(cleanRole, requestedProvider);
   const resolvedProvider = cleanId(requestedProvider || inferProviderForModel(resolvedModel) || inferLocalProviderForModel(resolvedModel) || '');
   return {
     agent_id: uniqueSlug(displayName, seen),
@@ -1459,7 +1463,7 @@ function defaultAgentsFromCatalog(runtime = {}, taskText = '') {
     provider: migrateProviderAwayFromGemini(row.provider || inferProviderForModel(row.model || '') || inferLocalProviderForModel(row.model || '') || 'codex', { fallback: 'codex' }).provider,
   })).filter((row) => row.agent_id);
   if (picked.length > 0) return picked;
-  return [{ agent_id: 'researcher', name: 'Researcher', role: 'researcher', model: defaultModelForRole('researcher', 'codex'), purpose: clean(taskText), skills: [], provider: 'codex' }];
+  return [agentDraft({ name: 'Researcher', role: 'researcher', purpose: clean(taskText) }, { seen: new Set(), taskText, index: 1 })];
 }
 
 export function getSessionTeamState(sessionStore, chatId) {
@@ -2333,9 +2337,9 @@ function buildControlPlaneWorkspaceBuilderTeam({ taskText = '', runtime = null, 
   const builderName = explicitCodex ? 'Codex Builder' : 'Workspace Builder';
   const agents = [
     { agent_id: 'workspace_builder', name: builderName, role: 'builder', model: 'gpt-5-codex', provider: 'codex', purpose: 'workspace에서 요청된 코드·문서·파일 산출물을 구현한다', capabilities: ['workspace_fs', 'code_patch', 'artifact_build', 'artifact_materialization'], runtime_capabilities_required: ['filesystem_read', 'filesystem_write'], runtime_capabilities_optional: ['shell_exec'] },
-    { agent_id: 'implementation_reviewer', name: 'Implementation Reviewer', role: 'reviewer', model: 'gpt-5.4', provider: 'chatgpt', purpose: 'Builder의 변경 사항과 산출물 누락 여부를 검토한다', capabilities: ['review', 'artifact_check'], runtime_capabilities_required: ['filesystem_read'] },
-    { agent_id: 'delivery_synthesizer', name: 'Delivery Synthesizer', role: 'synthesizer', model: 'gpt-5.4', provider: 'chatgpt', purpose: '구현 결과와 검토 결과를 사용자에게 전달한다', capabilities: ['synthesis', 'handoff'], runtime_capabilities_required: ['filesystem_read'] },
-  ];
+    { agent_id: 'implementation_reviewer', name: 'Implementation Reviewer', role: 'reviewer', model: '', provider: '', purpose: 'Builder의 변경 사항과 산출물 누락 여부를 독립적으로 검토한다', capabilities: ['review', 'artifact_check'], runtime_capabilities_required: ['filesystem_read'] },
+    { agent_id: 'delivery_synthesizer', name: 'Delivery Synthesizer', role: 'synthesizer', model: '', provider: '', purpose: '구현 결과와 검토 결과를 사용자에게 전달한다', capabilities: ['synthesis', 'handoff'], runtime_capabilities_required: ['filesystem_read'] },
+  ].map((agent) => applyRoomModelRolePolicyToAgent(agent, { env: process.env, source: 'workspace_builder_fast_path' }));
   return normalizeTeamConfig({
     team_name: suggestedName, mode: 'scoped_context', composition_mode: 'freeform', proposal_mode: 'create', lock_after_apply: true,
     agents, interaction_spec: buildDefaultInteractionSpec(agents, { task: taskText }), shortcut_policy: normalizeShortcutPolicy(buildDefaultShortcutPolicy()),

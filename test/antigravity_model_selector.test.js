@@ -4,8 +4,14 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { runAntigravityPrompt } from '../src/antigravity.js';
+import { resolveAntigravityCliCommand, runAntigravityPrompt } from '../src/antigravity.js';
 
+
+test('Antigravity logical provider defaults to the agy executable while preserving overrides', () => {
+  assert.equal(resolveAntigravityCliCommand({}), 'agy');
+  assert.equal(resolveAntigravityCliCommand({ ANTIGRAVITY_CLI_COMMAND: '/opt/custom-agy' }), '/opt/custom-agy');
+  assert.equal(resolveAntigravityCliCommand({ GOOGLE_AI_CLI_COMMAND: 'google-ai-wrapper' }), 'google-ai-wrapper');
+});
 test('Antigravity execution passes the complete discovered display selector as one model argument', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ddalggak-agy-selector-'));
   const command = path.join(dir, 'agy');

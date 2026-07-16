@@ -4,6 +4,7 @@ import { readRoomSemanticObservations } from './room_semantic_observation_log.js
 import { deriveActiveRoomLoop, formatActiveRoomLoopProjectionBlock, readRoomLoopEvents } from './room_loop_events.js';
 import { deriveRoomCompanionState, formatRoomCompanionProjectionBlock, readRoomCompanionEvents } from './room_companions.js';
 import { normalizeRoomMemoryItem } from './room_memory_view.js';
+import { readLoopWorkingMemory, formatLoopWorkingMemoryProjection } from './loop_memory_manager.js';
 
 function clean(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
@@ -137,6 +138,7 @@ export function createRoomContextSnapshot({
   const companionState = deriveRoomCompanionState({ events: companionEvents, session });
   const loopEvents = readRoomLoopEvents({ jobDir, session, limit: 80 });
   const activeLoop = deriveActiveRoomLoop({ events: loopEvents, session });
+  const loopWorkingMemory = activeLoop?.loop_id ? readLoopWorkingMemory({ jobDir, loopId: activeLoop.loop_id }) : null;
   return {
     kind: 'room_context_snapshot_v1',
     snapshot_id: `roomctx_${tinyHash(seed)}`,
@@ -154,7 +156,8 @@ export function createRoomContextSnapshot({
     approved_room_memories: approvedMemories,
     room_loop_events: loopEvents,
     active_room_loop: activeLoop || undefined,
-    substrates: ['room_turn_ledger', 'session_recent_room_turns', ...(approvedMemories.length ? ['approved_room_memory'] : []), ...(semanticObservations.length ? ['room_semantic_observations'] : []), ...(companionEvents.length || companionState ? ['room_companion_events'] : []), ...(activeLoop ? ['room_loop_events'] : [])],
+    loop_working_memory: loopWorkingMemory || undefined,
+    substrates: ['room_turn_ledger', 'session_recent_room_turns', ...(approvedMemories.length ? ['approved_room_memory'] : []), ...(semanticObservations.length ? ['room_semantic_observations'] : []), ...(companionEvents.length || companionState ? ['room_companion_events'] : []), ...(activeLoop ? ['room_loop_events'] : []), ...(loopWorkingMemory ? ['loop_working_memory_projection'] : [])],
     created_at: new Date().toISOString(),
   };
 }
@@ -262,6 +265,9 @@ export function buildBudgetedRoomContextProjection({
     summarizeRoomContextState(snap.context_state || deriveRoomContextState({ turns: allTurns, latestUserText: latest, semanticObservations: snap.semantic_observations || [] }), { maxItems: projectionTier === 'micro' ? 4 : 6 }),
     formatRoomCompanionProjectionBlock({ state: snap.companion_state || deriveRoomCompanionState({ events: snap.companion_events || [] }), maxChars: projectionTier === 'micro' ? 760 : 1200 }),
     snap.active_room_loop ? formatActiveRoomLoopProjectionBlock({ loop: snap.active_room_loop, maxChars: projectionTier === 'micro' ? 760 : 1200 }) : '',
+    snap.loop_working_memory ? '[LOOP WORKING MEMORY — COMPACTED PROMPT SURFACE]' : '',
+    snap.loop_working_memory ? 'loop_memory_policy: Treat this compact projection as the current working context. Raw trace remains audit evidence and must not be injected wholesale.' : '',
+    snap.loop_working_memory ? formatLoopWorkingMemoryProjection({ workingMemory: snap.loop_working_memory, maxChars: projectionTier === 'micro' ? 900 : projectionTier === 'team' ? 2600 : 1600 }) : '',
     turns.length ? '[RECENT SAME-ROOM TURNS]' : '',
     ...turns.map((turn) => renderTurn(turn, { turnChars: defaults.turnChars })),
   ].filter(Boolean);

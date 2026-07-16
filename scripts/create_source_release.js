@@ -10,6 +10,8 @@ const excludes = [
   '.git/',
   'node_modules/',
   'runs/',
+  'experiment_runs/',
+  'experiments/room_journeys/',
   'data/',
   'models/',
   'reports/',

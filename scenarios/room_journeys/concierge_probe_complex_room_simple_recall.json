@@ -23,8 +23,14 @@
       "bounded_loop_team"
     ],
     "measurement_policy": {
-      "require_context_parity": true
-    }
+      "require_context_parity": true,
+      "require_context_coverage_evidence": true,
+      "require_frozen_pre_target_snapshot": true,
+      "require_runtime_shape_evidence": true
+    },
+    "required_context_step_ids": [
+      "establish_goal"
+    ]
   },
   "experiment": {
     "baseline": {

@@ -55,6 +55,11 @@ import { resolveRoomModelRolePlan, formatRoomModelRolePlanForTelegram } from '..
 import { appendKnowledgeRouteEvent } from '../../application/knowledge_route_event_log.js';
 import { appendRoomConversationExchange, appendRoomConversationTurn } from '../../application/room_conversation_ledger.js';
 import { appendRoomLoopEvent, buildRoomLoopStartEvent, classifyRoomLoopInterruption, createRoomLoopId, deriveActiveRoomLoop, normalizeRoomLoop, readRoomLoopEvents } from '../../application/room_loop_events.js';
+import { buildLoopRunSpec } from '../../application/loop_execution_kernel.js';
+import { applyActiveLoopUserControl, createLoopRun, readActiveLoopRun, listLoopRuns } from '../../application/loop_run_store.js';
+import { buildLoopProgressProjection, formatLoopProgressForUser } from '../../application/loop_progress_projection.js';
+import { compactLoopRunMemory, finalizeLoopMemory, formatLoopMemoryStatus } from '../../application/loop_memory_manager.js';
+import { recommendLoopTopology, formatLoopTopologyRecommendation } from '../../application/loop_topology_recommender.js';
 import { appendRoomCompanionEvent, buildCompanionCouncilSession, buildCorrectionMergeProposalEvent, buildRoomCompanionMaterializationCandidateEvent, buildRoomCompanionMemoryExchangeDecisionEvent, buildRoomCompanionMergeProposalDecisionEvent, classifyRoomCorrectionIntent, deriveRoomCompanionState, formatRoomCompanionCouncilLogForTelegram, formatRoomCompanionListForTelegram, formatRoomCompanionMaterializationCandidatesForTelegram, formatRoomCompanionMemoryExchangeProposalsForTelegram, formatRoomCompanionMergeProposalsForTelegram, formatRoomCompanionProfileForTelegram, getRoomCompanionProfile, normalizeAgentMode, normalizeCompanionId, normalizeContextMode, readRoomCompanionEvents, selectRoomCompanionMemoryExchangeProposal } from '../../application/room_companions.js';
 import { createRoomContextSnapshot, formatRoomContextProjectionBlock } from '../../application/room_context_projection.js';
 import { resolveDdalggakRuntimeConfig, resolveDdalggakRouteRuntimeConfig, formatRuntimeConfigForTelegram, auditDdalggakRuntimeEnv, formatRuntimeConfigDoctorForTelegram } from '../../application/runtime_config.js';
@@ -1676,7 +1681,7 @@ export function createTelegramCommandHandler(deps = {}) {
       const event = classifyRoomLoopInterruption({ text: message, command, activeLoop });
       if (!event) return null;
       const { jobId, jobDir } = resolveJobDirForRoute(chatId);
-      return appendRoomLoopEvent({
+      const persisted = appendRoomLoopEvent({
         jobDir,
         chatSessionStore,
         chatId,
@@ -1690,6 +1695,15 @@ export function createTelegramCommandHandler(deps = {}) {
           command,
         },
       });
+      const control = event.interrupt_type === 'constraint_update' ? 'constraint_update' : event.interrupt_type;
+      applyActiveLoopUserControl({
+        jobDir,
+        control,
+        text: event.payload?.text || message,
+        objective: event.interrupt_type === 'redirect' ? (event.payload?.new_constraint || message) : '',
+        source: 'telegram_room_loop_interruption',
+      });
+      return persisted;
     } catch {
       return null;
     }
@@ -1699,6 +1713,28 @@ export function createTelegramCommandHandler(deps = {}) {
     try {
       const { jobId, jobDir } = resolveJobDirForRoute(chatId);
       const loopId = createRoomLoopId({ chatId, objective: goal, source });
+      const modelPolicy = teamConfig?.room_runtime_selection || teamConfig?.ai_room_selection || {};
+      const activeConstraints = Array.isArray(workflowContract?.stop_conditions) ? workflowContract.stop_conditions.map((item) => `stop_condition: ${item}`) : [];
+      const topologyRecommendation = recommendLoopTopology({
+        taskText: goal,
+        workflowContract,
+        priorRuns: listLoopRuns({ jobDir, limit: 24 }),
+      });
+      const spec = buildLoopRunSpec({
+        loopId,
+        roomId: chatId,
+        chatId,
+        objective: goal,
+        workflowContract,
+        requestedTopology: topologyRecommendation.topology_id || workflowContract?.execution_topology || '',
+        progressVisibility: workflowContract?.progress_visibility || 'quiet',
+        modelPolicy,
+        budgetPolicy: { max_iterations: workflowContract?.max_iterations || workflowContract?.maxIterations || undefined },
+        activeConstraints,
+        source,
+      });
+      spec.topology_selection = topologyRecommendation;
+      createLoopRun({ jobDir, spec, source });
       const loop = normalizeRoomLoop({
         loop_id: loopId,
         room_id: chatId,
@@ -1708,14 +1744,21 @@ export function createTelegramCommandHandler(deps = {}) {
         controller: 'user',
         command,
         source,
-        model_policy: teamConfig?.room_runtime_selection || teamConfig?.ai_room_selection || {},
+        model_policy: modelPolicy,
         budget_policy: { max_iterations: workflowContract?.max_iterations || workflowContract?.maxIterations || undefined },
-        current_plan: Array.isArray(workflowContract?.required_passes) ? workflowContract.required_passes : [],
-        active_constraints: Array.isArray(workflowContract?.stop_conditions) ? workflowContract.stop_conditions.map((item) => `stop_condition: ${item}`) : [],
+        loop_run_ref: `local_memory/loop_runs/${loopId}/state.json`,
+        topology_id: spec.topology.topology_id,
+        progress_visibility: spec.progress_policy.visibility,
+        current_stage_id: spec.topology.stages[0]?.stage_id,
+        current_round: 1,
+        memory_policy: spec.memory_policy,
+        current_plan: spec.topology.stages.map((stage) => stage.stage_id),
+        active_constraints: activeConstraints,
+        lessons: [`topology recommendation: ${topologyRecommendation.topology_id} confidence=${topologyRecommendation.confidence}`],
       });
       const event = buildRoomLoopStartEvent({ loop, chatId, userId, jobId, command, source });
       appendRoomLoopEvent({ jobDir, chatSessionStore, chatId, userId, jobId, event });
-      return loop;
+      return { ...loop, topology_selection: topologyRecommendation };
     } catch {
       return null;
     }
@@ -1727,7 +1770,7 @@ export function createTelegramCommandHandler(deps = {}) {
       if (!activeLoop?.loop_id) return null;
       const interruptType = command === '/pause' ? 'pause' : command === '/resume' ? 'resume' : command === '/approve' ? 'approve' : 'status_update';
       const { jobId, jobDir } = resolveJobDirForRoute(chatId);
-      return appendRoomLoopEvent({
+      const persisted = appendRoomLoopEvent({
         jobDir,
         chatSessionStore,
         chatId,
@@ -1745,6 +1788,8 @@ export function createTelegramCommandHandler(deps = {}) {
           payload: { text: text || command, target_status: status },
         },
       });
+      applyActiveLoopUserControl({ jobDir, control: interruptType, text: text || command, source: 'telegram_loop_status_command' });
+      return persisted;
     } catch {
       return null;
     }
@@ -2145,9 +2190,14 @@ export function createTelegramCommandHandler(deps = {}) {
       '🔁 Bounded loop를 시작합니다.',
       '',
       `workflow: ${summarizeTeamWorkflowContract(workflowContract)}`,
+      `topology: ${roomLoop?.topology_id || workflowContract.execution_topology || 'review_loop'}`,
+      roomLoop?.topology_selection ? formatLoopTopologyRecommendation(roomLoop.topology_selection) : '',
+      `progress: ${roomLoop?.progress_visibility || 'quiet'} (quiet · standard · debug)`,
       `agents: ${(roomProfile.default_agents || []).join(', ') || '-'}`,
       roomLoop?.loop_id ? `loop id: ${roomLoop.loop_id}` : '',
       `max loops: ${workflowContract.max_iterations}`,
+      'memory: raw trace 보존 · prompt에는 compact working projection · durable memory는 review proposal only',
+      'control: /loop status · /loop visibility standard · /loop memory · /pause · /resume',
       'policy: small safe changes auto · risky/large changes approval-required',
     ].join('\n'));
     const taskMessage = [
@@ -3205,6 +3255,55 @@ export function createTelegramCommandHandler(deps = {}) {
     }
 
     if (cmd === "/loop") {
+      const rawLoopArgs = String(args || '').trim();
+      const lowerLoopArgs = rawLoopArgs.toLowerCase();
+      if (['status', 'progress', '상태', '진행'].includes(lowerLoopArgs)) {
+        const { jobDir } = resolveJobDirForRoute(chatId);
+        const projection = jobDir ? buildLoopProgressProjection({ jobDir }) : null;
+        await sendLong(bot, chatId, formatLoopProgressForUser({ projection }));
+        return true;
+      }
+      if (/^(visibility|view|표시)\s+/.test(lowerLoopArgs)) {
+        const requested = lowerLoopArgs.replace(/^(visibility|view|표시)\s+/, '').trim();
+        const visibility = ['debug', 'detailed', 'full'].includes(requested) ? 'debug' : ['standard', 'normal'].includes(requested) ? 'standard' : 'quiet';
+        const { jobDir } = resolveJobDirForRoute(chatId);
+        if (!jobDir || !readActiveLoopRun({ jobDir })) {
+          await bot.sendMessage(chatId, '활성 loop가 없습니다.');
+          return true;
+        }
+        applyActiveLoopUserControl({ jobDir, control: 'visibility', visibility, text: rawLoopArgs, source: 'telegram_loop_visibility' });
+        const projection = buildLoopProgressProjection({ jobDir });
+        await bot.sendMessage(chatId, `✅ loop 진행 표시를 ${visibility}로 변경했습니다.
+
+${formatLoopProgressForUser({ projection })}`);
+        return true;
+      }
+      if (['memory', '메모리'].includes(lowerLoopArgs)) {
+        const { jobDir } = resolveJobDirForRoute(chatId);
+        const active = jobDir ? readActiveLoopRun({ jobDir }) : null;
+        await bot.sendMessage(chatId, active ? formatLoopMemoryStatus({ jobDir, loopId: active.state.loop_id }) : '활성 loop가 없습니다.');
+        return true;
+      }
+      if (['compact', '메모리 정리', '정리'].includes(lowerLoopArgs)) {
+        const { jobDir } = resolveJobDirForRoute(chatId);
+        const active = jobDir ? readActiveLoopRun({ jobDir }) : null;
+        if (!active) { await bot.sendMessage(chatId, '활성 loop가 없습니다.'); return true; }
+        const result = compactLoopRunMemory({ jobDir, loopId: active.state.loop_id, force: true });
+        await bot.sendMessage(chatId, result.ok ? `✅ working memory를 compact했습니다.
+${result.working_memory_path || ''}` : `compaction 실패: ${result.reason || 'unknown'}`);
+        return true;
+      }
+      if (['finalize', '완료 정리'].includes(lowerLoopArgs)) {
+        const { jobDir } = resolveJobDirForRoute(chatId);
+        const active = jobDir ? readActiveLoopRun({ jobDir }) : null;
+        if (!active) { await bot.sendMessage(chatId, '활성 loop가 없습니다.'); return true; }
+        const result = finalizeLoopMemory({ jobDir, loopId: active.state.loop_id, archive: true, allowRawPrune: false });
+        await bot.sendMessage(chatId, `✅ loop memory finalization 완료
+- promotion candidates: ${result.candidates.length}
+- raw trace: 보존됨
+- cold archive: 생성됨`);
+        return true;
+      }
       return startBoundedLoopFromTelegram({ chatId, userId, msg, raw: args, sourceCommand: '/loop' });
     }
 

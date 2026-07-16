@@ -27,7 +27,8 @@
       "require_semantic_evidence": true,
       "require_cost_evidence": true,
       "require_exact_model_identity": true
-    }
+    },
+    "target_step_id": "request_options"
   },
   "steps": [
     {

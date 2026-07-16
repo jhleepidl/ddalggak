@@ -1,5 +1,6 @@
 
 import { buildTeamSeedFromTaskArchetype } from './team_blueprint_templates.js';
+import { applyRoomModelRolePolicyToAgent } from './room_model_role_router.js';
 
 function clean(value=''){ return String(value||'').trim(); }
 function cleanId(value=''){ return clean(value).toLowerCase().replace(/[^a-z0-9_.-]+/g, '_'); }
@@ -110,6 +111,7 @@ export function buildBenchmarkTeamTemplate(templateId = '', overrides = {}) {
     benchmark_template_id: row.template_id,
     benchmark_source: row.benchmark_source,
   };
+  seed.agents = (seed.agents || []).map((agent) => applyRoomModelRolePolicyToAgent(agent, { source: 'benchmark_team_template' }));
   return seed;
 }
 

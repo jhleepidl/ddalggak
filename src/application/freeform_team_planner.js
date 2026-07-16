@@ -3,6 +3,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { runCodexExec } from '../codex.js';
+import { resolveAntigravityCliCommand } from '../antigravity.js';
 import { migrateProviderAwayFromGemini, normalizeRuntimeProvider } from '../provider_migration.js';
 import { runGeminiPrompt } from '../gemini.js';
 import { parseJsonObjectFromText } from '../shared/json_extract.js';
@@ -16,6 +17,7 @@ import { normalizeParticipantExecutionSchema } from '../shared/participant_schem
 import { inferExecutionRoleFromText } from '../shared/work_intent.js';
 import { buildPlannerCreateConstraintLines, buildPlannerOutputSchemaLines, buildPlannerRefinementRuleLines } from './planner_prompt_fragments.js';
 import { formatModelNodeInventoryForPlanner, listPlannerModelChoices } from './model_node_registry.js';
+import { applyRoomModelRolePolicyToAgent, formatEnvModelRolePolicyForPlanner } from './room_model_role_router.js';
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -104,7 +106,7 @@ function isPlannerProviderAvailable(provider = '') {
   const cacheKey = mode + ':' + key + ':' + (process.env.PATH || '');
   if (plannerAvailabilityCache.has(cacheKey)) return plannerAvailabilityCache.get(cacheKey);
   const effectiveKey = migrateProviderAwayFromGemini(key, { fallback: 'codex' }).provider;
-  const binary = effectiveKey === 'antigravity' ? (process.env.ANTIGRAVITY_CLI_COMMAND || process.env.GOOGLE_AI_CLI_COMMAND || 'antigravity') : effectiveKey === 'codex' ? 'codex' : '';
+  const binary = effectiveKey === 'antigravity' ? resolveAntigravityCliCommand(process.env) : effectiveKey === 'codex' ? 'codex' : '';
   const available = Boolean(binary && hasExecutableOnPath(binary));
   plannerAvailabilityCache.set(cacheKey, available);
   return available;
@@ -236,7 +238,8 @@ function buildPlannerPrompt({
     '',
     `Supported models: ${models.join(', ')}`,
     modelNodeInventory,
-    'Provider choices: gemini, codex, chatgpt, openai_compatible. Use provider=openai_compatible for listed local/OpenAI-compatible model nodes and set model to that node model name.',
+    'Provider choices: antigravity, codex, chatgpt, openai_compatible. Use provider=openai_compatible for listed local/OpenAI-compatible model nodes and set model to that node model name.',
+    formatEnvModelRolePolicyForPlanner(process.env),
     `Available tools: ${asArray(availableToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 10).join(', ') || '(none listed)'}`,
     catalog.length ? `Runtime catalog (compact): ${compactPromptJson(catalog, { maxDepth: 2, maxItems: 6, maxStringChars: 72 })}` : '',
     skills.length ? `Skill registry sample (compact): ${compactPromptJson(skills, { maxDepth: 2, maxItems: 6, maxStringChars: 72 })}` : '',
@@ -341,7 +344,8 @@ ${buildCurrentRosterSummaryLines(currentTeam)}`,
     '',
     `Supported models: ${models.join(', ')}`,
     modelNodeInventory,
-    'Provider choices: gemini, codex, chatgpt, openai_compatible. Use provider=openai_compatible for listed local/OpenAI-compatible model nodes and set model to that node model name.',
+    'Provider choices: antigravity, codex, chatgpt, openai_compatible. Use provider=openai_compatible for listed local/OpenAI-compatible model nodes and set model to that node model name.',
+    formatEnvModelRolePolicyForPlanner(process.env),
     `Available tools: ${asArray(availableToolIds).map((entry) => cleanId(entry)).filter(Boolean).slice(0, 10).join(', ') || '(none listed)'}`,
     catalog.length ? `Runtime catalog (compact): ${compactPromptJson(catalog, { maxDepth: 2, maxItems: 6, maxStringChars: 72 })}` : '',
     skills.length ? `Skill registry sample (compact): ${compactPromptJson(skills, { maxDepth: 2, maxItems: 6, maxStringChars: 72 })}` : '',
@@ -362,7 +366,7 @@ function normalizeGeneratedSkillBriefs(rows = []) {
       label,
       goal: clean(row.goal || row.objective || row.description),
       checklist: asArray(row.checklist || row.steps).map((entry) => clean(entry)).filter(Boolean).slice(0, 5),
-      selected_by: 'gpt_5_4_team_planner',
+      selected_by: 'llm_team_planner',
       executable: false,
     });
   }
@@ -397,7 +401,7 @@ function normalizePlannerPlan(raw = {}) {
     reasoning_summary: asArray(source.reasoning_summary || source.rationale || source.why).map((entry) => clean(entry)).filter(Boolean).slice(0, 5),
     agents: asArray(source.agents).map((agent) => {
       const item = asObject(agent);
-      return {
+      const normalizedAgent = {
         name: clean(item.name || item.display_name || item.agent_name),
         role: inferPlannerRole(item),
         purpose: clean(item.purpose || item.goal || item.description),
@@ -409,6 +413,7 @@ function normalizePlannerPlan(raw = {}) {
         ...(() => { const execution = normalizeParticipantExecutionSchema(item); return { runtime_capabilities_required: execution.runtime_capabilities_required.slice(0, 6), runtime_capabilities_optional: execution.runtime_capabilities_optional.slice(0, 6), external_tool_requirements: execution.external_tool_requirements.slice(0, 6), external_tool_preferences: execution.external_tool_preferences.slice(0, 6) }; })(),
         context_policy: asObject(item.context_policy || item.contextPolicy),
       };
+      return applyRoomModelRolePolicyToAgent(normalizedAgent, { env: process.env, source: 'llm_team_planner' });
     }).filter((agent) => agent.name),
     interaction_spec: asObject(source.interaction_spec || source.interactionSpec),
     shortcut_policy: asObject(source.shortcut_policy || source.shortcutPolicy),

@@ -62,3 +62,15 @@ Journey tracing is disabled globally and leased only for synthetic benchmark Roo
 `model_portfolio_suite.json` automatically loads `config/model_roles/portfolio_benchmark.json`. No external `/home/jhlee/tmp/model-role-map.json` is required. Use `--model-role-policy <path>` only for an intentional experiment override. The legacy `--model-role-map` spelling remains accepted as an alias.
 
 The repository policy is copied into each synthetic benchmark Room as an ephemeral Room policy. In real Rooms, `agent_room_profile.model_policy` is the role-by-role override layer; future learned changes should be proposed, trialed, and approved before becoming durable.
+## 2026-07-15 comparison execution contract
+
+Comparison scenarios with a designated target step now use **common buildup once -> immutable frozen pre-target snapshot -> per-arm target fork**. The snapshot copies canonical session state and non-volatile job-local Room state; volatile runtime logs and provider traces are excluded from snapshot equivalence.
+
+Scenarios may declare required authoritative source steps. The runner creates one benchmark evidence manifest, injects it into every target arm, and verifies that every executed target role received the manifest marker and all required `source_step_id` markers in its actual role goal. Team route repair preserves this full evidence block beyond the ordinary compact request-summary limit.
+
+Comparison semantic judging is target-only and topology-blind. Outcome quality, process assurance, and execution efficiency are separate. `collaboration_process_evidence.json` is diagnostic process evidence, not quality credit. Portfolio comparison latency uses target/comparison duration rather than snapshot setup time.
+
+The `state_update` research shape now has a deterministic benchmark execution path with zero provider calls. This does not change production Concierge routing.
+
+The high-impact routing experiment is not statically forced to a winner or permanently quarantined: it emits a label only when frozen snapshot parity, common evidence parity, complete required-context delivery, runtime execution-contract validity, provider/role/collaboration validity, and semantic evidence all pass.
+

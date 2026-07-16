@@ -2,6 +2,7 @@
   "version": 1,
   "policy": "Fast tests are deterministic and must not launch provider CLIs, wait on real backoff timers, build release bundles, or bootstrap the complete supervisor runtime.",
   "integration": [
+    "antigravity_dogfood_readiness.test.js",
     "antigravity_model_selector.test.js",
     "artifact_delivery.test.js",
     "claude_cli_provider.test.js",

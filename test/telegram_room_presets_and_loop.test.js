@@ -26,7 +26,7 @@ function makeSessionStore(initial = {}) {
   };
 }
 
-function makeHandler({ sent = [], incoming = [], sessionStore = makeSessionStore() } = {}) {
+function makeHandler({ sent = [], incoming = [], sessionStore = makeSessionStore(), jobDir = '' } = {}) {
   return createTelegramCommandHandler({
     bot: makeBot(sent),
     sendLong: async (_bot, chatId, text) => {
@@ -38,7 +38,8 @@ function makeHandler({ sent = [], incoming = [], sessionStore = makeSessionStore
       return { message_id: sent.length };
     },
     chatSessionStore: sessionStore,
-    resolveLiveJobIdForChat: () => null,
+    resolveLiveJobIdForChat: () => jobDir ? 'job-test' : null,
+    jobs: jobDir ? { jobDir: () => jobDir } : undefined,
     parseChatMessageWithFlags: (raw) => ({ message: String(raw || '').trim(), debug: false }),
     createAgentRoomTeamConfiguration: async ({ description }) => ({
       agents: [{ agent_id: 'fallback', name: 'Fallback', role: 'builder' }],
@@ -165,4 +166,26 @@ test('/room learning summarizes and exports room preference data', async () => {
   await handler({ msg: { message_id: 4, chat: { id: 'chat-learning' }, from: { id: 'u' } }, text: '/room learning export', chatId: 'chat-learning', userId: 'u' });
   assert.match(sent.at(-1).text, /preference dataset exported/);
   assert.match(sent.at(-1).text, /durable evolution/);
+});
+
+test('/loop status, visibility, and memory expose the LoopRun control plane without dumping raw trace', async () => {
+  const sent = [];
+  const incoming = [];
+  const sessionStore = makeSessionStore();
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const jobDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-loop-control-'));
+  const handler = makeHandler({ sent, incoming, sessionStore, jobDir });
+  const chatId = `chat-loop-control-${Date.now()}`;
+  await handler({ msg: { message_id: 1, chat: { id: chatId }, from: { id: 'u' } }, text: '/loop 2 코드를 구현하고 review해줘', chatId, userId: 'u' });
+  await handler({ msg: { message_id: 2, chat: { id: chatId }, from: { id: 'u' } }, text: '/loop status', chatId, userId: 'u' });
+  assert.match(sent.at(-1).text, /topology:/);
+  assert.match(sent.at(-1).text, /단계:/);
+  await handler({ msg: { message_id: 3, chat: { id: chatId }, from: { id: 'u' } }, text: '/loop visibility standard', chatId, userId: 'u' });
+  assert.match(sent.at(-1).text, /standard/);
+  await handler({ msg: { message_id: 4, chat: { id: chatId }, from: { id: 'u' } }, text: '/loop memory', chatId, userId: 'u' });
+  assert.match(sent.at(-1).text, /raw trace: append-only evidence/);
+  assert.doesNotMatch(sent.at(-1).text, /events\.jsonl/);
+  fs.rmSync(jobDir, { recursive: true, force: true });
 });

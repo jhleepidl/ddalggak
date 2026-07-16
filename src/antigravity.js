@@ -55,8 +55,12 @@ function attachAntigravityTrace({ result, jobId, surface, agentId, roleId, model
   return trace ? { ...withModel, llm_trace_id: trace.trace_id, llm_trace_dir: trace.trace_dir } : withModel;
 }
 
+export function resolveAntigravityCliCommand(env = process.env) {
+  return String(env?.ANTIGRAVITY_CLI_COMMAND || env?.GOOGLE_AI_CLI_COMMAND || 'agy').trim() || 'agy';
+}
+
 export async function runAntigravityPrompt({ workspaceRoot, prompt, signal, cwd, jobId = '', model = '', surface = 'antigravity_prompt', agentId = '', roleId = '', timeoutMs = 0, traceMetadata = {}, env = {} } = {}) {
-  const command = String(process.env.ANTIGRAVITY_CLI_COMMAND || process.env.GOOGLE_AI_CLI_COMMAND || 'antigravity').trim() || 'antigravity';
+  const command = resolveAntigravityCliCommand(process.env);
   const baseArgs = splitArgs(process.env.ANTIGRAVITY_CLI_ARGS || process.env.GOOGLE_AI_CLI_ARGS || '');
   const modelArgName = String(process.env.ANTIGRAVITY_MODEL_ARG || '').trim();
   const requestedModel = String(model || process.env.ANTIGRAVITY_MODEL || process.env.GOOGLE_AI_MODEL || '').trim();

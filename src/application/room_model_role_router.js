@@ -144,6 +144,81 @@ export function resolveRoomModelRole({ phase = '', modelRole = '', roomPackage =
   };
 }
 
+
+export function normalizeModelRolePolicyMode(value = '', env = process.env) {
+  const raw = cleanText(value || env.TEAM_ROLE_PROVIDER_POLICY_MODE || 'prefer', { lower: true, maxLen: 80 });
+  if (['off', 'disabled', 'none', 'preserve'].includes(raw)) return 'off';
+  if (['enforce', 'strict', 'enforce_generated', 'generated'].includes(raw)) return 'enforce_generated';
+  return 'prefer';
+}
+
+export function applyRoomModelRolePolicyToAgent(agent = {}, { env = process.env, mode = '', source = 'generated_team' } = {}) {
+  const row = asObject(agent);
+  const roleId = cleanText(row.role || row.role_id || row.roleId || '', { lower: true, maxLen: 160 });
+  const modelRole = cleanText(row.model_role || row.modelRole || modelRoleForAgentRole(roleId), { lower: true, maxLen: 120 });
+  const resolution = resolveRoomModelRole({ modelRole, env });
+  const policyMode = normalizeModelRolePolicyMode(mode, env);
+  const hasEnvOverride = resolution.source === 'env_model_role_override';
+  let provider = cleanText(row.provider || row.provider_spec?.provider || row.providerSpec?.provider || '', { lower: true, maxLen: 80 });
+  let model = cleanText(row.model || row.provider_spec?.model || row.providerSpec?.model || '', { maxLen: 160 });
+  const originalProvider = provider;
+
+  if (policyMode !== 'off' && hasEnvOverride) {
+    if (policyMode === 'enforce_generated') {
+      if (resolution.provider) provider = resolution.provider;
+      if (resolution.model) model = resolution.model;
+      else if (provider && provider !== originalProvider) model = '';
+    } else {
+      if (!provider && resolution.provider) provider = resolution.provider;
+      if (!model && resolution.model && (!originalProvider || originalProvider === resolution.provider)) model = resolution.model;
+    }
+  }
+
+  return {
+    ...row,
+    provider,
+    model,
+    provider_spec: {
+      ...asObject(row.provider_spec || row.providerSpec),
+      provider,
+      model,
+    },
+    model_role: modelRole,
+    model_role_resolution: {
+      ...asObject(row.model_role_resolution || row.modelRoleResolution),
+      source: hasEnvOverride && policyMode !== 'off' ? `${resolution.source}:${source}` : resolution.source,
+      preferred_tier: resolution.preferred_tier,
+      fallback_tier: resolution.fallback_tier,
+      node_id: resolution.node_id || '',
+      route_footer: resolution.route_footer,
+      policy_mode: policyMode,
+    },
+  };
+}
+
+export function formatEnvModelRolePolicyForPlanner(env = process.env) {
+  const labels = {
+    concierge_router: 'supervisor/planner/operator',
+    source_grounder: 'researcher/source-grounder',
+    code_executor: 'builder/implementer/test-fix',
+    verifier_critic: 'reviewer/critic/adjudicator',
+    idle_structurer: 'idle memory structurer',
+    delivery_synthesizer: 'synthesizer/progress/final delivery',
+  };
+  const rows = [];
+  for (const role of Object.keys(DEFAULT_MODEL_ROLE_FALLBACKS)) {
+    const assignment = envAssignmentForRole(role, env);
+    if (!assignment) continue;
+    rows.push(`- ${labels[role] || role}: provider=${assignment.provider || '(provider default)'}, model=${assignment.model || '(provider default)'}`);
+  }
+  if (!rows.length) return 'No environment model-role overrides are configured; use provider/model defaults and preserve explicit user choices.';
+  return [
+    `Environment model-role policy (${normalizeModelRolePolicyMode('', env)}):`,
+    ...rows,
+    'For generated team proposals, follow this role policy. Do not assign every role to one provider merely because that provider planned the team.',
+  ].join('\n');
+}
+
 export function resolveRoomModelRolePlan({ phases = ['concierge', 'source', 'code', 'verifier', 'idle', 'synthesis'], roomPackage = null, profile = null, env = process.env } = {}) {
   const rows = asArray(phases).map((phase) => resolveRoomModelRole({ phase, roomPackage, profile, env }));
   return {

@@ -22,6 +22,32 @@ function unique(values = []) {
   return out;
 }
 
+
+const ROOM_JOURNEY_CONTEXT_OPEN = '[ROOM_JOURNEY_AUTHORITATIVE_CONTEXT';
+const ROOM_JOURNEY_CONTEXT_CLOSE = '[/ROOM_JOURNEY_AUTHORITATIVE_CONTEXT]';
+
+function splitBenchmarkAuthoritativeContext(message = '') {
+  const text = String(message || '').trim();
+  const start = text.indexOf(ROOM_JOURNEY_CONTEXT_OPEN);
+  if (start < 0) return { evidence: '', request: text };
+  const closeStart = text.indexOf(ROOM_JOURNEY_CONTEXT_CLOSE, start);
+  if (closeStart < 0) return { evidence: '', request: text };
+  const end = closeStart + ROOM_JOURNEY_CONTEXT_CLOSE.length;
+  const evidence = text.slice(start, end).trim();
+  const request = `${text.slice(0, start)}
+${text.slice(end)}`.trim();
+  return { evidence, request };
+}
+
+function appendBenchmarkAuthoritativeContext(goal = '', message = '') {
+  const base = String(goal || '').trim();
+  const { evidence } = splitBenchmarkAuthoritativeContext(message);
+  if (!evidence || base.includes(ROOM_JOURNEY_CONTEXT_OPEN)) return base;
+  return `${base}
+
+${evidence}`.trim();
+}
+
 function isGenericRawGoal(goal = '') {
   const text = String(goal || '').trim();
   if (!text) return true;
@@ -143,20 +169,30 @@ function roleIdForAction(action = {}, teamAgents = []) {
 }
 
 function buildRoleGoal(roleId = '', message = '') {
-  const request = clip(String(message || '').trim(), 180);
+  const { evidence, request: requestWithoutEvidence } = splitBenchmarkAuthoritativeContext(message);
+  const request = clip(requestWithoutEvidence, 180);
   const requestLine = request ? ` 요청 요약: ${request}` : '';
+  let goal = '';
   switch (cleanId(roleId)) {
     case 'researcher':
-      return `구현을 바로 진행할 수 있도록 핵심 요구사항, 제품 흐름, 외부 제약/리스크를 짧게 정리하고 builder에게 handoff를 남겨라.${requestLine}`;
+      goal = `구현을 바로 진행할 수 있도록 핵심 요구사항, 제품 흐름, 외부 제약/리스크를 짧게 정리하고 builder에게 handoff를 남겨라.${requestLine}`;
+      break;
     case 'builder':
-      return `upstream handoff와 mission_brief/working_memory를 source of truth로 삼아 실제 구현 산출물을 만들어라. raw user request를 되풀이하지 말고, 연구 결과를 실행 가능한 작업 단계와 파일 변경으로 변환하라. 설계 설명만으로 끝내지 말고 가능한 파일 생성/수정, 구현 초안, 실행 방법, implementation_notes를 남겨라.${requestLine}`;
+      goal = `upstream handoff와 mission_brief/working_memory를 source of truth로 삼아 실제 구현 산출물을 만들어라. raw user request를 되풀이하지 말고, 연구 결과를 실행 가능한 작업 단계와 파일 변경으로 변환하라. 설계 설명만으로 끝내지 말고 가능한 파일 생성/수정, 구현 초안, 실행 방법, implementation_notes를 남겨라.${requestLine}`;
+      break;
     case 'reviewer':
-      return `현재 구현 산출물과 upstream handoff를 함께 검토하고 blocker, 빠진 테스트, 리스크, 수정 제안을 우선순위와 함께 review_findings에 남겨라.${requestLine}`;
+      goal = `현재 구현 산출물과 upstream handoff를 함께 검토하고 blocker, 빠진 테스트, 리스크, 수정 제안을 우선순위와 함께 review_findings에 남겨라.${requestLine}`;
+      break;
     case 'synthesizer':
-      return `upstream 결과와 검토 결과를 합쳐 사용자에게 전달 가능한 최종 구현 요약, 생성된 산출물, 실행 방법, 남은 리스크를 정리하라.${requestLine}`;
+      goal = `upstream 결과와 검토 결과를 합쳐 사용자에게 전달 가능한 최종 구현 요약, 생성된 산출물, 실행 방법, 남은 리스크를 정리하라.${requestLine}`;
+      break;
     default:
-      return request;
+      goal = request;
+      break;
   }
+  return evidence ? `${goal}
+
+${evidence}`.trim() : goal;
 }
 
 function buildRunAction(agent = {}, message = '', { finalSynthesis = false } = {}) {
@@ -193,9 +229,10 @@ function repairExistingGoals(actions = [], teamAgents = [], message = '', { fina
     const goal = String(action?.goal || action?.prompt || action?.task || '').trim();
     const agentId = cleanId(action?.agent_id || action?.agent);
     const matched = teamAgents.find((row) => cleanId(row.agent_id) === agentId) || {};
-    const rewritten = (!goal || goal === String(message || '').trim() || isGenericRawGoal(goal))
+    const rewrittenBase = (!goal || goal === String(message || '').trim() || isGenericRawGoal(goal))
       ? buildRoleGoal(roleId || matched.role_id, message)
       : goal;
+    const rewritten = appendBenchmarkAuthoritativeContext(rewrittenBase, message);
     const finalOwnerOverride = type === 'synthesize_final' && finalOwnerAgent ? finalOwnerAgent : null;
     const effectiveAgentId = cleanId(finalOwnerOverride?.agent_id || agentId || matched.agent_id || roleId);
     return {

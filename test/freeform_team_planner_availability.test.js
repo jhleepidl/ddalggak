@@ -72,3 +72,33 @@ test('isLlmTeamPlannerEnabled does not treat Gemini planner binary as available 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('isLlmTeamPlannerEnabled resolves logical antigravity provider to the agy executable by default', () => {
+  const prev = {
+    PATH: process.env.PATH,
+    TEAM_CREATE_PLANNER_MODE: process.env.TEAM_CREATE_PLANNER_MODE,
+    TEAM_PLANNER_PROVIDER: process.env.TEAM_PLANNER_PROVIDER,
+    ANTIGRAVITY_CLI_COMMAND: process.env.ANTIGRAVITY_CLI_COMMAND,
+    GOOGLE_AI_CLI_COMMAND: process.env.GOOGLE_AI_CLI_COMMAND,
+  };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ddalggak-agy-path-'));
+  const bin = path.join(dir, 'agy');
+  fs.writeFileSync(bin, '#!/bin/sh\necho agy\n', 'utf8');
+  fs.chmodSync(bin, 0o755);
+  process.env.PATH = dir;
+  process.env.TEAM_CREATE_PLANNER_MODE = 'auto';
+  process.env.TEAM_PLANNER_PROVIDER = 'antigravity';
+  delete process.env.ANTIGRAVITY_CLI_COMMAND;
+  delete process.env.GOOGLE_AI_CLI_COMMAND;
+  resetFreeformPlannerAvailabilityCache();
+  try {
+    assert.equal(isLlmTeamPlannerEnabled('create'), true);
+  } finally {
+    for (const [key, value] of Object.entries(prev)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    resetFreeformPlannerAvailabilityCache();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

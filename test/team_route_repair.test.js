@@ -361,3 +361,50 @@ test('named parallel execution pattern remains authoritative even when task inte
   assert.equal(repaired.actions[2].type, 'synthesize_final');
   assert.equal(repaired.actions[2].agent_id, 'synthesizer');
 });
+
+test('benchmark authoritative context survives role-goal repair without the 180 character request clip', () => {
+  const runtime = {
+    teamLocked: true,
+    activeTeamConfig: {
+      task_archetype: 'general',
+      interaction_spec: { execution_pattern: 'parallel_research_then_review_then_synthesize', collaboration_profile_id: 'evidence_panel' },
+      agents: [
+        { agent_id: 'lane_1', role: 'researcher', provider: 'claude', model_role: 'source_grounder' },
+        { agent_id: 'lane_2', role: 'researcher', provider: 'claude', model_role: 'source_grounder' },
+        { agent_id: 'reviewer', role: 'reviewer', provider: 'claude', model_role: 'verifier_critic' },
+        { agent_id: 'synthesizer', role: 'synthesizer', provider: 'codex', model_role: 'delivery_synthesizer' },
+      ],
+    },
+  };
+  const evidence = [
+    '[ROOM_JOURNEY_AUTHORITATIVE_CONTEXT manifest_id=manifest_abc sha256=hash_abc]',
+    'The following items are immutable.',
+    '- source_step_id=fact_cost sha256=h1',
+    '  A는 월 180만원, B는 월 90만원이다.',
+    '- source_step_id=fact_recovery sha256=h2',
+    '  A는 수동 복구 40분, B는 자동 복구 8분이다.',
+    '- source_step_id=fact_constraints sha256=h3',
+    '  출시 기한은 6주이고 장애 대응 인력은 1명이다.',
+    '[/ROOM_JOURNEY_AUTHORITATIVE_CONTEXT]',
+  ].join('\n');
+  const message = `${evidence}\n\nA/B 중 하나를 추천해줘.`;
+  const repaired = repairRoutePlanForTeamExecution({
+    reason: 'single lane fallback',
+    actions: [{ type: 'run_agent', agent_id: 'lane_1', goal: message, inputs: { role_id: 'researcher' } }],
+    team_locked: true,
+  }, { message, runtime });
+
+  const goals = [
+    ...repaired.actions[0].agents.map((row) => row.goal),
+    repaired.actions[1].goal,
+    repaired.actions[2].goal,
+  ];
+  assert.equal(goals.length, 4);
+  for (const goal of goals) {
+    assert.match(goal, /manifest_id=manifest_abc/);
+    assert.match(goal, /source_step_id=fact_cost/);
+    assert.match(goal, /source_step_id=fact_recovery/);
+    assert.match(goal, /source_step_id=fact_constraints/);
+    assert.match(goal, /장애 대응 인력은 1명/);
+  }
+});

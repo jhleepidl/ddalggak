@@ -5,6 +5,7 @@ import { clip, compactWithPinnedContext } from '../textutil.js';
 import { formatActiveArtifactContext, loadArtifactObservations } from './artifact_context.js';
 import { planMemoryTopology } from './memory_topology.js';
 import { updateChatMemoryAnchor } from './chat_memory_anchor.js';
+import { runLoopMemoryMaintenance } from './loop_memory_manager.js';
 
 const IDLE_COMPACTION_CANDIDATES_FILE = 'idle_compaction_candidates.jsonl';
 const IDLE_COMPACTION_SUMMARY_FILE = 'idle_compaction_summary.md';
@@ -205,15 +206,31 @@ export function runIdleMemoryMaintenance({ jobDir = '', jobId = '', chatId = '',
   if (shouldWriteCandidate) {
     candidate = writeIdleCompactionCandidate({ jobDir: cleanJobDir, maxChars });
   }
+  let loopMemory = null;
+  try {
+    loopMemory = runLoopMemoryMaintenance({
+      jobDir: cleanJobDir,
+      force: false,
+      archiveTerminal: true,
+      allowRawPrune: false,
+      limit: Number(process.env.IDLE_LOOP_MEMORY_MAINTENANCE_LIMIT || 100),
+    });
+  } catch {}
   const nextState = {
     last_run_at: new Date().toISOString(),
     last_topology_mode: mode || undefined,
     last_topology_stress: stress,
     last_candidate_written: !!candidate,
+    last_loop_memory_maintenance: loopMemory ? {
+      checked_runs: loopMemory.checked_runs,
+      compacted: loopMemory.compacted.length,
+      finalized: loopMemory.finalized.length,
+      failures: loopMemory.failures.length,
+    } : undefined,
     last_reason: shouldWriteCandidate ? 'candidate_written' : 'topology_only_low_pressure',
   };
   writeJson(statePath, nextState);
-  return { ok: true, skipped: false, topology, anchor, candidate, state: nextState };
+  return { ok: true, skipped: false, topology, anchor, candidate, loop_memory: loopMemory, state: nextState };
 }
 
 export function formatIdleCompactionCandidateForTelegram(candidate = {}) {

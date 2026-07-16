@@ -18,6 +18,7 @@ import {
   finalizeConciergeRoutingObservations,
   evaluatePortfolioPromotion,
   HeadlessRoomJourneyTransport,
+  judgeRoomJourneyRun,
   loadRoomJourneyScenario,
   loadRoomJourneySuite,
   runRoomJourneyScenario,
@@ -60,8 +61,8 @@ class FakeJourneyTransport {
     const runId = `run-${this.turn}`;
     this.models.forEach((model, index) => {
       const provider = index % 2 ? 'claude' : 'codex';
-      const modelRole = index === 0 ? 'code_executor' : 'verifier_critic';
-      const agentId = index === 0 ? 'builder' : `reviewer_${index}`;
+      const modelRole = index === 0 ? 'code_executor' : (index === 1 ? 'verifier_critic' : 'delivery_synthesizer');
+      const agentId = index === 0 ? 'builder' : (index === 1 ? `reviewer_${index}` : `synthesizer_${index}`);
       this.events.push(runtimeEvent('run.agent_start', { agent_id: agentId, provider, model, model_role: modelRole, execution_channel: 'local_cli' }, runId));
       this.events.push(runtimeEvent('run.agent_finish', { agent_id: agentId, provider, model, model_role: modelRole, execution_channel: 'local_cli', output_chars: 32 }, runId));
     });
@@ -88,8 +89,10 @@ test('room journey scenario loader and suite expose natural user and portfolio s
 test('latest routing and portfolio scenarios encode measurement-validity and topology-neutral promotion contracts', () => {
   const base = path.resolve('scenarios/room_journeys');
   const highImpact = loadRoomJourneyScenario(path.join(base, 'concierge_probe_complex_room_high_impact_decision.json'));
-  assert.equal(highImpact.routing_experiment.measurement_policy.label_status, 'quarantine');
+  assert.notEqual(highImpact.routing_experiment.measurement_policy.label_status, 'quarantine');
   assert.equal(highImpact.routing_experiment.measurement_policy.require_frozen_pre_target_snapshot, true);
+  assert.equal(highImpact.routing_experiment.measurement_policy.require_context_coverage_evidence, true);
+  assert.equal(highImpact.routing_experiment.measurement_policy.require_runtime_shape_evidence, true);
   assert.deepEqual(highImpact.routing_experiment.required_context_step_ids, ['fact_cost', 'fact_recovery', 'fact_constraints']);
 
   for (const name of ['portfolio_builder_reviewer.json', 'portfolio_parallel_ideation.json', 'portfolio_evidence_panel.json']) {
@@ -350,7 +353,7 @@ test('concierge routing label selects the least complex valid shape within seman
   });
   assert.equal(label.target_execution_shape, 'single_agent_with_retrieval');
   assert.equal(label.target_arm_id, 'solo');
-  assert.equal(label.label_basis, 'minimal_sufficient_execution_shape_within_quality_tolerance_after_measurement_validity_gate');
+  assert.equal(label.label_basis, 'minimal_sufficient_execution_shape_within_target_only_outcome_quality_tolerance_after_measurement_validity_gate');
 });
 
 test('concierge routing label is withheld when semantic evidence is insufficient', () => {
@@ -410,6 +413,7 @@ test('concierge routing measurement gate quarantines comparisons that require a 
     semantic_score: 0.95,
     pre_route_input_snapshot: { sha256: 'same', snapshot_mode: 'independent_arm_replay' },
     pre_route_room_snapshot_sha256: 'room-same',
+    context_projection_evidence: { common_evidence_hash: 'evidence-same' },
     measurement_validity: { invalid_reasons: ['context_coverage_evidence_unverified', 'frozen_pre_target_snapshot_unavailable', 'label_quarantined_by_experiment_policy'] },
   };
   const observations = finalizeConciergeRoutingObservations({
@@ -504,7 +508,7 @@ test('routing suite writes observations and a conservative minimal-sufficient la
       transportFactory: async ({ arm }) => new FakeJourneyTransport({
         chatId: `routing-${arm.id}`,
         traceRoot: path.join(root, 'trace'),
-        models: arm.id === 'solo' ? ['gpt-5.5'] : ['gpt-5.5', 'ag-fast'],
+        models: arm.id === 'solo' ? ['gpt-5.5'] : ['gpt-5.5', 'ag-fast', 'gpt-synth'],
       }),
       traceRoot: path.join(root, 'trace'),
       options: { judgeProvider: 'antigravity', judgeExecutor },
@@ -890,6 +894,364 @@ test('portfolio metrics do not count provider-success outputs that failed the ro
     assert.equal(result.summary.metrics.cli_failure_count, 1);
     const cliRows = fs.readFileSync(path.join(result.runDir, 'cli_calls.jsonl'), 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
     assert.ok(cliRows.some((row) => row.role_output_valid === false && row.provider_execution_success === true));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test('target-only semantic judge excludes prior assistant behavior and topology metadata from outcome scoring', async () => {
+  const root = makeTestTempDir('room-journey-target-only-judge-');
+  try {
+    const scenario = {
+      id: 'target_only_probe',
+      title: 'Target only probe',
+      routing_experiment: { target_step_id: 'target', required_context_step_ids: ['fact'] },
+      semantic_rubric: [{ id: 'fidelity', description: 'Use the source fact accurately.' }],
+    };
+    let captured = '';
+    const judgment = await judgeRoomJourneyRun({
+      scenario,
+      arm: { id: 'panel', collaboration_profile: 'evidence_panel', model_policy: 'multi' },
+      stepRows: [
+        { step: { id: 'fact', action: 'send_message', text: '정답 기준 사실은 42다.' }, result: { output: '이전 assistant가 잘못 99라고 말했다.' } },
+        { step: { id: 'target', action: 'send_message', text: '기준 사실을 답해줘.' }, result: { output: '42' } },
+      ],
+      assertions: [],
+      runDir: root,
+      provider: 'fake',
+      executor: async ({ prompt }) => {
+        captured = prompt;
+        return { ok: true, stdout: JSON.stringify({ passed: true, score: 1, summary: 'ok', rubric: [], findings: [] }) };
+      },
+    });
+    assert.equal(judgment.evaluation_scope.mode, 'target_only');
+    assert.match(captured, /정답 기준 사실은 42다/);
+    assert.match(captured, /"assistant": "42"/);
+    assert.doesNotMatch(captured, /이전 assistant가 잘못 99라고 말했다/);
+    assert.doesNotMatch(captured, /evidence_panel/);
+    assert.doesNotMatch(captured, /model_policy/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('routing suite builds common Room state once, forks the same snapshot, and applies candidate policy only at target', async () => {
+  const root = makeTestTempDir('room-journey-frozen-fork-');
+  try {
+    const scenarioFile = path.join(root, 'scenario.json');
+    fs.writeFileSync(scenarioFile, JSON.stringify({
+      schema_version: 'ddalggak.room_journey_scenario/v1',
+      id: 'frozen_fork_probe',
+      routing_experiment: {
+        target_step_id: 'target',
+        required_context_step_ids: ['fact'],
+        minimum_semantic_score: 0.8,
+        quality_tolerance: 0.05,
+        candidate_shapes: { solo: 'single_agent_with_retrieval', panel: 'evidence_panel' },
+        measurement_policy: {
+          require_context_parity: true,
+          require_context_coverage_evidence: true,
+          require_frozen_pre_target_snapshot: true,
+          require_runtime_shape_evidence: true,
+        },
+      },
+      experiment: {
+        baseline: { id: 'solo', collaboration_profile: 'solo', input_kind: 'normal' },
+        challengers: [{ id: 'panel', collaboration_profile: 'evidence_panel', input_kind: 'team_task' }],
+      },
+      steps: [
+        { id: 'fact', action: 'send_message', text: '공통 source of truth는 42다.' },
+        { id: 'target', action: 'send_message', text: 'source of truth를 사용해 답해줘.' },
+      ],
+      assertions: [{ id: 'target_ok', type: 'step_ok', step_id: 'target' }],
+      semantic_rubric: [{ id: 'fidelity', description: '42를 사용한다.' }],
+    }, null, 2));
+
+    const calls = [];
+    class FrozenTransport {
+      constructor(armId) { this.armId = armId; this.chatId = `room_${armId}`; this.events = []; this.turns = []; this.profile = 'auto'; }
+      async initialize() { calls.push(`${this.armId}:initialize`); }
+      async sendCommand(command) { this.profile = command.split(/\s+/).at(-1); calls.push(`${this.armId}:command:${this.profile}`); return { ok: true, room_state: this.snapshotState() }; }
+      snapshotState() { return { recent_room_turn_count: this.turns.length * 2, collaboration_profile_id: this.profile, runtime_rules: [], memory_candidates: [], room_memory_items: [], pending_approval: false }; }
+      async sendMessage(text, options = {}) {
+        calls.push(`${this.armId}:message:${text}`);
+        this.turns.push(text);
+        const manifestId = options.authoritativeContextManifest?.manifest_id || '';
+        const manifestSteps = (options.authoritativeContextManifest?.items || []).map((item) => `source_step_id=${item.source_step_id}`).join(' ');
+        const goal = manifestId ? `${manifestId} ${manifestSteps} ${text}` : text;
+        const event = (type, payload) => ({ event_id: `${this.armId}_${type}_${this.events.length}`, event_type: type, occurred_at: new Date().toISOString(), payload: { execution_channel: 'local_cli', ...payload } });
+        if (this.armId === 'panel' && text.includes('답해줘')) {
+          for (let i = 1; i <= 2; i += 1) {
+            this.events.push(event('run.agent_start', { agent_id: `lane_${i}`, role_id: 'researcher', model_role: 'source_grounder', provider: 'antigravity', resolved_model: `model_${i}`, lane_id: `lane_${i}`, goal }));
+            this.events.push(event('run.agent_finish', { agent_id: `lane_${i}`, role_id: 'researcher', model_role: 'source_grounder', provider: 'antigravity', resolved_model: `model_${i}`, lane_id: `lane_${i}`, role_output_valid: true }));
+          }
+          for (const [agent, role] of [['reviewer', 'verifier_critic'], ['synthesizer', 'delivery_synthesizer']]) {
+            this.events.push(event('run.agent_start', { agent_id: agent, role_id: agent, model_role: role, provider: 'codex', resolved_model: 'gpt-test', goal }));
+            this.events.push(event('run.agent_finish', { agent_id: agent, role_id: agent, model_role: role, provider: 'codex', resolved_model: 'gpt-test', role_output_valid: true }));
+          }
+        } else if (text.includes('답해줘')) {
+          this.events.push(event('run.agent_start', { agent_id: 'solo', role_id: 'researcher', model_role: 'source_grounder', provider: 'codex', resolved_model: 'gpt-test', goal }));
+          this.events.push(event('run.agent_finish', { agent_id: 'solo', role_id: 'researcher', model_role: 'source_grounder', provider: 'codex', resolved_model: 'gpt-test', role_output_valid: true }));
+        }
+        return { ok: true, output: text.includes('답해줘') ? '42' : '반영했습니다.', room_state: this.snapshotState(), authoritative_context_manifest: options.authoritativeContextManifest || null };
+      }
+      async exportFrozenSnapshot({ authoritativeContextManifest, buildupSteps }) {
+        return {
+          schema_version: 'ddalggak.frozen_pre_target_room_snapshot/v1', snapshot_mode: 'frozen_pre_target_room_fork', snapshot_id: 'snapshot_same', canonical_content_sha256: 'hash_same',
+          scenario_id: 'frozen_fork_probe', target_step_id: 'target', snapshot_root: root, job_state_dir: root,
+          authoritative_context_manifest: authoritativeContextManifest, buildup_steps: buildupSteps, state: { turns: [...this.turns] },
+        };
+      }
+      async restoreFrozenSnapshot(snapshot) { this.turns = [...(snapshot.state?.turns || ['공통 source of truth는 42다.'])]; calls.push(`${this.armId}:restore:${snapshot.snapshot_id}`); return { ok: true }; }
+    }
+
+    const summary = await runRoomJourneySuite({
+      scenarioFiles: [scenarioFile],
+      outputRoot: path.join(root, 'out'),
+      execute: true,
+      transportFactory: async ({ arm }) => new FrozenTransport(arm.id),
+      options: {
+        judgeProvider: 'fake',
+        judgeExecutor: async () => ({ ok: true, stdout: JSON.stringify({ passed: true, score: 0.95, summary: 'ok', rubric: [], findings: [] }) }),
+      },
+    });
+    assert.equal(calls.filter((row) => row === '__frozen_seed__:message:공통 source of truth는 42다.').length, 1);
+    assert.equal(calls.some((row) => row === 'solo:message:공통 source of truth는 42다.'), false);
+    assert.equal(calls.some((row) => row === 'panel:message:공통 source of truth는 42다.'), false);
+    assert.equal(calls.includes('solo:restore:snapshot_same'), true);
+    assert.equal(calls.includes('panel:restore:snapshot_same'), true);
+    const observations = fs.readFileSync(path.join(root, 'out', 'concierge_routing_observations.jsonl'), 'utf8').trim().split(/\n/).map(JSON.parse);
+    assert.equal(observations.length, 2);
+    assert.equal(observations.every((row) => row.pre_route_input_snapshot.snapshot_mode === 'frozen_pre_target_room_fork'), true);
+    assert.equal(observations.every((row) => row.pre_route_room_snapshot_sha256 === 'hash_same'), true);
+    assert.equal(observations.every((row) => row.context_projection_evidence.coverage_status === 'verified'), true);
+    assert.equal(observations.every((row) => row.actual_execution.contract_match === true), true);
+    assert.equal(observations.every((row) => row.context_parity.valid === true), true);
+    assert.equal(summary.concierge_routing_label_count, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('headless frozen snapshot clones canonical Room session and job-local memory while excluding volatile runtime traces', async () => {
+  const root = makeTestTempDir('room-journey-real-frozen-snapshot-');
+  try {
+    const sessions = new Map();
+    let jobCounter = 0;
+    const jobsRoot = path.join(root, 'jobs');
+    const jobs = {
+      createJob() {
+        jobCounter += 1;
+        const jobId = `job-${jobCounter}`;
+        const dir = path.join(jobsRoot, jobId);
+        fs.mkdirSync(dir, { recursive: true });
+        return { jobId, dir };
+      },
+      jobDir(jobId) { return path.join(jobsRoot, jobId); },
+    };
+    const chatSessionStore = {
+      clear(chatId) { sessions.delete(String(chatId)); },
+      get(chatId) { return sessions.get(String(chatId)) || { state: 'idle' }; },
+      upsert(chatId, patchOrUpdater) {
+        const current = this.get(chatId);
+        const patch = typeof patchOrUpdater === 'function' ? patchOrUpdater(current) : patchOrUpdater;
+        const next = { ...current, ...patch };
+        sessions.set(String(chatId), next);
+        return next;
+      },
+    };
+    const runtimeFactory = async () => ({
+      bot: { mark() { return 0; }, messagesSince() { return []; } },
+      runtimeCore: {
+        chatSessionStore,
+        jobs,
+        resolveCurrentJobIdForChat(chatId) { return cleanJobId(chatSessionStore.get(chatId).jobId); },
+      },
+      chatRunManager: { isRunning() { return false; } },
+    });
+    function cleanJobId(value) { return String(value || '').trim(); }
+
+    const source = new HeadlessRoomJourneyTransport({ chatId: 'room-source', threadId: 'room-source', userId: 'u', runtimeRoot: root, runtimeFactory });
+    await source.initialize();
+    const sourceJob = jobs.createJob();
+    chatSessionStore.upsert('room-source', {
+      state: 'idle',
+      jobId: sourceJob.jobId,
+      recent_room_turns: [
+        { role: 'user', text: '공통 사실 42', source: 'test' },
+        { role: 'assistant', text: '반영했습니다.', source: 'test' },
+      ],
+      runtime_rules: [{ id: 'rule-1', text: '근거를 우선한다', enabled: true }],
+    });
+    fs.mkdirSync(path.join(sourceJob.dir, 'local_memory'), { recursive: true });
+    fs.mkdirSync(path.join(sourceJob.dir, 'llm_traces', 'trace-1'), { recursive: true });
+    fs.writeFileSync(path.join(sourceJob.dir, 'conversation.jsonl'), '{"role":"user","text":"공통 사실 42"}\n');
+    fs.writeFileSync(path.join(sourceJob.dir, 'local_memory', 'room_turn_ledger.jsonl'), '{"role":"user","text":"공통 사실 42"}\n');
+    fs.writeFileSync(path.join(sourceJob.dir, 'runtime_events.jsonl'), '{"event_type":"volatile"}\n');
+    fs.writeFileSync(path.join(sourceJob.dir, 'llm_traces', 'trace-1', 'prompt.txt'), 'sensitive volatile prompt');
+
+    const manifest = {
+      schema_version: 'ddalggak.room_journey_authoritative_context_manifest/v1',
+      manifest_id: 'manifest-test',
+      sha256: 'manifest-hash',
+      complete: true,
+      items: [{ source_step_id: 'fact', sha256: 'fact-hash', text: '공통 사실 42' }],
+    };
+    const snapshot = await source.exportFrozenSnapshot({
+      destinationRoot: path.join(root, 'snapshots'),
+      scenarioId: 'snapshot_probe',
+      targetStepId: 'target',
+      authoritativeContextManifest: manifest,
+      buildupSteps: [{ step: { id: 'fact' } }],
+    });
+    assert.equal(snapshot.snapshot_mode, 'frozen_pre_target_room_fork');
+    assert.ok(snapshot.canonical_content_sha256);
+    assert.ok(snapshot.job_files.some((row) => row.relative_path === 'conversation.jsonl'));
+    assert.ok(snapshot.job_files.some((row) => row.relative_path === 'local_memory/room_turn_ledger.jsonl'));
+    assert.equal(snapshot.job_files.some((row) => row.relative_path === 'runtime_events.jsonl'), false);
+    assert.equal(snapshot.job_files.some((row) => row.relative_path.startsWith('llm_traces/')), false);
+
+    const branch = new HeadlessRoomJourneyTransport({ chatId: 'room-branch', threadId: 'room-branch', userId: 'u', runtimeRoot: root, runtimeFactory });
+    await branch.initialize();
+    const restored = await branch.restoreFrozenSnapshot(snapshot);
+    const branchSession = chatSessionStore.get('room-branch');
+    const branchJobDir = jobs.jobDir(branchSession.jobId);
+    assert.equal(restored.snapshot_id, snapshot.snapshot_id);
+    assert.notEqual(branchSession.jobId, sourceJob.jobId);
+    assert.equal(branchSession.recent_room_turns.length, 2);
+    assert.equal(fs.readFileSync(path.join(branchJobDir, 'conversation.jsonl'), 'utf8'), fs.readFileSync(path.join(sourceJob.dir, 'conversation.jsonl'), 'utf8'));
+    assert.equal(fs.existsSync(path.join(branchJobDir, 'runtime_events.jsonl')), false);
+    assert.equal(fs.existsSync(path.join(branchJobDir, 'llm_traces')), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('deterministic state_update mutates Room ledger with zero provider calls', async () => {
+  const root = makeTestTempDir('room-journey-deterministic-state-update-');
+  try {
+    const sessions = new Map();
+    const jobDir = path.join(root, 'job-state-update');
+    fs.mkdirSync(jobDir, { recursive: true });
+    const chatSessionStore = {
+      clear(chatId) { sessions.delete(String(chatId)); },
+      get(chatId) { return sessions.get(String(chatId)) || { state: 'idle' }; },
+      upsert(chatId, patchOrUpdater) {
+        const current = this.get(chatId);
+        const patch = typeof patchOrUpdater === 'function' ? patchOrUpdater(current) : patchOrUpdater;
+        const next = { ...current, ...patch };
+        sessions.set(String(chatId), next);
+        return next;
+      },
+    };
+    const runtimeFactory = async () => ({
+      bot: { mark() { return 0; }, messagesSince() { return []; } },
+      runtimeCore: {
+        chatSessionStore,
+        resolveCurrentJobIdForChat(chatId) { return chatSessionStore.get(chatId).jobId || ''; },
+        jobs: { jobDir() { return jobDir; } },
+      },
+      chatRunManager: { isRunning() { return false; } },
+    });
+    const transport = new HeadlessRoomJourneyTransport({ chatId: 'room-state', threadId: 'room-state', userId: 'u', runtimeRoot: root, runtimeFactory });
+    await transport.initialize();
+    chatSessionStore.upsert('room-state', { state: 'idle', jobId: 'job-state-update', recent_room_turns: [] });
+    const result = await transport.applyDeterministicStateUpdate('출시 목표일은 9월 18일이야.', { acknowledgement: '9월 18일로 반영했습니다.' });
+    assert.equal(result.ok, true);
+    assert.equal(result.execution_mode, 'deterministic_state_update');
+    assert.equal(result.provider_call_count, 0);
+    assert.equal(transport.events.length, 0);
+    const session = chatSessionStore.get('room-state');
+    assert.equal(session.recent_room_turns.length, 2);
+    assert.equal(session.recent_room_turns[0].role, 'user');
+    assert.equal(session.recent_room_turns[1].role, 'assistant');
+    const ledger = fs.readFileSync(path.join(jobDir, 'local_memory', 'room_turn_ledger.jsonl'), 'utf8');
+    assert.match(ledger, /출시 목표일은 9월 18일/);
+    assert.match(ledger, /9월 18일로 반영했습니다/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('portfolio latency comparison prefers target-step duration over frozen-fork setup overhead', () => {
+  const baseline = { execution_status: 'valid_execution', collaboration_execution_status: 'not_applicable', outcome_quality_score: 0.9, required_fail: 0, duration_ms: 10000, target_step_duration_ms: 1000, comparison_duration_ms: 1000, semantic_judge_present: true, exact_model_identity_complete: true, cost_usd: 1 };
+  const challenger = { execution_status: 'valid_execution', collaboration_execution_status: 'valid_collaboration_execution', outcome_quality_score: 0.96, required_fail: 0, duration_ms: 12000, target_step_duration_ms: 2500, comparison_duration_ms: 2500, semantic_judge_present: true, exact_model_identity_complete: true, cost_usd: 2 };
+  const result = evaluatePortfolioPromotion({ baseline, challenger, gate: { min_quality_uplift: 0.05, max_latency_ratio: 3, max_cost_ratio: 3 } });
+  assert.equal(result.latency_ratio, 2.5);
+  assert.equal(result.promote, true);
+});
+
+test('collaboration process evidence preserves target-only lane lineage separately from outcome quality', async () => {
+  const root = makeTestTempDir('room-journey-process-evidence-');
+  try {
+    const jobDir = path.join(root, 'job');
+    fs.mkdirSync(path.join(jobDir, 'local_memory', 'role_summaries'), { recursive: true });
+    class ProcessEvidenceTransport extends HeadlessRoomJourneyTransport {
+      async initialize() {
+        const session = { state: 'idle', jobId: 'job-process', recent_room_turns: [] };
+        this.runtime = {
+          bot: { mark() { return 0; }, messagesSince() { return []; } },
+          runtimeCore: {
+            chatSessionStore: { get() { return session; }, upsert() { return session; } },
+            resolveCurrentJobIdForChat() { return 'job-process'; },
+            jobs: { jobDir() { return jobDir; } },
+          },
+          chatRunManager: { isRunning() { return false; } },
+        };
+        return { transport: 'headless' };
+      }
+      async sendCommand() { return { ok: true }; }
+      snapshotState() { return { recent_room_turn_count: 0, collaboration_profile_id: 'parallel_ideation', runtime_rules: [], memory_candidates: [], room_memory_items: [], pending_approval: false }; }
+      async sendMessage() {
+        fs.writeFileSync(path.join(jobDir, 'local_memory', 'role_summaries', 'researcher.md'), [
+          '# role summary · researcher',
+          '',
+          '## 2026-07-15T00:00:01Z · researcher',
+          '- goal: lane one',
+          '- output: 장애 재구성 시뮬레이션으로 실제 흐름을 학습한다.',
+          '- model: claude/model-a',
+          '',
+          '## 2026-07-15T00:00:02Z · researcher',
+          '- goal: lane two',
+          '- output: 실제 백로그 버그를 조사하고 수정 증거를 제출한다.',
+          '- model: claude/model-b',
+          '',
+        ].join('\n'));
+        fs.writeFileSync(path.join(jobDir, 'local_memory', 'role_summaries', 'reviewer.md'), '# role summary · reviewer\n\n## 2026-07-15T00:00:03Z · reviewer\n- goal: review\n- output: 두 접근은 메커니즘이 다르다.\n- model: claude/model-r\n');
+        fs.writeFileSync(path.join(jobDir, 'local_memory', 'role_summaries', 'synthesizer.md'), '# role summary · synthesizer\n\n## 2026-07-15T00:00:04Z · synthesizer\n- goal: synthesize\n- output: 두 접근을 비교해 최종 세 안을 제시한다.\n- model: codex/gpt-test\n');
+        const now = Date.now();
+        const make = (offset, event_type, payload) => ({ event_id: `${event_type}-${offset}`, event_type, occurred_at: new Date(now + offset).toISOString(), payload: { execution_channel: 'local_cli', ...payload } });
+        const events = [
+          make(1, 'run.agent_start', { agent_id: 'lane-1', role_id: 'researcher', model_role: 'source_grounder', lane_id: 'lane-1', provider: 'claude', goal: 'lane one' }),
+          make(2, 'run.agent_finish', { agent_id: 'lane-1', role_id: 'researcher', model_role: 'source_grounder', lane_id: 'lane-1', provider: 'claude', role_output_valid: true }),
+          make(3, 'run.agent_start', { agent_id: 'lane-2', role_id: 'researcher', model_role: 'source_grounder', lane_id: 'lane-2', provider: 'claude', goal: 'lane two' }),
+          make(4, 'run.agent_finish', { agent_id: 'lane-2', role_id: 'researcher', model_role: 'source_grounder', lane_id: 'lane-2', provider: 'claude', role_output_valid: true }),
+          make(5, 'run.agent_start', { agent_id: 'reviewer', role_id: 'reviewer', model_role: 'verifier_critic', provider: 'claude', goal: 'review' }),
+          make(6, 'run.agent_finish', { agent_id: 'reviewer', role_id: 'reviewer', model_role: 'verifier_critic', provider: 'claude', role_output_valid: true }),
+          make(7, 'run.agent_start', { agent_id: 'synthesizer', role_id: 'synthesizer', model_role: 'delivery_synthesizer', provider: 'codex', goal: 'synthesize' }),
+          make(8, 'run.agent_finish', { agent_id: 'synthesizer', role_id: 'synthesizer', model_role: 'delivery_synthesizer', provider: 'codex', role_output_valid: true }),
+        ];
+        this.events.push(...events);
+        return { ok: true, output: '장애 재구성과 실제 버그 조사를 포함한 세 안을 제안한다.', events, room_state: this.snapshotState() };
+      }
+    }
+    const scenario = {
+      id: 'process_evidence_probe',
+      experiment: { target_step_id: 'target', baseline: { id: 'parallel', collaboration_profile: 'parallel_ideation', input_kind: 'team_task' } },
+      semantic_judge: false,
+      steps: [{ id: 'target', action: 'send_message', text: '서로 다른 대안을 만들어줘.' }],
+      assertions: [{ id: 'target_ok', type: 'step_ok', step_id: 'target' }],
+    };
+    const transport = new ProcessEvidenceTransport({ chatId: 'process-room', threadId: 'process-room', runtimeRoot: root });
+    const result = await runRoomJourneyScenario({ scenario, arm: scenarioArms(scenario)[0], outputRoot: path.join(root, 'out'), execute: true, transport });
+    const evidence = result.summary.collaboration_process_evidence;
+    assert.equal(evidence.outcome_score_inclusion, false);
+    assert.equal(evidence.lane_output_count, 2);
+    assert.equal(evidence.distinct_lane_output_hash_count, 2);
+    assert.ok(evidence.mean_pairwise_lane_lexical_distance > 0);
+    assert.equal(evidence.final_lane_overlap_proxy.length, 2);
+    assert.ok(fs.existsSync(path.join(result.runDir, 'collaboration_process_evidence.json')));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

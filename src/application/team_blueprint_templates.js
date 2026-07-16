@@ -1,3 +1,5 @@
+import { applyRoomModelRolePolicyToAgent } from './room_model_role_router.js';
+
 function asArray(value){ return Array.isArray(value) ? value : []; }
 function clean(value=''){ return String(value||'').trim(); }
 function cleanId(value=''){ return clean(value).toLowerCase().replace(/[^a-z0-9._:-]+/g, '_'); }
@@ -84,7 +86,7 @@ function buildSeed(template, { taskBrief = '', title = '', description = '' } = 
     task_brief: taskText,
     composition_mode: 'structured',
     proposal_mode: 'create',
-    agents: template.agents.map((agent) => ({ ...agent })),
+    agents: template.agents.map((agent) => applyRoomModelRolePolicyToAgent({ ...agent }, { source: 'task_archetype_template' })),
     interaction_spec: JSON.parse(JSON.stringify(template.interaction_spec)),
     shortcut_policy: {
       enabled: true,

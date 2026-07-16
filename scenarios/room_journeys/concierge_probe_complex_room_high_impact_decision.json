@@ -28,11 +28,10 @@
       "fact_constraints"
     ],
     "measurement_policy": {
-      "label_status": "quarantine",
-      "quarantine_reason": "rerun_required_with_frozen_pre_target_room_snapshot_and_verified_authoritative_context_coverage",
       "require_context_parity": true,
       "require_context_coverage_evidence": true,
-      "require_frozen_pre_target_snapshot": true
+      "require_frozen_pre_target_snapshot": true,
+      "require_runtime_shape_evidence": true
     }
   },
   "experiment": {

@@ -13,6 +13,8 @@ import { getAgentRoomProfile, upsertAgentRoomProfile } from '../application/agen
 import { buildRoomFirstTeamConfiguration } from '../application/ai_room_runtime_selection.js';
 import { classifyRoomConciergeRoute } from '../application/room_concierge.js';
 import { buildRoomTurnRoute } from '../application/room_turn_router.js';
+import { appendRoomConversationExchange } from '../application/room_conversation_ledger.js';
+import { recordUserFactEvents } from '../application/user_fact_context.js';
 
 function clean(value = '') { return String(value ?? '').trim(); }
 function asArray(value) { return Array.isArray(value) ? value : []; }
@@ -31,6 +33,99 @@ function stableValue(value) {
   return value;
 }
 function stableSha256(value) { return createHash('sha256').update(JSON.stringify(stableValue(value))).digest('hex'); }
+
+function deepClone(value) { return value == null ? value : JSON.parse(JSON.stringify(value)); }
+function fileSha256(filePath = '') { return createHash('sha256').update(fs.readFileSync(filePath)).digest('hex'); }
+function walkRegularFiles(root = '') {
+  const resolved = path.resolve(root || '.');
+  if (!fs.existsSync(resolved)) return [];
+  const out = [];
+  const visit = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) visit(full);
+      else if (entry.isFile()) out.push(full);
+    }
+  };
+  visit(resolved);
+  return out.sort();
+}
+function frozenSnapshotFileIncluded(relative = '') {
+  const rel = clean(relative).replaceAll('\\', '/');
+  if (!rel) return false;
+  if (rel === 'runtime_events.jsonl' || rel === 'job.log' || rel === 'meta.json') return false;
+  if (rel.startsWith('llm_traces/') || rel.includes('/llm_traces/')) return false;
+  if (rel.startsWith('improvement_debug/') || rel.includes('/improvement_debug/')) return false;
+  return true;
+}
+function copyFrozenJobState(sourceDir = '', destinationDir = '') {
+  ensureDir(destinationDir);
+  for (const sourceFile of walkRegularFiles(sourceDir)) {
+    const rel = path.relative(sourceDir, sourceFile);
+    if (!frozenSnapshotFileIncluded(rel)) continue;
+    const destinationFile = path.join(destinationDir, rel);
+    ensureDir(path.dirname(destinationFile));
+    fs.copyFileSync(sourceFile, destinationFile);
+  }
+}
+function frozenJobStateManifest(root = '') {
+  return walkRegularFiles(root)
+    .map((file) => ({ relative_path: path.relative(root, file).replaceAll('\\', '/'), sha256: fileSha256(file), size_bytes: fs.statSync(file).size }))
+    .filter((row) => frozenSnapshotFileIncluded(row.relative_path));
+}
+function canonicalFrozenSession(session = {}) {
+  const row = deepClone(asObject(session));
+  row.chat_id = '__FROZEN_ROOM__';
+  row.jobId = '__FROZEN_JOB__';
+  row.state = 'idle';
+  row.active_run_id = null;
+  row.pending_approval = null;
+  row.interrupt = null;
+  row.agent_status = {};
+  row.current_turn_ack_message_id = null;
+  row.current_turn_plan_message_id = null;
+  row.room_journey_identity = { transport: 'headless', snapshot: true };
+  delete row.updated_at;
+  return row;
+}
+function authoritativeContextManifestFromScenario(scenario = {}, targetStepId = '') {
+  const required = routingRequiredContextStepIds(scenario);
+  if (!required.length) return null;
+  const byId = new Map(asArray(scenario.steps).map((step) => [clean(step?.id), step]));
+  const items = required.map((stepId) => {
+    const step = byId.get(stepId);
+    const text = clean(step?.text);
+    return { source_step_id: stepId, authority: 'user_source_of_truth', text, sha256: stableSha256({ source_step_id: stepId, text }) };
+  }).filter((row) => row.text);
+  if (items.length !== required.length) return { manifest_id: null, required_source_step_ids: required, items, complete: false };
+  const canonical = { scenario_id: clean(scenario.id), target_step_id: clean(targetStepId), items };
+  const sha256 = stableSha256(canonical);
+  return {
+    schema_version: 'ddalggak.authoritative_context_manifest/v1',
+    manifest_id: `ctx_${sha256.slice(0, 20)}`,
+    sha256,
+    scenario_id: clean(scenario.id),
+    target_step_id: clean(targetStepId),
+    required_source_step_ids: required,
+    items,
+    complete: true,
+  };
+}
+function renderAuthoritativeContextEnvelope(text = '', manifest = null) {
+  const row = asObject(manifest);
+  const items = asArray(row.items);
+  if (!clean(row.manifest_id) || !items.length) return clean(text);
+  const evidence = items.map((item) => `- source_step_id=${clean(item.source_step_id)} sha256=${clean(item.sha256)}\n  ${clean(item.text)}`).join('\n');
+  return [
+    `[ROOM_JOURNEY_AUTHORITATIVE_CONTEXT manifest_id=${clean(row.manifest_id)} sha256=${clean(row.sha256)}]`,
+    'The following items are the immutable Room source of truth for this benchmark turn. Do not replace them with assumptions.',
+    evidence,
+    '[/ROOM_JOURNEY_AUTHORITATIVE_CONTEXT]',
+    '',
+    clean(text),
+  ].join('\n');
+}
 
 export function loadRoomJourneyScenario(filePath) {
   const row = readJson(filePath);
@@ -292,9 +387,140 @@ export class HeadlessRoomJourneyTransport {
     };
   }
 
-  async sendMessage(text = '', messageOptions = {}) {
+  async exportFrozenSnapshot({ destinationRoot = '', scenarioId = '', targetStepId = '', authoritativeContextManifest = null, buildupSteps = [] } = {}) {
+    if (!this.runtime) await this.initialize();
+    await this._waitForIdle();
+    const runtimeCore = this.runtime.runtimeCore;
+    const session = runtimeCore.chatSessionStore.get(this.chatId) || {};
+    const jobId = this._currentJobId();
+    if (!jobId) throw new Error('Cannot freeze Room journey without an active job');
+    const sourceJobDir = runtimeCore.jobs.jobDir(jobId);
+    const root = ensureDir(path.resolve(destinationRoot || this.runtimeRoot, safe(scenarioId || this.chatId)));
+    const jobStateDir = path.join(root, 'job_state');
+    fs.rmSync(jobStateDir, { recursive: true, force: true });
+    copyFrozenJobState(sourceJobDir, jobStateDir);
+    const canonicalSession = canonicalFrozenSession(session);
+    const jobFiles = frozenJobStateManifest(jobStateDir);
+    const canonical = {
+      schema_version: 'ddalggak.frozen_pre_target_room_snapshot/v1',
+      scenario_id: clean(scenarioId),
+      target_step_id: clean(targetStepId),
+      session: canonicalSession,
+      job_files: jobFiles,
+      authoritative_context_manifest: asObject(authoritativeContextManifest),
+      buildup_step_ids: asArray(buildupSteps).map((row) => clean(row?.step?.id || row?.id)).filter(Boolean),
+    };
+    const sha256 = stableSha256(canonical);
+    const snapshot = {
+      ...canonical,
+      snapshot_mode: 'frozen_pre_target_room_fork',
+      snapshot_id: `room_snapshot_${sha256.slice(0, 20)}`,
+      canonical_content_sha256: sha256,
+      source_chat_id: this.chatId,
+      source_job_id: jobId,
+      snapshot_root: root,
+      job_state_dir: jobStateDir,
+      created_at: nowIso(),
+    };
+    writeJson(path.join(root, 'snapshot.json'), snapshot);
+    return snapshot;
+  }
+
+  async restoreFrozenSnapshot(snapshot = {}) {
+    if (!this.runtime) await this.initialize();
+    const row = asObject(snapshot);
+    if (clean(row.snapshot_mode) !== 'frozen_pre_target_room_fork' || !clean(row.job_state_dir)) throw new Error('Invalid frozen pre-target Room snapshot');
+    const runtimeCore = this.runtime.runtimeCore;
+    const clonedJob = runtimeCore.jobs.createJob({
+      title: `Frozen Room fork ${clean(row.scenario_id || this.chatId)}`,
+      ownerUserId: this.userId,
+      ownerChatId: this.chatId,
+    });
+    fs.rmSync(clonedJob.dir, { recursive: true, force: true });
+    ensureDir(clonedJob.dir);
+    copyFrozenJobState(path.resolve(row.job_state_dir), clonedJob.dir);
+    ensureDir(path.join(clonedJob.dir, 'workspace'));
+    ensureDir(path.join(clonedJob.dir, 'shared'));
+    writeJson(path.join(clonedJob.dir, 'meta.json'), {
+      jobId: clonedJob.jobId,
+      title: `Frozen Room fork ${clean(row.scenario_id || this.chatId)}`,
+      ownerUserId: this.userId,
+      ownerChatId: this.chatId,
+      createdAt: nowIso(),
+      frozen_snapshot_id: clean(row.snapshot_id),
+      frozen_snapshot_sha256: clean(row.canonical_content_sha256),
+    });
+    const sourceSession = deepClone(asObject(row.session));
+    runtimeCore.chatSessionStore.upsert(this.chatId, {
+      ...sourceSession,
+      chat_id: this.chatId,
+      jobId: clonedJob.jobId,
+      state: 'idle',
+      active_run_id: null,
+      pending_approval: null,
+      interrupt: null,
+      agent_status: {},
+      room_journey_trace_enabled: true,
+      room_journey_trace_until: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+      room_journey_trace_source: 'headless_room_journey_frozen_fork',
+      room_journey_identity: {
+        thread_id: this.threadId,
+        chat_id: this.chatId,
+        user_id: this.userId,
+        transport: 'headless',
+        frozen_snapshot_id: clean(row.snapshot_id),
+      },
+    });
+    this.events = [];
+    this.seenRuntimeEventKeys.clear();
+    return {
+      ok: true,
+      snapshot_id: clean(row.snapshot_id),
+      canonical_content_sha256: clean(row.canonical_content_sha256),
+      cloned_job_id: clonedJob.jobId,
+      room_state: this.snapshotState(),
+    };
+  }
+
+  async applyDeterministicStateUpdate(text = '', { acknowledgement = '' } = {}) {
     if (!this.runtime) await this.initialize();
     const message = clean(text);
+    const response = clean(acknowledgement) || '반영했습니다.';
+    const runtimeCore = this.runtime.runtimeCore;
+    let jobId = this._currentJobId();
+    if (!jobId) throw new Error('Deterministic state update requires an active Room job');
+    const jobDir = runtimeCore.jobs.jobDir(jobId);
+    try { recordUserFactEvents(jobDir, message, { source: 'room_journey_deterministic_state_update', timestamp: nowIso() }); } catch {}
+    appendRoomConversationExchange({
+      jobDir,
+      chatSessionStore: runtimeCore.chatSessionStore,
+      chatId: this.chatId,
+      userId: this.userId,
+      userText: message,
+      assistantText: response,
+      source: 'room_journey_deterministic_state_update',
+      provider: 'deterministic',
+      model: 'none',
+      route: 'state_update',
+      jobId,
+    });
+    return {
+      ok: true,
+      output: response,
+      full_user_response: response,
+      orchestration_transcript: '',
+      execution_mode: 'deterministic_state_update',
+      provider_call_count: 0,
+      events: [],
+      room_state: this.snapshotState(),
+    };
+  }
+
+  async sendMessage(text = '', messageOptions = {}) {
+    if (!this.runtime) await this.initialize();
+    const originalMessage = clean(text);
+    const authoritativeContextManifest = asObject(messageOptions.authoritativeContextManifest);
+    const message = renderAuthoritativeContextEnvelope(originalMessage, authoritativeContextManifest);
     if (!message) return { ok: false, output: '', error: 'empty_message' };
     const mark = this.runtime.bot.mark();
     const beforeCount = this.events.length;
@@ -341,6 +567,12 @@ export class HeadlessRoomJourneyTransport {
       job_id: this._currentJobId(),
       events: freshEvents,
       assistant_messages: this.runtime.bot.messagesSince(mark, this.chatId),
+      authoritative_context_manifest: clean(authoritativeContextManifest.manifest_id) ? authoritativeContextManifest : null,
+      authoritative_context_delivery: clean(authoritativeContextManifest.manifest_id) ? {
+        manifest_id: clean(authoritativeContextManifest.manifest_id),
+        sha256: clean(authoritativeContextManifest.sha256),
+        execution_message_contains_manifest: message.includes(clean(authoritativeContextManifest.manifest_id)),
+      } : null,
       room_state: this.snapshotState(),
     };
   }
@@ -508,10 +740,19 @@ function resolveTemplate(template = '', step = {}, arm = {}) {
 async function executeStep({ step, arm, transport, options }) {
   const action = clean(step.action).toLowerCase();
   if (action === 'send_message') {
+    const isTargetStep = clean(options?.targetStepId) && clean(step?.id) === clean(options.targetStepId);
+    const executionMode = clean(arm?.metadata?.execution_mode || arm?.metadata?.executionMode).toLowerCase();
+    if (isTargetStep && executionMode === 'deterministic_state_update') {
+      if (typeof transport.applyDeterministicStateUpdate !== 'function') return { ok: false, error: 'transport_does_not_support_deterministic_state_update' };
+      return await transport.applyDeterministicStateUpdate(step.text, {
+        acknowledgement: clean(step.deterministic_ack_text || step.deterministicAckText || arm?.metadata?.deterministic_ack_text || arm?.metadata?.deterministicAckText),
+      });
+    }
     return await transport.sendMessage(step.text, {
       kind: clean(step.input_kind || step.inputKind || arm.input_kind || 'normal') || 'normal',
       forceMode: clean(step.force_mode || step.forceMode || arm.force_mode || 'normal') || 'normal',
       teamConfig: step.team_config || step.teamConfig || null,
+      authoritativeContextManifest: isTargetStep ? asObject(options?.authoritativeContextManifest) : null,
     });
   }
   if (['room_command', 'inspect', 'branch', 'generate_memory_candidates', 'approve_memory', 'reject_memory', 'set_collaboration_profile'].includes(action)) {
@@ -814,19 +1055,48 @@ function extractJsonObject(value = '') {
   try { return JSON.parse(match[0]); } catch { return null; }
 }
 
+function roomJourneyOutcomeEvaluationScope(scenario = {}) {
+  const targetStepId = comparisonTargetStepId(scenario);
+  return targetStepId ? { mode: 'target_only', target_step_id: targetStepId } : { mode: 'full_journey', target_step_id: null };
+}
+
 function buildRoomJourneyJudgePrompt({ scenario = {}, arm = {}, stepRows = [], assertions = [] } = {}) {
-  const transcript = stepRows
-    .filter((row) => clean(row.step?.action) === 'send_message')
-    .map((row) => ({ step_id: row.step.id, user: clean(row.step.text), assistant: clean(row.result?.output) }));
+  const scope = roomJourneyOutcomeEvaluationScope(scenario);
+  const messageRows = stepRows.filter((row) => clean(row.step?.action) === 'send_message');
+  if (scope.mode === 'target_only') {
+    const targetIndex = messageRows.findIndex((row) => clean(row.step?.id) === clean(scope.target_step_id));
+    const targetRow = targetIndex >= 0 ? messageRows[targetIndex] : null;
+    const requiredContextIds = routingRequiredContextStepIds(scenario);
+    const contextRows = requiredContextIds.length
+      ? requiredContextIds.map((id) => messageRows.find((row) => clean(row.step?.id) === id)).filter(Boolean)
+      : messageRows.slice(0, Math.max(0, targetIndex));
+    const scopedAssertions = assertions.filter((row) => {
+      const assertion = asArray(scenario.assertions).find((candidate) => clean(candidate?.id || candidate?.type) === clean(row.id));
+      const stepId = clean(assertion?.step_id || assertion?.stepId);
+      return !stepId || stepId === clean(scope.target_step_id);
+    });
+    return [
+      'Evaluate only the target-turn user-visible outcome. This is a topology-blind outcome-quality judgment.',
+      'Use the supplied authoritative prior USER context as source material. Do not evaluate prior assistant behavior, number of agents, provider count, collaboration topology, cost, or latency.',
+      'Do not reward or penalize collaboration by itself. Judge correctness, fact fidelity, instruction adherence, completeness, decision quality, uncertainty calibration, and usefulness according to the rubric.',
+      'Return JSON only with: passed(boolean), score(number 0..1), summary(string), rubric(array of {id,score,reason}), findings(array of strings).',
+      '',
+      'SCENARIO', JSON.stringify({ id: scenario.id, title: scenario.title, description: scenario.description, rubric: scenario.semantic_rubric || scenario.rubric || [], evaluation_scope: scope }, null, 2),
+      '',
+      'AUTHORITATIVE PRIOR USER CONTEXT', JSON.stringify(contextRows.map((row) => ({ step_id: row.step.id, user: clean(row.step.text) })), null, 2),
+      '',
+      'TARGET TURN', JSON.stringify({ step_id: targetRow?.step?.id || scope.target_step_id, user: clean(targetRow?.step?.text), assistant: clean(targetRow?.result?.output) }, null, 2),
+      '',
+      'TARGET-SCOPED DETERMINISTIC ASSERTIONS', JSON.stringify(scopedAssertions.map((row) => ({ id: row.id, passed: row.passed, observed: row.observed })), null, 2),
+    ].join('\n');
+  }
+  const transcript = messageRows.map((row) => ({ step_id: row.step.id, user: clean(row.step.text), assistant: clean(row.result?.output) }));
   return [
-    'Evaluate this AI Room user journey. Use only the supplied transcript, deterministic assertions, and rubric.',
-    'Judge continuity, correction uptake, relevance of remembered context, task quality, and whether collaboration added useful independent value.',
-    'Do not reward extra agents or extra models by themselves. Penalize repetition, stale-memory use, unsupported claims, privacy leakage, and needless cost/latency.',
+    'Evaluate this AI Room user journey using only the supplied transcript, deterministic assertions, and outcome-quality rubric.',
+    'Do not reward extra agents or extra models by themselves. Process assurance and execution efficiency are measured separately from this score.',
     'Return JSON only with: passed(boolean), score(number 0..1), summary(string), rubric(array of {id,score,reason}), findings(array of strings).',
     '',
-    'SCENARIO', JSON.stringify({ id: scenario.id, title: scenario.title, description: scenario.description, rubric: scenario.semantic_rubric || scenario.rubric || [] }, null, 2),
-    '',
-    'EXPERIMENT ARM', JSON.stringify({ id: arm.id, title: arm.title, collaboration_profile: arm.collaboration_profile, model_policy: arm.model_policy }, null, 2),
+    'SCENARIO', JSON.stringify({ id: scenario.id, title: scenario.title, description: scenario.description, rubric: scenario.semantic_rubric || scenario.rubric || [], evaluation_scope: scope }, null, 2),
     '',
     'TRANSCRIPT', JSON.stringify(transcript, null, 2),
     '',
@@ -853,6 +1123,7 @@ export async function judgeRoomJourneyRun({ scenario = {}, arm = {}, stepRows = 
     ok: result?.ok === true && Boolean(parsed),
     exit_code: result?.exitCode ?? result?.exit_code ?? null,
     result: parsed,
+    evaluation_scope: roomJourneyOutcomeEvaluationScope(scenario),
     judged_at: nowIso(),
   };
 }
@@ -868,7 +1139,9 @@ function cliExecutionKey(event = {}) {
 
 function classifyCliExecutionOutcomes(runtimeEvents = []) {
   const rows = runtimeEvents.filter((event) => ['run.agent_start', 'run.agent_finish', 'run.agent_error'].includes(eventType(event)) && isLocalCliEvent(event));
-  const finishes = rows.filter((event) => eventType(event) === 'run.agent_finish' && eventPayload(event).role_output_valid !== false);
+  const allFinishes = rows.filter((event) => eventType(event) === 'run.agent_finish');
+  const finishes = allFinishes.filter((event) => eventPayload(event).role_output_valid !== false);
+  const invalidRoleFinishes = allFinishes.filter((event) => eventPayload(event).role_output_valid === false);
   const errors = rows.filter((event) => eventType(event) === 'run.agent_error');
   const recoveredErrors = [];
   const terminalErrors = [];
@@ -879,17 +1152,17 @@ function classifyCliExecutionOutcomes(runtimeEvents = []) {
     const recovered = rows.slice(index + 1).some((later) => eventType(later) === 'run.agent_finish' && cliExecutionKey(later) === key);
     (recovered ? recoveredErrors : terminalErrors).push(event);
   }
-  return { finishes, errors, recoveredErrors, terminalErrors };
+  return { finishes, invalidRoleFinishes, errors, recoveredErrors, terminalErrors };
 }
 
-function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '', finishedAt = '', semanticJudgment = null, arm = null } = {}) {
+function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '', finishedAt = '', semanticJudgment = null, arm = null, stepRows = [], processEvidenceRubric = [], targetStepId = '' } = {}) {
   const required = assertions.filter((row) => row.required !== false);
   const qualityAssertions = required.filter((row) => row.quality_metric !== false);
   const deterministicQuality = qualityAssertions.length ? qualityAssertions.filter((row) => row.passed).length / qualityAssertions.length : 0;
   const semanticScore = Number(semanticJudgment?.result?.score);
   const quality = Number.isFinite(semanticScore) ? Math.max(0, Math.min(1, semanticScore)) : deterministicQuality;
   const starts = runtimeEvents.filter((event) => eventType(event) === 'run.agent_start');
-  const { finishes, errors, recoveredErrors, terminalErrors } = classifyCliExecutionOutcomes(runtimeEvents);
+  const { finishes, invalidRoleFinishes, errors, recoveredErrors, terminalErrors } = classifyCliExecutionOutcomes(runtimeEvents);
   const attempts = starts.filter(isLocalCliEvent);
   const providers = [...new Set(finishes.map((event) => clean(eventPayload(event).provider)).filter(Boolean))];
   const models = [...new Set(finishes.map((event) => clean(eventPayload(event).model)).filter(Boolean))];
@@ -899,6 +1172,10 @@ function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '',
   const modelNodes = [...new Set(finishes.map((event) => modelNodeKey(eventPayload(event))).filter(Boolean))];
   const roles = [...new Set(finishes.map((event) => clean(eventPayload(event).model_role || eventPayload(event).role_id)).filter(Boolean))];
   const collaborationProfile = clean(arm?.collaboration_profile || arm?.collaborationProfile || '');
+  const deterministicExecutions = asArray(stepRows).filter((row) => clean(row?.result?.execution_mode) === 'deterministic_state_update');
+  const deterministicExecutionValid = deterministicExecutions.length > 0 && deterministicExecutions.every((row) => row?.result?.ok === true);
+  const executionPresent = finishes.length > 0 || deterministicExecutionValid;
+  const laneIds = [...new Set(finishes.map((event) => clean(eventPayload(event).lane_id || eventPayload(event).laneId || eventPayload(event)?.collaboration_lane?.lane_id)).filter(Boolean))];
   const collaborationAssertionTypes = new Set([
     'successful_provider_role_count',
     'successful_model_roles_include',
@@ -913,6 +1190,11 @@ function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '',
       ? 'valid_collaboration_execution'
       : 'invalid_collaboration_execution')
     : 'not_applicable';
+  const comparisonStepId = clean(targetStepId) || (asArray(stepRows).length ? clean(asArray(stepRows).at(-1)?.step?.id) : '');
+  const targetStepRow = comparisonStepId ? [...asArray(stepRows)].reverse().find((row) => clean(row?.step?.id) === comparisonStepId) : null;
+  const targetStepDurationMs = targetStepRow
+    ? Math.max(0, (Date.parse(targetStepRow.completed_at || '') || 0) - (Date.parse(targetStepRow.started_at || '') || 0))
+    : null;
   let tokens = 0; let cost = 0; let hasTokens = false; let hasCost = false;
   for (const event of runtimeEvents) {
     const payload = eventPayload(event);
@@ -928,16 +1210,43 @@ function summarizeMetrics({ assertions = [], runtimeEvents = [], startedAt = '',
     required_fail: required.filter((row) => !row.passed).length,
     quality_assertion_count: qualityAssertions.length,
     duration_ms: Math.max(0, (Date.parse(finishedAt) || Date.now()) - (Date.parse(startedAt) || Date.now())),
+    target_step_duration_ms: Number.isFinite(targetStepDurationMs) ? targetStepDurationMs : null,
+    comparison_duration_ms: Number.isFinite(targetStepDurationMs) ? targetStepDurationMs : Math.max(0, (Date.parse(finishedAt) || Date.now()) - (Date.parse(startedAt) || Date.now())),
     agent_call_count: starts.length,
     cli_attempt_count: attempts.length,
     cli_success_count: finishes.length,
     cli_failure_count: terminalErrors.length,
+    role_output_invalid_count: invalidRoleFinishes.length,
     cli_recovered_failure_count: recoveredErrors.length,
     cli_raw_error_count: errors.length,
-    execution_status: finishes.length === 0 || terminalErrors.length > 0
+    execution_status: !executionPresent || terminalErrors.length > 0 || invalidRoleFinishes.length > 0
       ? 'invalid_execution'
       : (recoveredErrors.length > 0 ? 'valid_degraded_execution' : 'valid_execution'),
-    execution_eligible: finishes.length > 0 && terminalErrors.length === 0,
+    execution_eligible: executionPresent && terminalErrors.length === 0 && invalidRoleFinishes.length === 0,
+    outcome_quality_score: quality,
+    outcome_evaluation_scope: semanticJudgment?.evaluation_scope || null,
+    process_assurance: {
+      rubric: asArray(processEvidenceRubric),
+      semantic_score: null,
+      collaboration_profile: collaborationProfile || null,
+      successful_role_count: roles.length,
+      lane_count: laneIds.length,
+      reviewer_present: roles.includes('verifier_critic'),
+      synthesizer_present: roles.includes('delivery_synthesizer'),
+      exact_model_identity_complete: exactModelIdentityComplete,
+      note: 'Process assurance is reported separately and is not included in outcome_quality_score.',
+    },
+    execution_efficiency: {
+      duration_ms: Math.max(0, (Date.parse(finishedAt) || Date.now()) - (Date.parse(startedAt) || Date.now())),
+      target_step_duration_ms: Number.isFinite(targetStepDurationMs) ? targetStepDurationMs : null,
+      comparison_duration_ms: Number.isFinite(targetStepDurationMs) ? targetStepDurationMs : Math.max(0, (Date.parse(finishedAt) || Date.now()) - (Date.parse(startedAt) || Date.now())),
+      agent_call_count: starts.length,
+      cli_attempt_count: attempts.length,
+      provider_call_count: attempts.length,
+      deterministic_execution_count: deterministicExecutions.length,
+      total_tokens: hasTokens ? tokens : null,
+      cost_usd: hasCost ? cost : null,
+    },
     collaboration_profile: collaborationProfile || null,
     collaboration_execution_status: collaborationExecutionStatus,
     collaboration_assertion_failures: collaborationAssertions.filter((row) => !row.passed).map((row) => row.id),
@@ -985,9 +1294,11 @@ export function evaluatePortfolioPromotion({ baseline = null, challenger = null,
   const minUplift = Number(gate.min_quality_uplift ?? 0.05);
   const maxCostRatio = Number(gate.max_cost_ratio ?? 3);
   const maxLatencyRatio = Number(gate.max_latency_ratio ?? 3);
-  const qualityUplift = Number(challenger.quality_score || 0) - Number(baseline.quality_score || 0);
+  const qualityUplift = Number(challenger.outcome_quality_score ?? challenger.quality_score ?? 0) - Number(baseline.outcome_quality_score ?? baseline.quality_score ?? 0);
   const costRatio = baseline.cost_usd > 0 && challenger.cost_usd !== null ? challenger.cost_usd / baseline.cost_usd : null;
-  const latencyRatio = baseline.duration_ms > 0 ? challenger.duration_ms / baseline.duration_ms : null;
+  const baselineDuration = Number(baseline.comparison_duration_ms ?? baseline.target_step_duration_ms ?? baseline.duration_ms);
+  const challengerDuration = Number(challenger.comparison_duration_ms ?? challenger.target_step_duration_ms ?? challenger.duration_ms);
+  const latencyRatio = baselineDuration > 0 && Number.isFinite(challengerDuration) ? challengerDuration / baselineDuration : null;
   const reasons = [];
   if (challenger.required_fail > 0) reasons.push('challenger_required_assertion_failed');
   if (qualityUplift < minUplift) reasons.push('quality_uplift_below_gate');
@@ -1000,6 +1311,162 @@ export function evaluatePortfolioPromotion({ baseline = null, challenger = null,
   const promote = reasons.length === 0;
   const insufficientEvidenceReasons = new Set(['cost_evidence_missing', 'semantic_evidence_missing', 'exact_model_identity_missing']);
   return { status: promote ? 'promotion_candidate' : (reasons.some((reason) => insufficientEvidenceReasons.has(reason)) ? 'insufficient_evidence' : 'not_promoted'), promote, quality_uplift: qualityUplift, cost_ratio: costRatio, latency_ratio: latencyRatio, reasons };
+}
+
+
+function parseRoleSummaryEntries(markdown = '', roleId = '') {
+  const text = String(markdown || '');
+  const sections = text.split(/^##\s+/m).slice(1);
+  return sections.map((section, index) => {
+    const headerEnd = section.indexOf('\n');
+    const header = (headerEnd >= 0 ? section.slice(0, headerEnd) : section).trim();
+    const body = headerEnd >= 0 ? section.slice(headerEnd + 1) : '';
+    const goalMatch = body.match(/^- goal:\s*(.*)$/m);
+    const outputMarker = body.indexOf('\n- output:');
+    const outputStart = outputMarker >= 0 ? outputMarker + '\n- output:'.length : -1;
+    const modelMarker = outputStart >= 0 ? body.indexOf('\n- model:', outputStart) : -1;
+    const output = outputStart >= 0 ? body.slice(outputStart, modelMarker >= 0 ? modelMarker : undefined).trim() : '';
+    const modelMatch = body.match(/^- model:\s*(.*)$/m);
+    return {
+      index,
+      role_id: clean(roleId),
+      header,
+      goal: clean(goalMatch?.[1]),
+      output,
+      output_sha256: output ? stableSha256(output) : null,
+      output_chars: output.length,
+      model: clean(modelMatch?.[1]) || null,
+    };
+  });
+}
+
+function currentHeadlessJobDir(transport = null) {
+  try {
+    const jobId = clean(transport?._currentJobId?.());
+    if (!jobId) return '';
+    return path.resolve(transport?.runtime?.runtimeCore?.jobs?.jobDir?.(jobId) || '');
+  } catch {
+    return '';
+  }
+}
+
+function captureRoleSummaryCursor(transport = null) {
+  const jobDir = currentHeadlessJobDir(transport);
+  const roleDir = jobDir ? path.join(jobDir, 'local_memory', 'role_summaries') : '';
+  const counts = {};
+  if (!roleDir || !fs.existsSync(roleDir)) return { job_dir: jobDir || null, counts };
+  for (const name of fs.readdirSync(roleDir).filter((value) => value.endsWith('.md')).sort()) {
+    const roleId = path.basename(name, '.md');
+    counts[roleId] = parseRoleSummaryEntries(fs.readFileSync(path.join(roleDir, name), 'utf8'), roleId).length;
+  }
+  return { job_dir: jobDir, counts };
+}
+
+function processTokens(value = '') {
+  return new Set(String(value || '').toLowerCase().match(/[\p{L}\p{N}_-]{2,}/gu) || []);
+}
+
+function tokenJaccardDistance(left = '', right = '') {
+  const a = processTokens(left);
+  const b = processTokens(right);
+  if (!a.size && !b.size) return 0;
+  let intersection = 0;
+  for (const token of a) if (b.has(token)) intersection += 1;
+  const union = a.size + b.size - intersection;
+  return union > 0 ? 1 - (intersection / union) : 0;
+}
+
+function tokenJaccardSimilarity(left = '', right = '') {
+  return 1 - tokenJaccardDistance(left, right);
+}
+
+function collectCollaborationProcessEvidence({ transport = null, cursor = null, targetEvents = [], targetOutput = '', targetStepId = '' } = {}) {
+  const jobDir = currentHeadlessJobDir(transport);
+  const roleDir = jobDir ? path.join(jobDir, 'local_memory', 'role_summaries') : '';
+  if (!roleDir || !fs.existsSync(roleDir)) return null;
+  const baselineCounts = asObject(cursor?.counts);
+  const entriesByRole = new Map();
+  const artifacts = [];
+  for (const name of fs.readdirSync(roleDir).filter((value) => value.endsWith('.md')).sort()) {
+    const file = path.join(roleDir, name);
+    const roleId = path.basename(name, '.md');
+    const allEntries = parseRoleSummaryEntries(fs.readFileSync(file, 'utf8'), roleId);
+    const baseline = Math.max(0, Number(baselineCounts[roleId] || 0));
+    const freshEntries = allEntries.slice(baseline);
+    entriesByRole.set(roleId, [...freshEntries]);
+    artifacts.push({
+      role_id: roleId,
+      relative_path: path.relative(jobDir, file).replaceAll('\\', '/'),
+      sha256: fileSha256(file),
+      size_bytes: fs.statSync(file).size,
+      baseline_entry_count: baseline,
+      target_entry_count: freshEntries.length,
+    });
+  }
+  const starts = asArray(targetEvents).filter((event) => eventType(event) === 'run.agent_start' && isLocalCliEvent(event));
+  const roleOffsets = new Map();
+  const executions = starts.map((event, index) => {
+    const payload = eventPayload(event);
+    const roleId = clean(payload.role_id) || clean(payload.model_role);
+    const roleEntries = entriesByRole.get(roleId) || [];
+    const offset = Number(roleOffsets.get(roleId) || 0);
+    roleOffsets.set(roleId, offset + 1);
+    const entry = roleEntries[offset] || null;
+    const goal = clean(payload.goal);
+    return {
+      order: index + 1,
+      agent_id: clean(payload.agent_id) || null,
+      role_id: roleId || null,
+      model_role: clean(payload.model_role) || null,
+      lane_id: clean(payload.lane_id || payload.laneId || payload?.collaboration_lane?.lane_id) || null,
+      provider: clean(payload.provider) || null,
+      requested_model: clean(payload.requested_model || payload.requestedModel || payload.model) || null,
+      goal_sha256: goal ? stableSha256(goal) : null,
+      role_summary_entry_index: entry ? entry.index : null,
+      role_summary_output_sha256: entry?.output_sha256 || null,
+      role_summary_output_chars: Number(entry?.output_chars || 0),
+      role_summary_model: entry?.model || null,
+      _output: entry?.output || '',
+    };
+  });
+  const laneOutputs = executions.filter((row) => row.lane_id && row._output);
+  const pairwiseDistances = [];
+  for (let i = 0; i < laneOutputs.length; i += 1) {
+    for (let j = i + 1; j < laneOutputs.length; j += 1) {
+      pairwiseDistances.push(tokenJaccardDistance(laneOutputs[i]._output, laneOutputs[j]._output));
+    }
+  }
+  const finalText = String(targetOutput || '').trim();
+  const finalOverlaps = laneOutputs.map((row) => ({
+    lane_id: row.lane_id,
+    final_lexical_jaccard_similarity: Number(tokenJaccardSimilarity(row._output, finalText).toFixed(6)),
+  }));
+  return {
+    schema_version: 'ddalggak.collaboration_process_evidence/v1',
+    target_step_id: clean(targetStepId) || null,
+    evidence_scope: 'target_execution_only',
+    outcome_score_inclusion: false,
+    lineage_granularity: 'role_and_lane_output',
+    role_summary_artifacts: artifacts,
+    executions: executions.map(({ _output, ...row }) => row),
+    lane_output_lineage: laneOutputs.map((row) => ({
+      lane_id: row.lane_id,
+      agent_id: row.agent_id,
+      role_id: row.role_id,
+      model_role: row.model_role,
+      output_sha256: row.role_summary_output_sha256,
+      output_chars: row.role_summary_output_chars,
+    })),
+    lane_output_count: laneOutputs.length,
+    distinct_lane_output_hash_count: new Set(laneOutputs.map((row) => row.role_summary_output_sha256).filter(Boolean)).size,
+    mean_pairwise_lane_lexical_distance: pairwiseDistances.length
+      ? Number((pairwiseDistances.reduce((sum, value) => sum + value, 0) / pairwiseDistances.length).toFixed(6))
+      : null,
+    final_response_sha256: finalText ? stableSha256(finalText) : null,
+    final_response_chars: finalText.length,
+    final_lane_overlap_proxy: finalOverlaps,
+    note: 'This process evidence preserves target-stage role/lane lineage separately from outcome quality. Lexical distance/overlap are diagnostics, not semantic quality scores.',
+  };
 }
 
 function buildCliCallRows(runtimeEvents = []) {
@@ -1092,7 +1559,45 @@ function writeTraceViews(runDir, trace, runtimeEvents, steps) {
   });
 }
 
-export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot = 'experiments/room_journeys', transport, execute = false, traceRoot = '', options = {} } = {}) {
+export async function buildFrozenPreTargetRoomSnapshot({ scenario = {}, transport, outputRoot = '', options = {} } = {}) {
+  const targetStepId = comparisonTargetStepId(scenario);
+  if (!targetStepId || typeof transport?.exportFrozenSnapshot !== 'function') return null;
+  const targetIndex = asArray(scenario.steps).findIndex((step) => clean(step?.id) === targetStepId);
+  if (targetIndex <= 0) return null;
+  await transport.initialize?.();
+  const routing = routingExperimentConfig(scenario);
+  const experiment = asObject(scenario.experiment);
+  const commonProfile = clean(routing.common_buildup_collaboration_profile || routing.commonBuildupCollaborationProfile || experiment.common_buildup_collaboration_profile || experiment.commonBuildupCollaborationProfile || 'solo');
+  if (commonProfile) await transport.sendCommand?.(`/collab use ${commonProfile}`);
+  const seedArm = normalizeArm({ id: '__frozen_seed__', title: 'Frozen pre-target Room seed', collaboration_profile: commonProfile, input_kind: 'normal' }, '__frozen_seed__');
+  const stepRows = [];
+  for (const step of asArray(scenario.steps).slice(0, targetIndex)) {
+    const stepStarted = nowIso();
+    let result;
+    try { result = await executeStep({ step, arm: seedArm, transport, options: { ...options, targetStepId: '' } }); }
+    catch (error) { result = { ok: false, error: String(error?.message || error) }; }
+    if ((!result?.room_state || typeof result.room_state !== 'object') && typeof transport.snapshotState === 'function') {
+      try { result = { ...asObject(result), room_state: transport.snapshotState() }; } catch {}
+    }
+    const row = { step, started_at: stepStarted, completed_at: nowIso(), result };
+    stepRows.push(row);
+    if (step.stop_on_failure !== false && result?.ok === false) throw new Error(`Frozen pre-target buildup failed at ${clean(step.id)}`);
+  }
+  const authoritativeContextManifest = authoritativeContextManifestFromScenario(scenario, targetStepId);
+  const snapshot = await transport.exportFrozenSnapshot({
+    destinationRoot: path.join(path.resolve(outputRoot), '_frozen_snapshots'),
+    scenarioId: scenario.id,
+    targetStepId,
+    authoritativeContextManifest,
+    buildupSteps: stepRows,
+  });
+  const withBuildup = { ...snapshot, buildup_steps: stepRows, common_buildup_collaboration_profile: commonProfile };
+  writeJson(path.join(snapshot.snapshot_root, 'snapshot.json'), withBuildup);
+  writeJsonlRows(path.join(snapshot.snapshot_root, 'buildup_steps.jsonl'), stepRows);
+  return withBuildup;
+}
+
+export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot = 'experiments/room_journeys', transport, execute = false, traceRoot = '', options = {}, frozenPreTargetSnapshot = null } = {}) {
   const selectedArm = arm || scenarioArms(scenario)[0];
   const runId = `${safe(scenario.id)}__${safe(selectedArm.id)}__${Date.now().toString(36)}`;
   const runDir = ensureDir(path.resolve(outputRoot, runId));
@@ -1105,14 +1610,40 @@ export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot 
     return { runDir, summary: plan };
   }
   await transport.initialize?.();
+  const targetStepId = comparisonTargetStepId(scenario);
+  if (frozenPreTargetSnapshot && typeof transport.restoreFrozenSnapshot === 'function') {
+    await transport.restoreFrozenSnapshot(frozenPreTargetSnapshot);
+  }
   if (selectedArm.collaboration_profile) await transport.sendCommand(`/collab use ${selectedArm.collaboration_profile}`);
   for (const command of selectedArm.setup_commands) await transport.sendCommand(command);
-  const stepRows = [];
-  for (const step of scenario.steps) {
+  const armPreTargetRoomState = frozenPreTargetSnapshot && typeof transport.snapshotState === 'function' ? transport.snapshotState() : null;
+  const processEvidenceCursor = captureRoleSummaryCursor(transport);
+  const stepRows = frozenPreTargetSnapshot ? deepClone(asArray(frozenPreTargetSnapshot.buildup_steps)) : [];
+  if (frozenPreTargetSnapshot) {
+    for (const row of stepRows) appendJsonl(path.join(runDir, 'steps.jsonl'), {
+      ...row,
+      reused_from_frozen_snapshot: true,
+      frozen_snapshot_id: clean(frozenPreTargetSnapshot.snapshot_id),
+    });
+  }
+  const stepsToExecute = frozenPreTargetSnapshot && targetStepId
+    ? asArray(scenario.steps).slice(Math.max(0, asArray(scenario.steps).findIndex((step) => clean(step?.id) === targetStepId)))
+    : asArray(scenario.steps);
+  for (const step of stepsToExecute) {
     const stepStarted = nowIso();
     let result;
-    try { result = await executeStep({ step, arm: selectedArm, transport, options }); }
+    try { result = await executeStep({
+      step,
+      arm: selectedArm,
+      transport,
+      options: {
+        ...options,
+        targetStepId,
+        authoritativeContextManifest: frozenPreTargetSnapshot?.authoritative_context_manifest || null,
+      },
+    }); }
     catch (error) { result = { ok: false, error: String(error?.message || error) }; }
+    if (clean(step?.id) === targetStepId && armPreTargetRoomState) result = { ...asObject(result), pre_target_room_state: armPreTargetRoomState };
     if ((!result?.room_state || typeof result.room_state !== 'object') && typeof transport.snapshotState === 'function') {
       try { result = { ...asObject(result), room_state: transport.snapshotState() }; } catch {}
     }
@@ -1126,6 +1657,15 @@ export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot 
   const runtimeEvents = asArray(transport.events);
   const stepsById = Object.fromEntries(stepRows.map((row) => [row.step.id, row]));
   const latestRoomState = [...stepRows].reverse().find((row) => row?.result?.room_state)?.result?.room_state || null;
+  const targetStepRow = targetStepId ? stepsById[targetStepId] : null;
+  const targetProcessEvents = targetStepId ? runtimeEventsForAssertion({ runtimeEvents, stepsById }, { step_id: targetStepId }) : runtimeEvents;
+  const collaborationProcessEvidence = collectCollaborationProcessEvidence({
+    transport,
+    cursor: processEvidenceCursor,
+    targetEvents: targetProcessEvents,
+    targetOutput: clean(targetStepRow?.result?.output),
+    targetStepId,
+  });
   const assertions = asArray(scenario.assertions)
     .filter((assertion) => assertionApplies(assertion, selectedArm.id))
     .map((assertion) => assertionResult(assertion, {
@@ -1167,7 +1707,17 @@ export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot 
     });
   }
   const finishedAt = nowIso();
-  const metrics = summarizeMetrics({ assertions, runtimeEvents, startedAt, finishedAt: executionFinishedAt, semanticJudgment, arm: selectedArm });
+  const metrics = summarizeMetrics({
+    assertions,
+    runtimeEvents,
+    startedAt,
+    finishedAt: executionFinishedAt,
+    semanticJudgment,
+    arm: selectedArm,
+    stepRows,
+    processEvidenceRubric: asArray(scenario.process_evidence_rubric || scenario.processEvidenceRubric),
+    targetStepId,
+  });
   metrics.evaluation_duration_ms = Math.max(0, (Date.parse(finishedAt) || Date.now()) - (Date.parse(executionFinishedAt) || Date.now()));
   const summary = {
     schema_version: 'ddalggak.room_journey_run/v1',
@@ -1182,6 +1732,7 @@ export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot 
     metrics,
     assertions,
     semantic_judgment: semanticJudgment,
+    collaboration_process_evidence: collaborationProcessEvidence,
     transport: {
       type: transport instanceof HeadlessRoomJourneyTransport ? 'headless' : 'goc',
       thread_id: clean(transport?.threadId) || null,
@@ -1189,6 +1740,14 @@ export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot 
       user_id: clean(transport?.userId) || null,
       runtime_root: clean(transport?.runtimeRoot) || null,
     },
+    frozen_pre_target_snapshot: frozenPreTargetSnapshot ? {
+      snapshot_mode: clean(frozenPreTargetSnapshot.snapshot_mode),
+      snapshot_id: clean(frozenPreTargetSnapshot.snapshot_id),
+      canonical_content_sha256: clean(frozenPreTargetSnapshot.canonical_content_sha256),
+      target_step_id: clean(frozenPreTargetSnapshot.target_step_id),
+      common_buildup_collaboration_profile: clean(frozenPreTargetSnapshot.common_buildup_collaboration_profile),
+      authoritative_context_manifest_id: clean(frozenPreTargetSnapshot?.authoritative_context_manifest?.manifest_id) || null,
+    } : null,
     trace_contract: {
       raw_provider_prompts_saved: true,
       raw_provider_prompt_scope: 'local_debug_runtime',
@@ -1202,6 +1761,7 @@ export async function runRoomJourneyScenario({ scenario, arm = null, outputRoot 
   };
   writeTraceViews(runDir, trace, runtimeEvents, stepRows);
   writeJson(path.join(runDir, 'assertions.json'), assertions);
+  if (collaborationProcessEvidence) writeJson(path.join(runDir, 'collaboration_process_evidence.json'), collaborationProcessEvidence);
   writeJson(path.join(runDir, 'summary.json'), summary);
   return { runDir, summary, steps: stepRows, trace, runtimeEvents };
 }
@@ -1226,6 +1786,22 @@ function routingExperimentConfig(scenario = {}) {
 function routingTargetStepId(scenario = {}) {
   const config = routingExperimentConfig(scenario);
   return clean(config.target_step_id || config.targetStepId);
+}
+
+function comparisonTargetStepId(scenario = {}) {
+  const routingTarget = routingTargetStepId(scenario);
+  if (routingTarget) return routingTarget;
+  const experiment = asObject(scenario.experiment);
+  return clean(experiment.target_step_id || experiment.targetStepId || experiment.comparison_target_step_id || experiment.comparisonTargetStepId);
+}
+
+function shouldUseFrozenPreTargetFork(scenario = {}, execute = false) {
+  if (!execute || !comparisonTargetStepId(scenario)) return false;
+  const experiment = asObject(scenario.experiment);
+  const routing = routingExperimentConfig(scenario);
+  if (experiment.pre_target_fork === false || experiment.preTargetFork === false) return false;
+  if (routing.pre_target_fork === false || routing.preTargetFork === false) return false;
+  return true;
 }
 
 function routingExecutionShape(scenario = {}, arm = {}) {
@@ -1291,7 +1867,10 @@ function routingMeasurementPolicy(scenario = {}) {
 
 function routingRequiredContextStepIds(scenario = {}) {
   const config = routingExperimentConfig(scenario);
-  return [...new Set(asArray(config.required_context_step_ids || config.requiredContextStepIds).map(clean).filter(Boolean))];
+  const experiment = asObject(scenario.experiment);
+  const configured = asArray(config.required_context_step_ids || config.requiredContextStepIds);
+  const fallback = asArray(experiment.required_context_step_ids || experiment.requiredContextStepIds || experiment.evaluation_context_step_ids || experiment.evaluationContextStepIds);
+  return [...new Set((configured.length ? configured : fallback).map(clean).filter(Boolean))];
 }
 
 function preRouteExperimentInputSnapshot(scenario = {}, targetStepId = '') {
@@ -1326,21 +1905,62 @@ function traceEventsWithinStep(trace = [], stepRow = {}) {
   });
 }
 
-function contextProjectionEvidence({ trace = [], targetRow = {}, requiredContextStepIds = [] } = {}) {
+function contextProjectionEvidence({ trace = [], targetRow = {}, targetEvents = [], requiredContextStepIds = [] } = {}) {
   const projections = traceEventsWithinStep(trace, targetRow).filter((event) => eventType(event) === 'context.projection_compiled');
   const payloads = projections.map((event) => eventPayload(event));
-  const sourceStepIds = [...new Set(payloads.flatMap((payload) => [
+  const runtimeSourceStepIds = [...new Set(payloads.flatMap((payload) => [
     ...asArray(payload.selected_source_step_ids || payload.selectedSourceStepIds),
     ...asArray(payload.source_step_ids || payload.sourceStepIds),
     ...asArray(payload.selected_atoms).map((atom) => clean(atom?.source_step_id || atom?.sourceStepId)),
   ]).map(clean).filter(Boolean))];
   const required = [...new Set(asArray(requiredContextStepIds).map(clean).filter(Boolean))];
-  const missing = required.filter((id) => !sourceStepIds.includes(id));
+  const manifest = asObject(targetRow?.result?.authoritative_context_manifest);
+  const manifestStepIds = [...new Set(asArray(manifest.items).map((item) => clean(item?.source_step_id)).filter(Boolean))];
+  const manifestMissing = required.filter((id) => !manifestStepIds.includes(id));
+  const manifestId = clean(manifest.manifest_id);
+  const roleStarts = asArray(targetEvents).filter((event) => eventType(event) === 'run.agent_start' && isLocalCliEvent(event));
+  const roleDeliveries = roleStarts.map((event) => {
+    const payload = eventPayload(event);
+    const goal = clean(payload.goal);
+    const deliveredSourceStepIds = required.filter((id) => goal.includes(`source_step_id=${id}`));
+    const missingSourceStepIds = required.filter((id) => !deliveredSourceStepIds.includes(id));
+    const manifestMarkerPresent = Boolean(manifestId && goal.includes(manifestId));
+    return {
+      agent_id: clean(payload.agent_id),
+      role_id: clean(payload.role_id),
+      model_role: clean(payload.model_role),
+      lane_id: clean(payload.lane_id || payload.laneId || payload?.collaboration_lane?.lane_id) || null,
+      manifest_id: manifestId || null,
+      manifest_marker_present: manifestMarkerPresent,
+      delivered_source_step_ids: deliveredSourceStepIds,
+      missing_source_step_ids: missingSourceStepIds,
+      complete: manifestMarkerPresent && missingSourceStepIds.length === 0,
+    };
+  });
+  const roleDeliveryComplete = roleDeliveries.length > 0 && roleDeliveries.every((row) => row.complete === true);
   let coverageStatus = 'not_declared';
-  if (required.length && !projections.length) coverageStatus = 'missing_projection';
-  else if (required.length && !sourceStepIds.length) coverageStatus = 'unverified_provenance';
-  else if (required.length && missing.length) coverageStatus = 'incomplete';
-  else if (required.length) coverageStatus = 'verified';
+  let coverageSource = 'none';
+  if (required.length) {
+    if (!manifestId || manifest.complete !== true) {
+      coverageStatus = 'missing_authoritative_manifest';
+      coverageSource = 'benchmark_authoritative_context_manifest';
+    } else if (manifestMissing.length) {
+      coverageStatus = 'incomplete';
+      coverageSource = 'benchmark_authoritative_context_manifest';
+    } else if (!roleDeliveries.length) {
+      coverageStatus = clean(targetRow?.result?.execution_mode) === 'deterministic_state_update' ? 'verified' : 'missing_role_delivery_evidence';
+      coverageSource = 'benchmark_authoritative_context_manifest';
+    } else if (!roleDeliveryComplete) {
+      coverageStatus = 'incomplete_role_delivery';
+      coverageSource = 'benchmark_authoritative_context_manifest';
+    } else {
+      coverageStatus = 'verified';
+      coverageSource = 'benchmark_authoritative_context_manifest';
+    }
+  } else if (runtimeSourceStepIds.length) {
+    coverageStatus = 'runtime_projection_observed';
+    coverageSource = 'runtime_context_projection';
+  }
   return {
     projection_count: projections.length,
     projection_ids: [...new Set(payloads.map((payload) => clean(payload.projection_id)).filter(Boolean))],
@@ -1351,8 +1971,15 @@ function contextProjectionEvidence({ trace = [], targetRow = {}, requiredContext
     selected_atom_types: [...new Set(payloads.flatMap((payload) => asArray(payload.selected_atom_types)).map(clean).filter(Boolean))],
     approved_memory_ids: [...new Set(payloads.flatMap((payload) => asArray(payload.approved_memory_ids)).map(clean).filter(Boolean))],
     required_context_step_ids: required,
-    source_step_provenance_ids: sourceStepIds,
-    missing_required_context_step_ids: missing,
+    runtime_projection_source_step_ids: runtimeSourceStepIds,
+    authoritative_manifest_id: manifestId || null,
+    authoritative_manifest_sha256: clean(manifest.sha256) || null,
+    authoritative_manifest_source_step_ids: manifestStepIds,
+    missing_required_context_step_ids: manifestMissing,
+    role_delivery_evidence: roleDeliveries,
+    role_delivery_complete: roleDeliveryComplete || (required.length === 0),
+    common_evidence_hash: clean(manifest.sha256) || null,
+    coverage_source: coverageSource,
     coverage_status: coverageStatus,
     provenance_complete: coverageStatus === 'verified',
   };
@@ -1380,6 +2007,44 @@ function targetExecutionEvidence(successfulFinishes = []) {
   };
 }
 
+
+function actualExecutionContract({ plannedShape = '', successfulFinishes = [], targetRow = {}, contextEvidence = {} } = {}) {
+  const evidence = targetExecutionEvidence(successfulFinishes);
+  const roles = asArray(evidence.model_roles);
+  const deterministicStateUpdate = clean(targetRow?.result?.execution_mode) === 'deterministic_state_update';
+  const hasReviewer = roles.includes('verifier_critic');
+  const hasSynthesizer = roles.includes('delivery_synthesizer');
+  const laneCount = Number(evidence.lane_count || 0);
+  const shape = clean(plannedShape).toLowerCase();
+  let contractMatch = false;
+  if (shape === 'state_update') contractMatch = deterministicStateUpdate && Number(evidence.agent_finish_count || 0) === 0;
+  else if (['direct_answer', 'single_agent', 'single_agent_with_retrieval', 'single_agent_search'].includes(shape)) contractMatch = !deterministicStateUpdate && Number(evidence.agent_finish_count || 0) >= 1 && laneCount <= 1;
+  else if (shape === 'builder_reviewer') contractMatch = Number(evidence.agent_finish_count || 0) >= 3 && roles.includes('code_executor') && hasReviewer && hasSynthesizer;
+  else if (['parallel_ideation', 'evidence_panel'].includes(shape)) contractMatch = Number(evidence.agent_finish_count || 0) >= 3 && roles.includes('source_grounder') && laneCount >= 2 && hasReviewer && hasSynthesizer;
+  else if (shape === 'bounded_loop_team') contractMatch = Number(evidence.agent_finish_count || 0) >= 2;
+  return {
+    schema_version: 'ddalggak.actual_execution_contract/v1',
+    planned_shape: shape || null,
+    observed_shape: contractMatch ? shape : (deterministicStateUpdate ? 'state_update' : (laneCount >= 2 ? 'unclassified_multi_lane_team' : (evidence.agent_finish_count > 1 ? 'unclassified_team' : 'single_agent'))),
+    contract_match: contractMatch,
+    deterministic_state_update: deterministicStateUpdate,
+    provider_call_count: Number(evidence.agent_finish_count || 0),
+    model_roles: roles,
+    providers: asArray(evidence.providers),
+    model_nodes: asArray(evidence.model_nodes),
+    lane_ids: asArray(evidence.lane_ids),
+    lane_count: laneCount,
+    reviewer_present: hasReviewer,
+    synthesizer_present: hasSynthesizer,
+    retrieval_or_context_projection_used: Number(contextEvidence?.projection_count || 0) > 0 || clean(contextEvidence?.coverage_status) === 'verified',
+    common_evidence_hash: clean(contextEvidence?.common_evidence_hash) || null,
+    common_evidence_delivery_complete: contextEvidence?.role_delivery_complete === true || deterministicStateUpdate,
+    exact_model_identity_complete: deterministicStateUpdate ? true : evidence.exact_model_identity_complete === true,
+    requested_models: asArray(evidence.requested_models),
+    resolved_models: asArray(evidence.resolved_models),
+  };
+}
+
 export function buildConciergeRoutingObservation({ scenario = {}, result = {} } = {}) {
   const config = routingExperimentConfig(scenario);
   const measurementPolicy = routingMeasurementPolicy(scenario);
@@ -1390,6 +2055,8 @@ export function buildConciergeRoutingObservation({ scenario = {}, result = {} } 
   if (targetIndex < 0) return null;
   const targetRow = steps[targetIndex];
   const previousRoomState = targetIndex > 0 ? asObject(steps[targetIndex - 1]?.result?.room_state) : {};
+  const armPreTargetRoomState = asObject(targetRow?.result?.pre_target_room_state);
+  const effectivePreTargetRoomState = Object.keys(armPreTargetRoomState).length ? armPreTargetRoomState : previousRoomState;
   const targetRoomState = asObject(targetRow?.result?.room_state);
   const stepsById = Object.fromEntries(steps.map((row) => [clean(row?.step?.id), row]).filter(([id]) => id));
   const targetEvents = runtimeEventsForAssertion({
@@ -1398,6 +2065,9 @@ export function buildConciergeRoutingObservation({ scenario = {}, result = {} } 
   }, { step_id: targetStepId });
   const outcomes = classifyCliExecutionOutcomes(targetEvents);
   const successfulFinishes = outcomes.finishes.filter((event) => isValidRoleFinish(event));
+  const providerExecutionValid = targetRow?.result?.ok === true && outcomes.terminalErrors.length === 0;
+  const roleOutputValid = outcomes.invalidRoleFinishes.length === 0;
+  const requiredAssertionFailures = asArray(result?.summary?.assertions).filter((row) => row?.required !== false && row?.passed !== true && clean(row?.type) !== 'semantic_judge');
   const semanticScore = Number(result?.summary?.metrics?.semantic_score);
   const semanticJudgePresent = result?.summary?.metrics?.semantic_judge_present === true && Number.isFinite(semanticScore);
   const targetDurationMs = Math.max(0, (Date.parse(targetRow?.completed_at || '') || 0) - (Date.parse(targetRow?.started_at || '') || 0));
@@ -1405,60 +2075,90 @@ export function buildConciergeRoutingObservation({ scenario = {}, result = {} } 
   const conciergeShadow = classifyRoomConciergeRoute({
     text: targetText,
     command: '/chat',
-    pendingApproval: previousRoomState.pending_approval === true,
-    roomFootprint: roomComplexitySnapshot(previousRoomState),
+    pendingApproval: effectivePreTargetRoomState.pending_approval === true,
+    roomFootprint: roomComplexitySnapshot(effectivePreTargetRoomState),
   });
   const turnRouterShadow = buildRoomTurnRoute({
     taskText: targetText,
     inputKind: '',
-    chatId: clean(previousRoomState.chat_id || targetRoomState.chat_id),
-    roomPackage: asObject(previousRoomState.agent_room_profile?.room_package || previousRoomState.agent_room_profile?.roomPackage),
+    chatId: clean(effectivePreTargetRoomState.chat_id || targetRoomState.chat_id),
+    roomPackage: asObject(effectivePreTargetRoomState.agent_room_profile?.room_package || effectivePreTargetRoomState.agent_room_profile?.roomPackage),
     source: 'room_journey_concierge_shadow_probe',
   });
   const executionShape = routingExecutionShape(scenario, result?.summary?.arm || {});
   const runtimeDeclaredExecutionShape = clean(targetRoomState?.last_route?.execution_shape || targetRoomState?.lastRoute?.executionShape);
-  const targetExecutionValid = targetRow?.result?.ok === true && outcomes.terminalErrors.length === 0;
-  const inputSnapshot = preRouteExperimentInputSnapshot(scenario, targetStepId);
-  const roomSnapshot = labelSafeRoomSnapshot(previousRoomState);
+  const frozenSnapshot = asObject(result?.summary?.frozen_pre_target_snapshot);
+  const fallbackInputSnapshot = preRouteExperimentInputSnapshot(scenario, targetStepId);
+  const inputSnapshot = clean(frozenSnapshot.snapshot_id) ? {
+    snapshot_mode: clean(frozenSnapshot.snapshot_mode),
+    source: 'frozen_pre_target_room_snapshot',
+    snapshot_id: clean(frozenSnapshot.snapshot_id),
+    sha256: clean(frozenSnapshot.canonical_content_sha256),
+    target_step_id: clean(frozenSnapshot.target_step_id),
+  } : fallbackInputSnapshot;
+  const roomSnapshot = clean(frozenSnapshot.snapshot_id) ? {
+    snapshot_mode: clean(frozenSnapshot.snapshot_mode),
+    snapshot_id: clean(frozenSnapshot.snapshot_id),
+    canonical_content_sha256: clean(frozenSnapshot.canonical_content_sha256),
+  } : labelSafeRoomSnapshot(effectivePreTargetRoomState);
   const projectionEvidence = contextProjectionEvidence({
     trace: asArray(result.trace),
     targetRow,
+    targetEvents,
     requiredContextStepIds: routingRequiredContextStepIds(scenario),
   });
+  const actualContract = actualExecutionContract({
+    plannedShape: executionShape,
+    successfulFinishes,
+    targetRow,
+    contextEvidence: projectionEvidence,
+  });
+  const collaborationShape = ['builder_reviewer', 'parallel_ideation', 'evidence_panel', 'bounded_loop_team'].includes(clean(executionShape).toLowerCase());
+  const collaborationGraphValid = !collaborationShape || actualContract.contract_match === true;
+  const targetExecutionValid = providerExecutionValid && roleOutputValid && collaborationGraphValid && requiredAssertionFailures.length === 0;
   const invalidReasons = [];
-  if (!targetExecutionValid) invalidReasons.push('provider_execution_failed');
+  if (!providerExecutionValid) invalidReasons.push('provider_execution_failed');
+  if (!roleOutputValid) invalidReasons.push('role_output_invalid');
+  if (!collaborationGraphValid) invalidReasons.push('collaboration_graph_failed');
+  if (requiredAssertionFailures.length > 0) invalidReasons.push('required_assertion_failed');
   if (config.label_requires_semantic_judge !== false && !semanticJudgePresent) invalidReasons.push('semantic_evidence_missing');
   if (measurementPolicy.require_context_coverage_evidence && projectionEvidence.coverage_status !== 'verified') invalidReasons.push('context_coverage_evidence_unverified');
   if (measurementPolicy.require_frozen_pre_target_snapshot && inputSnapshot?.snapshot_mode !== 'frozen_pre_target_room_fork') invalidReasons.push('frozen_pre_target_snapshot_unavailable');
-  if (measurementPolicy.require_runtime_shape_evidence && !runtimeDeclaredExecutionShape) invalidReasons.push('runtime_shape_unverified');
+  if (measurementPolicy.require_runtime_shape_evidence && actualContract.contract_match !== true) invalidReasons.push('runtime_shape_unverified');
   if (measurementPolicy.label_status === 'quarantine') invalidReasons.push('label_quarantined_by_experiment_policy');
   return {
-    schema_version: 'ddalggak.concierge_routing_observation/v2',
+    schema_version: 'ddalggak.concierge_routing_observation/v3',
     scenario_id: clean(scenario.id),
     target_step_id: targetStepId,
     arm_id: clean(result?.summary?.arm?.id),
     execution_shape: executionShape,
-    execution_shape_source: 'experiment_candidate_label',
+    execution_shape_source: 'experiment_plan_verified_by_runtime_contract',
     execution_shape_rank: routingShapeRank(executionShape, scenario),
     runtime_declared_execution_shape: runtimeDeclaredExecutionShape,
     target_text: targetText,
     target_step_duration_ms: targetDurationMs,
     target_step_ok: targetRow?.result?.ok === true,
     target_execution_valid: targetExecutionValid,
+    provider_execution_valid: providerExecutionValid,
+    role_output_valid: roleOutputValid,
+    collaboration_graph_valid: collaborationGraphValid,
+    required_assertion_failures: requiredAssertionFailures.map((row) => clean(row.id)).filter(Boolean),
     target_terminal_failure_count: outcomes.terminalErrors.length,
+    target_invalid_role_output_count: outcomes.invalidRoleFinishes.length,
     target_recovered_failure_count: outcomes.recoveredErrors.length,
     semantic_judge_present: semanticJudgePresent,
     semantic_score: semanticJudgePresent ? semanticScore : null,
     pre_route_input_snapshot: inputSnapshot,
     pre_route_room_snapshot: roomSnapshot,
-    pre_route_room_snapshot_sha256: stableSha256(roomSnapshot),
+    pre_route_room_snapshot_sha256: clean(frozenSnapshot.canonical_content_sha256) || stableSha256(roomSnapshot),
     candidate_specific_pre_route_state: {
-      collaboration_profile_id: clean(previousRoomState.collaboration_profile_id || 'auto') || 'auto',
+      collaboration_profile_id: clean(effectivePreTargetRoomState.collaboration_profile_id || 'auto') || 'auto',
     },
-    room_complexity_before_target: roomComplexitySnapshot(previousRoomState),
+    room_complexity_before_target: roomComplexitySnapshot(effectivePreTargetRoomState),
     room_complexity_after_target: roomComplexitySnapshot(targetRoomState),
     context_projection_evidence: projectionEvidence,
-    actual_execution: targetExecutionEvidence(successfulFinishes),
+    actual_execution: actualContract,
+    provider_execution_evidence: targetExecutionEvidence(successfulFinishes),
     shadow_predictions: {
       room_concierge: {
         route: clean(conciergeShadow?.route),
@@ -1476,10 +2176,15 @@ export function buildConciergeRoutingObservation({ scenario = {}, result = {} } 
     measurement_policy: measurementPolicy,
     measurement_validity: {
       execution_evidence_valid: targetExecutionValid,
+      provider_execution_valid: providerExecutionValid,
+      role_output_valid: roleOutputValid,
+      collaboration_graph_valid: collaborationGraphValid,
+      required_assertions_valid: requiredAssertionFailures.length === 0,
       semantic_evidence_valid: semanticJudgePresent,
       context_coverage_status: projectionEvidence.coverage_status,
       context_parity_status: 'pending_peer_comparison',
       snapshot_mode: inputSnapshot?.snapshot_mode || 'unavailable',
+      runtime_shape_contract_valid: actualContract.contract_match === true,
       routing_comparison_valid: invalidReasons.length === 0,
       invalid_reasons: invalidReasons,
     },
@@ -1497,10 +2202,13 @@ export function finalizeConciergeRoutingObservations({ scenario = {}, observatio
   const rows = asArray(observations);
   const inputHashes = [...new Set(rows.map((row) => clean(row?.pre_route_input_snapshot?.sha256)).filter(Boolean))];
   const roomHashes = [...new Set(rows.map((row) => clean(row?.pre_route_room_snapshot_sha256)).filter(Boolean))];
+  const evidenceHashes = [...new Set(rows.map((row) => clean(row?.context_projection_evidence?.common_evidence_hash)).filter(Boolean))];
   const inputParity = rows.length > 0 && inputHashes.length === 1;
   const roomParity = rows.length > 0 && roomHashes.length === 1;
-  const contextParityValid = inputParity && roomParity;
-  const equivalenceGroupId = inputParity ? `ctxeq_${inputHashes[0].slice(0, 16)}` : '';
+  const commonEvidenceRequired = routingRequiredContextStepIds(scenario).length > 0;
+  const commonEvidenceParity = !commonEvidenceRequired || (rows.length > 0 && evidenceHashes.length === 1);
+  const contextParityValid = inputParity && roomParity && commonEvidenceParity;
+  const equivalenceGroupId = contextParityValid ? `ctxeq_${stableSha256({ inputHashes, roomHashes, evidenceHashes }).slice(0, 16)}` : '';
   return rows.map((row) => {
     const existing = asArray(row?.measurement_validity?.invalid_reasons).map(clean).filter(Boolean);
     const reasons = [...existing];
@@ -1512,11 +2220,15 @@ export function finalizeConciergeRoutingObservations({ scenario = {}, observatio
       context_parity: {
         required: policy.require_context_parity,
         experiment_input_parity: inputParity,
-        label_safe_room_snapshot_parity: roomParity,
+        frozen_room_snapshot_parity: roomParity,
+        common_authoritative_evidence_parity: commonEvidenceParity,
         valid: contextParityValid,
         input_snapshot_hashes: inputHashes,
         room_snapshot_hashes: roomHashes,
-        note: 'Arms are independently replayed. This parity check does not claim a frozen pre-target Room fork.',
+        common_evidence_hashes: evidenceHashes,
+        note: rows.every((item) => clean(item?.pre_route_input_snapshot?.snapshot_mode) === 'frozen_pre_target_room_fork')
+          ? 'All candidate arms were forked from the same immutable pre-target Room snapshot.'
+          : 'At least one arm lacks a true frozen pre-target Room snapshot.',
       },
       measurement_validity: {
         ...asObject(row.measurement_validity),
@@ -1551,19 +2263,20 @@ export function deriveConciergeRoutingLabel({ scenario = {}, observations = [] }
   const winner = sufficient[0];
   const targetRoute = coarseConciergeRouteForExecutionShape(winner.execution_shape);
   return {
-    schema_version: 'ddalggak.concierge_routing_label/v2',
+    schema_version: 'ddalggak.concierge_routing_label/v3',
     scenario_id: clean(scenario.id),
     target_step_id: targetStepId,
     target_arm_id: clean(winner.arm_id),
     target_execution_shape: clean(winner.execution_shape),
     target_route: targetRoute,
     training_eligible_for_current_coarse_model: Boolean(targetRoute),
-    label_basis: 'minimal_sufficient_execution_shape_within_quality_tolerance_after_measurement_validity_gate',
+    label_basis: 'minimal_sufficient_execution_shape_within_target_only_outcome_quality_tolerance_after_measurement_validity_gate',
     evidence: {
       best_semantic_score: bestScore,
       minimum_semantic_score: minimumSemanticScore,
       quality_tolerance: qualityTolerance,
       sufficient_score_floor: scoreFloor,
+      selected_outcome_quality_score: Number(winner.semantic_score),
       selected_semantic_score: Number(winner.semantic_score),
       selected_target_step_duration_ms: Number(winner.target_step_duration_ms),
       candidate_count: observations.length,
@@ -1588,6 +2301,8 @@ export function deriveConciergeRoutingLabel({ scenario = {}, observations = [] }
       training_label_eligible: row.training_label_eligible !== false,
       measurement_invalid_reasons: asArray(row?.measurement_validity?.invalid_reasons),
       exact_model_identity_complete: row?.actual_execution?.exact_model_identity_complete === true,
+      runtime_execution_contract_match: row?.actual_execution?.contract_match === true,
+      common_evidence_hash: clean(row?.context_projection_evidence?.common_evidence_hash) || null,
     })),
   };
 }
@@ -1606,10 +2321,20 @@ export async function runRoomJourneySuite({ suiteFile = '', scenarioFiles = [], 
   for (const file of files) {
     const scenario = loadRoomJourneyScenario(file);
     scenarioById.set(scenario.id, scenario);
+    let frozenPreTargetSnapshot = null;
+    if (shouldUseFrozenPreTargetFork(scenario, execute)) {
+      const seedArm = normalizeArm({ id: '__frozen_seed__', title: 'Frozen pre-target Room seed', collaboration_profile: '' }, '__frozen_seed__');
+      const seedTransport = await transportFactory({ scenario, arm: seedArm });
+      frozenPreTargetSnapshot = await buildFrozenPreTargetRoomSnapshot({ scenario, transport: seedTransport, outputRoot, options });
+    }
     for (const arm of scenarioArms(scenario)) {
       const transport = await transportFactory({ scenario, arm });
-      const armOptions = { ...options, chatId: clean(transport?.chatId || arm.metadata?.chat_id || arm.metadata?.chatId || options.chatId) };
-      results.push(await runRoomJourneyScenario({ scenario, arm, outputRoot, transport, execute, traceRoot, options: armOptions }));
+      const armOptions = {
+        ...options,
+        chatId: clean(transport?.chatId || arm.metadata?.chat_id || arm.metadata?.chatId || options.chatId),
+        comparisonTargetStepId: comparisonTargetStepId(scenario),
+      };
+      results.push(await runRoomJourneyScenario({ scenario, arm, outputRoot, transport, execute, traceRoot, options: armOptions, frozenPreTargetSnapshot }));
     }
   }
   const byScenario = new Map();
@@ -1705,7 +2430,10 @@ export async function runRoomJourneySuite({ suiteFile = '', scenarioFiles = [], 
         principle: 'keep_the_room_persistent_choose_the_minimum_sufficient_execution_shape_per_turn',
         labels_are_emitted_only_after_measurement_validity_gate: true,
         candidate_specific_room_state_is_excluded_from_label_input: true,
-        independent_arm_replay_is_not_treated_as_a_frozen_room_fork: true,
+        comparison_scenarios_use_common_buildup_and_frozen_pre_target_fork_when_supported: true,
+        frozen_snapshot_hashes_canonical_session_and_nonvolatile_job_state: true,
+        authoritative_context_delivery_is_verified_per_target_role: true,
+        independent_arm_replay_is_never_misrepresented_as_a_frozen_room_fork: true,
       },
     });
   }

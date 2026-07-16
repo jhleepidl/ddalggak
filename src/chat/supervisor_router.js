@@ -1,4 +1,5 @@
 import path from "node:path";
+import { resolveRoomModelRole } from '../application/room_model_role_router.js';
 import { runGeminiPrompt } from "../gemini.js";
 import { runCodexExec } from "../codex.js";
 import { clip } from "../textutil.js";
@@ -1007,7 +1008,8 @@ function isSupervisorGeminiToolLeakCircuitOpen() {
 }
 
 function supervisorProviderOrder() {
-  const raw = String(process.env.CHAT_SUPERVISOR_PROVIDER || process.env.CHAT_ROUTER_PROVIDER || 'auto').trim().toLowerCase();
+  const roleResolution = resolveRoomModelRole({ phase: 'concierge', env: process.env });
+  const raw = String(process.env.CHAT_SUPERVISOR_PROVIDER || process.env.CHAT_ROUTER_PROVIDER || roleResolution.provider || 'auto').trim().toLowerCase();
   if (['off', 'disabled', 'none'].includes(raw)) return [];
   const migrated = migrateProviderAwayFromGemini(raw, { fallback: 'codex' }).provider;
   if (['codex', 'codex_cli'].includes(migrated)) return ['codex'];
@@ -1051,7 +1053,7 @@ async function runSupervisorRouterProvider({
       prompt,
       signal,
       jobId: String(currentJobId || '').trim(),
-      model: process.env.ANTIGRAVITY_ROUTER_MODEL || process.env.ANTIGRAVITY_MODEL || '',
+      model: process.env.ANTIGRAVITY_ROUTER_MODEL || resolveRoomModelRole({ phase: 'concierge', env: process.env }).model || process.env.ANTIGRAVITY_MODEL || '',
       timeoutMs: positiveInt(process.env.CHAT_SUPERVISOR_ANTIGRAVITY_TIMEOUT_MS || process.env.CHAT_ROUTER_ANTIGRAVITY_TIMEOUT_MS, 60000, { min: 5000, max: 180000 }),
       surface: 'supervisor_router',
       agentId: 'supervisor_router',
@@ -1067,6 +1069,7 @@ async function runSupervisorRouterProvider({
       signal,
       jobId: String(currentJobId || '').trim(),
       profile: codexRouterProfile(),
+      model: process.env.CHAT_SUPERVISOR_CODEX_MODEL || resolveRoomModelRole({ phase: 'concierge', env: process.env }).model || process.env.CODEX_ASSIST_MODEL || process.env.CODEX_MODEL || '',
       sandboxMode: codexRouterSandboxMode(),
       approvalPolicy: codexRouterApprovalPolicy(),
       timeoutMs: positiveInt(process.env.CHAT_SUPERVISOR_CODEX_TIMEOUT_MS || process.env.CHAT_ROUTER_CODEX_TIMEOUT_MS, 60000, { min: 5000, max: 180000 }),

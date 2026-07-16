@@ -55,6 +55,20 @@ export function buildTeamWorkflowContract({ signals = null, goal = '', taskInter
       ? ['user_stop', 'novel_and_sufficiently_complete', 'approval_required_for_high_risk_change', 'iteration_budget_exceeded', 'three_consecutive_failures']
       : (kind === 'bounded_continuous_loop' ? ['user_stop', 'iteration_budget_exceeded', 'three_consecutive_failures'] : []),
     recommended_roles: uniq(row.recommended_roles || row.recommendedRoles || [], { max: 8 }),
+    execution_topology: kind === 'explore_then_synthesize' ? 'deliberation' : (kind === 'single_task' ? 'solo' : 'review_loop'),
+    progress_visibility: 'quiet',
+    progress_policy: {
+      default_visibility: 'quiet',
+      user_selectable: ['quiet', 'standard', 'debug'],
+      notify_on: ['stage_started', 'blocking_issue_found', 'approval_required', 'run_completed', 'run_failed'],
+    },
+    memory_policy: {
+      raw_trace: 'append_only',
+      prompt_surface: 'compacted_working_projection',
+      durable_promotion: 'proposal_only',
+      compact_after_events: 80,
+      compact_after_bytes: 48000,
+    },
     semantic_indexing: {
       requested: semanticIndexing.requested === true,
       targets: uniq(semanticIndexingTargets, { max: 6 }),
