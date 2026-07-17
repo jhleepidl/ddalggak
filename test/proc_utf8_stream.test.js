@@ -40,3 +40,23 @@ test('runCommand decodes stdout and stderr safely when a Korean character is spl
   assert.equal(result.stdout.includes('�'), false);
   assert.equal(result.stderr.includes('�'), false);
 });
+
+test('runCommand emits ordered intermediate output events before resolving', async () => {
+  const source = [
+    "process.stdout.write('first\\n')",
+    "setTimeout(() => process.stderr.write('second\\n'), 10)",
+    "setTimeout(() => process.stdout.write('third\\n'), 20)",
+  ].join(';');
+  const events = [];
+  const result = await runCommand(process.execPath, ['-e', source], {
+    timeoutMs: 5000,
+    onOutput: async (event) => {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      events.push({ stream: event.stream, chunk: event.chunk.trim(), sequence: event.sequence });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(events.map((row) => row.chunk), ['first', 'second', 'third']);
+  assert.deepEqual(events.map((row) => row.sequence), [1, 2, 3]);
+  assert.equal(result.outputEventCount, 3);
+});

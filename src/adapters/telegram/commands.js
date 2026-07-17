@@ -125,6 +125,7 @@ import {
 import { extractTeamCreationSignals } from '../../application/team_signal_extractor.js';
 import { buildTeamWorkflowContract, summarizeTeamWorkflowContract } from '../../application/team_workflow_contract.js';
 import { buildWorkflowRuntimeExecutionPatch } from '../../application/workflow_execution_contract.js';
+import { RoomNativeService, deriveTelegramRoomId, formatRoomNativeStatus, formatRoomNativeTimeline } from '../../room_runtime/room_native_service.js';
 import {
   buildRoomPackage,
   buildRoomProfileFromGoal,
@@ -368,6 +369,12 @@ const AGENTS_HELP_TEXT = [
 
 const ROOM_HELP_TEXT = [
   "AI Room commands:",
+  "- /room workspace: 이 Room의 canonical workspace 경로 보기",
+  "- /room run [--topology review_loop|deliberate|solo] <goal>: Room-native 실행 시작",
+  "- /room status: 목표·현재 단계·다음 단계·blocker 보기 (run-status alias)",
+  "- /room timeline [n]: 최근 단계/CLI 활동 기록 보기",
+  "- /room visibility quiet|standard|debug: 완료만·주요 진행·상세 활동 표시",
+  "- /room pause · /room resume · /room cancel: 실행 제어",
   "- /room: 현재 방의 specialization 보기",
   "- /room suggest <goal>: 반복 작업용 room profile / Room Package 제안",
   "- /room apply <goal>: 이 방을 해당 목적에 맞게 전문화",
@@ -528,6 +535,112 @@ export function createTelegramCommandHandler(deps = {}) {
   const createAgentRoomTeamConfiguration = teamOps.createAgentRoomTeamConfiguration
     || deps.createAgentRoomTeamConfiguration
     || createFreeformTeamConfigurationAdvanced;
+
+  const roomNativeService = deps.roomNativeService || new RoomNativeService({ env: runtimeEnv });
+
+  function isRoomNativeExecutionEnabled() {
+    return roomNativeService?.isEnabled?.() === true;
+  }
+
+  function roomIdForChat(chatId = '') {
+    return deriveTelegramRoomId(chatId);
+  }
+
+  function roomNativeVisibilityForChat(chatId = '') {
+    try {
+      const session = chatSessionStore?.get?.(chatId) || {};
+      const explicit = String(session?.room_native_visibility || runtimeEnv.ROOM_DEFAULT_PROGRESS_VISIBILITY || 'quiet').trim().toLowerCase();
+      return ['quiet', 'standard', 'debug'].includes(explicit) ? explicit : 'quiet';
+    } catch {
+      return 'quiet';
+    }
+  }
+
+  function shouldNotifyRoomNativeProgress(event = {}, visibility = 'quiet') {
+    // Successful completion is delivered once with the final answer by attachRoomNativeCompletion.
+    if (['run_completed', 'run_completed_with_blockers'].includes(event.event)) return false;
+    if (['run_failed', 'run_cancelled'].includes(event.event)) return true;
+    // Start/resume have explicit command acknowledgements; avoid duplicate lifecycle messages.
+    if (['run_started', 'run_resumed'].includes(event.event)) return false;
+    if (visibility === 'debug') return true;
+    if (visibility === 'standard') return ['stage_started', 'stage_output', 'stage_completed', 'stage_skipped', 'stage_retry'].includes(event.event);
+    return event.event === 'stage_completed' && (String(event.stage_id || '').startsWith('review_') || event.stage_id === 'verify');
+  }
+
+  function formatRoomNativeProgress(event = {}) {
+    const stage = event.stage_id ? `stage ${event.stage_index || '-'} / ${event.stage_total || '-'} · ${event.stage_id}` : '';
+    const status = event.status ? `status: ${event.status}` : '';
+    const provider = event.provider ? `${event.provider}${event.role ? ` · ${event.role}` : ''}` : '';
+    const title = event.event === 'run_completed' ? '✅ Room 실행 완료'
+      : event.event === 'run_completed_with_blockers' ? '⚠️ Room 실행 완료 — blocker 확인 필요'
+        : event.event === 'run_failed' ? '❌ Room 실행 실패'
+          : event.event === 'run_cancelled' ? '🛑 Room 실행 취소'
+            : event.event === 'stage_started' ? '▶️ 단계 시작'
+              : event.event === 'stage_skipped' ? '⏭️ 단계 건너뜀'
+                : event.event === 'stage_retry' ? '🔁 단계 재시도'
+                  : event.event === 'stage_output' ? `🔎 ${event.provider || 'provider'} 활동`
+                    : '📍 단계 완료';
+    return [
+      title,
+      stage,
+      provider,
+      status,
+      String(event.message || '').trim(),
+      event.event !== 'stage_output' && event.run_id ? `run: ${event.run_id}` : '',
+    ].filter(Boolean).join('\n');
+  }
+
+  function roomNativeProgressHandler(chatId = '', visibility = 'quiet') {
+    let lastOutputAt = 0;
+    let lastOutputMessage = '';
+    return async (event) => {
+      if (!shouldNotifyRoomNativeProgress(event, visibility)) return;
+      if (event.event === 'stage_output') {
+        const message = String(event.message || '').trim();
+        const now = Date.now();
+        const urgent = ['error', 'warning', 'validation'].includes(String(event.output_kind || ''));
+        const minInterval = visibility === 'debug' ? 1500 : 8000;
+        if (!message || message === lastOutputMessage) return;
+        if (!urgent && now - lastOutputAt < minInterval) return;
+        lastOutputAt = now;
+        lastOutputMessage = message;
+      }
+      try { await bot.sendMessage(chatId, formatRoomNativeProgress(event)); } catch {}
+    };
+  }
+
+  function attachRoomNativeCompletion(chatId = '', started = null) {
+    started?.completion?.then(async (result) => {
+      if (!result?.ok) return;
+      const userMessage = result?.finalStage?.structured?.user_message || result?.finalStage?.output_excerpt || result?.finalStage?.structured?.summary || '';
+      const title = result?.needs_attention
+        ? '⚠️ Room 실행 완료 — 미해결 blocker 확인 필요'
+        : '✅ Room 실행 완료';
+      const runId = result?.run?.paths?.runId || started?.run_id || '';
+      const body = [title, runId ? `run: ${runId}` : '', userMessage ? '' : '', userMessage].filter((value, index) => value || index === 2).join('\n');
+      try { await sendLong(bot, chatId, body); } catch {}
+    }).catch(async (error) => {
+      try { await bot.sendMessage(chatId, `Room execution error: ${String(error?.message || error)}`); } catch {}
+    });
+  }
+
+  async function startRoomNativeRun({ chatId, objective = '', topology = '' } = {}) {
+    const roomId = roomIdForChat(chatId);
+    const visibility = roomNativeVisibilityForChat(chatId);
+    const started = await roomNativeService.startRun({
+      roomId,
+      objective,
+      topology,
+      visibility,
+      modelPolicy: {
+        antigravity_model: runtimeEnv.ANTIGRAVITY_MODEL || '',
+        codex_model: runtimeEnv.DDALGGAK_WORK_MODEL || runtimeEnv.CODEX_MODEL || '',
+      },
+      onProgress: roomNativeProgressHandler(chatId, visibility),
+    });
+    attachRoomNativeCompletion(chatId, started);
+    return started;
+  }
 
   function parseApplyStateTokens(tokens = []) {
     for (const raw of tokens) {
@@ -2944,6 +3057,78 @@ export function createTelegramCommandHandler(deps = {}) {
 
     if (cmd === "/room") {
       const sub = String(rest[0] || "").trim().toLowerCase();
+      const roomId = roomIdForChat(chatId);
+      const roomPayload = String(rawArgs || '').replace(/^\S+\s*/, '').trim();
+      if (['workspace', '작업공간'].includes(sub)) {
+        const room = roomNativeService.initializeRoom(roomId, { title: `Telegram Room ${chatId}` });
+        await bot.sendMessage(chatId, [
+          `Room: ${room.roomId}`,
+          `workspace: ${room.workspaceRoot}`,
+          '이 디렉터리만 Codex의 canonical write scope로 사용됩니다.',
+          'ddalggak control-plane source는 Room 실행에서 접근하지 않습니다.',
+        ].join('\n'));
+        return true;
+      }
+      if (['run', 'start', '실행'].includes(sub)) {
+        if (!isRoomNativeExecutionEnabled()) {
+          await bot.sendMessage(chatId, 'Room-native engine이 비활성화되어 있습니다. ROOM_EXECUTION_ENGINE=room_native_v2를 설정하세요.');
+          return true;
+        }
+        if (!roomPayload) {
+          await bot.sendMessage(chatId, 'Usage: /room run [--topology review_loop|deliberate|solo] <goal>');
+          return true;
+        }
+        try {
+          const started = await startRoomNativeRun({ chatId, objective: roomPayload });
+          await bot.sendMessage(chatId, [
+            'Room-native execution을 시작했습니다.',
+            `room: ${started.room.roomId}`,
+            `workspace: ${started.room.workspaceRoot}`,
+            `run: ${started.run_id}`,
+            `topology: ${started.spec.execution_graph.topology_id}`,
+            `progress: ${roomNativeVisibilityForChat(chatId)}`,
+            '확인: /room status · /room timeline',
+            '제어: /room pause · /room resume · /room cancel',
+          ].join('\n'));
+        } catch (error) {
+          await bot.sendMessage(chatId, `Room execution 시작 실패: ${String(error?.message || error)}`);
+        }
+        return true;
+      }
+      if (['run-status', 'status', 'progress', 'execution', '실행상태', '상태', '진행'].includes(sub)) {
+        await bot.sendMessage(chatId, formatRoomNativeStatus(roomNativeService.status(roomId)));
+        return true;
+      }
+      if (['timeline', 'history', 'log', 'logs', '타임라인', '기록'].includes(sub)) {
+        const limitToken = String(roomPayload || '').split(/\s+/)[0];
+        const limit = /^\d+$/.test(limitToken) ? Number(limitToken) : 20;
+        await sendLong(bot, chatId, formatRoomNativeTimeline(roomNativeService.timeline(roomId, { limit })));
+        return true;
+      }
+      if (['pause', 'resume', 'cancel', '중지', '재개', '취소'].includes(sub)) {
+        const action = ['pause', '중지'].includes(sub) ? 'pause' : ['resume', '재개'].includes(sub) ? 'resume' : 'cancel';
+        if (action === 'resume') {
+          try {
+            const visibility = roomNativeVisibilityForChat(chatId);
+            const resumed = await roomNativeService.resumeRun({ roomId, onProgress: roomNativeProgressHandler(chatId, visibility) });
+            attachRoomNativeCompletion(chatId, resumed);
+            await bot.sendMessage(chatId, `Room run resumed: ${resumed.run_id}`);
+          } catch (error) {
+            await bot.sendMessage(chatId, `Room resume 실패: ${String(error?.message || error)}`);
+          }
+          return true;
+        }
+        const result = roomNativeService.control(roomId, action, `telegram_${action}`);
+        await bot.sendMessage(chatId, result.ok ? `Room run: ${result.status}` : `Room control 실패: ${result.reason}`);
+        return true;
+      }
+      if (['visibility', 'view', '표시'].includes(sub)) {
+        const requested = String(roomPayload || 'quiet').split(/\s+/)[0].toLowerCase();
+        const visibility = roomNativeService.setVisibility(roomId, requested);
+        try { chatSessionStore?.upsert?.(chatId, (session = {}) => ({ ...session, room_native_visibility: visibility })); } catch {}
+        await bot.sendMessage(chatId, `Room progress visibility: ${visibility}`);
+        return true;
+      }
       return handleRoomCommand({ chatId, userId, msg, sub, rawArgs });
     }
 
@@ -3254,6 +3439,66 @@ export function createTelegramCommandHandler(deps = {}) {
       return true;
     }
 
+    if (cmd === "/loop" && isRoomNativeExecutionEnabled()) {
+      const rawLoopArgs = String(args || '').trim();
+      const lowerLoopArgs = rawLoopArgs.toLowerCase();
+      const roomId = roomIdForChat(chatId);
+      if (['status', 'progress', '상태', '진행'].includes(lowerLoopArgs)) {
+        await bot.sendMessage(chatId, formatRoomNativeStatus(roomNativeService.status(roomId)));
+        return true;
+      }
+      if (/^(timeline|history|logs?|타임라인|기록)(?:\s+\d+)?$/.test(lowerLoopArgs)) {
+        const token = lowerLoopArgs.split(/\s+/)[1] || '';
+        const limit = /^\d+$/.test(token) ? Number(token) : 20;
+        await sendLong(bot, chatId, formatRoomNativeTimeline(roomNativeService.timeline(roomId, { limit })));
+        return true;
+      }
+      if (/^(visibility|view|표시)\s+/.test(lowerLoopArgs)) {
+        const requested = lowerLoopArgs.replace(/^(visibility|view|표시)\s+/, '').trim();
+        const visibility = roomNativeService.setVisibility(roomId, requested);
+        try { chatSessionStore?.upsert?.(chatId, (session = {}) => ({ ...session, room_native_visibility: visibility })); } catch {}
+        await bot.sendMessage(chatId, `Room progress visibility: ${visibility}`);
+        return true;
+      }
+      if (['pause', 'resume', 'cancel', '중지', '재개', '취소'].includes(lowerLoopArgs)) {
+        const action = ['pause', '중지'].includes(lowerLoopArgs) ? 'pause' : ['resume', '재개'].includes(lowerLoopArgs) ? 'resume' : 'cancel';
+        if (action === 'resume') {
+          try {
+            const visibility = roomNativeVisibilityForChat(chatId);
+            const resumed = await roomNativeService.resumeRun({ roomId, onProgress: roomNativeProgressHandler(chatId, visibility) });
+            attachRoomNativeCompletion(chatId, resumed);
+            await bot.sendMessage(chatId, `Room run resumed: ${resumed.run_id}`);
+          } catch (error) {
+            await bot.sendMessage(chatId, `Room resume 실패: ${String(error?.message || error)}`);
+          }
+          return true;
+        }
+        const result = roomNativeService.control(roomId, action, `telegram_loop_${action}`);
+        await bot.sendMessage(chatId, result.ok ? `Room run: ${result.status}` : `Room control 실패: ${result.reason}`);
+        return true;
+      }
+      if (!rawLoopArgs) {
+        await bot.sendMessage(chatId, 'Usage: /loop [--topology review_loop|deliberate|solo] <goal>');
+        return true;
+      }
+      try {
+        const started = await startRoomNativeRun({ chatId, objective: rawLoopArgs });
+        await bot.sendMessage(chatId, [
+          'Room-native loop을 시작했습니다.',
+          `workspace: ${started.room.workspaceRoot}`,
+          `run: ${started.run_id}`,
+          `topology: ${started.spec.execution_graph.topology_id}`,
+          `progress: ${roomNativeVisibilityForChat(chatId)}`,
+          '확인: /loop status · /loop timeline',
+          '제어: /loop pause · /loop resume · /loop cancel',
+          '기존 workbench job workspace는 사용하지 않습니다.',
+        ].join('\n'));
+      } catch (error) {
+        await bot.sendMessage(chatId, `Room loop 시작 실패: ${String(error?.message || error)}`);
+      }
+      return true;
+    }
+
     if (cmd === "/loop") {
       const rawLoopArgs = String(args || '').trim();
       const lowerLoopArgs = rawLoopArgs.toLowerCase();
@@ -3305,6 +3550,25 @@ ${result.working_memory_path || ''}` : `compaction 실패: ${result.reason || 'u
         return true;
       }
       return startBoundedLoopFromTelegram({ chatId, userId, msg, raw: args, sourceCommand: '/loop' });
+    }
+
+    if (["/pause", "/resume", "/cancel"].includes(cmd) && isRoomNativeExecutionEnabled()) {
+      const action = cmd === '/pause' ? 'pause' : cmd === '/resume' ? 'resume' : 'cancel';
+      const roomId = roomIdForChat(chatId);
+      if (action === 'resume') {
+        try {
+          const visibility = roomNativeVisibilityForChat(chatId);
+          const resumed = await roomNativeService.resumeRun({ roomId, onProgress: roomNativeProgressHandler(chatId, visibility) });
+          attachRoomNativeCompletion(chatId, resumed);
+          await bot.sendMessage(chatId, `Room run resumed: ${resumed.run_id}`);
+        } catch (error) {
+          await bot.sendMessage(chatId, `Room resume 실패: ${String(error?.message || error)}`);
+        }
+        return true;
+      }
+      const result = roomNativeService.control(roomId, action, `telegram_top_level_${action}`);
+      await bot.sendMessage(chatId, result.ok ? `Room run: ${result.status}` : `Room control 실패: ${result.reason}`);
+      return true;
     }
 
     if (["/pause", "/resume", "/approve"].includes(cmd)) {

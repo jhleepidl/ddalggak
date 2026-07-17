@@ -150,6 +150,8 @@ export function createTelegramUploadService(deps = {}) {
     tracking,
     appendWorkspaceUploadArtifactToGoc = async () => null,
     visualArtifactExtractor = null,
+    roomNativeService = null,
+    deriveRoomId = (chatId) => `telegram-${String(chatId || 'unknown')}`,
   } = deps;
   const allowedExtSet = new Set(
     (Array.isArray(allowedExts) ? allowedExts : [])
@@ -176,6 +178,73 @@ export function createTelegramUploadService(deps = {}) {
     const hash = crypto.createHash("sha256");
     hash.update(fs.readFileSync(cleanPath));
     return hash.digest("hex");
+  }
+
+  async function saveRoomNativeAttachment({ candidate, cleanKind, cleanName, cleanSize, msg, chatId, userId, uploadNote }) {
+    const roomId = deriveRoomId(chatId);
+    const room = roomNativeService.initializeRoom(roomId, { title: `Telegram Room ${chatId}` });
+    const inboxDir = path.join(room.workspaceRoot, 'inbox');
+    fs.mkdirSync(inboxDir, { recursive: true });
+    const inboxStat = fs.lstatSync(inboxDir);
+    if (!inboxStat.isDirectory() || inboxStat.isSymbolicLink()) throw new Error(`Room inbox is not a safe directory: ${inboxDir}`);
+
+    const downloadedPath = await bot.downloadFile(candidate.fileId, inboxDir);
+    const stamp = Date.now().toString(36);
+    const messageId = Number.isFinite(Number(msg?.message_id)) ? Number(msg.message_id) : 0;
+    const finalName = sanitizeWorkspaceFileName(`${stamp}_${messageId}_${cleanName}`, {
+      fallback: `${cleanKind}_${stamp}.bin`,
+    });
+    const finalPath = path.resolve(inboxDir, finalName);
+    const relative = path.relative(room.workspaceRoot, finalPath);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error(`Room upload path escaped workspace: ${finalPath}`);
+    if (path.resolve(downloadedPath) !== finalPath) fs.renameSync(downloadedPath, finalPath);
+
+    const fileStat = fs.statSync(finalPath);
+    const actualSize = Number(fileStat?.size || cleanSize || 0);
+    const sha256 = computeFileSha256(finalPath);
+    const cleanUploadNote = String(uploadNote || '').trim().slice(0, 500);
+    const workspaceRelPath = path.relative(room.workspaceRoot, finalPath).replace(/\\/g, '/');
+    const record = {
+      ts: new Date().toISOString(),
+      kind: `telegram_${cleanKind}_upload`,
+      upload_kind: cleanKind,
+      room_id: room.roomId,
+      chat_id: String(chatId || ''),
+      user_id: String(userId || ''),
+      message_id: messageId,
+      file_id: candidate.fileId,
+      file_unique_id: String(candidate.fileUniqueId || '').trim(),
+      filename: cleanName,
+      size: actualSize,
+      sha256,
+      local_path: finalPath,
+      workspace_path: workspaceRelPath,
+      upload_note: cleanUploadNote || undefined,
+    };
+    fs.appendFileSync(path.join(room.roomStateRoot, 'uploads.jsonl'), `${JSON.stringify(record)}\n`, 'utf8');
+    await bot.sendMessage(
+      chatId,
+      [
+        '📎 Room workspace 업로드 완료',
+        `- Room: ${room.roomId}`,
+        `- 파일: ${cleanName}`,
+        `- 위치: ${workspaceRelPath}`,
+        `- 크기: ${formatByteSize(actualSize)}`,
+        cleanUploadNote ? `- 메모: ${cleanUploadNote}` : '',
+        '- legacy job workspace는 생성하지 않았습니다.',
+      ].filter(Boolean).join('\n'),
+      replyToMessageOptions(msg),
+    );
+    return {
+      skipped: false,
+      roomNative: true,
+      kind: cleanKind,
+      roomId: room.roomId,
+      finalPath,
+      relPath: workspaceRelPath,
+      sha256,
+      createdJob: false,
+    };
   }
 
   async function saveMessageAttachment(msg, { chatId = "", userId = "", uploadNote = "" } = {}) {
@@ -216,6 +285,10 @@ export function createTelegramUploadService(deps = {}) {
         skipped: true,
         reason: "extension_not_allowed",
       };
+    }
+
+    if (roomNativeService?.isEnabled?.() === true) {
+      return await saveRoomNativeAttachment({ candidate, cleanKind, cleanName, cleanSize, msg, chatId, userId, uploadNote });
     }
 
     let jobId = String(resolveLiveJobIdForChat(chatId) || "").trim();

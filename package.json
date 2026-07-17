@@ -27,8 +27,9 @@
     "continuity:handoff": "node scripts/build_continuity_handoff.js",
     "test:user-paths": "node --test test/runtime_command_worker.test.js test/runtime_command_processor.test.js test/run_event_outbox.test.js test/continuity_scenario_runner.test.js test/continuity_handoff_builder.test.js test/room_journey_trace.test.js test/room_journey_runner.test.js test/room_journey_cli.test.js test/headless_room_runtime.test.js test/session_compaction.test.js",
     "room:journey-bench": "node scripts/run_room_journey_bench.js",
-    "dogfood:antigravity-check": "node scripts/check_antigravity_dogfood_readiness.js",
-    "dogfood:hybrid-check": "node scripts/check_antigravity_dogfood_readiness.js"
+    "dogfood:antigravity-check": "node scripts/check_room_native_dogfood_readiness.js",
+    "dogfood:hybrid-check": "node scripts/check_room_native_dogfood_readiness.js",
+    "dogfood:room-check": "node scripts/check_room_native_dogfood_readiness.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

@@ -246,7 +246,7 @@ export async function handleTelegramTeamBlueprintSubcommand(context = {}) {
     const saved = saveSharedTeamPackageToRegistry(pkg);
     let serverLine = '';
     const threadId = getCurrentThreadId(runtimeForTeam);
-    if (threadId && memoryModeWithFallback?.() === 'goc' && typeof requireGocClient === 'function' && /--server/i.test(rawArgs)) {
+    if (threadId && memoryModeWithFallback?.() === 'goc' && typeof requireGocClient === 'function' && /--server\b/i.test(rawArgs)) {
       try {
         await requireGocClient().upsertThreadTeamPackage({ threadId }, saved.package);
         serverLine = 'GoC Team Library에도 package를 업로드했습니다.';

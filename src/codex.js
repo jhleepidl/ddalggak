@@ -181,22 +181,45 @@ function attachCodexTrace({ result, jobId, surface, agentId, roleId, model, prom
   return trace ? { ...withModel, llm_trace_id: trace.trace_id, llm_trace_dir: trace.trace_dir } : withModel;
 }
 
-export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId = "", model = "", reasoningEffort = "", profile = "", addDirs = [], configOverrides = {}, sandboxMode = "", approvalPolicy = "", env = {}, surface = "codex_exec", agentId = "", roleId = "", traceMetadata = {}, timeoutMs = 0 }) {
-  // Requires Codex CLI logged in on the server
-  const command = String(process.env.CODEX_CLI_COMMAND || "codex").trim() || "codex";
-  const requestedSandboxMode = String(sandboxMode || process.env.CODEX_SANDBOX_MODE || "workspace-write").trim() || "workspace-write";
-  const requestedApprovalPolicy = String(approvalPolicy || process.env.CODEX_APPROVAL_POLICY || "never").trim() || "never";
-  const effectiveTimeoutMs = Number(timeoutMs || process.env.CODEX_EXEC_TIMEOUT_MS || 0) > 0 ? Number(timeoutMs || process.env.CODEX_EXEC_TIMEOUT_MS) : 45 * 60 * 1000;
+export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId = "", model = "", reasoningEffort = "", profile = "", addDirs = [], configOverrides = {}, sandboxMode = "", approvalPolicy = "", env = {}, surface = "codex_exec", agentId = "", roleId = "", traceMetadata = {}, timeoutMs = 0, onOutput = null }) {
+  // Requires Codex CLI logged in on the server.
+  // Explicit invocation env overrides process.env so RoomRuntime can use one coherent config object.
+  const runtimeEnv = { ...process.env, ...(env && typeof env === 'object' ? env : {}) };
+  const command = String(runtimeEnv.CODEX_CLI_COMMAND || "codex").trim() || "codex";
+  const requestedSandboxMode = String(sandboxMode || runtimeEnv.CODEX_SANDBOX_MODE || "workspace-write").trim() || "workspace-write";
+  const requestedApprovalPolicy = String(approvalPolicy || runtimeEnv.CODEX_APPROVAL_POLICY || "never").trim() || "never";
+  const effectiveTimeoutMs = Number(timeoutMs || runtimeEnv.CODEX_EXEC_TIMEOUT_MS || 0) > 0 ? Number(timeoutMs || runtimeEnv.CODEX_EXEC_TIMEOUT_MS) : 45 * 60 * 1000;
   const workspacePath = path.resolve(String(workspaceRoot || cwd || process.cwd()).trim() || process.cwd());
   const commandCwd = path.resolve(String(cwd || workspacePath).trim() || workspacePath);
   const requestedModel = String(model || "").trim();
-  const requestedReasoningEffort = String(reasoningEffort || process.env.CODEX_REASONING_EFFORT || "").trim().toLowerCase();
-  const requestedProfile = String(profile || process.env.CODEX_PROFILE || "").trim();
+  const requestedReasoningEffort = String(reasoningEffort || runtimeEnv.CODEX_REASONING_EFFORT || "").trim().toLowerCase();
+  const requestedProfile = String(profile || runtimeEnv.CODEX_PROFILE || "").trim();
   const extraDirs = Array.isArray(addDirs) ? addDirs.map((entry) => String(entry || "").trim()).filter(Boolean) : [];
+  const roomScoped = Boolean(String(traceMetadata?.room_id || '').trim() || String(traceMetadata?.room_run_id || '').trim());
+  let roomBoundaryError = '';
+  if (roomScoped) {
+    if (!String(workspaceRoot || '').trim()) roomBoundaryError = 'Room-scoped Codex execution requires an explicit workspaceRoot';
+    else if (commandCwd !== workspacePath) roomBoundaryError = `Room-scoped Codex cwd must equal workspaceRoot: cwd=${commandCwd} workspace=${workspacePath}`;
+    else if (extraDirs.length > 0) roomBoundaryError = 'Room-scoped Codex execution forbids --add-dir';
+    else {
+      const controlRoot = path.resolve(String(runtimeEnv.DDALGGAK_CONTROL_ROOT || process.cwd()).trim() || process.cwd());
+      if (workspacePath === controlRoot || workspacePath.startsWith(`${controlRoot}${path.sep}`)) {
+        roomBoundaryError = `Room workspace cannot be inside the ddalggak control plane: ${workspacePath}`;
+      } else {
+        try {
+          const stat = fs.lstatSync(workspacePath);
+          if (!stat.isDirectory()) roomBoundaryError = `Room workspace is not a directory: ${workspacePath}`;
+          else if (stat.isSymbolicLink()) roomBoundaryError = `Room workspace cannot be a symlink: ${workspacePath}`;
+        } catch (error) {
+          roomBoundaryError = `Room workspace is unavailable: ${workspacePath} (${error.message})`;
+        }
+      }
+    }
+  }
   const gitRepoCheckResolution = resolveCodexGitRepoCheckPolicy({
     workspacePath,
-    requested: process.env.DDALGGAK_CODEX_SKIP_GIT_REPO_CHECK || '',
-    allowedRoot: process.env.DDALGGAK_CODEX_SKIP_GIT_REPO_CHECK_ROOT || '',
+    requested: runtimeEnv.DDALGGAK_CODEX_SKIP_GIT_REPO_CHECK || '',
+    allowedRoot: runtimeEnv.DDALGGAK_CODEX_SKIP_GIT_REPO_CHECK_ROOT || '',
   });
   const approvalResolution = resolveCodexWorkspaceApprovalPolicy({
     approvalPolicy: requestedApprovalPolicy,
@@ -209,8 +232,8 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
   const effectiveApprovalPolicy = approvalResolution.approvalPolicy;
   const cliApprovalPolicy = approvalResolution.cliApprovalPolicy;
   const envConfigOverrides = {};
-  if (String(process.env.CODEX_MODEL_PROVIDER || "").trim()) envConfigOverrides.model_provider = String(process.env.CODEX_MODEL_PROVIDER || "").trim();
-  if (["1", "true", "yes", "on"].includes(String(process.env.CODEX_ENABLE_WEB_SEARCH || "").trim().toLowerCase())) envConfigOverrides["tools.web_search"] = true;
+  if (String(runtimeEnv.CODEX_MODEL_PROVIDER || "").trim()) envConfigOverrides.model_provider = String(runtimeEnv.CODEX_MODEL_PROVIDER || "").trim();
+  if (["1", "true", "yes", "on"].includes(String(runtimeEnv.CODEX_ENABLE_WEB_SEARCH || "").trim().toLowerCase())) envConfigOverrides["tools.web_search"] = true;
   const mergedConfigOverrides = {
     ...envConfigOverrides,
     ...(requestedReasoningEffort && requestedReasoningEffort !== 'provider_default' ? { model_reasoning_effort: requestedReasoningEffort } : {}),
@@ -218,8 +241,8 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
   };
   appendCodexDebugLog(`[codex] job=${String(jobId || "").trim() || "-"} cwd=${commandCwd} workspace=${workspacePath} model=${requestedModel || "(default)"} approval=${effectiveApprovalPolicy}${approvalResolution.workspaceAutoApprove ? '/workspace-auto' : ''}`);
 
-  if (approvalResolution.error || gitRepoCheckResolution.error) {
-    const policyError = approvalResolution.error || gitRepoCheckResolution.error;
+  if (roomBoundaryError || approvalResolution.error || gitRepoCheckResolution.error) {
+    const policyError = roomBoundaryError || approvalResolution.error || gitRepoCheckResolution.error;
     const blocked = {
       ok: false,
       exitCode: -1,
@@ -267,7 +290,7 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
   const traceModel = requestedModel || requestedProfile || "default";
   return await withRuntimeActivity({ provider: 'codex', kind: 'provider_execution', jobId, metadata: { surface, model: requestedModel || null, workspace: workspacePath } }, async () => {
     const modernArgs = [...modelArgs, ...profileArgs, "exec", ...gitRepoCheckArgs, "-C", workspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "-c", `approval_policy=${cliApprovalPolicy}`, ...configArgs, "-"];
-    const modern = await runCommand(command, modernArgs, { cwd: commandCwd, timeoutMs: effectiveTimeoutMs, input: prompt, abortSignal: signal, env });
+    const modern = await runCommand(command, modernArgs, { cwd: commandCwd, timeoutMs: effectiveTimeoutMs, input: prompt, abortSignal: signal, env: runtimeEnv, onOutput: typeof onOutput === 'function' ? (event) => onOutput({ ...event, provider: 'codex', provider_attempt: 'primary' }) : null });
     if (modern.ok) return attachCodexTrace({ result: modern, jobId, surface, agentId, roleId, model: traceModel, prompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: modernArgs, compatibility_retry: false } });
 
     // Fallback for older codex-cli variants that still support this flag in `exec`.
@@ -280,7 +303,7 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
     if (!optionCompatibilityError) return attachCodexTrace({ result: modern, jobId, surface, agentId, roleId, model: traceModel, prompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: modernArgs, compatibility_retry: false } });
 
     const legacyArgs = [...modelArgs, ...profileArgs, "exec", ...gitRepoCheckArgs, "-C", workspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "--ask-for-approval", cliApprovalPolicy, "-"];
-    const legacy = await runCommand(command, legacyArgs, { cwd: commandCwd, timeoutMs: effectiveTimeoutMs, input: prompt, abortSignal: signal, env });
+    const legacy = await runCommand(command, legacyArgs, { cwd: commandCwd, timeoutMs: effectiveTimeoutMs, input: prompt, abortSignal: signal, env: runtimeEnv, onOutput: typeof onOutput === 'function' ? (event) => onOutput({ ...event, provider: 'codex', provider_attempt: 'compatibility' }) : null });
     if (legacy.ok) return attachCodexTrace({ result: legacy, jobId, surface, agentId, roleId, model: traceModel, prompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: legacyArgs, compatibility_retry: true, primary_error: modern.stderr || null } });
 
     // If legacy flag is unsupported too, keep modern error as the primary one.

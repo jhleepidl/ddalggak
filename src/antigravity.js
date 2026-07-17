@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { runCommand } from './proc.js';
 import { recordLlmTrace } from './application/llm_trace_recorder.js';
@@ -59,27 +60,42 @@ export function resolveAntigravityCliCommand(env = process.env) {
   return String(env?.ANTIGRAVITY_CLI_COMMAND || env?.GOOGLE_AI_CLI_COMMAND || 'agy').trim() || 'agy';
 }
 
-export async function runAntigravityPrompt({ workspaceRoot, prompt, signal, cwd, jobId = '', model = '', surface = 'antigravity_prompt', agentId = '', roleId = '', timeoutMs = 0, traceMetadata = {}, env = {} } = {}) {
-  const command = resolveAntigravityCliCommand(process.env);
-  const baseArgs = splitArgs(process.env.ANTIGRAVITY_CLI_ARGS || process.env.GOOGLE_AI_CLI_ARGS || '');
-  const modelArgName = String(process.env.ANTIGRAVITY_MODEL_ARG || '').trim();
-  const requestedModel = String(model || process.env.ANTIGRAVITY_MODEL || process.env.GOOGLE_AI_MODEL || '').trim();
+export async function runAntigravityPrompt({ workspaceRoot, prompt, signal, cwd, jobId = '', model = '', surface = 'antigravity_prompt', agentId = '', roleId = '', timeoutMs = 0, traceMetadata = {}, env = {}, onOutput = null } = {}) {
+  const runtimeEnv = { ...process.env, ...(env && typeof env === 'object' ? env : {}) };
+  const command = resolveAntigravityCliCommand(runtimeEnv);
+  const baseArgs = splitArgs(runtimeEnv.ANTIGRAVITY_CLI_ARGS || runtimeEnv.GOOGLE_AI_CLI_ARGS || '');
+  const modelArgName = String(runtimeEnv.ANTIGRAVITY_MODEL_ARG || '').trim();
+  const requestedModel = String(model || runtimeEnv.ANTIGRAVITY_MODEL || runtimeEnv.GOOGLE_AI_MODEL || '').trim();
   const modelArgs = requestedModel && modelArgName ? [modelArgName, requestedModel] : [];
+  const roomScoped = Boolean(String(traceMetadata?.room_id || '').trim() || String(traceMetadata?.room_run_id || '').trim());
+  if (roomScoped && !String(workspaceRoot || '').trim()) {
+    throw Object.assign(new Error('Room-scoped Antigravity execution requires an explicit workspaceRoot'), { code: 'ROOM_WORKSPACE_REQUIRED' });
+  }
   const workspacePath = path.resolve(String(workspaceRoot || cwd || process.cwd()).trim() || process.cwd());
   const commandCwd = path.resolve(String(cwd || workspacePath).trim() || workspacePath);
-  const effectiveTimeoutMs = Number(timeoutMs || process.env.ANTIGRAVITY_TIMEOUT_MS || process.env.GOOGLE_AI_TIMEOUT_MS || 0) > 0
-    ? Number(timeoutMs || process.env.ANTIGRAVITY_TIMEOUT_MS || process.env.GOOGLE_AI_TIMEOUT_MS)
+  if (roomScoped) {
+    if (commandCwd !== workspacePath) throw Object.assign(new Error(`Room-scoped Antigravity cwd must equal workspaceRoot: cwd=${commandCwd} workspace=${workspacePath}`), { code: 'ROOM_WORKSPACE_BOUNDARY' });
+    const controlRoot = path.resolve(String(runtimeEnv.DDALGGAK_CONTROL_ROOT || process.cwd()).trim() || process.cwd());
+    if (workspacePath === controlRoot || workspacePath.startsWith(`${controlRoot}${path.sep}`)) {
+      throw Object.assign(new Error(`Room workspace cannot be inside the ddalggak control plane: ${workspacePath}`), { code: 'ROOM_WORKSPACE_BOUNDARY' });
+    }
+    const stat = fs.lstatSync(workspacePath);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw Object.assign(new Error(`Invalid Room workspace: ${workspacePath}`), { code: 'ROOM_WORKSPACE_BOUNDARY' });
+  }
+  const effectiveTimeoutMs = Number(timeoutMs || runtimeEnv.ANTIGRAVITY_TIMEOUT_MS || runtimeEnv.GOOGLE_AI_TIMEOUT_MS || 0) > 0
+    ? Number(timeoutMs || runtimeEnv.ANTIGRAVITY_TIMEOUT_MS || runtimeEnv.GOOGLE_AI_TIMEOUT_MS)
     : 240000;
   const result = await withRuntimeActivity({ provider: 'antigravity', kind: 'provider_execution', jobId, metadata: { surface, model: requestedModel || null, workspace: workspacePath } }, async () => await runCommand(command, [...baseArgs, ...modelArgs], {
     cwd: commandCwd,
     timeoutMs: effectiveTimeoutMs,
     input: String(prompt || ''),
     abortSignal: signal,
+    onOutput: typeof onOutput === 'function' ? (event) => onOutput({ ...event, provider: 'antigravity', provider_attempt: 'primary' }) : null,
     env: {
       CI: '1',
       NO_COLOR: '1',
       FORCE_COLOR: '0',
-      ...env,
+      ...runtimeEnv,
     },
   }));
   return attachAntigravityTrace({

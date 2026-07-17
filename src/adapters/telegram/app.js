@@ -14,6 +14,7 @@ import {
   registerLifecycleSignals,
 } from "./lifecycle.js";
 import { createTelegramUploadService } from "./uploads.js";
+import { RoomNativeService, deriveTelegramRoomId } from "../../room_runtime/room_native_service.js";
 import * as runtimeCore from "../../application/telegram_runtime_ops.js";
 import { startModelCatalogRefreshScheduler } from "../../application/model_catalog_refresh.js";
 import { getRuntimeActivityState } from "../../application/runtime_activity_registry.js";
@@ -111,7 +112,7 @@ function createAppChatRunManager(bot) {
   });
 }
 
-function buildGroupedDeps({ bot, botUsername, chatRunManager, uploadService }) {
+function buildGroupedDeps({ bot, botUsername, chatRunManager, uploadService, roomNativeService }) {
   const telegramUi = {
     bot,
     clip: runtimeCore.clip,
@@ -228,7 +229,7 @@ function buildGroupedDeps({ bot, botUsername, chatRunManager, uploadService }) {
     appendParticipantToJobConfig: runtimeCore.appendParticipantToJobConfig,
     refreshAgentRegistry: runtimeCore.refreshAgentRegistry,
   };
-  return { telegramUi, runtimeOps, jobOps, sessionOps, fileOps, teamOps };
+  return { telegramUi, runtimeOps, jobOps, sessionOps, fileOps, teamOps, roomNativeService };
 }
 
 export async function startTelegramApp({ token = runtimeCore.TOKEN } = {}) {
@@ -287,6 +288,7 @@ export async function startTelegramApp({ token = runtimeCore.TOKEN } = {}) {
   });
   bot.on("polling_error", createPollingErrorHandler({ shutdown }));
 
+  const roomNativeService = new RoomNativeService({ env: process.env });
   const uploadService = createTelegramUploadService({
     bot,
     maxBytes: runtimeCore.TELEGRAM_EFFECTIVE_DOWNLOAD_MAX_BYTES,
@@ -300,6 +302,8 @@ export async function startTelegramApp({ token = runtimeCore.TOKEN } = {}) {
     jobs: runtimeCore.jobs,
     tracking: runtimeCore.tracking,
     appendWorkspaceUploadArtifactToGoc: runtimeCore.appendWorkspaceUploadArtifactToGoc,
+    roomNativeService,
+    deriveRoomId: deriveTelegramRoomId,
   });
 
   try {
@@ -314,6 +318,7 @@ export async function startTelegramApp({ token = runtimeCore.TOKEN } = {}) {
     botUsername,
     chatRunManager,
     uploadService,
+    roomNativeService,
   });
   const onCallbackQuery = createTelegramCallbackQueryHandler(groupedDeps);
   const handleTelegramCommand = createTelegramCommandHandler(groupedDeps);

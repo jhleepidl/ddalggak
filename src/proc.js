@@ -98,6 +98,7 @@ export async function runCommand(command, args = [], opts = {}) {
     abortSignal,
     earlyExitPattern = null,
     earlyExitLabel = 'output_pattern',
+    onOutput = null,
   } = opts;
   const startedAt = Date.now();
   const useProcessGroup = shouldUseProcessGroup(opts);
@@ -132,17 +133,33 @@ export async function runCommand(command, args = [], opts = {}) {
     let abortKillTimer = null;
     let earlyKillTimer = null;
     let child = null;
+    let outputSequence = 0;
+    let outputCallbackChain = Promise.resolve();
+
+    const notifyOutput = (stream, chunk) => {
+      if (typeof onOutput !== 'function' || !chunk) return;
+      const event = {
+        stream,
+        chunk: String(chunk),
+        sequence: ++outputSequence,
+        elapsedMs: Date.now() - startedAt,
+        at: new Date().toISOString(),
+      };
+      outputCallbackChain = outputCallbackChain
+        .then(() => onOutput(event))
+        .catch(() => {});
+    };
 
     const flushStdoutDecoder = () => {
       if (stdoutDecoderEnded) return;
       const rest = stdoutDecoder.end();
-      if (rest) stdoutBuffer.append(rest);
+      if (rest) { stdoutBuffer.append(rest); notifyOutput('stdout', rest); }
       stdoutDecoderEnded = true;
     };
     const flushStderrDecoder = () => {
       if (stderrDecoderEnded) return;
       const rest = stderrDecoder.end();
-      if (rest) stderrBuffer.append(rest);
+      if (rest) { stderrBuffer.append(rest); notifyOutput('stderr', rest); }
       stderrDecoderEnded = true;
     };
 
@@ -169,7 +186,7 @@ export async function runCommand(command, args = [], opts = {}) {
       if (settled) return;
       settled = true;
       cleanup();
-      resolve({
+      const payload = {
         ...result,
         durationMs: Date.now() - startedAt,
         timedOut: didTimeout,
@@ -181,7 +198,9 @@ export async function runCommand(command, args = [], opts = {}) {
         stderrChars: stderrBuffer.totalChars,
         stdoutTruncated: stdoutBuffer.truncated,
         stderrTruncated: stderrBuffer.truncated,
-      });
+        outputEventCount: outputSequence,
+      };
+      Promise.resolve(outputCallbackChain).catch(() => {}).finally(() => resolve(payload));
     };
 
     const scheduleHardResolve = (reason) => {
@@ -286,12 +305,14 @@ export async function runCommand(command, args = [], opts = {}) {
     child.stdout?.on("data", (d) => {
       const chunk = stdoutDecoder.write(d);
       stdoutBuffer.append(chunk);
+      notifyOutput('stdout', chunk);
       maybeEarlyTerminate('stdout', chunk);
     });
     child.stdout?.on("end", flushStdoutDecoder);
     child.stderr?.on("data", (d) => {
       const chunk = stderrDecoder.write(d);
       stderrBuffer.append(chunk);
+      notifyOutput('stderr', chunk);
       maybeEarlyTerminate('stderr', chunk);
     });
     child.stderr?.on("end", flushStderrDecoder);

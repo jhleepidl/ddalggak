@@ -173,3 +173,47 @@ test("createTelegramUploadService rejects files outside the allowed extension li
   assert.equal(harness.state.createdJobs.length, 0);
   assert.match(harness.state.sentMessages[0].text, /허용 목록/);
 });
+
+
+test('Room-native uploads go to the canonical Room inbox without creating a legacy job', async () => {
+  const harness = createWorkspaceHarness();
+  const runtimeRoot = path.join(harness.tmpRoot, 'room-runtime');
+  const room = {
+    roomId: 'telegram-9001',
+    workspaceRoot: path.join(runtimeRoot, 'workspaces', 'telegram-9001', 'workspace'),
+    roomStateRoot: path.join(runtimeRoot, 'state', 'telegram-9001'),
+  };
+  fs.mkdirSync(room.workspaceRoot, { recursive: true });
+  fs.mkdirSync(room.roomStateRoot, { recursive: true });
+  const service = createTelegramUploadService({
+    ...harness.deps,
+    roomNativeService: {
+      isEnabled: () => true,
+      initializeRoom: () => room,
+    },
+    deriveRoomId: () => room.roomId,
+  });
+
+  const result = await service.saveMessageAttachment({
+    message_id: 55,
+    document: {
+      file_id: 'doc-file-id',
+      file_unique_id: 'unique-room-doc',
+      file_name: 'room-notes.txt',
+      file_size: 16,
+    },
+  }, { chatId: 9001, userId: 42, uploadNote: 'Room input' });
+
+  assert.equal(result.roomNative, true);
+  assert.equal(result.roomId, room.roomId);
+  assert.equal(harness.state.createdJobs.length, 0);
+  assert.equal(harness.state.conversations.length, 0);
+  assert.equal(harness.state.tracking.length, 0);
+  assert.ok(result.finalPath.startsWith(path.join(room.workspaceRoot, 'inbox')));
+  assert.equal(fs.readFileSync(result.finalPath, 'utf8'), 'uploaded content');
+  const records = fs.readFileSync(path.join(room.roomStateRoot, 'uploads.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].room_id, room.roomId);
+  assert.match(records[0].workspace_path, /^inbox\//);
+  assert.match(harness.state.sentMessages[0].text, /legacy job workspace는 생성하지 않았습니다/);
+});
