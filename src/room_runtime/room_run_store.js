@@ -17,6 +17,8 @@ export function roomRunPaths(roomStateRoot = '', runId = '', { create = false } 
     ensureDir(path.join(runRoot, 'stages'));
     ensureDir(path.join(runRoot, 'snapshots'));
     ensureDir(path.join(runRoot, 'raw'));
+    ensureDir(path.join(runRoot, 'receipts'));
+    ensureDir(path.join(runRoot, 'checkpoints'));
   }
   return {
     runId: id,
@@ -31,6 +33,9 @@ export function roomRunPaths(roomStateRoot = '', runId = '', { create = false } 
     stagesRoot: path.join(runRoot, 'stages'),
     snapshotsRoot: path.join(runRoot, 'snapshots'),
     rawRoot: path.join(runRoot, 'raw'),
+    receiptsRoot: path.join(runRoot, 'receipts'),
+    checkpointsRoot: path.join(runRoot, 'checkpoints'),
+    checkpointPath: path.join(runRoot, 'checkpoint.json'),
   };
 }
 
@@ -38,7 +43,7 @@ export function createRoomRun({ roomStateRoot = '', spec = {} } = {}) {
   const paths = roomRunPaths(roomStateRoot, spec.run_id, { create: true });
   const now = new Date().toISOString();
   const state = {
-    schema_version: 'ai_rooms.room_run_state/v2',
+    schema_version: 'ai_rooms.room_run_state/v3',
     run_id: paths.runId,
     room_id: spec.room_id,
     status: 'queued',
@@ -57,12 +62,16 @@ export function createRoomRun({ roomStateRoot = '', spec = {} } = {}) {
   writeJsonAtomic(paths.statePath, state);
   writeJsonAtomic(paths.controlPath, { status: 'running', updated_at: now, reason: 'initial' });
   writeJsonAtomic(paths.workingMemoryPath, {
-    schema_version: 'ai_rooms.working_memory/v2',
+    schema_version: 'ai_rooms.working_memory/v3',
     objective: spec.objective,
     decisions: [],
     open_blockers: [],
     milestones: [],
     stage_summaries: [],
+    next_actions: [],
+    artifacts: [],
+    claims: [],
+    receipt_index: [],
     updated_at: now,
   });
   appendJsonl(paths.eventsPath, { event_type: 'run_created', at: now, run_id: paths.runId, room_id: spec.room_id });

@@ -21,7 +21,7 @@ test('Room-scoped Codex rejects control-plane workspace before invoking CLI', as
       traceMetadata: { room_id: 'room-a', room_run_id: 'run-a' },
     });
     assert.equal(result.ok, false);
-    assert.match(result.stderr, /Room workspace cannot be inside the ddalggak control plane/);
+    assert.match(result.stderr, /inside the ddalggak control plane/);
   } finally {
     if (old === undefined) delete process.env.DDALGGAK_CONTROL_ROOT; else process.env.DDALGGAK_CONTROL_ROOT = old;
     if (oldCommand === undefined) delete process.env.CODEX_CLI_COMMAND; else process.env.CODEX_CLI_COMMAND = oldCommand;

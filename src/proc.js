@@ -99,6 +99,7 @@ export async function runCommand(command, args = [], opts = {}) {
     earlyExitPattern = null,
     earlyExitLabel = 'output_pattern',
     onOutput = null,
+    inheritEnv = true,
   } = opts;
   const startedAt = Date.now();
   const useProcessGroup = shouldUseProcessGroup(opts);
@@ -265,7 +266,7 @@ export async function runCommand(command, args = [], opts = {}) {
       child = spawn(command, args, {
         cwd,
         shell,
-        env: { ...process.env, ...env },
+        env: inheritEnv ? { ...process.env, ...env } : { ...env },
         detached: useProcessGroup,
         stdio: ["pipe", "pipe", "pipe"],
       });

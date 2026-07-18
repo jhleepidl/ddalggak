@@ -75,3 +75,39 @@ test('dogfood readiness warns when all execution is accidentally assigned to Ant
     assert.ok(row.warnings.some(x=>x.includes('CODE_EXECUTOR')));
   }finally{fs.rmSync(env._TEST_ROOT,{recursive:true,force:true});}
 });
+
+test('dogfood readiness performs a bubblewrap smoke for nested runs layout',async()=>{
+  const env=hybridEnv();
+  const control=env.DDALGGAK_CONTROL_ROOT;
+  const runs=path.join(control,'runs');
+  const runtime=path.join(runs,'_room_native');
+  Object.assign(env,{
+    RUNS_DIR:runs,
+    ROOM_RUNTIME_ROOT:runtime,
+    ROOM_WORKSPACES_ROOT:path.join(runtime,'workspaces'),
+    ROOM_STATE_ROOT:path.join(runtime,'state'),
+    DDALGGAK_CODEX_SKIP_GIT_REPO_CHECK_ROOT:path.join(runtime,'workspaces'),
+    ROOM_ALLOW_RUNTIME_INSIDE_CONTROL_ROOT:'true',
+    ROOM_PROVIDER_OS_SANDBOX:'bwrap',
+    ROOM_PROVIDER_BWRAP_COMMAND:process.execPath,
+  });
+  fs.mkdirSync(control,{recursive:true});
+  fs.writeFileSync(path.join(control,'package.json'),'{}');
+  const calls=[];
+  try{
+    const runner=async(command,args,options)=>{
+      calls.push({command,args,options});
+      if(command==='agy') return {ok:true,stdout:'Model A\n',stderr:'',exit_code:0};
+      if(command==='codex') return {ok:true,stdout:'codex-cli 1.0\n',stderr:'',exit_code:0};
+      return {ok:true,stdout:'',stderr:'',exit_code:0};
+    };
+    const row=await checkAntigravityDogfood({env,runner});
+    assert.equal(row.ready,true);
+    assert.equal(row.bwrap_smoke_ok,true);
+    assert.equal(row.roots.runtimeInsideControlRoot,true);
+    assert.equal(calls.length,3);
+    assert.equal(calls[2].command,process.execPath);
+    assert.ok(calls[2].args.includes('--unshare-pid'));
+    assert.ok(calls[2].args.some((value,index)=>value==='--tmpfs' && calls[2].args[index+1]===control));
+  }finally{fs.rmSync(env._TEST_ROOT,{recursive:true,force:true});}
+});

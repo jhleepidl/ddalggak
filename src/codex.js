@@ -3,6 +3,7 @@ import path from "node:path";
 import { runCommand } from "./proc.js";
 import { recordLlmTrace } from "./application/llm_trace_recorder.js";
 import { withRuntimeActivity } from "./application/runtime_activity_registry.js";
+import { prepareRoomProviderInvocation, rewriteWorkspacePathForSandbox } from "./room_runtime/provider_process_boundary.js";
 
 function appendCodexDebugLog(line = "") {
   const file = path.resolve(process.env.CODEX_DEBUG_LOG || "codex_debug.log");
@@ -202,20 +203,26 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
     else if (commandCwd !== workspacePath) roomBoundaryError = `Room-scoped Codex cwd must equal workspaceRoot: cwd=${commandCwd} workspace=${workspacePath}`;
     else if (extraDirs.length > 0) roomBoundaryError = 'Room-scoped Codex execution forbids --add-dir';
     else {
-      const controlRoot = path.resolve(String(runtimeEnv.DDALGGAK_CONTROL_ROOT || process.cwd()).trim() || process.cwd());
-      if (workspacePath === controlRoot || workspacePath.startsWith(`${controlRoot}${path.sep}`)) {
-        roomBoundaryError = `Room workspace cannot be inside the ddalggak control plane: ${workspacePath}`;
-      } else {
-        try {
-          const stat = fs.lstatSync(workspacePath);
-          if (!stat.isDirectory()) roomBoundaryError = `Room workspace is not a directory: ${workspacePath}`;
-          else if (stat.isSymbolicLink()) roomBoundaryError = `Room workspace cannot be a symlink: ${workspacePath}`;
-        } catch (error) {
-          roomBoundaryError = `Room workspace is unavailable: ${workspacePath} (${error.message})`;
-        }
+      try {
+        const stat = fs.lstatSync(workspacePath);
+        if (!stat.isDirectory()) roomBoundaryError = `Room workspace is not a directory: ${workspacePath}`;
+        else if (stat.isSymbolicLink()) roomBoundaryError = `Room workspace cannot be a symlink: ${workspacePath}`;
+      } catch (error) {
+        roomBoundaryError = `Room workspace is unavailable: ${workspacePath} (${error.message})`;
       }
     }
   }
+  const boundaryProbe = prepareRoomProviderInvocation({
+    provider: 'codex',
+    command,
+    args: [],
+    workspacePath,
+    roomScoped,
+    env: runtimeEnv,
+  });
+  if (!roomBoundaryError && !boundaryProbe.ok) roomBoundaryError = boundaryProbe.error;
+  const providerWorkspacePath = boundaryProbe.ok ? boundaryProbe.visibleWorkspacePath : workspacePath;
+  const executionPrompt = rewriteWorkspacePathForSandbox(String(prompt || ''), workspacePath, providerWorkspacePath);
   const gitRepoCheckResolution = resolveCodexGitRepoCheckPolicy({
     workspacePath,
     requested: runtimeEnv.DDALGGAK_CODEX_SKIP_GIT_REPO_CHECK || '',
@@ -285,13 +292,21 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
     reasoning_effort: requestedReasoningEffort || null,
     requested_model: requestedModel || null,
     resolved_model: requestedModel || null,
+    room_provider_os_sandbox: boundaryProbe.ok ? boundaryProbe.osSandbox : null,
+    provider_visible_workspace: boundaryProbe.ok ? boundaryProbe.visibleWorkspacePath : null,
+    provider_env_inheritance: boundaryProbe.ok && boundaryProbe.inheritEnv ? 'full' : 'allowlist',
     ...asObject(traceMetadata),
   };
   const traceModel = requestedModel || requestedProfile || "default";
   return await withRuntimeActivity({ provider: 'codex', kind: 'provider_execution', jobId, metadata: { surface, model: requestedModel || null, workspace: workspacePath } }, async () => {
-    const modernArgs = [...modelArgs, ...profileArgs, "exec", ...gitRepoCheckArgs, "-C", workspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "-c", `approval_policy=${cliApprovalPolicy}`, ...configArgs, "-"];
-    const modern = await runCommand(command, modernArgs, { cwd: commandCwd, timeoutMs: effectiveTimeoutMs, input: prompt, abortSignal: signal, env: runtimeEnv, onOutput: typeof onOutput === 'function' ? (event) => onOutput({ ...event, provider: 'codex', provider_attempt: 'primary' }) : null });
-    if (modern.ok) return attachCodexTrace({ result: modern, jobId, surface, agentId, roleId, model: traceModel, prompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: modernArgs, compatibility_retry: false } });
+    const modernArgs = [...modelArgs, ...profileArgs, "exec", ...gitRepoCheckArgs, "-C", providerWorkspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "-c", `approval_policy=${cliApprovalPolicy}`, ...configArgs, "-"];
+    const modernInvocation = prepareRoomProviderInvocation({ provider: 'codex', command, args: modernArgs, workspacePath, roomScoped, env: runtimeEnv });
+    if (!modernInvocation.ok) {
+      const blocked = { ok: false, exitCode: -1, signal: null, stdout: '', stderr: `[codex execution policy blocked] ${modernInvocation.error}`, durationMs: 0, timedOut: false, aborted: false, killed: false, killedProcessGroup: false, earlyTerminated: false, stdoutChars: 0, stderrChars: modernInvocation.error.length, stdoutTruncated: false, stderrTruncated: false };
+      return attachCodexTrace({ result: blocked, jobId, surface, agentId, roleId, model: traceModel, prompt: executionPrompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: modernArgs, compatibility_retry: false } });
+    }
+    const modern = await runCommand(modernInvocation.command, modernInvocation.args, { cwd: modernInvocation.cwd, timeoutMs: effectiveTimeoutMs, input: executionPrompt, abortSignal: signal, env: modernInvocation.childEnv, inheritEnv: modernInvocation.inheritEnv, onOutput: typeof onOutput === 'function' ? (event) => onOutput({ ...event, provider: 'codex', provider_attempt: 'primary' }) : null });
+    if (modern.ok) return attachCodexTrace({ result: modern, jobId, surface, agentId, roleId, model: traceModel, prompt: executionPrompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: modernArgs, compatibility_retry: false } });
 
     // Fallback for older codex-cli variants that still support this flag in `exec`.
     const optionCompatibilityError = [
@@ -300,14 +315,19 @@ export async function runCodexExec({ workspaceRoot, prompt, signal, cwd, jobId =
       "unknown config key",
       "unknown field `approval_policy`",
     ].some((needle) => (modern.stderr || "").toLowerCase().includes(needle.toLowerCase()));
-    if (!optionCompatibilityError) return attachCodexTrace({ result: modern, jobId, surface, agentId, roleId, model: traceModel, prompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: modernArgs, compatibility_retry: false } });
+    if (!optionCompatibilityError) return attachCodexTrace({ result: modern, jobId, surface, agentId, roleId, model: traceModel, prompt: executionPrompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: modernArgs, compatibility_retry: false } });
 
-    const legacyArgs = [...modelArgs, ...profileArgs, "exec", ...gitRepoCheckArgs, "-C", workspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "--ask-for-approval", cliApprovalPolicy, "-"];
-    const legacy = await runCommand(command, legacyArgs, { cwd: commandCwd, timeoutMs: effectiveTimeoutMs, input: prompt, abortSignal: signal, env: runtimeEnv, onOutput: typeof onOutput === 'function' ? (event) => onOutput({ ...event, provider: 'codex', provider_attempt: 'compatibility' }) : null });
-    if (legacy.ok) return attachCodexTrace({ result: legacy, jobId, surface, agentId, roleId, model: traceModel, prompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: legacyArgs, compatibility_retry: true, primary_error: modern.stderr || null } });
+    const legacyArgs = [...modelArgs, ...profileArgs, "exec", ...gitRepoCheckArgs, "-C", providerWorkspacePath, ...addDirArgs, "--sandbox", effectiveSandboxMode, "--ask-for-approval", cliApprovalPolicy, "-"];
+    const legacyInvocation = prepareRoomProviderInvocation({ provider: 'codex', command, args: legacyArgs, workspacePath, roomScoped, env: runtimeEnv });
+    if (!legacyInvocation.ok) {
+      const blocked = { ok: false, exitCode: -1, signal: null, stdout: '', stderr: `[codex execution policy blocked] ${legacyInvocation.error}`, durationMs: 0, timedOut: false, aborted: false, killed: false, killedProcessGroup: false, earlyTerminated: false, stdoutChars: 0, stderrChars: legacyInvocation.error.length, stdoutTruncated: false, stderrTruncated: false };
+      return attachCodexTrace({ result: blocked, jobId, surface, agentId, roleId, model: traceModel, prompt: executionPrompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: legacyArgs, compatibility_retry: true, primary_error: modern.stderr || null } });
+    }
+    const legacy = await runCommand(legacyInvocation.command, legacyInvocation.args, { cwd: legacyInvocation.cwd, timeoutMs: effectiveTimeoutMs, input: executionPrompt, abortSignal: signal, env: legacyInvocation.childEnv, inheritEnv: legacyInvocation.inheritEnv, onOutput: typeof onOutput === 'function' ? (event) => onOutput({ ...event, provider: 'codex', provider_attempt: 'compatibility' }) : null });
+    if (legacy.ok) return attachCodexTrace({ result: legacy, jobId, surface, agentId, roleId, model: traceModel, prompt: executionPrompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: legacyArgs, compatibility_retry: true, primary_error: modern.stderr || null } });
 
     // If legacy flag is unsupported too, keep modern error as the primary one.
     const finalResult = (legacy.stderr || "").includes("unexpected argument '--ask-for-approval'") ? modern : legacy;
-    return attachCodexTrace({ result: finalResult, jobId, surface, agentId, roleId, model: traceModel, prompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: finalResult === modern ? modernArgs : legacyArgs, compatibility_retry: true, primary_error: modern.stderr || null, legacy_error: legacy.stderr || null } });
+    return attachCodexTrace({ result: finalResult, jobId, surface, agentId, roleId, model: traceModel, prompt: executionPrompt, cwd: commandCwd, workspaceRoot: workspacePath, metadata: { ...commonTraceMetadata, args: finalResult === modern ? modernArgs : legacyArgs, compatibility_retry: true, primary_error: modern.stderr || null, legacy_error: legacy.stderr || null } });
   });
 }

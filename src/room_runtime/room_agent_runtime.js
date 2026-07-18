@@ -10,6 +10,8 @@ import {
   writeJsonAtomic,
 } from './fs_utils.js';
 import { validateRoomWorkspace } from './room_workspace_registry.js';
+import { assertProviderCapabilities, inspectRoomProviderPortfolio } from './room_provider_capabilities.js';
+import { hashWorkspaceManifest } from './room_execution_receipt.js';
 
 function resultOutput(result = {}) {
   return String(result?.stdout || result?.output || result?.stderr || '').trim();
@@ -34,6 +36,10 @@ export class RoomAgentRuntime {
     };
   }
 
+  inspectCapabilities() {
+    return inspectRoomProviderPortfolio(this.env);
+  }
+
   prepareStageWorkspace({ roomId, roomPaths, runPaths, stage }) {
     const validated = validateRoomWorkspace(roomId, { env: this.env });
     if (validated.workspaceRoot !== roomPaths.workspaceRoot) throw new Error('Room workspace identity changed during execution');
@@ -45,13 +51,15 @@ export class RoomAgentRuntime {
   }
 
   async execute({ roomId, roomPaths, runPaths, stage, prompt, signal, modelPolicy = {}, onOutput = null }) {
+    const providerCapability = assertProviderCapabilities(stage.provider, stage.required_capabilities || [], this.env);
     const prepared = this.prepareStageWorkspace({ roomId, roomPaths, runPaths, stage });
     const manifestOptions = {
       ignored: ['.git', 'node_modules', '__pycache__', '.pytest_cache', '.mypy_cache', '.next', '.venv', 'venv', '.cache', 'dist', 'build', 'target', 'coverage'],
       maxEntries: Number(this.env.ROOM_WORKSPACE_MANIFEST_MAX_ENTRIES || 500000),
       maxHashBytes: Number(this.env.ROOM_WORKSPACE_MANIFEST_MAX_HASH_BYTES || 33554432),
     };
-    const before = prepared.snapshot ? directoryManifest(roomPaths.workspaceRoot, manifestOptions) : null;
+    const canonicalBefore = directoryManifest(roomPaths.workspaceRoot, manifestOptions);
+    const executionBefore = prepared.snapshot ? directoryManifest(prepared.executionRoot, manifestOptions) : canonicalBefore;
     const common = {
       workspaceRoot: prepared.executionRoot,
       cwd: prepared.executionRoot,
@@ -95,20 +103,30 @@ export class RoomAgentRuntime {
       throw new Error(`Unsupported Room provider: ${stage.provider}`);
     }
     ensureProviderSuccess(stage.provider, result);
-    const after = prepared.snapshot ? directoryManifest(roomPaths.workspaceRoot, manifestOptions) : null;
-    if (prepared.snapshot && JSON.stringify(before) !== JSON.stringify(after)) {
+    const canonicalAfter = directoryManifest(roomPaths.workspaceRoot, manifestOptions);
+    const executionAfter = prepared.snapshot ? directoryManifest(prepared.executionRoot, manifestOptions) : canonicalAfter;
+    if (prepared.snapshot && JSON.stringify(canonicalBefore) !== JSON.stringify(canonicalAfter)) {
       const error = new Error(`Read-only Room agent mutated the canonical workspace during ${stage.stage_id}`);
       error.code = 'ROOM_READ_ONLY_MUTATION';
       throw error;
     }
     const rawFile = path.join(runPaths.rawRoot, `${String(stage.order).padStart(2, '0')}-${stage.stage_id}.json`);
     writeJsonAtomic(rawFile, {
-      schema_version: 'ai_rooms.provider_result/v2',
+      schema_version: 'ai_rooms.provider_result/v3',
       provider: stage.provider,
       stage_id: stage.stage_id,
       execution_root: prepared.executionRoot,
       canonical_workspace_root: roomPaths.workspaceRoot,
       snapshot: prepared.snapshot,
+      provider_capability: providerCapability,
+      workspace_evidence: {
+        canonical_revision_before: hashWorkspaceManifest(canonicalBefore),
+        canonical_revision_after: hashWorkspaceManifest(canonicalAfter),
+        canonical_before: canonicalBefore,
+        canonical_after: canonicalAfter,
+        execution_revision_before: hashWorkspaceManifest(executionBefore),
+        execution_revision_after: hashWorkspaceManifest(executionAfter),
+      },
       result,
     });
     return {
@@ -118,6 +136,16 @@ export class RoomAgentRuntime {
       output: resultOutput(result),
       result,
       raw_file: rawFile,
+      canonical_workspace_root: roomPaths.workspaceRoot,
+      provider_capability: providerCapability,
+      workspace_evidence: {
+        canonical_revision_before: hashWorkspaceManifest(canonicalBefore),
+        canonical_revision_after: hashWorkspaceManifest(canonicalAfter),
+        canonical_before: canonicalBefore,
+        canonical_after: canonicalAfter,
+        execution_revision_before: hashWorkspaceManifest(executionBefore),
+        execution_revision_after: hashWorkspaceManifest(executionAfter),
+      },
     };
   }
 }

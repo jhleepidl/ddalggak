@@ -33,7 +33,7 @@ function fixture() {
         stdout: [
           `${args.roleId} completed`,
           '<ROOM_STAGE_RESULT>',
-          JSON.stringify({ summary: `${args.roleId} summary`, decisions: [], blocking_issues: [], resolved_issues: [], next_actions: [], user_message: args.roleId === 'synthesizer' ? 'final room answer' : '' }),
+          JSON.stringify({ summary: `${args.roleId} summary`, decisions: [], blocking_issues: [], resolved_issues: [], next_actions: [], user_message: '' }),
           '</ROOM_STAGE_RESULT>',
         ].join('\n'),
       };
@@ -48,7 +48,7 @@ function fixture() {
         stdout: [
           `${args.roleId} completed`,
           '<ROOM_STAGE_RESULT>',
-          JSON.stringify({ summary: `${args.roleId} summary`, decisions: ['implementation kept inside Room workspace'], blocking_issues: [], resolved_issues: [], next_actions: [], user_message: '' }),
+          JSON.stringify({ summary: `${args.roleId} summary`, decisions: ['implementation kept inside Room workspace'], blocking_issues: [], resolved_issues: [], next_actions: [], user_message: args.roleId === 'operator' ? 'final room answer' : '' }),
           '</ROOM_STAGE_RESULT>',
         ].join('\n'),
       };
@@ -65,18 +65,16 @@ test('review loop executes only against canonical Room workspace or isolated sna
   try {
     const room = fx.service.initializeRoom('telegram-42');
     fs.writeFileSync(path.join(room.workspaceRoot, 'input.txt'), 'hello');
-    const started = await fx.service.startRun({ roomId: 'telegram-42', objective: 'Implement and review a small change', topology: 'review_loop', visibility: 'debug' });
+    const started = await fx.service.startRun({ roomId: 'telegram-42', objective: 'Implement and review a small change', collaborationProfile: 'builder_reviewer', visibility: 'debug' });
     const result = await started.completion;
     assert.equal(result.ok, true);
     assert.equal(result.run.state.status, 'completed');
     assert.equal(fs.existsSync(path.join(room.workspaceRoot, 'implemented.txt')), true);
-    assert.equal(fs.existsSync(path.join(room.workspaceRoot, '.snapshot-planner.txt')), false);
     assert.equal(fs.existsSync(path.join(room.workspaceRoot, '.snapshot-reviewer.txt')), false);
-    assert.equal(fs.existsSync(path.join(room.workspaceRoot, '.snapshot-synthesizer.txt')), false);
     const codexCalls = fx.calls.filter((row) => row.provider === 'codex');
     const antigravityCalls = fx.calls.filter((row) => row.provider === 'antigravity');
     assert.ok(codexCalls.length >= 2);
-    assert.ok(antigravityCalls.length >= 3);
+    assert.ok(antigravityCalls.length >= 1);
     assert.ok(codexCalls.every((row) => row.workspaceRoot === room.workspaceRoot));
     assert.ok(antigravityCalls.every((row) => row.workspaceRoot !== room.workspaceRoot));
     assert.ok(antigravityCalls.every((row) => row.workspaceRoot.startsWith(started.room.roomStateRoot)));
@@ -91,6 +89,12 @@ test('review loop executes only against canonical Room workspace or isolated sna
     assert.match(restoredEvents.toString('utf8'), /"event_type":"run_completed"/);
     const finalization = JSON.parse(fs.readFileSync(path.join(result.run.paths.runRoot, 'finalization.json'), 'utf8'));
     assert.equal(finalization.cold_archive_verified, true);
+    assert.ok(finalization.execution_receipt_count >= 3);
+    const checkpoint = JSON.parse(fs.readFileSync(result.run.paths.checkpointPath, 'utf8'));
+    assert.equal(checkpoint.provider_sessions_required, false);
+    assert.equal(checkpoint.resume_contract.provider_may_change, true);
+    assert.ok(checkpoint.receipt_index.length >= 3);
+    assert.equal(fs.readdirSync(result.run.paths.receiptsRoot).filter((name) => name.endsWith('.json')).length, checkpoint.receipt_index.length);
   } finally {
     fs.rmSync(fx.root, { recursive: true, force: true });
   }
@@ -100,12 +104,12 @@ test('only one active run is allowed per Room', async () => {
   const fx = fixture();
   try {
     let release;
-    fx.service.engine.agentRuntime.providers.antigravity = async (args) => {
+    fx.service.engine.agentRuntime.providers.codex = async (args) => {
       await new Promise((resolve) => { release = resolve; });
       return { ok: true, stdout: '<ROOM_STAGE_RESULT>{"summary":"done","decisions":[],"blocking_issues":[],"resolved_issues":[],"next_actions":[],"user_message":""}</ROOM_STAGE_RESULT>' };
     };
-    const first = await fx.service.startRun({ roomId: 'telegram-99', objective: 'first', topology: 'solo' });
-    await assert.rejects(() => fx.service.startRun({ roomId: 'telegram-99', objective: 'second', topology: 'solo' }), /active run/);
+    const first = await fx.service.startRun({ roomId: 'telegram-99', objective: 'first', collaborationProfile: 'solo' });
+    await assert.rejects(() => fx.service.startRun({ roomId: 'telegram-99', objective: 'second', collaborationProfile: 'solo' }), /active run/);
     fx.service.control('telegram-99', 'cancel', 'test');
     release?.();
     await first.completion;
@@ -117,34 +121,33 @@ test('only one active run is allowed per Room', async () => {
 test('persisted failed Room run resumes from the first incomplete stage', async () => {
   const fx = fixture();
   try {
-    let failOnce = true;
-    fx.service.engine.agentRuntime.providers.codex = async (args) => {
-      fx.calls.push({ provider: 'codex', ...args });
-      if (args.roleId === 'builder' && failOnce) {
-        failOnce = false;
-        return { ok: false, stderr: 'simulated transient builder failure' };
+    let failReviewOnce = true;
+    fx.service.engine.agentRuntime.providers.antigravity = async (args) => {
+      fx.calls.push({ provider: 'antigravity', ...args });
+      if (args.roleId === 'reviewer' && failReviewOnce) {
+        failReviewOnce = false;
+        return { ok: false, stderr: 'simulated review failure' };
       }
-      fs.writeFileSync(path.join(args.workspaceRoot, 'resumed.txt'), 'ok');
       return {
         ok: true,
-        stdout: '<ROOM_STAGE_RESULT>{"summary":"codex resumed","decisions":[],"blocking_issues":[],"resolved_issues":[],"next_actions":[],"user_message":""}</ROOM_STAGE_RESULT>',
+        stdout: '<ROOM_STAGE_RESULT>{"summary":"review resumed","decisions":[],"blocking_issues":[],"resolved_issues":[],"next_actions":[],"user_message":""}</ROOM_STAGE_RESULT>',
       };
     };
-    const first = await fx.service.startRun({ roomId: 'telegram-resume', objective: 'resume test', topology: 'review_loop' });
+    const first = await fx.service.startRun({ roomId: 'telegram-resume', objective: 'resume test', collaborationProfile: 'builder_reviewer' });
     const firstResult = await first.completion;
     assert.equal(firstResult.ok, false);
     assert.equal(firstResult.run.state.status, 'failed');
-    assert.deepEqual(firstResult.run.state.completed_stage_ids, ['plan']);
+    assert.deepEqual(firstResult.run.state.completed_stage_ids, ['execute']);
 
     const resumed = await fx.service.resumeRun({ roomId: 'telegram-resume' });
     const resumedResult = await resumed.completion;
     assert.equal(resumedResult.ok, true);
     assert.equal(resumedResult.run.state.status, 'completed');
-    assert.ok(resumedResult.run.state.completed_stage_ids.includes('plan'));
-    assert.ok(resumedResult.run.state.completed_stage_ids.includes('synthesize'));
-    assert.equal(fs.existsSync(path.join(resumed.room.workspaceRoot, 'resumed.txt')), true);
-    const plannerCalls = fx.calls.filter((row) => row.provider === 'antigravity' && row.roleId === 'planner');
-    assert.equal(plannerCalls.length, 1);
+    assert.ok(resumedResult.run.state.completed_stage_ids.includes('execute'));
+    assert.ok(resumedResult.run.state.completed_stage_ids.includes('verify'));
+    assert.equal(fs.existsSync(path.join(resumed.room.workspaceRoot, 'implemented.txt')), true);
+    const executeCalls = fx.calls.filter((row) => row.provider === 'codex' && row.surface === 'room_native_execute');
+    assert.equal(executeCalls.length, 1);
   } finally {
     fs.rmSync(fx.root, { recursive: true, force: true });
   }
@@ -155,7 +158,7 @@ test('transient stage failures are retried but boundary failures are not', async
   try {
     fx.env.ROOM_STAGE_MAX_ATTEMPTS = '2';
     let attempts = 0;
-    fx.service.engine.agentRuntime.providers.antigravity = async () => {
+    fx.service.engine.agentRuntime.providers.codex = async () => {
       attempts += 1;
       if (attempts === 1) {
         const error = new Error('429 rate limit');
@@ -165,7 +168,7 @@ test('transient stage failures are retried but boundary failures are not', async
       }
       return { ok: true, stdout: '<ROOM_STAGE_RESULT>{"summary":"recovered","decisions":[],"blocking_issues":[],"resolved_issues":[],"next_actions":[],"user_message":""}</ROOM_STAGE_RESULT>' };
     };
-    const started = await fx.service.startRun({ roomId: 'telegram-retry', objective: 'retry test', topology: 'solo' });
+    const started = await fx.service.startRun({ roomId: 'telegram-retry', objective: 'retry test', collaborationProfile: 'solo' });
     const result = await started.completion;
     assert.equal(result.ok, true);
     assert.equal(attempts, 2);
@@ -180,17 +183,17 @@ test('transient stage failures are retried but boundary failures are not', async
 test('malformed stage output is bounded, persisted, and does not crash the Room run', async () => {
   const fx = fixture();
   try {
-    fx.service.engine.agentRuntime.providers.antigravity = async (args) => ({
+    fx.service.engine.agentRuntime.providers.codex = async (args) => ({
       ok: true,
       stdout: `${args.roleId} produced plain output without the structured block`,
     });
-    const started = await fx.service.startRun({ roomId: 'telegram-malformed', objective: 'malformed contract fallback', topology: 'solo' });
+    const started = await fx.service.startRun({ roomId: 'telegram-malformed', objective: 'malformed contract fallback', collaborationProfile: 'solo' });
     const result = await started.completion;
     assert.equal(result.ok, true);
-    const synth = JSON.parse(fs.readFileSync(path.join(result.run.paths.stagesRoot, 'synthesize.json'), 'utf8'));
-    assert.equal(synth.contract_observed, false);
-    assert.match(synth.structured.summary, /plain output without the structured block/);
-    assert.ok(synth.structured.summary.length <= 2400);
+    const execute = JSON.parse(fs.readFileSync(path.join(result.run.paths.stagesRoot, 'execute.json'), 'utf8'));
+    assert.equal(execute.contract_observed, false);
+    assert.match(execute.structured.summary, /plain output without the structured block/);
+    assert.ok(execute.structured.summary.length <= 2400);
   } finally {
     fs.rmSync(fx.root, { recursive: true, force: true });
   }
@@ -208,7 +211,7 @@ test('review blockers trigger bounded revision and independent re-review', async
         ? { summary: 'review found one blocker', decisions: [], blocking_issues: ['bug A must be fixed'], resolved_issues: [], next_actions: [], user_message: '' }
         : reviewTwo
           ? { summary: 'second review found no blockers', decisions: [], blocking_issues: [], resolved_issues: [], next_actions: [], user_message: '' }
-          : { summary: `${args.roleId} summary`, decisions: [], blocking_issues: [], resolved_issues: [], next_actions: [], user_message: args.roleId === 'synthesizer' ? 'bounded loop done' : '' };
+          : { summary: `${args.roleId} summary`, decisions: [], blocking_issues: [], resolved_issues: [], next_actions: [], user_message: '' };
       return { ok: true, stdout: `<ROOM_STAGE_RESULT>${JSON.stringify(body)}</ROOM_STAGE_RESULT>` };
     };
     fx.service.engine.agentRuntime.providers.codex = async (args) => {
@@ -220,11 +223,11 @@ test('review blockers trigger bounded revision and independent re-review', async
         blocking_issues: [],
         resolved_issues: revision ? ['bug A must be fixed'] : [],
         next_actions: [],
-        user_message: '',
+        user_message: args.roleId === 'operator' ? 'bounded loop done' : '',
       };
       return { ok: true, stdout: `<ROOM_STAGE_RESULT>${JSON.stringify(body)}</ROOM_STAGE_RESULT>` };
     };
-    const started = await fx.service.startRun({ roomId: 'telegram-feedback', objective: 'bounded review loop', topology: 'review_loop' });
+    const started = await fx.service.startRun({ roomId: 'telegram-feedback', objective: 'bounded review loop', collaborationProfile: 'builder_reviewer' });
     const result = await started.completion;
     assert.equal(result.ok, true);
     assert.ok(result.run.state.completed_stage_ids.includes('review_1'));
@@ -251,22 +254,18 @@ test('provider intermediate output becomes bounded Room progress events and time
     fx.service.engine.agentRuntime.providers.codex = async (args) => {
       await args.onOutput?.({ stream: 'stdout', chunk: 'Running npm test\n', sequence: 1, elapsedMs: 5 });
       await args.onOutput?.({ stream: 'stdout', chunk: 'Updated src/example.js\n', sequence: 2, elapsedMs: 10 });
-      return { ok: true, stdout: '<ROOM_STAGE_RESULT>{"summary":"codex done","decisions":[],"blocking_issues":[],"resolved_issues":[],"next_actions":[],"user_message":""}</ROOM_STAGE_RESULT>' };
+      return { ok: true, stdout: '<ROOM_STAGE_RESULT>{"summary":"codex done","decisions":[],"blocking_issues":[],"resolved_issues":[],"next_actions":[],"user_message":"final answer"}</ROOM_STAGE_RESULT>' };
     };
-    fx.service.engine.agentRuntime.providers.antigravity = async (args) => {
-      await args.onOutput?.({ stream: 'stderr', chunk: 'warning: review diagnostic\n', sequence: 1, elapsedMs: 3 });
-      return { ok: true, stdout: '<ROOM_STAGE_RESULT>{"summary":"antigravity done","decisions":[],"blocking_issues":[],"resolved_issues":[],"next_actions":[],"user_message":"final answer"}</ROOM_STAGE_RESULT>' };
-    };
-    const started = await fx.service.startRun({ roomId: 'telegram-stream', objective: 'stream progress', topology: 'solo', onProgress: async (event) => progress.push(event) });
+    const started = await fx.service.startRun({ roomId: 'telegram-stream', objective: 'stream progress', collaborationProfile: 'solo', onProgress: async (event) => progress.push(event) });
     const result = await started.completion;
     assert.equal(result.ok, true);
     assert.ok(progress.some((event) => event.event === 'stage_output' && /Running npm test/.test(event.message)));
     const events = fs.readFileSync(result.run.paths.eventsPath, 'utf8');
     assert.match(events, /"event_type":"stage_output"/);
-    const implement = JSON.parse(fs.readFileSync(path.join(result.run.paths.stagesRoot, 'implement.json'), 'utf8'));
-    assert.ok(implement.stream_summary.projected_event_count >= 2);
+    const execute = JSON.parse(fs.readFileSync(path.join(result.run.paths.stagesRoot, 'execute.json'), 'utf8'));
+    assert.ok(execute.stream_summary.projected_event_count >= 2);
     const terminal = progress.findLast((event) => event.event === 'run_completed');
-    assert.equal(terminal.message, 'antigravity done');
+    assert.equal(terminal.message, 'codex done');
     assert.doesNotMatch(terminal.message, /final answer/);
     const timeline = fx.service.timeline('telegram-stream', { limit: 50 });
     assert.ok(timeline.events.some((event) => event.event_type === 'stage_output'));
@@ -282,14 +281,14 @@ test('unresolved blocking issues produce an honest completed_with_blockers outco
       const isReview = String(args.surface || '').includes('review_');
       const body = isReview
         ? { summary: 'blocking defect remains', decisions: [], blocking_issues: ['critical defect remains'], resolved_issues: [], next_actions: [], user_message: '' }
-        : { summary: `${args.roleId} summary`, decisions: [], blocking_issues: [], resolved_issues: [], next_actions: [], user_message: args.roleId === 'synthesizer' ? 'manual attention required' : '' };
+        : { summary: `${args.roleId} summary`, decisions: [], blocking_issues: [], resolved_issues: [], next_actions: [], user_message: '' };
       return { ok: true, stdout: `<ROOM_STAGE_RESULT>${JSON.stringify(body)}</ROOM_STAGE_RESULT>` };
     };
-    fx.service.engine.agentRuntime.providers.codex = async () => ({
+    fx.service.engine.agentRuntime.providers.codex = async (args) => ({
       ok: true,
-      stdout: '<ROOM_STAGE_RESULT>{"summary":"attempted fix","decisions":[],"blocking_issues":[],"resolved_issues":[],"next_actions":[],"user_message":""}</ROOM_STAGE_RESULT>',
+      stdout: `<ROOM_STAGE_RESULT>${JSON.stringify({ summary: 'attempted fix', decisions: [], blocking_issues: [], resolved_issues: [], next_actions: [], user_message: args.roleId === 'operator' ? 'manual attention required' : '' })}</ROOM_STAGE_RESULT>`,
     });
-    const started = await fx.service.startRun({ roomId: 'telegram-blocked', objective: 'honest blocker outcome', topology: 'review_loop' });
+    const started = await fx.service.startRun({ roomId: 'telegram-blocked', objective: 'honest blocker outcome', collaborationProfile: 'builder_reviewer' });
     const result = await started.completion;
     assert.equal(result.ok, true);
     assert.equal(result.needs_attention, true);
@@ -299,6 +298,25 @@ test('unresolved blocking issues produce an honest completed_with_blockers outco
     assert.deepEqual(final.open_blockers, ['critical defect remains']);
     const events = fs.readFileSync(result.run.paths.eventsPath, 'utf8');
     assert.match(events, /run_completed_with_blockers/);
+  } finally {
+    fs.rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+
+test('explicit profile flag overrides a stored or caller-provided collaboration profile', async () => {
+  const fx = fixture();
+  try {
+    const started = await fx.service.startRun({
+      roomId: 'telegram-profile-override',
+      objective: '--profile solo fix one file',
+      collaborationProfile: 'builder_reviewer',
+    });
+    const result = await started.completion;
+    assert.equal(result.ok, true);
+    assert.equal(started.spec.execution_graph.collaboration_profile_id, 'solo');
+    assert.deepEqual(started.spec.execution_graph.stages.map((stage) => stage.stage_id), ['execute']);
+    assert.equal(started.spec.objective, 'fix one file');
   } finally {
     fs.rmSync(fx.root, { recursive: true, force: true });
   }

@@ -59,6 +59,7 @@ export function createRoomProviderProgressTracker({
   onProjection = null,
 } = {}) {
   const residual = { stdout: '', stderr: '' };
+  const projections = [];
   const stats = {
     chunk_count: 0,
     stdout_chars: 0,
@@ -79,13 +80,17 @@ export function createRoomProviderProgressTracker({
     stats.projected_event_count += 1;
     stats.last_projected_message = projected.message;
     stats.last_projected_kind = projected.kind;
+    const projection = {
+      ...projected,
+      stream: event.stream || 'stdout',
+      sequence: Number(event.sequence || stats.chunk_count),
+      elapsed_ms: Number(event.elapsedMs || event.elapsed_ms || 0),
+      provider_attempt: event.provider_attempt || event.attempt || null,
+    };
+    projections.push(projection);
     if (typeof onProjection === 'function') {
       await onProjection({
-        ...projected,
-        stream: event.stream || 'stdout',
-        sequence: Number(event.sequence || stats.chunk_count),
-        elapsed_ms: Number(event.elapsedMs || event.elapsed_ms || 0),
-        provider_attempt: event.provider_attempt || event.attempt || null,
+        ...projection,
       });
     }
   }
@@ -116,5 +121,9 @@ export function createRoomProviderProgressTracker({
     return { ...stats };
   }
 
-  return { observe, flush, summary };
+  function events() {
+    return projections.map((row) => ({ ...row }));
+  }
+
+  return { observe, flush, summary, events };
 }

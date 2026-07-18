@@ -16,6 +16,10 @@ import {
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(MODULE_DIR, '..', '..');
 
+function isTruthy(value = '') {
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
+}
+
 export function resolveRoomRuntimeRoots(env = process.env) {
   const runtimeRoot = path.resolve(cleanText(env.ROOM_RUNTIME_ROOT) || '/home/jhlee/ai_rooms_runtime');
   const workspacesRoot = path.resolve(cleanText(env.ROOM_WORKSPACES_ROOT) || path.join(runtimeRoot, 'workspaces'));
@@ -23,8 +27,23 @@ export function resolveRoomRuntimeRoots(env = process.env) {
   const controlRoot = path.resolve(cleanText(env.DDALGGAK_CONTROL_ROOT) || PROJECT_ROOT);
 
   const insideOrEqual = (root, candidate) => candidate === root || candidate.startsWith(`${root}${path.sep}`);
-  if (insideOrEqual(controlRoot, runtimeRoot) || insideOrEqual(runtimeRoot, controlRoot)) {
-    throw new Error(`ROOM_RUNTIME_ROOT and ddalggak control plane must be disjoint: runtime=${runtimeRoot} control=${controlRoot}`);
+  const runsRoot = path.resolve(controlRoot, cleanText(env.RUNS_DIR) || 'runs');
+  const runtimeInsideControlRoot = insideOrEqual(controlRoot, runtimeRoot);
+  const controlInsideRuntimeRoot = insideOrEqual(runtimeRoot, controlRoot);
+  const allowRuntimeInsideControlRoot = isTruthy(env.ROOM_ALLOW_RUNTIME_INSIDE_CONTROL_ROOT);
+  if (controlInsideRuntimeRoot) {
+    throw new Error(`ROOM_RUNTIME_ROOT cannot contain the ddalggak control plane: runtime=${runtimeRoot} control=${controlRoot}`);
+  }
+  if (runtimeInsideControlRoot) {
+    if (!allowRuntimeInsideControlRoot) {
+      throw new Error(`ROOM_RUNTIME_ROOT is inside the ddalggak control plane; set ROOM_ALLOW_RUNTIME_INSIDE_CONTROL_ROOT=true only with provider OS sandboxing: runtime=${runtimeRoot} control=${controlRoot}`);
+    }
+    if (!insideOrEqual(runsRoot, runtimeRoot)) {
+      throw new Error(`Nested ROOM_RUNTIME_ROOT must stay inside RUNS_DIR: runtime=${runtimeRoot} runs=${runsRoot}`);
+    }
+    if (cleanText(env.ROOM_PROVIDER_OS_SANDBOX).toLowerCase() !== 'bwrap') {
+      throw new Error('Nested ROOM_RUNTIME_ROOT requires ROOM_PROVIDER_OS_SANDBOX=bwrap');
+    }
   }
   if (!insideOrEqual(runtimeRoot, workspacesRoot)) {
     throw new Error(`ROOM_WORKSPACES_ROOT must be inside ROOM_RUNTIME_ROOT: ${workspacesRoot}`);
@@ -35,13 +54,13 @@ export function resolveRoomRuntimeRoots(env = process.env) {
   if (insideOrEqual(workspacesRoot, stateRoot) || insideOrEqual(stateRoot, workspacesRoot)) {
     throw new Error(`ROOM_WORKSPACES_ROOT and ROOM_STATE_ROOT must not overlap: workspaces=${workspacesRoot} state=${stateRoot}`);
   }
-  if (insideOrEqual(controlRoot, workspacesRoot) || insideOrEqual(workspacesRoot, controlRoot)) {
-    throw new Error(`ROOM_WORKSPACES_ROOT and ddalggak control plane must be disjoint: ${workspacesRoot}`);
+  if (!runtimeInsideControlRoot && (insideOrEqual(controlRoot, workspacesRoot) || insideOrEqual(workspacesRoot, controlRoot))) {
+    throw new Error(`ROOM_WORKSPACES_ROOT and ddalggak control plane must be disjoint unless nested runtime mode is explicitly enabled: ${workspacesRoot}`);
   }
-  if (insideOrEqual(controlRoot, stateRoot) || insideOrEqual(stateRoot, controlRoot)) {
-    throw new Error(`ROOM_STATE_ROOT and ddalggak control plane must be disjoint: ${stateRoot}`);
+  if (!runtimeInsideControlRoot && (insideOrEqual(controlRoot, stateRoot) || insideOrEqual(stateRoot, controlRoot))) {
+    throw new Error(`ROOM_STATE_ROOT and ddalggak control plane must be disjoint unless nested runtime mode is explicitly enabled: ${stateRoot}`);
   }
-  return { runtimeRoot, workspacesRoot, stateRoot, controlRoot };
+  return { runtimeRoot, workspacesRoot, stateRoot, controlRoot, runsRoot, runtimeInsideControlRoot, allowRuntimeInsideControlRoot };
 }
 
 export function normalizeRoomId(value = '') {
@@ -74,7 +93,7 @@ export function roomPaths(roomId = '', { env = process.env, create = true } = {}
   const manifestPath = path.join(roomStateRoot, 'room.json');
   if (create && !fs.existsSync(manifestPath)) {
     writeJsonAtomic(manifestPath, {
-      schema_version: 'ai_rooms.room/v2',
+      schema_version: 'ai_rooms.room/v3',
       room_id: id,
       workspace_root: workspaceRoot,
       state_root: roomStateRoot,
@@ -105,8 +124,11 @@ export function validateRoomWorkspace(roomId = '', options = {}) {
   if (!fs.statSync(paths.workspaceRoot).isDirectory()) throw new Error(`Room workspace is not a directory: ${paths.workspaceRoot}`);
   assertNoSymlinkComponents(paths.workspaceRoot, { stopAt: paths.workspacesRoot });
   assertNoEscapingSymlinks(paths.workspaceRoot, { maxEntries: Number(options?.env?.ROOM_WORKSPACE_MAX_SCAN_ENTRIES || 100000) });
-  if (paths.workspaceRoot === paths.controlRoot || paths.workspaceRoot.startsWith(`${paths.controlRoot}${path.sep}`)) {
+  if (paths.workspaceRoot === paths.controlRoot) {
     throw new Error('Room workspace cannot be the ddalggak source tree');
+  }
+  if (paths.workspaceRoot.startsWith(`${paths.controlRoot}${path.sep}`) && !paths.runtimeInsideControlRoot) {
+    throw new Error('Room workspace cannot be inside the ddalggak source tree unless nested runtime mode is explicitly enabled');
   }
   return paths;
 }

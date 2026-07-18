@@ -88,7 +88,7 @@ test('Room runtime root cannot contain or be contained by the control plane', ()
     env.ROOM_RUNTIME_ROOT = root;
     env.ROOM_WORKSPACES_ROOT = path.join(root, 'workspaces');
     env.ROOM_STATE_ROOT = path.join(root, 'state');
-    assert.throws(() => resolveRoomRuntimeRoots(env), /must be disjoint/);
+    assert.throws(() => resolveRoomRuntimeRoots(env), /cannot contain/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -105,6 +105,43 @@ test('Room runtime root cannot contain or be contained by the control plane', ()
     env.ROOM_WORKSPACES_ROOT = path.join(linkedRuntime, 'workspaces');
     env.ROOM_STATE_ROOT = path.join(linkedRuntime, 'state');
     assert.throws(() => roomPaths('symlink-runtime', { env, create: true }), /symbolic-link component|cannot be a symbolic link/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Room runtime may live under RUNS_DIR only with explicit bwrap opt-in', () => {
+  const { root, env } = tempEnv();
+  try {
+    const runs = path.join(env.DDALGGAK_CONTROL_ROOT, 'runs');
+    const runtime = path.join(runs, '_room_native');
+    env.RUNS_DIR = runs;
+    env.ROOM_RUNTIME_ROOT = runtime;
+    env.ROOM_WORKSPACES_ROOT = path.join(runtime, 'workspaces');
+    env.ROOM_STATE_ROOT = path.join(runtime, 'state');
+    env.ROOM_ALLOW_RUNTIME_INSIDE_CONTROL_ROOT = 'true';
+    env.ROOM_PROVIDER_OS_SANDBOX = 'bwrap';
+    const roots = resolveRoomRuntimeRoots(env);
+    assert.equal(roots.runtimeInsideControlRoot, true);
+    assert.equal(roots.runsRoot, path.resolve(runs));
+    const paths = roomPaths('nested-room', { env, create: true });
+    assert.ok(paths.workspaceRoot.startsWith(path.resolve(env.ROOM_WORKSPACES_ROOT)));
+    assert.equal(validateRoomWorkspace('nested-room', { env }).workspaceRoot, paths.workspaceRoot);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Nested Room runtime is rejected outside RUNS_DIR', () => {
+  const { root, env } = tempEnv();
+  try {
+    env.RUNS_DIR = path.join(env.DDALGGAK_CONTROL_ROOT, 'runs');
+    env.ROOM_RUNTIME_ROOT = path.join(env.DDALGGAK_CONTROL_ROOT, 'other-runtime');
+    env.ROOM_WORKSPACES_ROOT = path.join(env.ROOM_RUNTIME_ROOT, 'workspaces');
+    env.ROOM_STATE_ROOT = path.join(env.ROOM_RUNTIME_ROOT, 'state');
+    env.ROOM_ALLOW_RUNTIME_INSIDE_CONTROL_ROOT = 'true';
+    env.ROOM_PROVIDER_OS_SANDBOX = 'bwrap';
+    assert.throws(() => resolveRoomRuntimeRoots(env), /must stay inside RUNS_DIR/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

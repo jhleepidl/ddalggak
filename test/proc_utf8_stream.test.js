@@ -60,3 +60,21 @@ test('runCommand emits ordered intermediate output events before resolving', asy
   assert.deepEqual(events.map((row) => row.sequence), [1, 2, 3]);
   assert.equal(result.outputEventCount, 3);
 });
+
+test('runCommand can use an exact child environment without inheriting secrets', async () => {
+  const previous = process.env.DDALGGAK_TEST_PARENT_SECRET;
+  process.env.DDALGGAK_TEST_PARENT_SECRET = 'must-not-leak';
+  try {
+    const source = "process.stdout.write(JSON.stringify({ secret: process.env.DDALGGAK_TEST_PARENT_SECRET || null, allowed: process.env.ALLOWED_VALUE || null }))";
+    const result = await runCommand(process.execPath, ['-e', source], {
+      timeoutMs: 5000,
+      inheritEnv: false,
+      env: { PATH: process.env.PATH || '', ALLOWED_VALUE: 'yes' },
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(JSON.parse(result.stdout), { secret: null, allowed: 'yes' });
+  } finally {
+    if (previous === undefined) delete process.env.DDALGGAK_TEST_PARENT_SECRET;
+    else process.env.DDALGGAK_TEST_PARENT_SECRET = previous;
+  }
+});

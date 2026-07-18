@@ -12,14 +12,16 @@ function harness() {
       return {
         room: { roomId: args.roomId, workspaceRoot: '/rooms/test/workspace' },
         run_id: 'run-1',
-        spec: { execution_graph: { topology_id: 'review_loop' } },
+        spec: { execution_graph: { collaboration_profile_id: 'builder_reviewer', topology_id: 'builder_reviewer' } },
         completion: Promise.resolve({ ok: true, finalStage: { structured: { user_message: 'done' } } }),
       };
     },
     initializeRoom: (roomId) => ({ roomId, workspaceRoot: '/rooms/test/workspace' }),
     status: (roomId) => ({ room_id: roomId, workspace_root: '/rooms/test/workspace', active_run_id: null, recent_runs: [] }),
     setVisibility: (_roomId, value) => value,
-    timeline: (roomId, { limit } = {}) => ({ room_id: roomId, run_id: 'run-1', status: 'running', objective: 'improve', events: [{ event_type: 'stage_output', stage_id: 'implement', message: `Running tests (${limit})` }] }),
+    timeline: (roomId, { limit } = {}) => ({ room_id: roomId, run_id: 'run-1', status: 'running', objective: 'improve', events: [{ event_type: 'stage_output', stage_id: 'execute', message: `Running tests (${limit})` }] }),
+    contract: () => ({ schema_version: 'ai_rooms.room_contract/v1', contract_revision: 2, contract_hash: 'abcdef1234567890', room_id: 'telegram-42', goal: 'ship safely', objective: 'improve', completion_contract: ['tests pass'], constraints: ['do not leak secrets'], sources: { authoritative: [], excluded: [] }, corrections: [], requested_artifacts: [], approval_policy: { mode: 'bounded', require_for: [] }, provider_policy: {}, continuity: { next_action: 'run tests', branches: [], pending_review_count: 0 }, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }),
+    receipts: () => ({ room_id: 'telegram-42', run_id: 'run-1', status: 'completed', receipts: [{ stage_id: 'execute', provider: 'codex', status: 'completed', receipt_hash: '1234567890abcdef', workspace: { revision_after: 'fedcba0987654321', files_changed: [{ path: 'a.js', change: 'modified' }] }, reported: { validations: [{ name: 'npm test', status: 'passed' }], blocking_issues: [] } }] }),
     control: () => ({ ok: true, status: 'paused' }),
     resumeRun: async () => ({ run_id: 'run-1', completion: Promise.resolve({ ok: true, finalStage: { structured: { user_message: '' } } }) }),
   };
@@ -69,7 +71,7 @@ test('successful Room completion is delivered once with the final answer', async
     return {
       room: { roomId: args.roomId, workspaceRoot: '/rooms/test/workspace' },
       run_id: 'run-1',
-      spec: { execution_graph: { topology_id: 'review_loop' } },
+      spec: { execution_graph: { collaboration_profile_id: 'builder_reviewer', topology_id: 'builder_reviewer' } },
       completion: Promise.resolve({
         ok: true,
         needs_attention: false,
@@ -81,7 +83,40 @@ test('successful Room completion is delivered once with the final answer', async
   const handled = await h.handler({ msg: {}, text: '/room run improve this workspace', chatId: '42', userId: '7' });
   assert.equal(handled, true);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(h.messages.filter((text) => text.includes('✅ Room 실행 완료')).length, 1);
+  assert.equal(h.messages.filter((text) => text.includes('✅ 작업을 완료했습니다')).length, 1);
   assert.equal(h.messages.filter((text) => text.trim() === 'done').length, 0);
-  assert.equal(h.messages.filter((text) => text.includes('\ndone')).length, 1);
+  assert.equal(h.messages.filter((text) => text.includes('done')).length, 1);
+  const startIndex = h.messages.findIndex((text) => text.includes('Room-native execution을 시작했습니다'));
+  const completionIndex = h.messages.findIndex((text) => text.includes('✅ 작업을 완료했습니다'));
+  assert.ok(startIndex >= 0);
+  assert.ok(completionIndex > startIndex, 'start acknowledgement must arrive before instant completion');
+});
+
+
+test('/room contract exposes the governed Room contract', async () => {
+  const h = harness();
+  const handled = await h.handler({ msg: {}, text: '/room contract', chatId: '42', userId: '7' });
+  assert.equal(handled, true);
+  assert.ok(h.messages.some((text) => text.includes('Room Contract v2')));
+  assert.ok(h.messages.some((text) => text.includes('ship safely')));
+});
+
+test('/room receipts exposes stage evidence without raw provider traces', async () => {
+  const h = harness();
+  const handled = await h.handler({ msg: {}, text: '/room receipts 5', chatId: '42', userId: '7' });
+  assert.equal(handled, true);
+  assert.ok(h.messages.some((text) => text.includes('Execution Receipts')));
+  assert.ok(h.messages.some((text) => text.includes('files=1')));
+  assert.ok(h.messages.every((text) => !text.includes('private chain-of-thought')));
+});
+
+test('instant Room resume acknowledgement arrives before completion', async () => {
+  const h = harness();
+  const handled = await h.handler({ msg: {}, text: '/room resume', chatId: '42', userId: '7' });
+  assert.equal(handled, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  const resumeIndex = h.messages.findIndex((text) => text.includes('Room run resumed: run-1'));
+  const completionIndex = h.messages.findIndex((text) => text.includes('✅ 작업을 완료했습니다'));
+  assert.ok(resumeIndex >= 0);
+  assert.ok(completionIndex > resumeIndex, 'resume acknowledgement must arrive before instant completion');
 });

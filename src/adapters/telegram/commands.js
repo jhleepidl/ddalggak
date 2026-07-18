@@ -125,7 +125,22 @@ import {
 import { extractTeamCreationSignals } from '../../application/team_signal_extractor.js';
 import { buildTeamWorkflowContract, summarizeTeamWorkflowContract } from '../../application/team_workflow_contract.js';
 import { buildWorkflowRuntimeExecutionPatch } from '../../application/workflow_execution_contract.js';
-import { RoomNativeService, deriveTelegramRoomId, formatRoomNativeStatus, formatRoomNativeTimeline } from '../../room_runtime/room_native_service.js';
+import { RoomNativeService, deriveTelegramRoomId, formatRoomNativeContract, formatRoomNativeReceipts, formatRoomNativeStatus, formatRoomNativeTimeline } from '../../room_runtime/room_native_service.js';
+import { createZipBundle } from '../../application/telegram_zip_bundle_io.js';
+import {
+  buildRoomNativeHomeCard,
+  buildRoomNativeReplyKeyboard,
+  formatRoomNativeActionError,
+  formatRoomNativeArtifacts,
+  formatRoomNativeArtifactPreview,
+  formatRoomNativeInbox,
+  formatRoomNativeCompletion,
+  formatRoomNativeUserBrief,
+  formatRoomNativeUserRules,
+  formatRoomNativeUserSources,
+  hasRoomNativeUserState,
+  roomNativePrimaryPathEnabled,
+} from '../../application/room_native_user_experience.js';
 import {
   buildRoomPackage,
   buildRoomProfileFromGoal,
@@ -171,18 +186,23 @@ const HELP_TEXT = [
   "Commands:",
   "- /home 또는 /start: 이 Room의 현재 상태와 다음 행동 보기",
   "- /brief: 목표·현재 단계·다음 행동을 한 번에 보기",
-  "- /continue [jobId]: 현재 또는 지정한 작업 이어가기",
   "- /sources: 이 Room이 사용하는 근거와 제외 범위 보기",
   "- /rules: 현재 규칙과 반영된 정정 보기",
-  "- /correct <정정>: 같은 Room에서 반복하지 않아야 할 내용 기록",
+  "- /correct <정정>: 다음 실행부터 적용할 반복 오류 방지 정정 기록",
+  "- /correct now <정정>: 현재 실행을 정정된 계약으로 안전하게 재시작",
+  "- /run <목표>: 오래 걸리는 Room 작업 시작",
+  "- /continue [jobId]: 현재 Room 작업 이어가기",
+  "- /status 또는 /st: 현재 진행과 다음 행동 보기",
   "- /branch <새 방향>: 현재 상태를 유지한 채 다른 방향 제안 만들기",
-  "- /chat 또는 /c <message>: 이 Room에 질문하거나 작업 요청",
-  "- /status 또는 /st: 실행 중인 작업 상태 보기",
-  "- /artifacts 또는 /art [limit]: 누적 산출물 보기",
+  "- /chat 또는 /c <message>: 빠른 질문이나 대화",
+  "- /artifacts 또는 /art [limit]: 누적 산출물과 승인 상태 보기",
+  "- /artifacts preview <번호>: 텍스트 산출물 미리보기",
+  "- /send <번호> 또는 /send bundle <번호,...>: 승인된 산출물 받기",
   "- /examples [검색어]: 검증 상태가 표시된 사용 Recipe 보기",
   "- /use <recipe_id> [작성 내용]: 구조화된 작업 요청 만들기",
   "- /room 또는 /r: Room 목적과 package 설정 보기",
-  "- /review 또는 /inbox: 승인·검토 대기 항목 보기",
+  "- /inbox: 승인·blocker·실패 검증을 한곳에서 처리",
+  "- /review: 기존 review queue 호환 보기 (Room 실행 결정은 /inbox)",
   "- /memory 또는 /m: 이 Room의 memory와 후보 보기",
   "- /stop [jobId]: 실행 중지",
   "- /help more: Agent·모델·협업·진단용 고급 명령 보기",
@@ -249,7 +269,8 @@ const ADVANCED_HELP_TEXT = [
   "- /companions, /companion switch <id>, /companion profile: AI Companion control surface",
   "- /council ask <message>|log|proposals|approve|reject: visible companion backchannel",
   "- /agent mode fast|balanced|strict: companion agent 모드 조절",
-  "- /correct <정정>: room-local correction을 기록하고 durable correction은 reviewable merge proposal 생성",
+  "- /correct <정정>: 다음 Room 실행부터 적용할 정정 기록",
+  "- /correct now <정정>: 현재 실행을 취소하고 같은 목표를 새 contract로 재시작",
   "- /correct proposals: companion correction merge proposal 확인",
   "- /correct approve latest|<number>: pending companion merge proposal 명시 승인",
     "- /correct materialize-preview: accepted proposal의 branchable materialization 후보 보기",
@@ -259,9 +280,13 @@ const ADVANCED_HELP_TEXT = [
   "- /models: 연결된 로컬/API/CLI model node 보기",
   "- /tools: 현재 job의 tool 상태 보기",
   "- /upload (+파일 첨부) [메모]: 실행 없이 업로드만 저장",
+  "- /artifacts preview <번호|path>: Room 텍스트 산출물 미리보기",
+  "- /send <번호|path>|bundle <번호,...>: 승인된 Room 산출물 Telegram 전송",
+  "- /inbox approve|reject|resolve <번호|id> [메모]: Room 승인과 blocker 처리",
   "- /chat [--debug] <message>|reset: supervisor chat 실행 또는 세션 초기화",
   "- /rule <자연어 지침>: chat-level agent/runtime 지침 반영 (상세 편집은 GoC)",
-  "- /run <goal>: goal 기반 실행 시작",
+  "- /run <goal>: Room-native 실행 시작 (engine 활성화 시 기본)",
+  "- /run legacy <goal>: 기존 workbench 실행 경로를 명시적으로 사용",
   "- /continue <jobId>: 기존 job 이어서 실행",
   "- /models refresh: Gemini/Codex/Ollama catalog 즉시 갱신",
   "- /agents export|publish-candidate|packages|clone <id>: agent package 공유/설치",
@@ -370,9 +395,11 @@ const AGENTS_HELP_TEXT = [
 const ROOM_HELP_TEXT = [
   "AI Room commands:",
   "- /room workspace: 이 Room의 canonical workspace 경로 보기",
-  "- /room run [--topology review_loop|deliberate|solo] <goal>: Room-native 실행 시작",
+  "- /room run [--profile solo|builder_reviewer|research_then_execute|parallel_ideation] <goal>: Room-native 실행 시작",
   "- /room status: 목표·현재 단계·다음 단계·blocker 보기 (run-status alias)",
   "- /room timeline [n]: 최근 단계/CLI 활동 기록 보기",
+  "- /room contract: 목표·완료 조건·규칙·근거 경계 보기",
+  "- /room receipts [n]: stage별 변경·검증·blocker 실행 영수증 보기",
   "- /room visibility quiet|standard|debug: 완료만·주요 진행·상세 활동 표시",
   "- /room pause · /room resume · /room cancel: 실행 제어",
   "- /room: 현재 방의 specialization 보기",
@@ -542,8 +569,61 @@ export function createTelegramCommandHandler(deps = {}) {
     return roomNativeService?.isEnabled?.() === true;
   }
 
+  function useRoomNativePrimaryPath() {
+    return roomNativePrimaryPathEnabled({ env: runtimeEnv, service: roomNativeService });
+  }
+
   function roomIdForChat(chatId = '') {
     return deriveTelegramRoomId(chatId);
+  }
+
+  function roomNativeUserSurface(chatId = '') {
+    if (!useRoomNativePrimaryPath()) return null;
+    const roomId = roomIdForChat(chatId);
+    try {
+      const status = roomNativeService.status(roomId);
+      const storedContract = roomNativeService.contract(roomId);
+      let currentContext = null;
+      try {
+        currentContext = buildRoomContinuitySnapshot({
+          roomProfile: getAgentRoomProfile(chatSessionStore, chatId),
+          companionState: getCurrentCompanionControlState(chatId),
+          session: chatSessionStore?.get?.(chatId) || {},
+          currentJobId: resolveLiveJobIdForChat(chatId) || '',
+        });
+      } catch {}
+      const uniqueTextRows = (rows = []) => {
+        const out = [];
+        const seen = new Set();
+        for (const row of rows) {
+          const text = String(typeof row === 'string' ? row : row?.text || row?.correction_text || row?.summary || row?.location || row?.path || row?.label || row?.name || '').trim();
+          if (!text || seen.has(text.toLowerCase())) continue;
+          seen.add(text.toLowerCase());
+          out.push(row);
+        }
+        return out;
+      };
+      const contract = storedContract ? {
+        ...storedContract,
+        constraints: uniqueTextRows([...(storedContract.constraints || []), ...(currentContext?.rules || [])]),
+        corrections: uniqueTextRows([...(storedContract.corrections || []), ...(currentContext?.corrections || []).map((text, index) => ({ correction_id: `effective-${index + 1}`, text, status: 'active', source: 'current_room_state' }))]),
+        sources: {
+          authoritative: uniqueTextRows([...(storedContract.sources?.authoritative || []), ...(currentContext?.source_policy?.included_sources || [])]),
+          excluded: uniqueTextRows([...(storedContract.sources?.excluded || []), ...(currentContext?.source_policy?.excluded_sources || [])]),
+        },
+      } : null;
+      return { roomId, status, contract, storedContract, currentContext, hasState: hasRoomNativeUserState(status, storedContract) || roomNativeService.hasState?.(roomId) === true };
+    } catch {
+      return { roomId, status: {}, contract: null, storedContract: null, currentContext: null, hasState: false };
+    }
+  }
+
+  async function sendRoomNativeHome(chatId = '') {
+    const surface = roomNativeUserSurface(chatId);
+    if (!surface) return false;
+    const card = buildRoomNativeHomeCard(surface);
+    await bot.sendMessage(chatId, card.text, card.options);
+    return true;
   }
 
   function roomNativeVisibilityForChat(chatId = '') {
@@ -612,25 +692,40 @@ export function createTelegramCommandHandler(deps = {}) {
   function attachRoomNativeCompletion(chatId = '', started = null) {
     started?.completion?.then(async (result) => {
       if (!result?.ok) return;
-      const userMessage = result?.finalStage?.structured?.user_message || result?.finalStage?.output_excerpt || result?.finalStage?.structured?.summary || '';
-      const title = result?.needs_attention
-        ? '⚠️ Room 실행 완료 — 미해결 blocker 확인 필요'
-        : '✅ Room 실행 완료';
-      const runId = result?.run?.paths?.runId || started?.run_id || '';
-      const body = [title, runId ? `run: ${runId}` : '', userMessage ? '' : '', userMessage].filter((value, index) => value || index === 2).join('\n');
-      try { await sendLong(bot, chatId, body); } catch {}
+      const roomId = roomIdForChat(chatId);
+      let status = {};
+      let receipts = [];
+      try { status = roomNativeService.status(roomId); } catch {}
+      try { receipts = roomNativeService.receipts(roomId, { runId: result?.run?.paths?.runId || started?.run_id || '', limit: 100 })?.receipts || []; } catch {}
+      const body = formatRoomNativeCompletion({ result, status, receipts });
+      try { await bot.sendMessage(chatId, body, { reply_markup: buildRoomNativeReplyKeyboard(status) }); } catch {}
     }).catch(async (error) => {
-      try { await bot.sendMessage(chatId, `Room execution error: ${String(error?.message || error)}`); } catch {}
+      let status = null;
+      try { status = roomNativeService.status(roomIdForChat(chatId)); } catch {}
+      try { await bot.sendMessage(chatId, formatRoomNativeActionError(error, { action: 'Room 실행', status })); } catch {}
     });
   }
 
-  async function startRoomNativeRun({ chatId, objective = '', topology = '' } = {}) {
+  async function startRoomNativeRun({ chatId, objective = '', collaborationProfile = '' } = {}) {
     const roomId = roomIdForChat(chatId);
     const visibility = roomNativeVisibilityForChat(chatId);
+    let roomProfile = null;
+    let companionState = null;
+    let session = null;
+    try { roomProfile = getAgentRoomProfile(chatSessionStore, chatId); } catch {}
+    try { companionState = getCurrentCompanionControlState(chatId); } catch {}
+    try { session = chatSessionStore?.get?.(chatId) || {}; } catch { session = {}; }
+    let roomContext = null;
+    try {
+      roomContext = buildRoomContinuitySnapshot({ roomProfile, companionState, session });
+    } catch {}
+    const storedProfile = resolveRoomCollaborationProfile(roomProfile || {});
+    const selectedProfile = collaborationProfile || (storedProfile?.id && storedProfile.id !== 'auto' ? storedProfile.id : '');
     const started = await roomNativeService.startRun({
       roomId,
       objective,
-      topology,
+      collaborationProfile: selectedProfile,
+      roomContext,
       visibility,
       modelPolicy: {
         antigravity_model: runtimeEnv.ANTIGRAVITY_MODEL || '',
@@ -638,7 +733,6 @@ export function createTelegramCommandHandler(deps = {}) {
       },
       onProgress: roomNativeProgressHandler(chatId, visibility),
     });
-    attachRoomNativeCompletion(chatId, started);
     return started;
   }
 
@@ -2799,6 +2893,7 @@ export function createTelegramCommandHandler(deps = {}) {
     const args = rawArgs || rest.join(" ").trim();
 
     if (cmd === "/start" || cmd === "/home" || cmd === "/quickstart") {
+      if (await sendRoomNativeHome(chatId)) return true;
       await sendLong(bot, chatId, buildDdalggakHomeText(chatId));
       return true;
     }
@@ -2955,6 +3050,12 @@ export function createTelegramCommandHandler(deps = {}) {
     }
 
     if (cmd === "/brief") {
+      const native = roomNativeUserSurface(chatId);
+      if (native?.hasState) {
+        recordRoomEvent({ chatId, userId, eventType: 'room_continuity_brief_view', command: '/brief', profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { native_room: true, run_id: native.status?.focus_run_id || null } });
+        await bot.sendMessage(chatId, formatRoomNativeUserBrief(native), { reply_markup: buildRoomNativeReplyKeyboard(native.status) });
+        return true;
+      }
       const session = chatSessionStore?.get?.(chatId) || {};
       const current = getCurrentJobDirForChat(chatId);
       let watchSummary = null;
@@ -2972,6 +3073,12 @@ export function createTelegramCommandHandler(deps = {}) {
     }
 
     if (cmd === "/sources") {
+      const native = roomNativeUserSurface(chatId);
+      if (native?.hasState) {
+        recordRoomEvent({ chatId, userId, eventType: 'room_source_boundary_view', command: '/sources', profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { native_room: true, authoritative_count: native.contract?.sources?.authoritative?.length || 0, excluded_count: native.contract?.sources?.excluded?.length || 0 } });
+        await sendLong(bot, chatId, formatRoomNativeUserSources(native.contract));
+        return true;
+      }
       const snapshot = buildRoomContinuitySnapshot({
         roomProfile: getAgentRoomProfile(chatSessionStore, chatId),
         companionState: getCurrentCompanionControlState(chatId),
@@ -2984,6 +3091,12 @@ export function createTelegramCommandHandler(deps = {}) {
     }
 
     if (cmd === "/rules") {
+      const native = roomNativeUserSurface(chatId);
+      if (native?.hasState) {
+        recordRoomEvent({ chatId, userId, eventType: 'room_rules_view', command: '/rules', profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { native_room: true, rule_count: native.contract?.constraints?.length || 0, correction_count: native.contract?.corrections?.length || 0 } });
+        await sendLong(bot, chatId, formatRoomNativeUserRules(native.contract));
+        return true;
+      }
       const snapshot = buildRoomContinuitySnapshot({
         roomProfile: getAgentRoomProfile(chatSessionStore, chatId),
         companionState: getCurrentCompanionControlState(chatId),
@@ -3008,7 +3121,9 @@ export function createTelegramCommandHandler(deps = {}) {
     }
 
     if (cmd === "/inbox") {
-      const sub = String(args || '').trim().toLowerCase();
+      const rawInboxArgs = String(args || '').trim();
+      const inboxTokens = rawInboxArgs.split(/\s+/).filter(Boolean);
+      const sub = String(inboxTokens[0] || '').trim().toLowerCase();
       if (['digest', 'metrics', 'governance'].includes(sub)) {
         const metrics = buildRoomGovernanceMetricsForChat(chatId);
         recordRoomEvent({
@@ -3020,6 +3135,47 @@ export function createTelegramCommandHandler(deps = {}) {
           extra: { status: metrics.status, pending: metrics.totals.pending, review_rate: metrics.totals.review_rate },
         });
         await sendLong(bot, chatId, formatRoomGovernanceDigestForTelegram(metrics));
+        return true;
+      }
+      const native = roomNativeUserSurface(chatId);
+      if (native?.hasState) {
+        if (['approve', 'reject', 'resolve', 'ack', 'acknowledge'].includes(sub)) {
+          const target = String(inboxTokens[1] || '').trim();
+          const note = inboxTokens.slice(2).join(' ').trim();
+          if (!target) {
+            await bot.sendMessage(chatId, 'Usage: /inbox approve|reject|resolve <번호|id> [메모]');
+            return true;
+          }
+          try {
+            const result = roomNativeService.decideInboxItem(native.roomId, { itemId: target, action: sub, note, actor: String(userId || chatId) });
+            const semanticNote = result.item?.kind === 'validation' && result.decision?.action === 'resolve'
+              ? '검증 실패를 통과로 바꾸지 않고 사용자가 확인했다는 기록만 남겼습니다.'
+              : 'Room 실행 기록은 변경하지 않고 결정 이력을 별도로 남겼습니다.';
+            const controlNote = result.control?.requires_continue
+              ? '승인 상태를 기록했습니다. 실행 프로세스가 재시작된 상태라면 /continue로 이어가세요.'
+              : result.control?.status ? `실행 상태: ${result.control.status}` : '';
+            await bot.sendMessage(chatId, [
+              `✅ Inbox 항목을 ${result.decision.action} 처리했습니다.`,
+              `item: ${result.item.item_id}`,
+              note ? `메모: ${note}` : '',
+              semanticNote,
+              controlNote,
+              '',
+              '남은 항목: /inbox',
+            ].filter(Boolean).join('\n'));
+          } catch (error) {
+            await bot.sendMessage(chatId, formatRoomNativeActionError(error, { action: 'Inbox 처리', status: native.status }));
+          }
+          return true;
+        }
+        let companionPending = 0;
+        try {
+          const companionState = getCurrentCompanionControlState(chatId);
+          companionPending += (companionState?.merge_proposals || []).filter((row) => String(row?.status || 'pending').toLowerCase() === 'pending').length;
+          companionPending += (companionState?.memory_exchange_proposals || []).filter((row) => String(row?.status || 'pending').toLowerCase() === 'pending').length;
+          companionPending += (companionState?.idle_memory_observations || []).filter((row) => String(row?.status || 'pending').toLowerCase() === 'pending').length;
+        } catch {}
+        await sendLong(bot, chatId, formatRoomNativeInbox(roomNativeService.inbox(native.roomId), { companionPending }));
         return true;
       }
       await sendLong(bot, chatId, buildDdalggakInboxText(chatId));
@@ -3059,6 +3215,10 @@ export function createTelegramCommandHandler(deps = {}) {
       const sub = String(rest[0] || "").trim().toLowerCase();
       const roomId = roomIdForChat(chatId);
       const roomPayload = String(rawArgs || '').replace(/^\S+\s*/, '').trim();
+      if (!sub && useRoomNativePrimaryPath()) {
+        await sendRoomNativeHome(chatId);
+        return true;
+      }
       if (['workspace', '작업공간'].includes(sub)) {
         const room = roomNativeService.initializeRoom(roomId, { title: `Telegram Room ${chatId}` });
         await bot.sendMessage(chatId, [
@@ -3075,7 +3235,7 @@ export function createTelegramCommandHandler(deps = {}) {
           return true;
         }
         if (!roomPayload) {
-          await bot.sendMessage(chatId, 'Usage: /room run [--topology review_loop|deliberate|solo] <goal>');
+          await bot.sendMessage(chatId, 'Usage: /room run [--profile solo|builder_reviewer|research_then_execute|parallel_ideation] <goal>');
           return true;
         }
         try {
@@ -3085,18 +3245,31 @@ export function createTelegramCommandHandler(deps = {}) {
             `room: ${started.room.roomId}`,
             `workspace: ${started.room.workspaceRoot}`,
             `run: ${started.run_id}`,
-            `topology: ${started.spec.execution_graph.topology_id}`,
+            `profile: ${started.spec.execution_graph.collaboration_profile_id}`,
             `progress: ${roomNativeVisibilityForChat(chatId)}`,
-            '확인: /room status · /room timeline',
+            '확인: /room status · /room contract · /room timeline · /room receipts',
             '제어: /room pause · /room resume · /room cancel',
           ].join('\n'));
+          attachRoomNativeCompletion(chatId, started);
         } catch (error) {
-          await bot.sendMessage(chatId, `Room execution 시작 실패: ${String(error?.message || error)}`);
+          let status = null;
+          try { status = roomNativeService.status(roomId); } catch {}
+          await bot.sendMessage(chatId, formatRoomNativeActionError(error, { action: 'Room 시작', status }));
         }
         return true;
       }
       if (['run-status', 'status', 'progress', 'execution', '실행상태', '상태', '진행'].includes(sub)) {
         await bot.sendMessage(chatId, formatRoomNativeStatus(roomNativeService.status(roomId)));
+        return true;
+      }
+      if (['contract', '계약', '계약서'].includes(sub)) {
+        await sendLong(bot, chatId, formatRoomNativeContract(roomNativeService.contract(roomId)));
+        return true;
+      }
+      if (['receipts', 'receipt', '영수증', '증거'].includes(sub)) {
+        const limitToken = String(roomPayload || '').split(/\s+/)[0];
+        const limit = /^\d+$/.test(limitToken) ? Number(limitToken) : 20;
+        await sendLong(bot, chatId, formatRoomNativeReceipts(roomNativeService.receipts(roomId, { limit })));
         return true;
       }
       if (['timeline', 'history', 'log', 'logs', '타임라인', '기록'].includes(sub)) {
@@ -3111,15 +3284,17 @@ export function createTelegramCommandHandler(deps = {}) {
           try {
             const visibility = roomNativeVisibilityForChat(chatId);
             const resumed = await roomNativeService.resumeRun({ roomId, onProgress: roomNativeProgressHandler(chatId, visibility) });
-            attachRoomNativeCompletion(chatId, resumed);
             await bot.sendMessage(chatId, `Room run resumed: ${resumed.run_id}`);
+            attachRoomNativeCompletion(chatId, resumed);
           } catch (error) {
-            await bot.sendMessage(chatId, `Room resume 실패: ${String(error?.message || error)}`);
+            let status = null;
+            try { status = roomNativeService.status(roomId); } catch {}
+            await bot.sendMessage(chatId, formatRoomNativeActionError(error, { action: 'Room 재개', status }));
           }
           return true;
         }
         const result = roomNativeService.control(roomId, action, `telegram_${action}`);
-        await bot.sendMessage(chatId, result.ok ? `Room run: ${result.status}` : `Room control 실패: ${result.reason}`);
+        await bot.sendMessage(chatId, result.ok ? `Room 상태: ${result.status}` : formatRoomNativeActionError(new Error(result.reason || 'control_failed'), { action: 'Room 제어', status: roomNativeService.status(roomId) }));
         return true;
       }
       if (['visibility', 'view', '표시'].includes(sub)) {
@@ -3256,13 +3431,16 @@ export function createTelegramCommandHandler(deps = {}) {
     }
 
     if (cmd === "/correct") {
-      const correctionText = String(args || '').trim();
+      const rawCorrectionText = String(args || '').trim();
+      const restartRequested = /^(?:now|restart)\s+/i.test(rawCorrectionText) || /(?:^|\s)--restart(?:\s|$)/i.test(rawCorrectionText);
+      const correctionText = rawCorrectionText.replace(/^(?:now|restart)\s+/i, '').replace(/(?:^|\s)--restart(?:\s|$)/ig, ' ').replace(/\s+/g, ' ').trim();
       const [subRaw, ...subRest] = correctionText.split(/\s+/);
       const sub = String(subRaw || '').trim().toLowerCase();
       if (!correctionText || sub === 'help') {
         await bot.sendMessage(chatId, [
           'Usage:',
-          '/correct <반복 오류 방지용 정정>',
+          '/correct <반복 오류 방지용 정정> — 다음 실행부터 적용',
+          '/correct now <정정> — 현재 실행을 취소하고 같은 목표를 새 contract로 재시작',
           '/correct proposals',
           '/correct approve latest|<number>',
           '/correct reject latest|<number> [reason]',
@@ -3397,19 +3575,55 @@ export function createTelegramCommandHandler(deps = {}) {
           });
         }
       }
+      let nativeCorrection = null;
+      let restarted = null;
+      const native = roomNativeUserSurface(chatId);
+      if (native?.hasState) {
+        try {
+          if (restartRequested) {
+            restarted = await roomNativeService.restartWithCorrection(native.roomId, {
+              text: correctionText,
+              actor: String(userId || chatId),
+              scope: intent.correction_scope,
+              onProgress: roomNativeProgressHandler(chatId, roomNativeVisibilityForChat(chatId)),
+            });
+            nativeCorrection = restarted.correction;
+            if (restarted.restarted && restarted.started) attachRoomNativeCompletion(chatId, restarted.started);
+          } else {
+            nativeCorrection = roomNativeService.recordCorrection(native.roomId, {
+              text: correctionText,
+              actor: String(userId || chatId),
+              scope: intent.correction_scope,
+              appliesTo: 'next_run',
+            });
+          }
+        } catch (error) {
+          await bot.sendMessage(chatId, formatRoomNativeActionError(error, { action: 'Room correction 반영', status: native.status }));
+          return true;
+        }
+      }
+      const activeRunNote = restarted?.restarted
+        ? `현재 실행 ${restarted.previous_run_id || ''}을 중단하고 새 run ${restarted.started?.run_id || ''}으로 재시작했습니다.`
+        : nativeCorrection?.active_run_id
+          ? `현재 실행 ${nativeCorrection.active_run_id}의 contract는 변경하지 않았습니다. 이 정정은 다음 /run부터 적용됩니다.`
+          : nativeCorrection
+            ? `Room Contract v${nativeCorrection.contract?.contract_revision || '-'}에 기록했으며 다음 실행부터 적용됩니다.`
+            : '다음 projection에 correction을 포함합니다.';
       await bot.sendMessage(chatId, [
         intent.should_create_merge_proposal
           ? '✅ correction을 기록했고, durable해 보이는 정정이라 reviewable merge proposal도 만들었습니다.'
           : '✅ room-local correction으로 기록했습니다.',
         `“${correctionText}”`,
         '',
+        activeRunNote,
         `scope: ${intent.correction_scope}`,
         `durability: ${intent.durability}`,
+        nativeCorrection?.contract?.contract_revision ? `room contract: v${nativeCorrection.contract.contract_revision}` : '',
         proposalEvent ? 'merge proposal: pending review' : 'merge proposal: not created automatically',
         '',
-        '다음 projection에 correction을 포함합니다. 실제 project-shared memory 승격은 자동으로 하지 않습니다.',
-        proposalEvent ? '확인: /correct proposals' : '필요하면 /correct promote latest 로 proposal을 만들 수 있습니다.',
-      ].join('\n'));
+        '실행 이력은 불변으로 유지됩니다. 실제 project-shared memory 승격은 자동으로 하지 않습니다.',
+        restarted?.restarted ? '진행: /status · /room timeline' : proposalEvent ? '확인: /correct proposals' : '즉시 다시 시작하려면 /correct now <정정>을 사용하세요.',
+      ].filter(Boolean).join('\n'));
       return true;
     }
 
@@ -3466,8 +3680,8 @@ export function createTelegramCommandHandler(deps = {}) {
           try {
             const visibility = roomNativeVisibilityForChat(chatId);
             const resumed = await roomNativeService.resumeRun({ roomId, onProgress: roomNativeProgressHandler(chatId, visibility) });
-            attachRoomNativeCompletion(chatId, resumed);
             await bot.sendMessage(chatId, `Room run resumed: ${resumed.run_id}`);
+            attachRoomNativeCompletion(chatId, resumed);
           } catch (error) {
             await bot.sendMessage(chatId, `Room resume 실패: ${String(error?.message || error)}`);
           }
@@ -3478,7 +3692,7 @@ export function createTelegramCommandHandler(deps = {}) {
         return true;
       }
       if (!rawLoopArgs) {
-        await bot.sendMessage(chatId, 'Usage: /loop [--topology review_loop|deliberate|solo] <goal>');
+        await bot.sendMessage(chatId, 'Usage: /loop [--profile solo|builder_reviewer|research_then_execute|parallel_ideation] <goal>');
         return true;
       }
       try {
@@ -3487,12 +3701,13 @@ export function createTelegramCommandHandler(deps = {}) {
           'Room-native loop을 시작했습니다.',
           `workspace: ${started.room.workspaceRoot}`,
           `run: ${started.run_id}`,
-          `topology: ${started.spec.execution_graph.topology_id}`,
+          `profile: ${started.spec.execution_graph.collaboration_profile_id}`,
           `progress: ${roomNativeVisibilityForChat(chatId)}`,
-          '확인: /loop status · /loop timeline',
+          '확인: /loop status · /room contract · /loop timeline · /room receipts',
           '제어: /loop pause · /loop resume · /loop cancel',
           '기존 workbench job workspace는 사용하지 않습니다.',
         ].join('\n'));
+        attachRoomNativeCompletion(chatId, started);
       } catch (error) {
         await bot.sendMessage(chatId, `Room loop 시작 실패: ${String(error?.message || error)}`);
       }
@@ -3559,15 +3774,17 @@ ${result.working_memory_path || ''}` : `compaction 실패: ${result.reason || 'u
         try {
           const visibility = roomNativeVisibilityForChat(chatId);
           const resumed = await roomNativeService.resumeRun({ roomId, onProgress: roomNativeProgressHandler(chatId, visibility) });
-          attachRoomNativeCompletion(chatId, resumed);
           await bot.sendMessage(chatId, `Room run resumed: ${resumed.run_id}`);
+          attachRoomNativeCompletion(chatId, resumed);
         } catch (error) {
-          await bot.sendMessage(chatId, `Room resume 실패: ${String(error?.message || error)}`);
+          let status = null;
+          try { status = roomNativeService.status(roomId); } catch {}
+          await bot.sendMessage(chatId, formatRoomNativeActionError(error, { action: 'Room 재개', status }));
         }
         return true;
       }
       const result = roomNativeService.control(roomId, action, `telegram_top_level_${action}`);
-      await bot.sendMessage(chatId, result.ok ? `Room run: ${result.status}` : `Room control 실패: ${result.reason}`);
+      await bot.sendMessage(chatId, result.ok ? `Room 상태: ${result.status}` : formatRoomNativeActionError(new Error(result.reason || 'control_failed'), { action: 'Room 제어', status: roomNativeService.status(roomId) }));
       return true;
     }
 
@@ -4224,6 +4441,11 @@ ${result.working_memory_path || ''}` : `compaction 실패: ${result.reason || 'u
 
     if (cmd === "/status") {
       const detailArg = String(rest[0] || '').trim().toLowerCase();
+      const native = roomNativeUserSurface(chatId);
+      if (native?.hasState && detailArg !== 'legacy') {
+        await bot.sendMessage(chatId, formatRoomNativeUserBrief(native), { reply_markup: buildRoomNativeReplyKeyboard(native.status) });
+        return true;
+      }
       const detail = ['full', 'detail', 'details', 'verbose'].includes(detailArg)
         ? 'full'
         : (['recent', 'activity', 'progress'].includes(detailArg)
@@ -5048,9 +5270,32 @@ ${formatWorkspaceFileListText(currentJobId, entries, { scope, limit })}`
     }
 
     if (cmd === "/artifacts") {
+      const native = roomNativeUserSurface(chatId);
+      if (native?.hasState) {
+        const sub = String(rest[0] || '').trim().toLowerCase();
+        if (['preview', 'show', 'open'].includes(sub)) {
+          const selection = rest.slice(1).join(' ').trim();
+          if (!selection) {
+            await bot.sendMessage(chatId, 'Usage: /artifacts preview <번호|artifact-id|path>');
+            return true;
+          }
+          try {
+            const preview = roomNativeService.previewArtifact(native.roomId, { selection });
+            roomNativeService.recordArtifactDelivery(native.roomId, { runId: preview.run_id, artifact: preview.artifact, action: 'previewed', actor: String(userId || chatId) });
+            await sendLong(bot, chatId, formatRoomNativeArtifactPreview(preview));
+          } catch (error) {
+            await bot.sendMessage(chatId, formatRoomNativeActionError(error, { action: 'Artifact 미리보기', status: native.status }));
+          }
+          return true;
+        }
+        const parsedLimit = Number(rest[0]);
+        const limit = Number.isFinite(parsedLimit) ? Math.max(1, Math.min(24, Math.trunc(parsedLimit))) : 12;
+        await sendLong(bot, chatId, formatRoomNativeArtifacts(roomNativeService.artifacts(native.roomId, { limit })));
+        return true;
+      }
       const currentJobId = resolveLiveJobIdForChat(chatId);
       if (!currentJobId) {
-        await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어요. 먼저 /chat 또는 /run으로 job을 시작해 주세요.");
+        await bot.sendMessage(chatId, "현재 Room 산출물이 없습니다. 먼저 /run <목표>로 작업을 시작해 주세요.");
         return true;
       }
       const limit = parseClampedInt(rest[0], 12, { min: 1, max: 24 });
@@ -5077,14 +5322,88 @@ ${contractLines.join('\n')}`);
     }
 
     if (cmd === "/send") {
-      const currentJobId = resolveLiveJobIdForChat(chatId);
-      if (!currentJobId) {
-        await bot.sendMessage(chatId, "현재 chat에 연결된 job이 없어요. 먼저 /chat 또는 /run으로 job을 시작해 주세요.");
+      const selection = String(args || '').trim();
+      const native = roomNativeUserSurface(chatId);
+      if (native?.hasState && !selection.toLowerCase().startsWith('legacy ')) {
+        if (!selection) {
+          await bot.sendMessage(chatId, 'Usage: /send <번호|artifact-id|path>\n또는 /send bundle <번호,번호,...>');
+          return true;
+        }
+        try {
+          if (typeof bot.sendDocument !== 'function') throw new Error('Telegram document delivery is unavailable');
+          const bundleMatch = selection.match(/^bundle\s+(.+)$/i);
+          if (bundleMatch) {
+            const selections = bundleMatch[1].split(',').map((value) => value.trim()).filter(Boolean).slice(0, 20);
+            if (!selections.length) throw new Error('bundle selection is empty');
+            const resolved = selections.map((item) => roomNativeService.artifact(native.roomId, { selection: item }));
+            const unique = new Map();
+            for (const item of resolved) {
+              const artifact = item.artifact;
+              const key = String(artifact?.artifact_id || artifact?.relative_path || '').trim();
+              if (key && !unique.has(key)) unique.set(key, item);
+            }
+            const uniqueResolved = [...unique.values()];
+            const artifacts = uniqueResolved.map((item) => item.artifact);
+            for (const artifact of artifacts) {
+              if (!artifact?.available) throw Object.assign(new Error(artifact?.error || 'artifact is unavailable'), { code: artifact?.error_code || 'ROOM_ARTIFACT_UNAVAILABLE' });
+              if (artifact.approval_state === 'pending') throw Object.assign(new Error(`산출물 전송 승인이 필요합니다: ${artifact.relative_path}. /inbox에서 승인하세요.`), { code: 'ROOM_ARTIFACT_APPROVAL_REQUIRED' });
+              if (artifact.approval_state === 'rejected') throw Object.assign(new Error(`산출물 전송이 거절되었습니다: ${artifact.relative_path}`), { code: 'ROOM_ARTIFACT_APPROVAL_REJECTED' });
+              if (!artifact.sendable) throw Object.assign(new Error(`Telegram 전송 크기 제한을 초과합니다: ${artifact.relative_path}`), { code: 'ROOM_ARTIFACT_TOO_LARGE' });
+            }
+            const bundle = await createZipBundle(native.roomId, artifacts.map((artifact) => ({ src: artifact.absolute_path, arc: artifact.relative_path })));
+            try {
+              const maxBundleBytes = Number(roomNativeService.artifactDeliveryLimits?.().max_send_bytes || 49 * 1024 * 1024);
+              if (Number(bundle.size || 0) > maxBundleBytes) {
+                throw Object.assign(new Error(`생성된 ZIP이 Telegram 전송 제한을 초과합니다: ${bundle.size} bytes > ${maxBundleBytes} bytes`), { code: 'ROOM_ARTIFACT_BUNDLE_TOO_LARGE' });
+              }
+              await bot.sendDocument(chatId, bundle.bundlePath, {
+                caption: [`📦 Room artifact bundle`, `files: ${artifacts.length}`, `run: ${uniqueResolved[0]?.run_id || '-'}`].join('\n'),
+                ...(msg.message_id ? { reply_to_message_id: msg.message_id } : {}),
+              });
+            } finally {
+              try { fs.rmSync(bundle.bundlePath, { force: true }); } catch {}
+            }
+            for (const artifact of artifacts) roomNativeService.recordArtifactDelivery(native.roomId, { runId: uniqueResolved[0]?.run_id, artifact, action: 'sent_bundle', actor: String(userId || chatId) });
+            await bot.sendMessage(chatId, `✅ Room 산출물 번들을 전송했습니다.\nfiles=${artifacts.length}\nsize=${formatByteSize ? formatByteSize(bundle.size) : bundle.size}`);
+            return true;
+          }
+          const result = roomNativeService.artifact(native.roomId, { selection });
+          const artifact = result.artifact;
+          if (!artifact?.available) throw Object.assign(new Error(artifact?.error || 'artifact is unavailable'), { code: artifact?.error_code || 'ROOM_ARTIFACT_UNAVAILABLE' });
+          if (artifact.approval_state === 'pending') throw Object.assign(new Error('이 산출물은 외부 전송 승인이 필요합니다. /inbox에서 승인 상태를 확인하세요.'), { code: 'ROOM_ARTIFACT_APPROVAL_REQUIRED' });
+          if (artifact.approval_state === 'rejected') throw Object.assign(new Error('이 산출물의 외부 전송은 거절되었습니다.'), { code: 'ROOM_ARTIFACT_APPROVAL_REJECTED' });
+          if (!artifact.sendable) throw Object.assign(new Error('이 산출물은 Telegram 전송 크기 제한을 초과합니다.'), { code: 'ROOM_ARTIFACT_TOO_LARGE' });
+          const caption = [
+            `📎 ${artifact.label || artifact.relative_path}`,
+            `path: ${artifact.relative_path}`,
+            artifact.provider ? `provider: ${artifact.provider}${artifact.stage_id ? ` · ${artifact.stage_id}` : ''}` : '',
+            artifact.receipt_hash ? `receipt: ${String(artifact.receipt_hash).slice(0, 16)}` : '',
+            result.contract_revision ? `contract: v${result.contract_revision}` : '',
+          ].filter(Boolean).join('\n').slice(0, 1000);
+          await bot.sendDocument(chatId, artifact.absolute_path, {
+            caption,
+            ...(msg.message_id ? { reply_to_message_id: msg.message_id } : {}),
+          });
+          roomNativeService.recordArtifactDelivery(native.roomId, { runId: result.run_id, artifact, action: 'sent', actor: String(userId || chatId) });
+          await bot.sendMessage(chatId, [
+            '✅ Room 산출물을 전송했습니다.',
+            `path=${artifact.relative_path}`,
+            `size=${formatByteSize ? formatByteSize(artifact.bytes) : artifact.bytes}`,
+            artifact.receipt_hash ? `receipt=${String(artifact.receipt_hash).slice(0, 16)}` : '',
+          ].filter(Boolean).join('\n'));
+        } catch (error) {
+          await bot.sendMessage(chatId, formatRoomNativeActionError(error, { action: 'Artifact 전송', status: native.status }));
+        }
         return true;
       }
-      const selection = String(args || '').trim();
-      if (!selection) {
-        await bot.sendMessage(chatId, 'Usage: /send <번호|path>\n또는 /send bundle <번호,번호|path,...>');
+      const currentJobId = resolveLiveJobIdForChat(chatId);
+      if (!currentJobId) {
+        await bot.sendMessage(chatId, "현재 Room 산출물이 없습니다. 먼저 /run <목표>로 작업을 시작해 주세요.");
+        return true;
+      }
+      const legacySelection = selection.toLowerCase().startsWith('legacy ') ? selection.slice(7).trim() : selection;
+      if (!legacySelection) {
+        await bot.sendMessage(chatId, 'Usage: /send <번호|path>\n또는 /send legacy <번호|path>');
         return true;
       }
       try {
@@ -5096,7 +5415,7 @@ ${contractLines.join('\n')}`);
           } catch {}
         }
         const contract = resolveArtifactDeliveryContract(currentJobId, runtime);
-        const bundle = parseArtifactBundleSelection(selection);
+        const bundle = parseArtifactBundleSelection(legacySelection);
         if (bundle) {
           if (!sendArtifactBundle) throw new Error('bundle send is not available');
           const sentBundle = await sendArtifactBundle(bot, chatId, currentJobId, bundle.items, {
@@ -5114,7 +5433,7 @@ size=${formatByteSize(sentBundle.size)}`
           );
           return true;
         }
-        const sent = await sendArtifactBySelection(bot, chatId, currentJobId, selection, {
+        const sent = await sendArtifactBySelection(bot, chatId, currentJobId, legacySelection, {
           replyToMessageId: msg.message_id,
           artifactIndex,
         });
@@ -5491,15 +5810,38 @@ size=${formatByteSize(sentBundle.size)}`
     }
 
     if (cmd === "/run") {
-      if (!args) {
-        await bot.sendMessage(chatId, "Usage: /run <goal>");
+      const rawGoal = String(args || '').trim();
+      const legacyRequested = /^legacy(?:\s+|$)/i.test(rawGoal);
+      const goal = legacyRequested ? rawGoal.replace(/^legacy\s*/i, '').trim() : rawGoal;
+      if (!goal) {
+        await bot.sendMessage(chatId, "사용법: /run <하고 싶은 일>\n예: /run 실패하는 테스트를 고치고 전체 검증해줘");
+        return true;
+      }
+      if (useRoomNativePrimaryPath() && !legacyRequested) {
+        try {
+          const started = await startRoomNativeRun({ chatId, objective: goal });
+          await bot.sendMessage(chatId, [
+            '🚀 Room 작업을 시작했습니다.',
+            `목표: ${goal}`,
+            `run: ${started.run_id}`,
+            `진행 표시: ${roomNativeVisibilityForChat(chatId)}`,
+            '',
+            '진행 확인: /status · /room timeline',
+            '중단: /pause · /cancel',
+          ].join('\n'), { reply_markup: buildRoomNativeReplyKeyboard({ focus_status: 'running', focus_run_id: started.run_id, active_run_id: started.run_id }) });
+          attachRoomNativeCompletion(chatId, started);
+        } catch (error) {
+          let status = null;
+          try { status = roomNativeService.status(roomIdForChat(chatId)); } catch {}
+          await bot.sendMessage(chatId, formatRoomNativeActionError(error, { action: 'Room 시작', status }));
+        }
         return true;
       }
       await executeRunCommand({
         bot,
         chatId,
         userId,
-        goal: args,
+        goal,
         createJob,
         resetJobAbortController,
         activeJobByChat,
@@ -5517,12 +5859,33 @@ size=${formatByteSize(sentBundle.size)}`
     }
 
     if (cmd === "/continue") {
-      const targetJobId = String(args || resolveLiveJobIdForChat(chatId) || lastChatJobByChat?.get?.(String(chatId)) || chatSessionStore?.get?.(chatId)?.jobId || '').trim();
-      if (!targetJobId) {
-        await bot.sendMessage(chatId, "이어갈 작업을 찾지 못했습니다. /brief에서 현재 상태를 확인하거나 /continue <jobId>를 사용하세요.");
+      const explicitTarget = String(args || '').trim();
+      const native = roomNativeUserSurface(chatId);
+      const nativeTarget = !explicitTarget || ['room', 'native'].includes(explicitTarget.toLowerCase()) || explicitTarget === native?.status?.focus_run_id;
+      if (native?.hasState && nativeTarget) {
+        recordRoomEvent({ chatId, userId, eventType: 'room_continuation_requested', command: '/continue', profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { native_room: true, run_id: native.status?.focus_run_id || null } });
+        try {
+          const visibility = roomNativeVisibilityForChat(chatId);
+          const resumed = await roomNativeService.resumeRun({ roomId: native.roomId, onProgress: roomNativeProgressHandler(chatId, visibility) });
+          await bot.sendMessage(chatId, [
+            '▶️ Room 작업을 이어갑니다.',
+            `run: ${resumed.run_id}`,
+            '확인: /status · /room timeline',
+          ].join('\n'), { reply_markup: buildRoomNativeReplyKeyboard({ ...native.status, focus_status: 'running', active_run_id: resumed.run_id }) });
+          attachRoomNativeCompletion(chatId, resumed);
+        } catch (error) {
+          let status = native.status;
+          try { status = roomNativeService.status(native.roomId); } catch {}
+          await bot.sendMessage(chatId, formatRoomNativeActionError(error, { action: 'Room 재개', status }));
+        }
         return true;
       }
-      recordRoomEvent({ chatId, userId, eventType: 'room_continuation_requested', command: '/continue', profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { job_id: targetJobId, implicit_job_resolution: !String(args || '').trim() } });
+      const targetJobId = String(explicitTarget || resolveLiveJobIdForChat(chatId) || lastChatJobByChat?.get?.(String(chatId)) || chatSessionStore?.get?.(chatId)?.jobId || '').trim();
+      if (!targetJobId) {
+        await bot.sendMessage(chatId, "이어갈 작업을 찾지 못했습니다. 새 작업은 /run <목표>로 시작하세요.");
+        return true;
+      }
+      recordRoomEvent({ chatId, userId, eventType: 'room_continuation_requested', command: '/continue', profile: getAgentRoomProfile(chatSessionStore, chatId), extra: { job_id: targetJobId, implicit_job_resolution: !explicitTarget } });
       await executeContinueCommand({
         bot,
         chatId,

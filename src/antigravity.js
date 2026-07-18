@@ -3,6 +3,7 @@ import path from 'node:path';
 import { runCommand } from './proc.js';
 import { recordLlmTrace } from './application/llm_trace_recorder.js';
 import { withRuntimeActivity } from './application/runtime_activity_registry.js';
+import { prepareRoomProviderInvocation, rewriteWorkspacePathForSandbox } from './room_runtime/provider_process_boundary.js';
 
 function splitArgs(value = '') {
   const text = String(value || '').trim();
@@ -75,28 +76,24 @@ export async function runAntigravityPrompt({ workspaceRoot, prompt, signal, cwd,
   const commandCwd = path.resolve(String(cwd || workspacePath).trim() || workspacePath);
   if (roomScoped) {
     if (commandCwd !== workspacePath) throw Object.assign(new Error(`Room-scoped Antigravity cwd must equal workspaceRoot: cwd=${commandCwd} workspace=${workspacePath}`), { code: 'ROOM_WORKSPACE_BOUNDARY' });
-    const controlRoot = path.resolve(String(runtimeEnv.DDALGGAK_CONTROL_ROOT || process.cwd()).trim() || process.cwd());
-    if (workspacePath === controlRoot || workspacePath.startsWith(`${controlRoot}${path.sep}`)) {
-      throw Object.assign(new Error(`Room workspace cannot be inside the ddalggak control plane: ${workspacePath}`), { code: 'ROOM_WORKSPACE_BOUNDARY' });
-    }
     const stat = fs.lstatSync(workspacePath);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw Object.assign(new Error(`Invalid Room workspace: ${workspacePath}`), { code: 'ROOM_WORKSPACE_BOUNDARY' });
   }
+  const providerArgs = [...baseArgs, ...modelArgs];
+  const invocation = prepareRoomProviderInvocation({ provider: 'antigravity', command, args: providerArgs, workspacePath, roomScoped, env: runtimeEnv });
+  if (!invocation.ok) throw Object.assign(new Error(invocation.error), { code: 'ROOM_WORKSPACE_BOUNDARY' });
+  const executionPrompt = rewriteWorkspacePathForSandbox(String(prompt || ''), workspacePath, invocation.visibleWorkspacePath);
   const effectiveTimeoutMs = Number(timeoutMs || runtimeEnv.ANTIGRAVITY_TIMEOUT_MS || runtimeEnv.GOOGLE_AI_TIMEOUT_MS || 0) > 0
     ? Number(timeoutMs || runtimeEnv.ANTIGRAVITY_TIMEOUT_MS || runtimeEnv.GOOGLE_AI_TIMEOUT_MS)
     : 240000;
-  const result = await withRuntimeActivity({ provider: 'antigravity', kind: 'provider_execution', jobId, metadata: { surface, model: requestedModel || null, workspace: workspacePath } }, async () => await runCommand(command, [...baseArgs, ...modelArgs], {
-    cwd: commandCwd,
+  const result = await withRuntimeActivity({ provider: 'antigravity', kind: 'provider_execution', jobId, metadata: { surface, model: requestedModel || null, workspace: workspacePath } }, async () => await runCommand(invocation.command, invocation.args, {
+    cwd: invocation.cwd,
     timeoutMs: effectiveTimeoutMs,
-    input: String(prompt || ''),
+    input: executionPrompt,
     abortSignal: signal,
     onOutput: typeof onOutput === 'function' ? (event) => onOutput({ ...event, provider: 'antigravity', provider_attempt: 'primary' }) : null,
-    env: {
-      CI: '1',
-      NO_COLOR: '1',
-      FORCE_COLOR: '0',
-      ...runtimeEnv,
-    },
+    env: invocation.childEnv,
+    inheritEnv: invocation.inheritEnv,
   }));
   return attachAntigravityTrace({
     result,
@@ -105,9 +102,9 @@ export async function runAntigravityPrompt({ workspaceRoot, prompt, signal, cwd,
     agentId,
     roleId,
     model: requestedModel || 'auto',
-    prompt: String(prompt || ''),
+    prompt: executionPrompt,
     cwd: commandCwd,
     workspaceRoot: workspacePath,
-    metadata: { command, args: [...baseArgs, ...modelArgs], timeout_ms: effectiveTimeoutMs, ...traceMetadata },
+    metadata: { command, args: providerArgs, timeout_ms: effectiveTimeoutMs, room_provider_os_sandbox: invocation.osSandbox, provider_visible_workspace: invocation.visibleWorkspacePath, provider_env_inheritance: invocation.inheritEnv ? 'full' : 'allowlist', ...traceMetadata },
   });
 }

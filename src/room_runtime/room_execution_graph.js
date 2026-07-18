@@ -1,15 +1,78 @@
 import { cleanText } from './fs_utils.js';
 
 const BASE_STAGES = {
-  plan: { role: 'planner', provider: 'antigravity', access: 'read_only_snapshot', purpose: 'Create an executable plan grounded only in the Room workspace.', context_policy: { prior_stage_ids: [] } },
-  implement: { role: 'builder', provider: 'codex', access: 'workspace_write', purpose: 'Implement the requested change inside the Room workspace.', context_policy: { prior_stage_ids: [] } },
-  review: { role: 'reviewer', provider: 'antigravity', access: 'read_only_snapshot', purpose: 'Independently review the current workspace for defects, missed requirements, and risks.', context_policy: { prior_stage_ids: [], include_working_memory: false } },
-  revise: { role: 'builder', provider: 'codex', access: 'workspace_write', purpose: 'Resolve every currently open blocking issue and improve the implementation.', context_policy: { prior_stage_ids: [], detail: 'full' } },
-  verify: { role: 'verifier', provider: 'codex', access: 'workspace_write', purpose: 'Run targeted validation and fix only issues required for the requested task.', context_policy: { prior_stage_ids: [] } },
-  synthesize: { role: 'synthesizer', provider: 'antigravity', access: 'read_only_snapshot', purpose: 'Produce the final user-facing result from verified workspace state and structured run memory.', context_policy: { mode: 'summaries' } },
-  propose_a: { role: 'proposer', provider: 'antigravity', access: 'read_only_snapshot', purpose: 'Produce an independent solution proposal without seeing other proposals.', context_policy: { prior_stage_ids: [], include_working_memory: false } },
-  propose_b: { role: 'challenger', provider: 'antigravity', access: 'read_only_snapshot', purpose: 'Produce a second independent proposal emphasizing alternatives and failure modes.', context_policy: { prior_stage_ids: [], include_working_memory: false } },
-  adjudicate: { role: 'adjudicator', provider: 'antigravity', access: 'read_only_snapshot', purpose: 'Compare independent proposals and select a justified execution plan.', context_policy: { prior_stage_ids: ['propose_a', 'propose_b'], detail: 'full', include_working_memory: false } },
+  execute: {
+    kind: 'execute',
+    role: 'builder',
+    provider: 'codex',
+    access: 'workspace_write',
+    purpose: 'Use the provider-native coding loop, tools, skills, and internal planning to complete the Room contract in the canonical workspace.',
+    context_policy: { prior_stage_ids: [] },
+    required_capabilities: ['provider_native_planning', 'workspace_write', 'command_execution', 'validation'],
+  },
+  research: {
+    kind: 'research',
+    role: 'researcher',
+    provider: 'antigravity',
+    access: 'read_only_snapshot',
+    purpose: 'Research and ground the execution approach using provider-native tools while respecting the Room source boundary.',
+    context_policy: { prior_stage_ids: [], include_working_memory: false },
+    required_capabilities: ['provider_native_planning', 'workspace_read', 'research'],
+  },
+  review: {
+    kind: 'review',
+    role: 'reviewer',
+    provider: 'antigravity',
+    access: 'read_only_snapshot',
+    purpose: 'Independently inspect the current workspace against the Room contract and report only externally verifiable blocking defects and risks.',
+    context_policy: { prior_stage_ids: [], include_working_memory: false },
+    required_capabilities: ['workspace_read', 'snapshot_review'],
+  },
+  revise: {
+    kind: 'revise',
+    role: 'builder',
+    provider: 'codex',
+    access: 'workspace_write',
+    purpose: 'Resolve the exact open review blockers in the canonical workspace using the provider-native coding loop.',
+    context_policy: { prior_stage_ids: [], detail: 'full' },
+    required_capabilities: ['provider_native_planning', 'workspace_write', 'command_execution', 'validation'],
+  },
+  verify: {
+    kind: 'verify',
+    role: 'operator',
+    provider: 'codex',
+    access: 'workspace_write',
+    purpose: 'Perform final provider-native validation, apply only bounded fixes required by the Room contract, and produce the user-facing completion report.',
+    context_policy: { mode: 'summaries' },
+    required_capabilities: ['workspace_write', 'command_execution', 'validation'],
+  },
+  propose_a: {
+    kind: 'proposal',
+    role: 'researcher',
+    provider: 'antigravity',
+    access: 'read_only_snapshot',
+    purpose: 'Produce an independent proposal from the Room contract without seeing another proposal.',
+    context_policy: { prior_stage_ids: [], include_working_memory: false },
+    required_capabilities: ['provider_native_planning', 'workspace_read', 'research'],
+  },
+  propose_b: {
+    kind: 'proposal',
+    role: 'researcher',
+    provider: 'antigravity',
+    access: 'read_only_snapshot',
+    purpose: 'Produce a second independent proposal emphasizing different assumptions, risks, and trade-offs.',
+    context_policy: { prior_stage_ids: [], include_working_memory: false },
+    required_capabilities: ['provider_native_planning', 'workspace_read', 'research'],
+  },
+  adjudicate: {
+    kind: 'adjudicate',
+    role: 'reviewer',
+    provider: 'antigravity',
+    access: 'read_only_snapshot',
+    purpose: 'Compare the independent proposals and publish a structured implementation handoff.',
+    context_policy: { prior_stage_ids: ['propose_a', 'propose_b'], detail: 'full', include_working_memory: false },
+    required_capabilities: ['provider_native_planning', 'workspace_read', 'snapshot_review'],
+  },
 };
 
 function stage(kind, stageId, extra = {}) {
@@ -24,67 +87,104 @@ function reviewCycle(round) {
       review_round: round,
       ...(priorReviewId ? { run_if: { kind: 'stage_reported_blockers', stage_id: priorReviewId } } : {}),
       purpose: round === 1
-        ? 'Independently review the implementation and report only blocking defects, missed requirements, and risks.'
-        : `Independently re-review the workspace after revision round ${round - 1} and report only remaining blocking defects, missed requirements, and risks.`,
+        ? 'Independently inspect the implementation against the Room contract and report only blocking defects, missed completion criteria, and material risks.'
+        : `Independently re-inspect the workspace after revision round ${round - 1} and report only remaining blockers.`,
     }),
     stage('revise', `revise_${round}`, {
       review_round: round,
       run_if: { kind: 'open_blockers' },
       context_policy: { prior_stage_ids: [reviewId], detail: 'full' },
-      purpose: `Resolve the exact open blocking issues reported in review round ${round}.`,
+      purpose: `Resolve the exact blockers reported in review round ${round}; preserve unrelated working behavior.`,
     }),
   ];
 }
 
-export function normalizeTopology(value = '') {
+const PROFILE_ALIASES = new Map([
+  ['solo', 'solo'],
+  ['single', 'solo'],
+  ['provider_native', 'solo'],
+  ['single_specialist', 'solo'],
+  ['review', 'builder_reviewer'],
+  ['review_loop', 'builder_reviewer'],
+  ['execute_and_verify', 'builder_reviewer'],
+  ['builder_reviewer', 'builder_reviewer'],
+  ['builder_reviewer_loop', 'builder_reviewer'],
+  ['research_then_execute', 'research_then_execute'],
+  ['research_execute', 'research_then_execute'],
+  ['iterative_project', 'research_then_execute'],
+  ['operator_gated_workflow', 'research_then_execute'],
+  ['deliberate', 'parallel_ideation'],
+  ['deliberation', 'parallel_ideation'],
+  ['discussion', 'parallel_ideation'],
+  ['multi_agent', 'parallel_ideation'],
+  ['compare_and_decide', 'parallel_ideation'],
+  ['parallel_ideation', 'parallel_ideation'],
+  ['parallel_research_then_review_then_synthesize', 'parallel_ideation'],
+]);
+
+export function normalizeCollaborationProfile(value = '') {
   const clean = cleanText(value).toLowerCase().replaceAll('-', '_');
-  if (['solo', 'single'].includes(clean)) return 'solo';
-  if (['deliberate', 'deliberation', 'discussion', 'multi_agent'].includes(clean)) return 'deliberate';
-  return 'review_loop';
+  return PROFILE_ALIASES.get(clean) || 'solo';
 }
 
-export function recommendTopology(objective = '') {
-  const text = cleanText(objective).toLowerCase();
-  if (/(비교|trade.?off|대안|토론|논쟁|architecture|설계안|여러 관점|alternative)/i.test(text)) return 'deliberate';
-  if (/(간단히|한 번|짧게|오타|rename|문구 수정)/i.test(text) && text.length < 180) return 'solo';
-  return 'review_loop';
+// Backward-compatible export. The returned value is now the collaboration profile ID.
+export function normalizeTopology(value = '') {
+  return normalizeCollaborationProfile(value);
 }
 
-export function buildExecutionGraph({ objective = '', topology = '', maxStages = 16, maxReviewRounds = 2 } = {}) {
-  const topologyId = topology ? normalizeTopology(topology) : recommendTopology(objective);
+// No scenario keyword routing: default to one provider-native execution capsule.
+export function recommendTopology() {
+  return 'solo';
+}
+
+export function buildExecutionGraph({
+  objective = '',
+  topology = '',
+  collaborationProfile = '',
+  maxStages = 16,
+  maxReviewRounds = 2,
+} = {}) {
+  const profileId = normalizeCollaborationProfile(collaborationProfile || topology || 'solo');
   const rounds = Math.max(1, Math.min(3, Number(maxReviewRounds) || 2));
   let stages;
-  if (topologyId === 'solo') {
+  if (profileId === 'solo') {
     stages = [
-      stage('implement', 'implement'),
-      stage('verify', 'verify'),
-      stage('synthesize', 'synthesize'),
+      stage('execute', 'execute', {
+        purpose: 'Own the task end-to-end inside one provider-native coding capsule: inspect, plan internally, implement, validate, and report against the Room contract.',
+      }),
     ];
-  } else if (topologyId === 'deliberate') {
+  } else if (profileId === 'parallel_ideation') {
     stages = [
       stage('propose_a', 'propose_a'),
       stage('propose_b', 'propose_b'),
       stage('adjudicate', 'adjudicate'),
-      stage('implement', 'implement', { context_policy: { prior_stage_ids: ['adjudicate'], detail: 'full' } }),
+      stage('execute', 'execute', { context_policy: { prior_stage_ids: ['adjudicate'], detail: 'full' } }),
       ...Array.from({ length: rounds }, (_, index) => reviewCycle(index + 1)).flat(),
       stage('verify', 'verify'),
-      stage('synthesize', 'synthesize'),
+    ];
+  } else if (profileId === 'research_then_execute') {
+    stages = [
+      stage('research', 'research'),
+      stage('execute', 'execute', { context_policy: { prior_stage_ids: ['research'], detail: 'full' } }),
+      ...Array.from({ length: rounds }, (_, index) => reviewCycle(index + 1)).flat(),
+      stage('verify', 'verify'),
     ];
   } else {
     stages = [
-      stage('plan', 'plan'),
-      stage('implement', 'implement', { context_policy: { prior_stage_ids: ['plan'], detail: 'full' } }),
+      stage('execute', 'execute'),
       ...Array.from({ length: rounds }, (_, index) => reviewCycle(index + 1)).flat(),
       stage('verify', 'verify'),
-      stage('synthesize', 'synthesize'),
     ];
   }
   const bounded = stages.slice(0, Math.max(1, Number(maxStages) || 16)).map((row, index) => ({ ...row, order: index + 1 }));
   return {
-    schema_version: 'ai_rooms.execution_graph/v4',
-    topology_id: topologyId,
-    review_round_limit: topologyId === 'solo' ? 0 : rounds,
+    schema_version: 'ai_rooms.execution_graph/v5',
+    collaboration_profile_id: profileId,
+    topology_id: profileId,
+    provider_native_default: profileId === 'solo',
+    objective_excerpt: cleanText(objective).slice(0, 500),
+    review_round_limit: ['builder_reviewer', 'research_then_execute', 'parallel_ideation'].includes(profileId) ? rounds : 0,
     stages: bounded,
-    stop_conditions: ['all_required_stages_completed_or_conditionally_skipped', 'cancelled_by_user', 'fatal_boundary_violation'],
+    stop_conditions: ['all_required_stages_completed_or_conditionally_skipped', 'cancelled_by_user', 'fatal_boundary_violation', 'approval_required'],
   };
 }
